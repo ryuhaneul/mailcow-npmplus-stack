@@ -363,9 +363,9 @@ RSPAMD_CONTAINER=$(docker ps --format '{{.Names}}' | grep rspamd-mailcow | head 
 REDIS_CONTAINER=$(docker ps --format '{{.Names}}' | grep redis-mailcow | head -1)
 
 if [ -n "$RSPAMD_CONTAINER" ] && [ -n "$REDIS_CONTAINER" ]; then
-    EXISTING_DKIM=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -c "PRIVATE KEY" || echo "0")
+    EXISTING_DKIM=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -v "^Warning" | grep -c "PRIVATE KEY" || true)
 
-    if [ "$EXISTING_DKIM" -eq 0 ]; then
+    if [ "${EXISTING_DKIM:-0}" -eq 0 ]; then
         log "Generating DKIM key for ${DOMAIN}..."
         DKIM_PRIVKEY=$(docker exec "$RSPAMD_CONTAINER" rspamadm dkim_keygen -s dkim -b 2048 -d "$DOMAIN" 2>/dev/null | sed -n '/-----BEGIN/,/-----END/p')
 

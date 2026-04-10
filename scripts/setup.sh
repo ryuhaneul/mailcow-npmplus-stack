@@ -493,6 +493,12 @@ NGINXCFG
 docker compose exec -T nginx-mailcow nginx -s reload 2>/dev/null || true
 log "Toolkit: nginx config installed"
 
+# Register Toolkit in Mailcow navbar (App Links via Redis)
+if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
+    APP_LINK_RESULT=$("$TOOLKIT_DIR/app_link.sh" add "$MAILCOW_DIR" 2>/dev/null || echo "failed")
+    log "Toolkit App Link: $APP_LINK_RESULT"
+fi
+
 # ============================================================
 # Phase 5: NPMplus + CrowdSec
 # ============================================================
@@ -535,6 +541,93 @@ cp "$PROJECT_DIR/snappymail/docker-compose.yml" "$SNAPPYMAIL_DIR/docker-compose.
 cd "$SNAPPYMAIL_DIR"
 docker compose up -d 2>&1 | tail -3
 log "Snappymail: deployed"
+
+# --- Configure Snappymail domain (IMAP/SMTP → Mailcow containers) ---
+log "Configuring Snappymail domain..."
+# Wait for Snappymail data directory to be ready
+for i in $(seq 1 10); do
+    if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+# Create domain config pointing to Mailcow's dovecot/postfix
+DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
+{
+    "IMAP": {
+        "host": "dovecot-mailcow",
+        "port": 993,
+        "type": 1,
+        "timeout": 300,
+        "shortLogin": true,
+        "lowerLogin": true,
+        "sasl": ["PLAIN", "LOGIN"],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": true,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "disabled_capabilities": ["METADATA", "OBJECTID", "PREVIEW", "STATUS=SIZE"],
+        "use_expunge_all_on_delete": false,
+        "fast_simple_search": true,
+        "force_select": false,
+        "message_all_headers": false,
+        "message_list_limit": 10000,
+        "search_filter": ""
+    },
+    "SMTP": {
+        "host": "postfix-mailcow",
+        "port": 465,
+        "type": 1,
+        "timeout": 60,
+        "shortLogin": true,
+        "lowerLogin": true,
+        "sasl": ["PLAIN", "LOGIN"],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": true,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "useAuth": true,
+        "setSender": false,
+        "usePhpMail": false
+    },
+    "Sieve": {
+        "host": "dovecot-mailcow",
+        "port": 4190,
+        "type": 0,
+        "timeout": 10,
+        "shortLogin": true,
+        "lowerLogin": true,
+        "sasl": ["PLAIN", "LOGIN"],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": true,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "enabled": true
+    },
+    "whiteList": ""
+}
+DOMAINJSON
+)
+
+docker exec snappymail sh -c "echo '${DOMAIN_CONFIG}' > /var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
+
+# Remove default localhost domain config
+docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains/default.json"
+
+log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
 
 # ============================================================
 # Phase 7: NPM Proxy Hosts + SSL

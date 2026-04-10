@@ -41,11 +41,11 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log()    { echo -e "${GREEN}[+]${NC} $*" | tee -a "$LOGFILE"; }
-warn()   { echo -e "${YELLOW}[!]${NC} $*" | tee -a "$LOGFILE"; }
-err()    { echo -e "${RED}[x]${NC} $*" | tee -a "$LOGFILE" >&2; }
+log()    { echo -e "${GREEN}[+]${NC} $*" >> "$LOGFILE"; echo -e "${GREEN}[+]${NC} $*" >&2; }
+warn()   { echo -e "${YELLOW}[!]${NC} $*" >> "$LOGFILE"; echo -e "${YELLOW}[!]${NC} $*" >&2; }
+err()    { echo -e "${RED}[x]${NC} $*" >> "$LOGFILE"; echo -e "${RED}[x]${NC} $*" >&2; }
 die()    { err "$@"; exit 1; }
-header() { echo "" | tee -a "$LOGFILE"; echo -e "${CYAN}══════════════════════════════════════════${NC}" | tee -a "$LOGFILE"; echo -e "${CYAN}  $*${NC}" | tee -a "$LOGFILE"; echo -e "${CYAN}══════════════════════════════════════════${NC}" | tee -a "$LOGFILE"; echo "" | tee -a "$LOGFILE"; }
+header() { local h; for h in "" "${CYAN}══════════════════════════════════════════${NC}" "${CYAN}  $*${NC}" "${CYAN}══════════════════════════════════════════${NC}" ""; do echo -e "$h" >> "$LOGFILE"; echo -e "$h" >&2; done; }
 
 confirm() {
     if [ "$NON_INTERACTIVE" = true ]; then

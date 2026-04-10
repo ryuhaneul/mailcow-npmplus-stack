@@ -25,10 +25,10 @@ check() {
     shift
     if "$@" >/dev/null 2>&1; then
         echo -e "  ${GREEN}PASS${NC}  $desc"
-        ((PASS++))
+        PASS=$((PASS + 1))
     else
         echo -e "  ${RED}FAIL${NC}  $desc"
-        ((FAIL++))
+        FAIL=$((FAIL + 1))
     fi
 }
 

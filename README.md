@@ -14,9 +14,15 @@ Internet → :80/443 → NPMplus + CrowdSec WAF
          → :143/993    → Dovecot (direct)
 ```
 
+## Tested On
+
+- **Rocky Linux 9** (primary)
+
+Other RHEL-based distros (Alma, CentOS 9) should work. Debian/Ubuntu support is included but untested.
+
 ## Prerequisites
 
-- Linux server (Rocky/Alma/CentOS/Debian/Ubuntu)
+- Linux server (see above)
 - Root access
 - DNS A records for `mail.DOMAIN`, `mailcow.DOMAIN`, `mail-npm.DOMAIN`
 - **Docker, Mailcow are NOT required** — setup.sh installs everything
@@ -35,8 +41,9 @@ sudo ./scripts/setup.sh
 
 ## What setup.sh does
 
-1. Installs system packages (curl, dig, openssl, git)
-2. Installs Docker Engine + Docker Compose
+1. Runs full system update (`dnf update`)
+2. Installs system packages (curl, dig, openssl, git)
+3. Installs Docker Engine + Docker Compose
 3. Clones and configures Mailcow (or patches existing)
 4. Deploys NPMplus + CrowdSec (ports 80/443)
 5. Deploys Snappymail (webmail)

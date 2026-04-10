@@ -18,6 +18,7 @@ set -euo pipefail
 #   Phase 9: Cert reload cron
 #
 # Idempotent: safe to re-run if interrupted.
+# Tested on: Rocky Linux 9
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,7 +74,19 @@ set -a; source "$ENV_FILE"; set +a
 # ============================================================
 # Phase 0: System Packages
 # ============================================================
-header "Phase 0: System Packages"
+header "Phase 0: System Update + Packages"
+
+# Full system update first — prevents version mismatches
+# (e.g. openssl update breaking sshd if only Docker deps are updated)
+log "Running system update..."
+if command -v dnf >/dev/null 2>&1; then
+    dnf update -y 2>&1 | tee -a "$LOGFILE" | tail -3
+elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get upgrade -y 2>&1 | tee -a "$LOGFILE" | tail -3
+elif command -v yum >/dev/null 2>&1; then
+    yum update -y 2>&1 | tee -a "$LOGFILE" | tail -3
+fi
+log "System update complete"
 
 install_pkg() {
     local cmd="$1" pkg="${2:-$1}"
@@ -599,7 +612,14 @@ echo "    Login:       admin / moohoo  (change immediately!)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""
-echo "  Next steps:"
+echo -e "  ${YELLOW}Reboot recommended!${NC}"
+echo "    System packages were updated during setup."
+echo "    Reboot ensures kernel, openssl, sshd etc. are all consistent."
+echo "    All containers have restart:always and will come back up."
+echo ""
+echo "    sudo reboot"
+echo ""
+echo "  After reboot:"
 echo "    1. sudo ./scripts/verify.sh"
 echo "    2. Change Mailcow admin password"
 echo "    3. Change NPM admin password"

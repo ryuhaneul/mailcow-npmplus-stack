@@ -405,20 +405,24 @@ else
 fi
 
 # --- Wait for MySQL readiness ---
+# MariaDB logs "ready for connections" before mailcow user/database are created.
+# Must wait until the mailcow user can actually authenticate.
 DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 || true)
 MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1 || true)
 if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
     log "Waiting for MySQL..."
-    for i in $(seq 1 30); do
-        if docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow -e "SELECT 1" &>/dev/null; then
+    MYSQL_READY="no"
+    for i in $(seq 1 60); do
+        if docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"${DBPASS}" mailcow -e "SELECT 1;" >/dev/null 2>&1; then
             log "MySQL: ready"
+            MYSQL_READY="yes"
             break
         fi
-        if [ "$i" -eq 30 ]; then
-            warn "MySQL not ready after 150s — API key must be set manually"
-        fi
-        sleep 5
+        sleep 3
     done
+    if [ "$MYSQL_READY" = "no" ]; then
+        warn "MySQL not ready after 180s — API key must be set manually"
+    fi
 fi
 
 # --- Generate Mailcow API key + update toolkit config ---
@@ -443,7 +447,7 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
     # Wait for MySQL to be ready after restart
     log "Waiting for MySQL after restart..."
     for i in $(seq 1 30); do
-        docker exec "$MYSQL_CONTAINER" mysqladmin ping -u mailcow -p"$DBPASS" --silent 2>/dev/null && break
+        docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"${DBPASS}" mailcow -e "SELECT 1;" >/dev/null 2>&1 && break
         sleep 3
     done
 fi
@@ -723,26 +727,24 @@ docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains
     log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
 fi
 
-# Change Snappymail admin password (skip if already changed from default)
-SNAPPY_DEFAULT=$(docker exec snappymail php -r "
-\$hash = trim(explode('=', file_get_contents('/var/lib/snappymail/_data_/_default_/configs/application.ini') ? '' : '')[0] ?? '');
-" 2>/dev/null || echo "")
-SNAPPY_IS_DEFAULT=$(docker exec snappymail php -r "
+# Change Snappymail admin password to NPM_ADMIN_PASSWORD
+# Always set it — Snappymail's default password varies by version (not always '12345')
+log "Setting Snappymail admin password..."
+SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
+if [ -n "$SNAPPY_HASH" ]; then
+    # Check if password is already correct
+    SNAPPY_ALREADY=$(docker exec snappymail php -r "
 \$ini = parse_ini_file('/var/lib/snappymail/_data_/_default_/configs/application.ini');
-echo password_verify('12345', \$ini['admin_password'] ?? '') ? 'yes' : 'no';
-" 2>/dev/null || echo "unknown")
-
-if [ "$SNAPPY_IS_DEFAULT" = "yes" ]; then
-    log "Changing Snappymail admin password..."
-    SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
-    if [ -n "$SNAPPY_HASH" ]; then
-        docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
-        log "Snappymail admin password changed"
+echo password_verify('${NPM_ADMIN_PASSWORD}', \$ini['admin_password'] ?? '') ? 'yes' : 'no';
+" 2>/dev/null || echo "no")
+    if [ "$SNAPPY_ALREADY" = "yes" ]; then
+        log "Snappymail admin password: already set"
     else
-        warn "Could not change Snappymail admin password"
+        docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
+        log "Snappymail admin password set"
     fi
 else
-    log "Snappymail admin password: already changed"
+    warn "Could not generate Snappymail admin password hash"
 fi
 
 # ============================================================

@@ -276,13 +276,7 @@ header "Phase 4: Mailcow"
 
 if [ -d "$MAILCOW_DIR" ] && [ -f "$MAILCOW_DIR/mailcow.conf" ]; then
     log "Mailcow: already installed at $MAILCOW_DIR"
-
-    # Stop if running (to free ports for NPM)
     cd "$MAILCOW_DIR"
-    if docker compose ps --format '{{.Name}}' 2>/dev/null | grep -q mailcow; then
-        log "Stopping Mailcow to free ports 80/443..."
-        docker compose down 2>&1 | tail -3 || true
-    fi
 else
     log "Installing Mailcow..."
     cd /home
@@ -428,38 +422,62 @@ if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
 fi
 
 # --- Generate Mailcow API key + update toolkit config ---
-if [ -z "${MAILCOW_API_KEY:-}" ]; then
+# Check if API_KEY already exists in mailcow.conf
+EXISTING_API_KEY=$(grep "^API_KEY=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 | head -1)
+if [ -n "$EXISTING_API_KEY" ]; then
+    MAILCOW_API_KEY="$EXISTING_API_KEY"
+    log "Mailcow API key: using existing from mailcow.conf"
+elif [ -z "${MAILCOW_API_KEY:-}" ]; then
     log "Generating Mailcow API key..."
     MAILCOW_API_KEY=$(openssl rand -hex 16)
-    if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
-        docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow \
-            -e "INSERT IGNORE INTO api (api_key, allow_from, skip_ip_check, access, active) VALUES ('${MAILCOW_API_KEY}', '', 1, 'rw', 1);" 2>/dev/null \
-            && log "Mailcow API key inserted into database" \
-            || warn "Could not insert API key — set manually in Mailcow Admin"
-    else
-        warn "MySQL container not found — API key must be set manually"
-    fi
 fi
 
-# --- Change Mailcow admin password ---
-# --- Change Mailcow admin password to NPM_ADMIN_PASSWORD ---
+# Ensure API key is in mailcow.conf (required for internal auth: dovecot → php-fpm)
+if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
+    sed -i "s|^#API_KEY=.*|API_KEY=${MAILCOW_API_KEY}|" "$MAILCOW_DIR/mailcow.conf"
+    # If no commented line existed, append
+    grep -q "^API_KEY=" "$MAILCOW_DIR/mailcow.conf" || echo "API_KEY=${MAILCOW_API_KEY}" >> "$MAILCOW_DIR/mailcow.conf"
+    log "API_KEY written to mailcow.conf"
+    # Restart containers to pick up new API_KEY env var
+    docker compose up -d 2>&1 | tail -3
+fi
+
+# Ensure API key is in database (for REST API access)
+if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
+    docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow \
+        -e "INSERT IGNORE INTO api (api_key, allow_from, skip_ip_check, access, active) VALUES ('${MAILCOW_API_KEY}', '', 1, 'rw', 1);" 2>/dev/null \
+        && log "Mailcow API key: database OK" \
+        || warn "Could not insert API key — set manually in Mailcow Admin"
+fi
+
+# --- Change Mailcow admin password (only if still default 'moohoo') ---
 if [ -n "${MAILCOW_API_KEY:-}" ]; then
-    log "Changing Mailcow admin password..."
-    CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
+    # Test if default password still works
+    MOOHOO_TEST=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/get/admin/all" \
         -H "Content-Type: application/json" \
-        -H "X-API-Key: ${MAILCOW_API_KEY}" \
-        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null)
-    if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
-        log "Mailcow admin password changed"
+        -u "admin:moohoo" 2>/dev/null | grep -c '"admin"' || true)
+    if [ "${MOOHOO_TEST:-0}" -gt 0 ]; then
+        log "Changing Mailcow admin password..."
+        CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null)
+        if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
+            log "Mailcow admin password changed"
+        else
+            warn "Could not change Mailcow admin password — change manually"
+        fi
     else
-        warn "Could not change Mailcow admin password — change manually"
+        log "Mailcow admin password: already changed"
     fi
 else
     warn "No API key — Mailcow admin password remains default (moohoo)"
 fi
 
-# Update toolkit config with real API key
-cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
+# Update toolkit config with real API key (skip if already has a real key)
+CURRENT_TK_KEY=$(grep "api_key:" "$TOOLKIT_DIR/config.yml" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "")
+if [ "$CURRENT_TK_KEY" = "placeholder" ] || [ -z "$CURRENT_TK_KEY" ]; then
+    cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
 mailcow:
   api_url: "https://nginx-mailcow:8443"
   api_key: "${MAILCOW_API_KEY}"
@@ -470,10 +488,11 @@ toolkit:
     - groups
     - syncjobs
 TKCFG
-log "Toolkit config.yml updated with API key"
-
-# Restart toolkit to pick up new config
-docker compose restart toolkit-mailcow 2>&1 | tail -1 || true
+    log "Toolkit config.yml updated with API key"
+    docker compose restart toolkit-mailcow 2>&1 | tail -1 || true
+else
+    log "Toolkit config.yml: already configured"
+fi
 
 # Install nginx custom config for toolkit (direct Mailcow access)
 NGINX_CUSTOM="$MAILCOW_DIR/data/conf/nginx/site.toolkit.custom"
@@ -541,23 +560,6 @@ cd "$SNAPPYMAIL_DIR"
 docker compose up -d 2>&1 | tail -3
 log "Snappymail: deployed"
 
-# --- Install Korean admin localization ---
-if [ -f "$PROJECT_DIR/snappymail/admin_ko.json" ]; then
-    docker cp "$PROJECT_DIR/snappymail/admin_ko.json" snappymail:/var/lib/snappymail/admin_ko.json
-    # Trigger the copy logic in the entrypoint command
-    docker restart snappymail 2>&1 | tail -1
-    log "Snappymail: Korean admin localization installed"
-    # Wait for restart
-    for i in $(seq 1 10); do
-        if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
-            break
-        fi
-        sleep 2
-    done
-fi
-
-# --- Configure Snappymail domain (IMAP/SMTP → Mailcow containers) ---
-log "Configuring Snappymail domain..."
 # Wait for Snappymail data directory to be ready
 for i in $(seq 1 10); do
     if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
@@ -565,6 +567,31 @@ for i in $(seq 1 10); do
     fi
     sleep 2
 done
+
+# --- Install Korean admin localization (skip if already present) ---
+if [ -f "$PROJECT_DIR/snappymail/admin_ko.json" ]; then
+    KO_INSTALLED=$(docker exec snappymail test -f /var/lib/snappymail/admin_ko.json 2>/dev/null && echo "yes" || echo "no")
+    if [ "$KO_INSTALLED" = "no" ]; then
+        docker cp "$PROJECT_DIR/snappymail/admin_ko.json" snappymail:/var/lib/snappymail/admin_ko.json
+        docker restart snappymail 2>&1 | tail -1
+        log "Snappymail: Korean admin localization installed"
+        for i in $(seq 1 10); do
+            if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
+                break
+            fi
+            sleep 2
+        done
+    else
+        log "Snappymail: Korean localization already installed"
+    fi
+fi
+
+# --- Configure Snappymail domain (skip if already configured) ---
+SNAPPY_DOMAIN_EXISTS=$(docker exec snappymail test -f "/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json" 2>/dev/null && echo "yes" || echo "no")
+if [ "$SNAPPY_DOMAIN_EXISTS" = "yes" ]; then
+    log "Snappymail: domain ${DOMAIN} already configured"
+else
+    log "Configuring Snappymail domain..."
 
 # Create domain config pointing to Mailcow's dovecot/postfix
 DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
@@ -641,16 +668,29 @@ docker exec snappymail sh -c "echo '${DOMAIN_CONFIG}' > /var/lib/snappymail/_dat
 # Remove default localhost domain config
 docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains/default.json"
 
-log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
+    log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
+fi
 
-# Change Snappymail admin password to NPM_ADMIN_PASSWORD
-log "Changing Snappymail admin password..."
-SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
-if [ -n "$SNAPPY_HASH" ]; then
-    docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
-    log "Snappymail admin password changed"
+# Change Snappymail admin password (skip if already changed from default)
+SNAPPY_DEFAULT=$(docker exec snappymail php -r "
+\$hash = trim(explode('=', file_get_contents('/var/lib/snappymail/_data_/_default_/configs/application.ini') ? '' : '')[0] ?? '');
+" 2>/dev/null || echo "")
+SNAPPY_IS_DEFAULT=$(docker exec snappymail php -r "
+\$ini = parse_ini_file('/var/lib/snappymail/_data_/_default_/configs/application.ini');
+echo password_verify('12345', \$ini['admin_password'] ?? '') ? 'yes' : 'no';
+" 2>/dev/null || echo "unknown")
+
+if [ "$SNAPPY_IS_DEFAULT" = "yes" ]; then
+    log "Changing Snappymail admin password..."
+    SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
+    if [ -n "$SNAPPY_HASH" ]; then
+        docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
+        log "Snappymail admin password changed"
+    else
+        warn "Could not change Snappymail admin password"
+    fi
 else
-    warn "Could not change Snappymail admin password — default is 12345"
+    log "Snappymail admin password: already changed"
 fi
 
 # ============================================================

@@ -410,12 +410,27 @@ else
     warn "rspamd/redis container not found — DKIM key not generated"
 fi
 
+# --- Wait for MySQL readiness ---
+DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
+MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1)
+if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
+    log "Waiting for MySQL..."
+    for i in $(seq 1 30); do
+        if docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow -e "SELECT 1" &>/dev/null; then
+            log "MySQL: ready"
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            warn "MySQL not ready after 150s — API key must be set manually"
+        fi
+        sleep 5
+    done
+fi
+
 # --- Generate Mailcow API key + update toolkit config ---
 if [ -z "${MAILCOW_API_KEY:-}" ]; then
     log "Generating Mailcow API key..."
     MAILCOW_API_KEY=$(openssl rand -hex 16)
-    DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
-    MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1)
     if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
         docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow \
             -e "INSERT IGNORE INTO api (api_key, allow_from, skip_ip_check, access, active) VALUES ('${MAILCOW_API_KEY}', '', 1, 'rw', 1);" 2>/dev/null \

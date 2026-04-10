@@ -72,16 +72,58 @@ command -v docker compose >/dev/null 2>&1 || docker compose version >/dev/null 2
 [ -d "$MAILCOW_DIR" ] || die "Mailcow not found at $MAILCOW_DIR. Install Mailcow first."
 [ -f "$MAILCOW_DIR/mailcow.conf" ] || die "mailcow.conf not found"
 
-# Check DNS
+# --- DNS Records Required ---
+echo ""
+echo "============================================"
+echo "  Required DNS Records"
+echo "============================================"
+echo ""
+echo "  Add the following DNS records before proceeding."
+echo "  All records should point to: ${SERVER_IP}"
+echo ""
+echo "  ┌──────────────────────────────────┬──────┬─────────────────┐"
+echo "  │ Name                             │ Type │ Value           │"
+echo "  ├──────────────────────────────────┼──────┼─────────────────┤"
+printf "  │ %-32s │ A    │ %-15s │\n" "mail.${DOMAIN}" "$SERVER_IP"
+printf "  │ %-32s │ A    │ %-15s │\n" "mailcow.${DOMAIN}" "$SERVER_IP"
+printf "  │ %-32s │ A    │ %-15s │\n" "mail-npm.${DOMAIN}" "$SERVER_IP"
+echo "  └──────────────────────────────────┴──────┴─────────────────┘"
+echo ""
+echo "  Additionally, ensure these mail-related records exist:"
+echo ""
+echo "  ┌──────────────────────────────────┬──────┬──────────────────────────────────┐"
+echo "  │ Name                             │ Type │ Value                            │"
+echo "  ├──────────────────────────────────┼──────┼──────────────────────────────────┤"
+printf "  │ %-32s │ MX   │ %-32s │\n" "${DOMAIN}" "mail.${DOMAIN}"
+printf "  │ %-32s │ TXT  │ %-32s │\n" "${DOMAIN}" "v=spf1 mx a -all"
+printf "  │ %-32s │ A    │ %-32s │\n" "autodiscover.${DOMAIN}" "$SERVER_IP"
+printf "  │ %-32s │ CNAME│ %-32s │\n" "autoconfig.${DOMAIN}" "mail.${DOMAIN}"
+echo "  └──────────────────────────────────┴──────┴──────────────────────────────────┘"
+echo ""
+echo "  Note: DKIM (dkim._domainkey) will be configured after Mailcow is running."
+echo ""
+
+# Check DNS resolution
+DNS_OK=true
 for sub in "mail" "mailcow" "mail-npm"; do
     RESOLVED=$(dig +short "${sub}.${DOMAIN}" A 2>/dev/null | head -1)
     if [ "$RESOLVED" != "$SERVER_IP" ]; then
         warn "DNS: ${sub}.${DOMAIN} -> ${RESOLVED:-NXDOMAIN} (expected $SERVER_IP)"
-        warn "Make sure DNS is configured before requesting certificates"
+        DNS_OK=false
     else
         log "DNS: ${sub}.${DOMAIN} -> $RESOLVED OK"
     fi
 done
+
+if [ "$DNS_OK" = false ]; then
+    echo ""
+    warn "Some DNS records are not yet resolving correctly."
+    warn "SSL certificate issuance will fail without proper DNS."
+    echo ""
+    read -p "Continue anyway? (y/N) " -n 1 -r
+    echo ""
+    [[ $REPLY =~ ^[Yy]$ ]] || die "Aborted. Configure DNS and re-run."
+fi
 
 # --- Step 1: Stop Mailcow (free ports 80/443) ---
 log "Stopping Mailcow to free ports 80/443..."

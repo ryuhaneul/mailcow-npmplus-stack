@@ -442,21 +442,20 @@ if [ -z "${MAILCOW_API_KEY:-}" ]; then
 fi
 
 # --- Change Mailcow admin password ---
-MAILCOW_ADMIN_PASSWORD=$(openssl rand -base64 18)
+# --- Change Mailcow admin password to NPM_ADMIN_PASSWORD ---
 if [ -n "${MAILCOW_API_KEY:-}" ]; then
     log "Changing Mailcow admin password..."
     CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
         -H "Content-Type: application/json" \
         -H "X-API-Key: ${MAILCOW_API_KEY}" \
-        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${MAILCOW_ADMIN_PASSWORD}\",\"password2\":\"${MAILCOW_ADMIN_PASSWORD}\"}}" 2>/dev/null)
+        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null)
     if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
         log "Mailcow admin password changed"
     else
-        warn "Could not change admin password — change manually"
-        MAILCOW_ADMIN_PASSWORD="moohoo (기본값 — 수동 변경 필요)"
+        warn "Could not change Mailcow admin password — change manually"
     fi
 else
-    MAILCOW_ADMIN_PASSWORD="moohoo (기본값 — 수동 변경 필요)"
+    warn "No API key — Mailcow admin password remains default (moohoo)"
 fi
 
 # Update toolkit config with real API key
@@ -628,6 +627,16 @@ docker exec snappymail sh -c "echo '${DOMAIN_CONFIG}' > /var/lib/snappymail/_dat
 docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains/default.json"
 
 log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
+
+# Change Snappymail admin password to NPM_ADMIN_PASSWORD
+log "Changing Snappymail admin password..."
+SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
+if [ -n "$SNAPPY_HASH" ]; then
+    docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
+    log "Snappymail admin password changed"
+else
+    warn "Could not change Snappymail admin password — default is 12345"
+fi
 
 # ============================================================
 # Phase 7: NPM Proxy Hosts + SSL
@@ -887,18 +896,17 @@ fi
 header "Setup Complete"
 
 echo "  Services:"
-echo "    Webmail:     https://mail.${DOMAIN}"
-echo "    Admin:       https://mailcow.${DOMAIN}"
-echo "    NPM:         https://mail-npm.${DOMAIN}"
+echo "    Webmail:       https://mail.${DOMAIN}"
+echo "    Mailcow Admin: https://mailcow.${DOMAIN}"
+echo "    NPM Dashboard: https://mail-npm.${DOMAIN}"
+echo "    Snappymail:    https://mail.${DOMAIN}/?admin"
 echo ""
-echo "  NPM Login:"
-echo "    Email:       ${NPM_ADMIN_EMAIL}"
+echo "  Admin Password (shared):"
 echo "    Password:    ${NPM_ADMIN_PASSWORD}"
 echo ""
-echo "  Mailcow Admin:"
-echo "    URL:         https://mailcow.${DOMAIN}"
-echo "    Login:       admin"
-echo "    Password:    ${MAILCOW_ADMIN_PASSWORD}"
+echo "    NPM:         ${NPM_ADMIN_EMAIL} / (above)"
+echo "    Mailcow:     admin / (above)"
+echo "    Snappymail:  admin / (above)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""
@@ -911,8 +919,7 @@ echo "    sudo reboot"
 echo ""
 echo "  After reboot:"
 echo "    1. sudo ./scripts/verify.sh"
-echo "    2. Change NPM admin password"
-echo "    3. Snappymail admin: https://mail.${DOMAIN}/?admin (pass: 12345)"
+echo "    2. Snappymail admin: https://mail.${DOMAIN}/?admin"
 echo ""
 if [ "${DNS_OK:-true}" = false ]; then
     echo -e "  ${YELLOW}Self-signed certs in use (DNS not configured)${NC}"

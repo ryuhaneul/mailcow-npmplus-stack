@@ -246,10 +246,8 @@ else
     cd "$MAILCOW_DIR"
 
     # Generate config non-interactively
-    MAILCOW_HOSTNAME="mail.${DOMAIN}" \
-    MAILCOW_TZ="Asia/Seoul" \
-    MAILCOW_BRANCH="master" \
-    ./generate_config.sh <<< ""
+    # generate_config.sh prompts: hostname, timezone, branch — feed defaults via stdin
+    printf "mail.%s\nAsia/Seoul\n1\n\n\n\n\n\n\n\n" "$DOMAIN" | ./generate_config.sh
 
     log "Mailcow config generated"
 fi

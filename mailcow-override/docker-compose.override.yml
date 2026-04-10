@@ -10,6 +10,20 @@ services:
     volumes:
       - npmplus-data:/npm-data:ro
 
+  # Mailcow Toolkit (built from /home/mailcow-toolkit)
+  toolkit-mailcow:
+    build: /home/mailcow-toolkit
+    container_name: toolkit-mailcow
+    restart: always
+    working_dir: /app
+    command: ["gunicorn", "-b", "0.0.0.0:5000", "-w", "2", "--access-logfile", "-", "main:app"]
+    volumes:
+      - /home/mailcow-toolkit/config.yml:/config/config.yml:ro
+    networks:
+      mailcow-network:
+    labels:
+      - "com.docker.compose.project=mailcowdockerized"
+
   # Disable acme-mailcow (NPM handles certificates)
   acme-mailcow:
     restart: "no"

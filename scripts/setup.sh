@@ -383,6 +383,74 @@ else
     warn "rspamd/redis container not found — DKIM key not generated"
 fi
 
+# --- Generate Mailcow API key ---
+if [ -z "${MAILCOW_API_KEY:-}" ]; then
+    log "Generating Mailcow API key..."
+    MAILCOW_API_KEY=$(openssl rand -hex 16)
+    DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
+    MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1)
+    if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
+        docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow \
+            -e "INSERT IGNORE INTO api (api_key, allow_from, skip_ip_check, access, active) VALUES ('${MAILCOW_API_KEY}', '', 1, 'rw', 1);" 2>/dev/null \
+            && log "Mailcow API key inserted into database" \
+            || warn "Could not insert API key — set manually in Mailcow Admin"
+    else
+        warn "MySQL container not found — API key must be set manually"
+    fi
+fi
+
+# --- Clone + configure Mailcow Toolkit ---
+TOOLKIT_DIR="/home/mailcow-toolkit"
+TOOLKIT_REPO="https://github.com/ryuhaneul/mailcow-toolkit.git"
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    TOOLKIT_REPO="https://${GITHUB_TOKEN}@github.com/ryuhaneul/mailcow-toolkit.git"
+fi
+if [ -d "$TOOLKIT_DIR/.git" ]; then
+    log "Toolkit: already cloned at $TOOLKIT_DIR"
+    cd "$TOOLKIT_DIR" && git pull --ff-only 2>&1 | tail -1 || true
+else
+    log "Cloning Mailcow Toolkit..."
+    git clone "$TOOLKIT_REPO" "$TOOLKIT_DIR" 2>&1 | tail -1
+fi
+
+# Generate toolkit config
+[ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"
+cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
+mailcow:
+  api_url: "https://nginx-mailcow:8443"
+  api_key: "${MAILCOW_API_KEY}"
+
+toolkit:
+  secret_key: "${TOOLKIT_SECRET_KEY}"
+  modules:
+    - groups
+    - syncjobs
+TKCFG
+log "Toolkit config.yml created"
+
+# Build toolkit image
+cd "$MAILCOW_DIR"
+docker compose build --no-cache toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -3
+docker compose up -d toolkit-mailcow 2>&1 | tail -3
+log "Toolkit: built and started"
+
+# Install nginx custom config for toolkit (direct Mailcow access)
+NGINX_CUSTOM="$MAILCOW_DIR/data/conf/nginx/site.toolkit.custom"
+cat > "$NGINX_CUSTOM" <<'NGINXCFG'
+location /toolkit/ {
+    proxy_pass http://toolkit-mailcow:5000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Cookie $http_cookie;
+    proxy_http_version 1.1;
+    proxy_read_timeout 300s;
+}
+NGINXCFG
+docker compose exec -T nginx-mailcow nginx -s reload 2>/dev/null || true
+log "Toolkit: nginx config installed"
+
 # ============================================================
 # Phase 5: NPMplus + CrowdSec
 # ============================================================
@@ -469,7 +537,7 @@ try:
 except: pass
 " 2>/dev/null || echo "")
 
-# Generate self-signed cert, upload to NPM, return cert_id
+# Generate self-signed cert, upload to NPM + place files in volume, return cert_id
 upload_selfsigned_cert() {
     local domain="$1"
     local tmpdir
@@ -486,10 +554,22 @@ upload_selfsigned_cert() {
         -F "certificate=@${tmpdir}/cert.pem" \
         -F "certificate_key=@${tmpdir}/key.pem" 2>/dev/null)
 
-    rm -rf "$tmpdir"
-
     local cid
     cid=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
+
+    # NPMplus API doesn't always persist custom cert files — place them manually
+    if [ "$cid" != "FAIL" ]; then
+        local vol_path
+        vol_path=$(docker volume inspect npmplus_npmplus-data --format '{{.Mountpoint}}' 2>/dev/null)
+        if [ -n "$vol_path" ]; then
+            local cert_dir="${vol_path}/tls/custom/npm-${cid}"
+            mkdir -p "$cert_dir"
+            cp "${tmpdir}/cert.pem" "${cert_dir}/fullchain.pem"
+            cp "${tmpdir}/key.pem" "${cert_dir}/privkey.pem"
+        fi
+    fi
+
+    rm -rf "$tmpdir"
     echo "$cid"
 }
 
@@ -596,18 +676,9 @@ log "Creating proxy hosts..."
 # 1. mail.DOMAIN -> snappymail
 MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "" || true)
 
-# 2. mailcow.DOMAIN -> nginx-mailcow (+ toolkit location)
-TOOLKIT_CONFIG='location /toolkit/ {
-    proxy_pass http://toolkit-mailcow:5000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Cookie $http_cookie;
-    proxy_http_version 1.1;
-    proxy_read_timeout 300s;
-}'
-create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "$TOOLKIT_CONFIG" >/dev/null || true
+# 2. mailcow.DOMAIN -> nginx-mailcow
+# Toolkit is proxied by Mailcow's internal nginx (site.toolkit.custom), not NPM
+create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" >/dev/null || true
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
 create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" >/dev/null || true
@@ -620,9 +691,18 @@ header "Phase 8: SSL Certificate Symlinks"
 if [ -n "${MAIL_CERT_ID:-}" ] && [ "$MAIL_CERT_ID" != "FAIL" ] && [ "$MAIL_CERT_ID" != "0" ]; then
     SSL_DIR="$MAILCOW_DIR/data/assets/ssl"
 
-    # Verify cert files exist in NPM volume
+    # Find cert files in NPM volume (certbot = LE, custom = self-signed)
     CERT_VOLUME_PATH=$(docker volume inspect npmplus_npmplus-data --format '{{.Mountpoint}}' 2>/dev/null || echo "")
-    if [ -n "$CERT_VOLUME_PATH" ] && [ -f "${CERT_VOLUME_PATH}/tls/certbot/live/npm-${MAIL_CERT_ID}/fullchain.pem" ]; then
+    CERT_REL_PATH=""
+    if [ -n "$CERT_VOLUME_PATH" ]; then
+        if [ -f "${CERT_VOLUME_PATH}/tls/certbot/live/npm-${MAIL_CERT_ID}/fullchain.pem" ]; then
+            CERT_REL_PATH="tls/certbot/live/npm-${MAIL_CERT_ID}"
+        elif [ -f "${CERT_VOLUME_PATH}/tls/custom/npm-${MAIL_CERT_ID}/fullchain.pem" ]; then
+            CERT_REL_PATH="tls/custom/npm-${MAIL_CERT_ID}"
+        fi
+    fi
+
+    if [ -n "$CERT_REL_PATH" ]; then
         cd "$SSL_DIR"
 
         # Backup originals (only if real files, not symlinks)
@@ -631,10 +711,10 @@ if [ -n "${MAIL_CERT_ID:-}" ] && [ "$MAIL_CERT_ID" != "FAIL" ] && [ "$MAIL_CERT_
 
         # Create symlinks pointing to container-internal paths
         rm -f cert.pem key.pem
-        ln -s "/npm-data/tls/certbot/live/npm-${MAIL_CERT_ID}/fullchain.pem" cert.pem
-        ln -s "/npm-data/tls/certbot/live/npm-${MAIL_CERT_ID}/privkey.pem" key.pem
+        ln -s "/npm-data/${CERT_REL_PATH}/fullchain.pem" cert.pem
+        ln -s "/npm-data/${CERT_REL_PATH}/privkey.pem" key.pem
 
-        log "SSL symlinks created → npm-${MAIL_CERT_ID}"
+        log "SSL symlinks created → ${CERT_REL_PATH}"
     else
         warn "Certificate files not found in NPM volume (cert_id=$MAIL_CERT_ID)"
         warn "SSL symlinks must be created manually after cert issuance."

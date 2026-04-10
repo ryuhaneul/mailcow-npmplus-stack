@@ -1,0 +1,14 @@
+# Append this to docker-compose.override.yml if using Mailcow Toolkit
+# ---
+#   toolkit-mailcow:
+#     build: /home/mailcow-toolkit
+#     container_name: toolkit-mailcow
+#     restart: always
+#     working_dir: /app
+#     command: ["gunicorn", "-b", "0.0.0.0:5000", "-w", "2", "--access-logfile", "-", "main:app"]
+#     volumes:
+#       - /home/mailcow-toolkit/config.yml:/config/config.yml:ro
+#     networks:
+#       mailcow-network:
+#     labels:
+#       - "com.docker.compose.project=mailcowdockerized"

@@ -1,0 +1,47 @@
+services:
+  npmplus:
+    image: zoeyvid/npmplus:latest
+    container_name: npmplus
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:81:81"
+    environment:
+      TZ: Asia/Seoul
+      CROWDSEC: "true"
+      CROWDSEC_LAPI: "http://crowdsec:8080"
+      CROWDSEC_KEY: "${CROWDSEC_BOUNCER_KEY}"
+    volumes:
+      - npmplus-data:/data
+    networks:
+      - npmplus-net
+      - mailcow-network
+    depends_on:
+      - crowdsec
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: always
+    environment:
+      TZ: Asia/Seoul
+      COLLECTIONS: "crowdsecurity/nginx crowdsecurity/http-cve"
+      BOUNCER_KEY_npmplus: "${CROWDSEC_BOUNCER_KEY}"
+    volumes:
+      - npmplus-data:/npmplus-data:ro
+      - crowdsec-data:/var/lib/crowdsec
+      - crowdsec-config:/etc/crowdsec
+    networks:
+      - npmplus-net
+
+volumes:
+  npmplus-data:
+  crowdsec-data:
+  crowdsec-config:
+
+networks:
+  npmplus-net:
+  mailcow-network:
+    external: true
+    name: mailcowdockerized_mailcow-network

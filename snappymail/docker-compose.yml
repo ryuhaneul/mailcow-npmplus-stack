@@ -1,0 +1,31 @@
+services:
+  snappymail:
+    image: djmaze/snappymail:latest
+    container_name: snappymail
+    restart: always
+    command:
+      - /bin/sh
+      - -c
+      - |
+        VER=$$(ls /snappymail/snappymail/v/ | head -1)
+        KO_DIR=/snappymail/snappymail/v/$${VER}/app/localization/ko
+        if [ -f /var/lib/snappymail/admin_ko.json ] && [ ! -f $${KO_DIR}/admin.json ]; then
+          cp /var/lib/snappymail/admin_ko.json $${KO_DIR}/admin.json
+        fi
+        exec /entrypoint.sh
+    volumes:
+      - snappymail-data:/var/lib/snappymail
+    networks:
+      mailcow-network:
+        aliases:
+          - snappymail
+    environment:
+      - SECURE_COOKIES=true
+
+volumes:
+  snappymail-data:
+
+networks:
+  mailcow-network:
+    external: true
+    name: mailcowdockerized_mailcow-network

@@ -1,0 +1,9 @@
+mailcow:
+  api_url: "https://nginx-mailcow:8443"
+  api_key: "__MAILCOW_API_KEY__"
+
+toolkit:
+  secret_key: "__TOOLKIT_SECRET_KEY__"
+  modules:
+    - groups
+    - syncjobs

@@ -1,0 +1,21 @@
+services:
+  # NPM certificate volume sharing
+  nginx-mailcow:
+    volumes:
+      - npmplus-data:/npm-data:ro
+  dovecot-mailcow:
+    volumes:
+      - npmplus-data:/npm-data:ro
+  postfix-mailcow:
+    volumes:
+      - npmplus-data:/npm-data:ro
+
+  # Disable acme-mailcow (NPM handles certificates)
+  acme-mailcow:
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+
+volumes:
+  npmplus-data:
+    external: true
+    name: npmplus_npmplus-data

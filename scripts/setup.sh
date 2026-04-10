@@ -257,11 +257,12 @@ done
 
 if [ "$DNS_OK" = false ]; then
     echo ""
-    err "Missing DNS records:"
-    echo -e "$DNS_FAIL_LIST"
-    warn "SSL certificate issuance WILL FAIL without these."
-    echo ""
-    if ! confirm "Continue without DNS? (certs will fail, can retry later)"; then
+    warn "Missing DNS records:"
+    echo -e "$DNS_FAIL_LIST" >&2
+    warn "Domains without DNS will use self-signed certificates."
+    warn "Switch to Let's Encrypt via NPM UI after DNS is configured."
+    echo "" >&2
+    if ! confirm "Continue with self-signed certs for missing DNS?"; then
         die "Aborted. Configure DNS and re-run."
     fi
 else
@@ -438,6 +439,30 @@ try:
 except: pass
 " 2>/dev/null || echo "")
 
+# Generate self-signed cert, upload to NPM, return cert_id
+upload_selfsigned_cert() {
+    local domain="$1"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+        -keyout "${tmpdir}/key.pem" -out "${tmpdir}/cert.pem" \
+        -subj "/CN=${domain}" 2>/dev/null
+
+    local result
+    result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/certificates" \
+        -F "nice_name=${domain} (self-signed)" \
+        -F "provider=other" \
+        -F "certificate=@${tmpdir}/cert.pem" \
+        -F "certificate_key=@${tmpdir}/key.pem" 2>/dev/null)
+
+    rm -rf "$tmpdir"
+
+    local cid
+    cid=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
+    echo "$cid"
+}
+
 create_proxy_host() {
     local domain="$1" host="$2" port="$3" scheme="$4" advanced="${5:-}"
 
@@ -454,13 +479,12 @@ for h in json.load(sys.stdin):
         return 0
     fi
 
-    # Check DNS before requesting cert
+    # Check DNS to decide cert strategy
     local dns_ok=true
     local resolved
     resolved=$(dig +short "$domain" A 2>/dev/null | head -1)
     if [ -z "$resolved" ] || [ "$resolved" = "" ]; then
         dns_ok=false
-        warn "  $domain: no DNS record — creating without SSL"
     fi
 
     local result host_id cert_id
@@ -468,6 +492,7 @@ for h in json.load(sys.stdin):
     adv_json=$(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
 
     if [ "$dns_ok" = "true" ]; then
+        # DNS exists → try Let's Encrypt
         result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
             -H "Content-Type: application/json" \
             -d "{
@@ -489,17 +514,25 @@ for h in json.load(sys.stdin):
         cert_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('certificate_id','FAIL'))" 2>/dev/null || echo "FAIL")
 
         if [ "$host_id" != "FAIL" ]; then
-            log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$cert_id)"
+            log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$cert_id, LE)"
             echo "$cert_id"
             return 0
         fi
 
-        local errmsg
-        errmsg=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',{}).get('message',str(d)))" 2>/dev/null || echo "$result")
-        warn "  $domain: SSL failed ($errmsg) — retrying without SSL"
+        warn "  $domain: Let's Encrypt failed, falling back to self-signed"
     fi
 
-    # Create without SSL (DNS missing or SSL failed)
+    # DNS missing or LE failed → self-signed cert
+    warn "  $domain: no DNS — using self-signed certificate"
+    local ss_cert_id
+    ss_cert_id=$(upload_selfsigned_cert "$domain")
+
+    if [ "$ss_cert_id" = "FAIL" ]; then
+        err "  $domain: self-signed cert upload failed"
+        echo "0"
+        return 1
+    fi
+
     result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
         -H "Content-Type: application/json" \
         -d "{
@@ -507,7 +540,8 @@ for h in json.load(sys.stdin):
             \"forward_scheme\": \"${scheme}\",
             \"forward_host\": \"${host}\",
             \"forward_port\": ${port},
-            \"ssl_forced\": false,
+            \"certificate_id\": ${ss_cert_id},
+            \"ssl_forced\": true,
             \"block_exploits\": false,
             \"allow_websocket_upgrade\": false,
             \"http2_support\": false,
@@ -517,8 +551,8 @@ for h in json.load(sys.stdin):
 
     host_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
     if [ "$host_id" != "FAIL" ]; then
-        warn "  $domain: created WITHOUT SSL (host_id=$host_id). Add cert via NPM UI after DNS setup."
-        echo "0"
+        log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$ss_cert_id, self-signed)"
+        echo "$ss_cert_id"
         return 0
     fi
 
@@ -635,4 +669,12 @@ echo "    2. Change Mailcow admin password"
 echo "    3. Change NPM admin password"
 echo "    4. Set DKIM: Mailcow Admin → Configuration → ARC/DKIM Keys"
 echo "    5. Snappymail admin: https://mail.${DOMAIN}/?admin (pass: 12345)"
+echo ""
+if [ "${DNS_OK:-true}" = false ]; then
+    echo -e "  ${YELLOW}Self-signed certs in use (DNS not configured)${NC}"
+    echo "    After DNS migration, switch to Let's Encrypt:"
+    echo "    1. NPM UI → SSL Certificates → Add Let's Encrypt"
+    echo "    2. Edit each proxy host → select the new LE cert"
+    echo "    3. Or re-run: sudo ./scripts/setup.sh"
+fi
 echo ""

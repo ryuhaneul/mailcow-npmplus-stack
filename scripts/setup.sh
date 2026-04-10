@@ -440,6 +440,17 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
     log "API_KEY written to mailcow.conf"
     # Restart containers to pick up new API_KEY env var
     docker compose up -d 2>&1 | tail -3
+    # Wait for Mailcow API to be responsive after restart
+    log "Waiting for Mailcow API..."
+    for i in $(seq 1 30); do
+        API_TEST=$(curl -sk -o /dev/null -w "%{http_code}" -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            "https://127.0.0.1:8443/api/v1/get/status/containers" 2>/dev/null || echo "000")
+        if [ "$API_TEST" = "200" ]; then
+            log "Mailcow API: ready"
+            break
+        fi
+        sleep 5
+    done
 fi
 
 # Ensure API key is in database (for REST API access)
@@ -481,12 +492,23 @@ if [ -n "${MAILCOW_API_KEY:-}" ]; then
         | python3 -c "import sys,json; print('yes' if any(d.get('domain_name')=='${DOMAIN}' for d in json.load(sys.stdin)) else 'no')" 2>/dev/null || echo "no")
     if [ "$DOMAIN_EXISTS" = "no" ]; then
         log "Adding domain ${DOMAIN} to Mailcow..."
-        curl -sk -X POST "https://127.0.0.1:8443/api/v1/add/domain" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            -d "{\"domain\":\"${DOMAIN}\",\"description\":\"${DOMAIN}\",\"aliases\":\"400\",\"mailboxes\":\"100\",\"defquota\":\"3072\",\"maxquota\":\"10240\",\"restart_sogo\":\"1\",\"active\":\"1\"}" >/dev/null 2>&1 \
-            && log "Domain ${DOMAIN} added" \
-            || warn "Could not add domain — add manually in Mailcow Admin"
+        DOMAIN_ADDED="no"
+        for attempt in 1 2 3; do
+            ADD_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/add/domain" \
+                -H "Content-Type: application/json" \
+                -H "X-API-Key: ${MAILCOW_API_KEY}" \
+                -d "{\"domain\":\"${DOMAIN}\",\"description\":\"${DOMAIN}\",\"aliases\":\"400\",\"mailboxes\":\"100\",\"defquota\":\"3072\",\"maxquota\":\"10240\",\"restart_sogo\":\"1\",\"active\":\"1\"}" 2>/dev/null || echo "")
+            if echo "$ADD_RESULT" | grep -q '"domain_added"'; then
+                log "Domain ${DOMAIN} added"
+                DOMAIN_ADDED="yes"
+                break
+            fi
+            warn "Domain add attempt ${attempt} failed — retrying in 10s..."
+            sleep 10
+        done
+        if [ "$DOMAIN_ADDED" = "no" ]; then
+            warn "Could not add domain after 3 attempts — add manually in Mailcow Admin"
+        fi
     else
         log "Domain ${DOMAIN}: already exists"
     fi

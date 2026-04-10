@@ -440,6 +440,25 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
     log "API_KEY written to mailcow.conf"
     # Restart containers to pick up new API_KEY env var
     docker compose up -d 2>&1 | tail -3
+    # Wait for MySQL to be ready after restart
+    log "Waiting for MySQL after restart..."
+    for i in $(seq 1 30); do
+        docker exec "$MYSQL_CONTAINER" mysqladmin ping -u mailcow -p"$DBPASS" --silent 2>/dev/null && break
+        sleep 3
+    done
+    # Wait for Mailcow API to be fully operational
+    log "Waiting for Mailcow API..."
+    for i in $(seq 1 60); do
+        API_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" \
+            -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            "https://127.0.0.1:8443/api/v1/get/status/containers" 2>/dev/null)
+        if [ "$API_HTTP" = "200" ]; then
+            log "Mailcow API: ready"
+            break
+        fi
+        [ "$i" -eq 60 ] && warn "Mailcow API not ready after 120s — proceeding anyway"
+        sleep 2
+    done
 fi
 
 # Ensure API key is in database (for REST API access)
@@ -449,22 +468,6 @@ if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
         && log "Mailcow API key: database OK" \
         || warn "Could not insert API key — set manually in Mailcow Admin"
 fi
-
-# --- Wait for Mailcow API to be fully operational ---
-# The status endpoint may return 200 before domain/admin endpoints are ready.
-# Wait until get/domain/all returns a valid JSON array ([] or [...]).
-log "Waiting for Mailcow API to be fully ready..."
-for i in $(seq 1 60); do
-    API_DOMAIN_TEST=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
-        "https://127.0.0.1:8443/api/v1/get/domain/all" 2>/dev/null || true)
-    # Valid response is a JSON array: [] or [{...}]
-    if echo "$API_DOMAIN_TEST" | python3 -c "import sys,json; d=json.load(sys.stdin); assert isinstance(d,list)" 2>/dev/null; then
-        log "Mailcow API: fully ready"
-        break
-    fi
-    [ "$i" -eq 60 ] && warn "Mailcow API not fully ready after 120s — proceeding anyway"
-    sleep 2
-done
 
 # --- Change Mailcow admin password ---
 if [ -n "${MAILCOW_API_KEY:-}" ]; then

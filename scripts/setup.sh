@@ -401,7 +401,7 @@ log "Snappymail: deployed"
 header "Phase 7: NPM Proxy Hosts + SSL Certificates"
 
 sleep 3
-NPM_API="http://127.0.0.1:81/api"
+NPM_API="https://127.0.0.1:81/api"
 COOKIE_JAR=$(mktemp)
 trap 'rm -f "$COOKIE_JAR"' EXIT
 

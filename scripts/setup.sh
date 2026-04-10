@@ -541,6 +541,21 @@ cd "$SNAPPYMAIL_DIR"
 docker compose up -d 2>&1 | tail -3
 log "Snappymail: deployed"
 
+# --- Install Korean admin localization ---
+if [ -f "$PROJECT_DIR/snappymail/admin_ko.json" ]; then
+    docker cp "$PROJECT_DIR/snappymail/admin_ko.json" snappymail:/var/lib/snappymail/admin_ko.json
+    # Trigger the copy logic in the entrypoint command
+    docker restart snappymail 2>&1 | tail -1
+    log "Snappymail: Korean admin localization installed"
+    # Wait for restart
+    for i in $(seq 1 10); do
+        if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
+fi
+
 # --- Configure Snappymail domain (IMAP/SMTP → Mailcow containers) ---
 log "Configuring Snappymail domain..."
 # Wait for Snappymail data directory to be ready

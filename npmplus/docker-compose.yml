@@ -9,6 +9,8 @@ services:
       - "127.0.0.1:81:81"
     environment:
       TZ: Asia/Seoul
+      INITIAL_ADMIN_EMAIL: "${NPM_ADMIN_EMAIL}"
+      INITIAL_ADMIN_PASSWORD: "${NPM_ADMIN_PASSWORD}"
       CROWDSEC: "true"
       CROWDSEC_LAPI: "http://crowdsec:8080"
       CROWDSEC_KEY: "${CROWDSEC_BOUNCER_KEY}"

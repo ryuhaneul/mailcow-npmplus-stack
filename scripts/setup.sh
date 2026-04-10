@@ -405,39 +405,26 @@ NPM_API="https://127.0.0.1:81/api"
 COOKIE_JAR=$(mktemp)
 trap 'rm -f "$COOKIE_JAR"' EXIT
 
-# --- NPM admin account ---
-# Try login first (idempotent — account may already exist)
-LOGIN_RESULT=$(curl -skL -c "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
-    -X POST "${NPM_API}/tokens" \
-    -H "Content-Type: application/json" \
-    -d "{\"identity\": \"${NPM_ADMIN_EMAIL}\", \"secret\": \"${NPM_ADMIN_PASSWORD}\"}" 2>/dev/null)
-
-if [ "$LOGIN_RESULT" != "200" ]; then
-    log "Creating NPM admin account..."
-    CREATE_RESULT=$(curl -skL -c "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
-        -X POST "${NPM_API}/users" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"name\": \"Administrator\",
-            \"nickname\": \"admin\",
-            \"email\": \"${NPM_ADMIN_EMAIL}\",
-            \"roles\": [\"admin\"],
-            \"is_disabled\": false,
-            \"secret\": \"${NPM_ADMIN_PASSWORD}\"
-        }" 2>/dev/null)
-
-    if [ "$CREATE_RESULT" != "201" ] && [ "$CREATE_RESULT" != "200" ]; then
-        warn "NPM user creation returned HTTP $CREATE_RESULT (may already exist)"
-    fi
-
-    # Login after creation
-    curl -skL -c "$COOKIE_JAR" -o /dev/null \
+# --- NPM admin login ---
+# Admin account is auto-created by INITIAL_ADMIN_EMAIL/PASSWORD env vars
+# Wait for NPMplus to finish initial setup
+log "Logging into NPM..."
+for attempt in $(seq 1 10); do
+    LOGIN_RESULT=$(curl -sk -c "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
         -X POST "${NPM_API}/tokens" \
         -H "Content-Type: application/json" \
-        -d "{\"identity\": \"${NPM_ADMIN_EMAIL}\", \"secret\": \"${NPM_ADMIN_PASSWORD}\"}" 2>/dev/null
-else
-    log "NPM admin: already exists, logged in"
-fi
+        -d "{\"identity\": \"${NPM_ADMIN_EMAIL}\", \"secret\": \"${NPM_ADMIN_PASSWORD}\"}" 2>/dev/null)
+    if [ "$LOGIN_RESULT" = "200" ]; then
+        log "NPM admin: logged in"
+        break
+    fi
+    if [ "$attempt" -eq 10 ]; then
+        error "NPM login failed after 10 attempts (HTTP $LOGIN_RESULT)"
+        exit 1
+    fi
+    warn "NPM login attempt $attempt failed (HTTP $LOGIN_RESULT), retrying in 3s..."
+    sleep 3
+done
 
 # --- Create proxy hosts ---
 # Check if hosts already exist (idempotent)

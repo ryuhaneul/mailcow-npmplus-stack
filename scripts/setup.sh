@@ -474,6 +474,24 @@ else
     warn "No API key — Mailcow admin password remains default (moohoo)"
 fi
 
+# --- Add domain to Mailcow (skip if already exists) ---
+if [ -n "${MAILCOW_API_KEY:-}" ]; then
+    DOMAIN_EXISTS=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        "https://127.0.0.1:8443/api/v1/get/domain/all" 2>/dev/null \
+        | python3 -c "import sys,json; print('yes' if any(d.get('domain_name')=='${DOMAIN}' for d in json.load(sys.stdin)) else 'no')" 2>/dev/null || echo "no")
+    if [ "$DOMAIN_EXISTS" = "no" ]; then
+        log "Adding domain ${DOMAIN} to Mailcow..."
+        curl -sk -X POST "https://127.0.0.1:8443/api/v1/add/domain" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            -d "{\"domain\":\"${DOMAIN}\",\"description\":\"${DOMAIN}\",\"aliases\":\"400\",\"mailboxes\":\"100\",\"defquota\":\"3072\",\"maxquota\":\"10240\",\"restart_sogo\":\"1\",\"active\":\"1\"}" >/dev/null 2>&1 \
+            && log "Domain ${DOMAIN} added" \
+            || warn "Could not add domain — add manually in Mailcow Admin"
+    else
+        log "Domain ${DOMAIN}: already exists"
+    fi
+fi
+
 # Update toolkit config with real API key (skip if already has a real key)
 CURRENT_TK_KEY=$(grep "api_key:" "$TOOLKIT_DIR/config.yml" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "")
 if [ "$CURRENT_TK_KEY" = "placeholder" ] || [ -z "$CURRENT_TK_KEY" ]; then

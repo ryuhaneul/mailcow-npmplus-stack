@@ -444,8 +444,7 @@ create_proxy_host() {
     # Skip if already exists
     if echo "$EXISTING_HOSTS" | grep -qx "$domain"; then
         log "  $domain: already exists, skipping"
-        # Return cert_id of existing host
-        curl -skL -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" 2>/dev/null | python3 -c "
+        curl -sk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" 2>/dev/null | python3 -c "
 import sys, json
 for h in json.load(sys.stdin):
     if '$domain' in h.get('domain_names', []):
@@ -455,65 +454,83 @@ for h in json.load(sys.stdin):
         return 0
     fi
 
-    local result
-    result=$(curl -skL -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"domain_names\": [\"${domain}\"],
-            \"forward_scheme\": \"${scheme}\",
-            \"forward_host\": \"${host}\",
-            \"forward_port\": ${port},
-            \"certificate_id\": \"new\",
-            \"ssl_forced\": true,
-            \"block_exploits\": false,
-            \"allow_websocket_upgrade\": false,
-            \"http2_support\": false,
-            \"advanced_config\": $(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
-            \"meta\": {\"letsencrypt_email\": \"${NPM_ADMIN_EMAIL}\", \"letsencrypt_agree\": true, \"dns_challenge\": false},
-            \"locations\": []
-        }" 2>/dev/null)
+    # Check DNS before requesting cert
+    local dns_ok=true
+    local resolved
+    resolved=$(dig +short "$domain" A 2>/dev/null | head -1)
+    if [ -z "$resolved" ] || [ "$resolved" = "" ]; then
+        dns_ok=false
+        warn "  $domain: no DNS record — creating without SSL"
+    fi
 
-    local host_id cert_id
-    host_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
-    cert_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('certificate_id','FAIL'))" 2>/dev/null || echo "FAIL")
+    local result host_id cert_id
+    local adv_json
+    adv_json=$(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
 
-    if [ "$host_id" = "FAIL" ]; then
-        local errmsg
-        errmsg=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',{}).get('message',str(d)))" 2>/dev/null || echo "$result")
-        err "  $domain: FAILED — $errmsg"
-
-        # Fallback: create without cert, warn user
-        warn "  Retrying without SSL (cert can be added later via NPM UI)..."
-        result=$(curl -skL -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
+    if [ "$dns_ok" = "true" ]; then
+        result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
             -H "Content-Type: application/json" \
             -d "{
                 \"domain_names\": [\"${domain}\"],
                 \"forward_scheme\": \"${scheme}\",
                 \"forward_host\": \"${host}\",
                 \"forward_port\": ${port},
-                \"certificate_id\": 0,
-                \"ssl_forced\": false,
-                \"advanced_config\": $(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
+                \"certificate_id\": \"new\",
+                \"ssl_forced\": true,
+                \"block_exploits\": false,
+                \"allow_websocket_upgrade\": false,
+                \"http2_support\": false,
+                \"advanced_config\": ${adv_json},
+                \"meta\": {\"letsencrypt_email\": \"${NPM_ADMIN_EMAIL}\", \"letsencrypt_agree\": true, \"dns_challenge\": false},
                 \"locations\": []
             }" 2>/dev/null)
+
         host_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
+        cert_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('certificate_id','FAIL'))" 2>/dev/null || echo "FAIL")
+
         if [ "$host_id" != "FAIL" ]; then
-            warn "  $domain: created WITHOUT SSL (host_id=$host_id). Add cert via NPM UI."
-        else
-            err "  $domain: creation failed completely"
+            log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$cert_id)"
+            echo "$cert_id"
+            return 0
         fi
-        echo "0"
-        return 1
+
+        local errmsg
+        errmsg=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',{}).get('message',str(d)))" 2>/dev/null || echo "$result")
+        warn "  $domain: SSL failed ($errmsg) — retrying without SSL"
     fi
 
-    log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$cert_id)"
-    echo "$cert_id"
+    # Create without SSL (DNS missing or SSL failed)
+    result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"domain_names\": [\"${domain}\"],
+            \"forward_scheme\": \"${scheme}\",
+            \"forward_host\": \"${host}\",
+            \"forward_port\": ${port},
+            \"ssl_forced\": false,
+            \"block_exploits\": false,
+            \"allow_websocket_upgrade\": false,
+            \"http2_support\": false,
+            \"advanced_config\": ${adv_json},
+            \"locations\": []
+        }" 2>/dev/null)
+
+    host_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
+    if [ "$host_id" != "FAIL" ]; then
+        warn "  $domain: created WITHOUT SSL (host_id=$host_id). Add cert via NPM UI after DNS setup."
+        echo "0"
+        return 0
+    fi
+
+    err "  $domain: creation failed — $(echo "$result" | head -c 200)"
+    echo "0"
+    return 1
 }
 
 log "Creating proxy hosts..."
 
 # 1. mail.DOMAIN -> snappymail
-MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "")
+MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "" || true)
 
 # 2. mailcow.DOMAIN -> nginx-mailcow (+ toolkit location)
 TOOLKIT_CONFIG='location /toolkit/ {
@@ -526,10 +543,10 @@ TOOLKIT_CONFIG='location /toolkit/ {
     proxy_http_version 1.1;
     proxy_read_timeout 300s;
 }'
-create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "$TOOLKIT_CONFIG" >/dev/null
+create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "$TOOLKIT_CONFIG" >/dev/null || true
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
-create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" >/dev/null
+create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" >/dev/null || true
 
 # ============================================================
 # Phase 8: SSL Symlinks

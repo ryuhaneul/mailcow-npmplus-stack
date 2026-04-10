@@ -332,6 +332,33 @@ if ! docker volume inspect npmplus_npmplus-data &>/dev/null; then
     log "Pre-created npmplus_npmplus-data volume"
 fi
 
+# --- Clone Mailcow Toolkit (needed by override for build) ---
+TOOLKIT_DIR="/home/mailcow-toolkit"
+TOOLKIT_REPO="https://github.com/ryuhaneul/mailcow-toolkit.git"
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    TOOLKIT_REPO="https://${GITHUB_TOKEN}@github.com/ryuhaneul/mailcow-toolkit.git"
+fi
+if [ -d "$TOOLKIT_DIR/.git" ]; then
+    log "Toolkit: already cloned at $TOOLKIT_DIR"
+    cd "$TOOLKIT_DIR" && git pull --ff-only 2>&1 | tail -1 || true
+else
+    log "Cloning Mailcow Toolkit..."
+    git clone "$TOOLKIT_REPO" "$TOOLKIT_DIR" 2>&1 | tail -1
+fi
+# Create placeholder config (API key filled after Mailcow starts)
+[ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"
+cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
+mailcow:
+  api_url: "https://nginx-mailcow:8443"
+  api_key: "placeholder"
+
+toolkit:
+  secret_key: "${TOOLKIT_SECRET_KEY}"
+  modules:
+    - groups
+    - syncjobs
+TKCFG
+
 # --- Start Mailcow ---
 log "Starting Mailcow (internal ports)..."
 cd "$MAILCOW_DIR"
@@ -383,7 +410,7 @@ else
     warn "rspamd/redis container not found — DKIM key not generated"
 fi
 
-# --- Generate Mailcow API key ---
+# --- Generate Mailcow API key + update toolkit config ---
 if [ -z "${MAILCOW_API_KEY:-}" ]; then
     log "Generating Mailcow API key..."
     MAILCOW_API_KEY=$(openssl rand -hex 16)
@@ -399,22 +426,7 @@ if [ -z "${MAILCOW_API_KEY:-}" ]; then
     fi
 fi
 
-# --- Clone + configure Mailcow Toolkit ---
-TOOLKIT_DIR="/home/mailcow-toolkit"
-TOOLKIT_REPO="https://github.com/ryuhaneul/mailcow-toolkit.git"
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-    TOOLKIT_REPO="https://${GITHUB_TOKEN}@github.com/ryuhaneul/mailcow-toolkit.git"
-fi
-if [ -d "$TOOLKIT_DIR/.git" ]; then
-    log "Toolkit: already cloned at $TOOLKIT_DIR"
-    cd "$TOOLKIT_DIR" && git pull --ff-only 2>&1 | tail -1 || true
-else
-    log "Cloning Mailcow Toolkit..."
-    git clone "$TOOLKIT_REPO" "$TOOLKIT_DIR" 2>&1 | tail -1
-fi
-
-# Generate toolkit config
-[ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"
+# Update toolkit config with real API key
 cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
 mailcow:
   api_url: "https://nginx-mailcow:8443"
@@ -426,13 +438,10 @@ toolkit:
     - groups
     - syncjobs
 TKCFG
-log "Toolkit config.yml created"
+log "Toolkit config.yml updated with API key"
 
-# Build toolkit image
-cd "$MAILCOW_DIR"
-docker compose build --no-cache toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -3
-docker compose up -d toolkit-mailcow 2>&1 | tail -3
-log "Toolkit: built and started"
+# Restart toolkit to pick up new config
+docker compose restart toolkit-mailcow 2>&1 | tail -1 || true
 
 # Install nginx custom config for toolkit (direct Mailcow access)
 NGINX_CUSTOM="$MAILCOW_DIR/data/conf/nginx/site.toolkit.custom"

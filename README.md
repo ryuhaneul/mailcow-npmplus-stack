@@ -16,9 +16,10 @@ Internet → :80/443 → NPMplus + CrowdSec WAF
 
 ## Prerequisites
 
-- Linux server with Docker + Docker Compose
-- Mailcow installed at `/home/mailcow-dockerized/`
+- Linux server (Rocky/Alma/CentOS/Debian/Ubuntu)
+- Root access
 - DNS A records for `mail.DOMAIN`, `mailcow.DOMAIN`, `mail-npm.DOMAIN`
+- **Docker, Mailcow are NOT required** — setup.sh installs everything
 
 ## Quick Start
 
@@ -34,13 +35,14 @@ sudo ./scripts/setup.sh
 
 ## What setup.sh does
 
-1. Patches `mailcow.conf` (ports → 127.0.0.1:8080/8443)
-2. Installs `docker-compose.override.yml` (NPM cert volume sharing, acme disabled)
-3. Deploys NPMplus + CrowdSec (ports 80/443)
-4. Deploys Snappymail (webmail)
-5. Creates NPM admin account + proxy hosts + Let's Encrypt certs
-6. Creates SSL symlinks for Mailcow (dovecot/postfix)
-7. Installs cert reload cron
+1. Installs system packages (curl, dig, openssl, git)
+2. Installs Docker Engine + Docker Compose
+3. Clones and configures Mailcow (or patches existing)
+4. Deploys NPMplus + CrowdSec (ports 80/443)
+5. Deploys Snappymail (webmail)
+6. Creates NPM admin account + proxy hosts + Let's Encrypt certs
+7. Creates SSL symlinks for Mailcow (dovecot/postfix)
+8. Installs cert reload cron
 
 ## Verify
 

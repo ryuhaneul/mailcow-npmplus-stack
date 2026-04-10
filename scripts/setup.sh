@@ -357,6 +357,32 @@ done
 log "Ensuring all Mailcow containers are started..."
 docker compose up -d 2>&1 | tail -3
 
+# --- Generate DKIM key ---
+REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
+RSPAMD_CONTAINER=$(docker ps --format '{{.Names}}' | grep rspamd-mailcow | head -1)
+REDIS_CONTAINER=$(docker ps --format '{{.Names}}' | grep redis-mailcow | head -1)
+
+if [ -n "$RSPAMD_CONTAINER" ] && [ -n "$REDIS_CONTAINER" ]; then
+    EXISTING_DKIM=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -c "PRIVATE KEY" || echo "0")
+
+    if [ "$EXISTING_DKIM" -eq 0 ]; then
+        log "Generating DKIM key for ${DOMAIN}..."
+        DKIM_PRIVKEY=$(docker exec "$RSPAMD_CONTAINER" rspamadm dkim_keygen -s dkim -b 2048 -d "$DOMAIN" 2>/dev/null | sed -n '/-----BEGIN/,/-----END/p')
+
+        if [ -n "$DKIM_PRIVKEY" ]; then
+            docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" SET "DKIM_PRIV_KEYS:${DOMAIN}" "$DKIM_PRIVKEY" >/dev/null 2>&1
+            docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" SET "DKIM_SELECTORS:${DOMAIN}" "dkim" >/dev/null 2>&1
+            log "DKIM key generated and stored in Redis"
+        else
+            warn "DKIM key generation failed — generate manually in Mailcow Admin"
+        fi
+    else
+        log "DKIM key: already exists for ${DOMAIN}"
+    fi
+else
+    warn "rspamd/redis container not found — DKIM key not generated"
+fi
+
 # ============================================================
 # Phase 5: NPMplus + CrowdSec
 # ============================================================
@@ -364,7 +390,11 @@ header "Phase 5: NPMplus + CrowdSec"
 
 mkdir -p "$NPMPLUS_DIR"
 cp "$PROJECT_DIR/npmplus/docker-compose.yml" "$NPMPLUS_DIR/docker-compose.yml"
-echo "CROWDSEC_BOUNCER_KEY=${CROWDSEC_BOUNCER_KEY}" > "$NPMPLUS_DIR/.env"
+cat > "$NPMPLUS_DIR/.env" <<NPMENV
+CROWDSEC_BOUNCER_KEY=${CROWDSEC_BOUNCER_KEY}
+NPM_ADMIN_EMAIL=${NPM_ADMIN_EMAIL}
+NPM_ADMIN_PASSWORD=${NPM_ADMIN_PASSWORD}
+NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"

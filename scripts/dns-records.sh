@@ -27,28 +27,21 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# --- Extract DKIM key from Mailcow ---
+# --- Extract DKIM key from Mailcow (Redis) ---
 DKIM_RECORD=""
 DKIM_SELECTOR="dkim"
 
-# Try rspamd container first
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q rspamd-mailcow; then
-    DKIM_PUB=$(docker exec rspamd-mailcow cat "/var/lib/rspamd/dkim/${DKIM_SELECTOR}.pub.pem" 2>/dev/null || \
-               docker exec rspamd-mailcow cat "/var/lib/rspamd/dkim/${DOMAIN}.${DKIM_SELECTOR}.pub.pem" 2>/dev/null || \
-               echo "")
-    if [ -n "$DKIM_PUB" ]; then
-        # Convert PEM to DNS TXT format (strip headers, join lines)
-        DKIM_RECORD=$(echo "$DKIM_PUB" | grep -v "^-" | tr -d '\n')
-    fi
-fi
+REDIS_CONTAINER=$(docker ps --format '{{.Names}}' 2>/dev/null | grep redis-mailcow | head -1)
+if [ -n "$REDIS_CONTAINER" ] && [ -f "$MAILCOW_DIR/mailcow.conf" ]; then
+    REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
+    DKIM_PRIVKEY=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -v "^Warning")
+    DKIM_SEL=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_SELECTORS:${DOMAIN}" 2>/dev/null | grep -v "^Warning" | tr -d '[:space:]')
 
-# Try filesystem if container didn't have it
-if [ -z "$DKIM_RECORD" ] && [ -d "$MAILCOW_DIR/data/conf/rspamd/dkim" ]; then
-    for f in "$MAILCOW_DIR/data/conf/rspamd/dkim/"*.pub.pem; do
-        [ -f "$f" ] || continue
-        DKIM_RECORD=$(grep -v "^-" "$f" | tr -d '\n')
-        break
-    done
+    if [ -n "$DKIM_PRIVKEY" ] && echo "$DKIM_PRIVKEY" | grep -q "PRIVATE KEY"; then
+        # Derive public key from private key
+        DKIM_RECORD=$(echo "$DKIM_PRIVKEY" | openssl rsa -pubout 2>/dev/null | grep -v "^-" | tr -d '\n')
+        [ -n "$DKIM_SEL" ] && DKIM_SELECTOR="$DKIM_SEL"
+    fi
 fi
 
 # --- Check current DNS status ---
@@ -125,14 +118,13 @@ if [ -n "$DKIM_RECORD" ]; then
     echo -e "    Status: ${DKIM_STATUS}"
 else
     echo -e "    Value:  ${YELLOW}(not generated yet)${NC}"
-    echo -e "    ${YELLOW}Generate in: Mailcow Admin → Configuration → ARC/DKIM Keys${NC}"
-    echo -e "    ${YELLOW}Select domain → DKIM key length 2048 → Generate${NC}"
+    echo -e "    ${YELLOW}Re-run setup.sh or generate in: Mailcow Admin → Configuration → ARC/DKIM Keys${NC}"
     echo -e "    ${YELLOW}Then re-run this script to get the record value.${NC}"
 fi
 echo ""
 
 # --- PTR ---
-echo -e "${BOLD}[PTR Record]${NC}  (reverse DNS — set at hosting provider)"
+echo -e "${BOLD}[PTR Record]${NC}  ${YELLOW}(optional — set at hosting provider)${NC}"
 echo ""
 echo -e "  ${SERVER_IP}  →  mail.${DOMAIN}"
 # Check current PTR
@@ -170,5 +162,5 @@ else
     printf "%-40s %-6s %s\n" "${DKIM_SELECTOR}._domainkey.${DOMAIN}" "TXT" "(generate DKIM key first)"
 fi
 echo ""
-echo -e "PTR: ${SERVER_IP} → mail.${DOMAIN}"
+echo -e "PTR (optional): ${SERVER_IP} → mail.${DOMAIN}"
 echo ""

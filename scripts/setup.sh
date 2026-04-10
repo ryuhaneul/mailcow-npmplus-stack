@@ -440,17 +440,6 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
     log "API_KEY written to mailcow.conf"
     # Restart containers to pick up new API_KEY env var
     docker compose up -d 2>&1 | tail -3
-    # Wait for Mailcow API to be responsive after restart
-    log "Waiting for Mailcow API..."
-    for i in $(seq 1 30); do
-        API_TEST=$(curl -sk -o /dev/null -w "%{http_code}" -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            "https://127.0.0.1:8443/api/v1/get/status/containers" 2>/dev/null || echo "000")
-        if [ "$API_TEST" = "200" ]; then
-            log "Mailcow API: ready"
-            break
-        fi
-        sleep 5
-    done
 fi
 
 # Ensure API key is in database (for REST API access)
@@ -461,25 +450,34 @@ if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
         || warn "Could not insert API key — set manually in Mailcow Admin"
 fi
 
-# --- Change Mailcow admin password (only if still default 'moohoo') ---
+# --- Wait for Mailcow API to be fully operational ---
+# The status endpoint may return 200 before domain/admin endpoints are ready.
+# Wait until get/domain/all returns a valid JSON array ([] or [...]).
+log "Waiting for Mailcow API to be fully ready..."
+for i in $(seq 1 60); do
+    API_DOMAIN_TEST=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        "https://127.0.0.1:8443/api/v1/get/domain/all" 2>/dev/null || true)
+    # Valid response is a JSON array: [] or [{...}]
+    if echo "$API_DOMAIN_TEST" | python3 -c "import sys,json; d=json.load(sys.stdin); assert isinstance(d,list)" 2>/dev/null; then
+        log "Mailcow API: fully ready"
+        break
+    fi
+    [ "$i" -eq 60 ] && warn "Mailcow API not fully ready after 120s — proceeding anyway"
+    sleep 2
+done
+
+# --- Change Mailcow admin password ---
 if [ -n "${MAILCOW_API_KEY:-}" ]; then
-    # Test if default password still works
-    MOOHOO_TEST=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/get/admin/all" \
+    # Always set admin password via API key (basic auth check is unreliable)
+    log "Setting Mailcow admin password..."
+    CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
         -H "Content-Type: application/json" \
-        -u "admin:moohoo" 2>/dev/null | grep -c '"admin"' || true)
-    if [ "${MOOHOO_TEST:-0}" -gt 0 ]; then
-        log "Changing Mailcow admin password..."
-        CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null)
-        if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
-            log "Mailcow admin password changed"
-        else
-            warn "Could not change Mailcow admin password — change manually"
-        fi
+        -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null || true)
+    if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
+        log "Mailcow admin password set"
     else
-        log "Mailcow admin password: already changed"
+        warn "Could not set Mailcow admin password (response: ${CHANGE_RESULT})"
     fi
 else
     warn "No API key — Mailcow admin password remains default (moohoo)"
@@ -489,7 +487,15 @@ fi
 if [ -n "${MAILCOW_API_KEY:-}" ]; then
     DOMAIN_EXISTS=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
         "https://127.0.0.1:8443/api/v1/get/domain/all" 2>/dev/null \
-        | python3 -c "import sys,json; print('yes' if any(d.get('domain_name')=='${DOMAIN}' for d in json.load(sys.stdin)) else 'no')" 2>/dev/null || echo "no")
+        | python3 -c "
+import sys,json
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    print('yes' if any(d.get('domain_name')=='${DOMAIN}' for d in data) else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+
     if [ "$DOMAIN_EXISTS" = "no" ]; then
         log "Adding domain ${DOMAIN} to Mailcow..."
         DOMAIN_ADDED="no"
@@ -503,7 +509,7 @@ if [ -n "${MAILCOW_API_KEY:-}" ]; then
                 DOMAIN_ADDED="yes"
                 break
             fi
-            warn "Domain add attempt ${attempt} failed — retrying in 10s..."
+            warn "Domain add attempt ${attempt} failed (response: ${ADD_RESULT}) — retrying in 10s..."
             sleep 10
         done
         if [ "$DOMAIN_ADDED" = "no" ]; then

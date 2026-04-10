@@ -441,6 +441,24 @@ if [ -z "${MAILCOW_API_KEY:-}" ]; then
     fi
 fi
 
+# --- Change Mailcow admin password ---
+MAILCOW_ADMIN_PASSWORD=$(openssl rand -base64 18)
+if [ -n "${MAILCOW_API_KEY:-}" ]; then
+    log "Changing Mailcow admin password..."
+    CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${MAILCOW_ADMIN_PASSWORD}\",\"password2\":\"${MAILCOW_ADMIN_PASSWORD}\"}}" 2>/dev/null)
+    if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
+        log "Mailcow admin password changed"
+    else
+        warn "Could not change admin password — change manually"
+        MAILCOW_ADMIN_PASSWORD="moohoo (기본값 — 수동 변경 필요)"
+    fi
+else
+    MAILCOW_ADMIN_PASSWORD="moohoo (기본값 — 수동 변경 필요)"
+fi
+
 # Update toolkit config with real API key
 cat > "$TOOLKIT_DIR/config.yml" <<TKCFG
 mailcow:
@@ -786,7 +804,8 @@ echo "    Password:    ${NPM_ADMIN_PASSWORD}"
 echo ""
 echo "  Mailcow Admin:"
 echo "    URL:         https://mailcow.${DOMAIN}"
-echo "    Login:       admin / moohoo  (change immediately!)"
+echo "    Login:       admin"
+echo "    Password:    ${MAILCOW_ADMIN_PASSWORD}"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""
@@ -799,9 +818,8 @@ echo "    sudo reboot"
 echo ""
 echo "  After reboot:"
 echo "    1. sudo ./scripts/verify.sh"
-echo "    2. Change Mailcow admin password"
-echo "    3. Change NPM admin password"
-echo "    4. Snappymail admin: https://mail.${DOMAIN}/?admin (pass: 12345)"
+echo "    2. Change NPM admin password"
+echo "    3. Snappymail admin: https://mail.${DOMAIN}/?admin (pass: 12345)"
 echo ""
 if [ "${DNS_OK:-true}" = false ]; then
     echo -e "  ${YELLOW}Self-signed certs in use (DNS not configured)${NC}"

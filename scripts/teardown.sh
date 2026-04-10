@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # ============================================================
-# Clean removal: stop and remove all stack components
-# Usage: ./scripts/teardown.sh [--volumes]
-#   --volumes: also remove Docker volumes (data loss!)
+# Clean removal: stop and remove all stack components + volumes
+# Usage: sudo ./scripts/teardown.sh
 # ============================================================
 
 MAILCOW_DIR="/home/mailcow-dockerized"
@@ -20,50 +19,40 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 
-REMOVE_VOLUMES=false
-if [[ "${1:-}" == "--volumes" ]]; then
-    REMOVE_VOLUMES=true
-fi
-
 echo ""
-echo -e "${RED}WARNING: This will STOP and REMOVE all stack components:${NC}"
-echo "  - Mailcow (all containers)"
+echo -e "${RED}WARNING: This will STOP and REMOVE all stack components + volumes:${NC}"
+echo "  - Mailcow (all containers + data)"
 echo "  - NPMplus + CrowdSec"
 echo "  - Snappymail"
 echo "  - Toolkit"
-if [ "$REMOVE_VOLUMES" = true ]; then
-    echo -e "  ${RED}- Docker volumes (ALL DATA WILL BE LOST)${NC}"
-fi
 echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
 
-DOWN_FLAGS=""
-if [ "$REMOVE_VOLUMES" = true ]; then
-    DOWN_FLAGS="-v"
-fi
-
 # Stop Mailcow (includes toolkit via override)
 if [ -d "$MAILCOW_DIR" ]; then
     log "Stopping Mailcow..."
     cd "$MAILCOW_DIR"
-    docker compose down --remove-orphans $DOWN_FLAGS 2>&1 | tail -5 || true
+    docker compose down --remove-orphans -v 2>&1 | tail -5 || true
 fi
 
 # Stop NPMplus + CrowdSec
 if [ -d "$NPMPLUS_DIR" ]; then
     log "Stopping NPMplus + CrowdSec..."
     cd "$NPMPLUS_DIR"
-    docker compose down --remove-orphans $DOWN_FLAGS 2>&1 | tail -3 || true
+    docker compose down --remove-orphans -v 2>&1 | tail -3 || true
 fi
 
 # Stop Snappymail
 if [ -d "$SNAPPYMAIL_DIR" ]; then
     log "Stopping Snappymail..."
     cd "$SNAPPYMAIL_DIR"
-    docker compose down --remove-orphans $DOWN_FLAGS 2>&1 | tail -3 || true
+    docker compose down --remove-orphans -v 2>&1 | tail -3 || true
 fi
+
+# Remove external volume
+docker volume rm npmplus_npmplus-data 2>/dev/null && log "Removed npmplus_npmplus-data volume" || true
 
 # Remove directories
 log "Removing installation directories..."
@@ -75,14 +64,8 @@ rm -rf "$TOOLKIT_DIR"
 # Remove cron
 rm -f /etc/cron.d/mailcow-cert-reload
 
-# Remove external volume
-if [ "$REMOVE_VOLUMES" = true ]; then
-    docker volume rm npmplus_npmplus-data 2>/dev/null && log "Removed npmplus_npmplus-data volume" || true
-fi
+# Remove toolkit nginx config
+rm -f "$MAILCOW_DIR/data/conf/nginx/site.toolkit.custom" 2>/dev/null || true
 
 echo ""
-log "Clean removal complete. All stack components stopped and removed."
-if [ "$REMOVE_VOLUMES" = false ]; then
-    warn "Docker volumes were preserved. To remove data too:"
-    warn "  sudo ./scripts/teardown.sh --volumes"
-fi
+log "Clean removal complete."

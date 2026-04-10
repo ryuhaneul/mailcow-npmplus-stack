@@ -82,8 +82,8 @@ echo ""
 
 # --- Mail protocols ---
 echo "[Mail Protocols]"
-check "SMTP (465 SSL)" sh -c "echo 'QUIT' | timeout 5 openssl s_client -connect mail.${DOMAIN}:465 -quiet 2>/dev/null | grep -q '220'"
-check "IMAP (993 SSL)" sh -c "echo '1 LOGOUT' | timeout 5 openssl s_client -connect mail.${DOMAIN}:993 -quiet 2>/dev/null | grep -q 'OK'"
+check "SMTP (465 SSL)" sh -c "echo 'QUIT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:465 -quiet 2>/dev/null | grep -q '220'"
+check "IMAP (993 SSL)" sh -c "echo '1 LOGOUT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:993 -quiet 2>/dev/null | grep -q 'OK'"
 
 echo ""
 

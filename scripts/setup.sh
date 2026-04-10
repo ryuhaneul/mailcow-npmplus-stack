@@ -300,7 +300,7 @@ log "Patching mailcow.conf..."
 cd "$MAILCOW_DIR"
 
 # Only backup if not already patched
-CURRENT_HTTP_PORT=$(grep '^HTTP_PORT=' mailcow.conf | cut -d= -f2)
+CURRENT_HTTP_PORT=$(grep '^HTTP_PORT=' mailcow.conf | cut -d= -f2 || true)
 if [ "$CURRENT_HTTP_PORT" != "8080" ]; then
     cp mailcow.conf "mailcow.conf.bak.$(date +%Y%m%d%H%M%S)"
     log "Backup created"
@@ -379,9 +379,9 @@ log "Ensuring all Mailcow containers are started..."
 docker compose up -d 2>&1 | tail -3
 
 # --- Generate DKIM key ---
-REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
-RSPAMD_CONTAINER=$(docker ps --format '{{.Names}}' | grep rspamd-mailcow | head -1)
-REDIS_CONTAINER=$(docker ps --format '{{.Names}}' | grep redis-mailcow | head -1)
+REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 || true)
+RSPAMD_CONTAINER=$(docker ps --format '{{.Names}}' | grep rspamd-mailcow | head -1 || true)
+REDIS_CONTAINER=$(docker ps --format '{{.Names}}' | grep redis-mailcow | head -1 || true)
 
 if [ -n "$RSPAMD_CONTAINER" ] && [ -n "$REDIS_CONTAINER" ]; then
     EXISTING_DKIM=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -v "^Warning" | grep -c "PRIVATE KEY" || true)
@@ -405,8 +405,8 @@ else
 fi
 
 # --- Wait for MySQL readiness ---
-DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
-MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1)
+DBPASS=$(grep "^DBPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 || true)
+MYSQL_CONTAINER=$(docker ps --format '{{.Names}}' | grep mysql-mailcow | head -1 || true)
 if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
     log "Waiting for MySQL..."
     for i in $(seq 1 30); do
@@ -423,7 +423,7 @@ fi
 
 # --- Generate Mailcow API key + update toolkit config ---
 # Check if API_KEY already exists in mailcow.conf
-EXISTING_API_KEY=$(grep "^API_KEY=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 | head -1)
+EXISTING_API_KEY=$(grep "^API_KEY=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 | head -1 || true)
 if [ -n "$EXISTING_API_KEY" ]; then
     MAILCOW_API_KEY="$EXISTING_API_KEY"
     log "Mailcow API key: using existing from mailcow.conf"

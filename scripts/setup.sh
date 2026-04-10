@@ -446,28 +446,31 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
         docker exec "$MYSQL_CONTAINER" mysqladmin ping -u mailcow -p"$DBPASS" --silent 2>/dev/null && break
         sleep 3
     done
-    # Wait for Mailcow API to be fully operational
-    log "Waiting for Mailcow API..."
-    for i in $(seq 1 60); do
-        API_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" \
-            -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            "https://127.0.0.1:8443/api/v1/get/status/containers" 2>/dev/null)
-        if [ "$API_HTTP" = "200" ]; then
-            log "Mailcow API: ready"
-            break
-        fi
-        [ "$i" -eq 60 ] && warn "Mailcow API not ready after 120s — proceeding anyway"
-        sleep 2
-    done
 fi
 
 # Ensure API key is in database (for REST API access)
+# Must happen BEFORE API readiness check (REST API authenticates against DB)
 if [ -n "$MYSQL_CONTAINER" ] && [ -n "$DBPASS" ]; then
     docker exec "$MYSQL_CONTAINER" mysql -u mailcow -p"$DBPASS" mailcow \
         -e "INSERT IGNORE INTO api (api_key, allow_from, skip_ip_check, access, active) VALUES ('${MAILCOW_API_KEY}', '', 1, 'rw', 1);" 2>/dev/null \
         && log "Mailcow API key: database OK" \
         || warn "Could not insert API key — set manually in Mailcow Admin"
 fi
+
+# --- Wait for Mailcow API to be fully operational ---
+# API key must be in DB first (REST API authenticates against DB, not env var)
+log "Waiting for Mailcow API..."
+for i in $(seq 1 30); do
+    API_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" \
+        -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        "https://127.0.0.1:8443/api/v1/get/status/containers" 2>/dev/null || true)
+    if [ "$API_HTTP" = "200" ]; then
+        log "Mailcow API: ready"
+        break
+    fi
+    [ "$i" -eq 30 ] && warn "Mailcow API not ready after 60s — proceeding anyway"
+    sleep 2
+done
 
 # --- Change Mailcow admin password ---
 if [ -n "${MAILCOW_API_KEY:-}" ]; then

@@ -325,6 +325,12 @@ log "mailcow.conf: HTTP_PORT=8080, HTTPS_PORT=8443, BIND=127.0.0.1"
 cp "$PROJECT_DIR/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
 log "docker-compose.override.yml installed"
 
+# --- Pre-create NPMplus volume (needed by override) ---
+if ! docker volume inspect npmplus_npmplus-data &>/dev/null; then
+    docker volume create npmplus_npmplus-data
+    log "Pre-created npmplus_npmplus-data volume"
+fi
+
 # --- Start Mailcow ---
 log "Starting Mailcow (internal ports)..."
 cd "$MAILCOW_DIR"

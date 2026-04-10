@@ -678,3 +678,8 @@ if [ "${DNS_OK:-true}" = false ]; then
     echo "    3. Or re-run: sudo ./scripts/setup.sh"
 fi
 echo ""
+
+# Show all required DNS records
+if [ -x "${SCRIPT_DIR}/dns-records.sh" ]; then
+    bash "${SCRIPT_DIR}/dns-records.sh"
+fi

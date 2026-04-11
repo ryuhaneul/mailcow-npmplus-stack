@@ -657,7 +657,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
         "port": 993,
         "type": 1,
         "timeout": 300,
-        "shortLogin": true,
+        "shortLogin": false,
         "lowerLogin": true,
         "sasl": ["PLAIN", "LOGIN"],
         "ssl": {
@@ -681,7 +681,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
         "port": 465,
         "type": 1,
         "timeout": 60,
-        "shortLogin": true,
+        "shortLogin": false,
         "lowerLogin": true,
         "sasl": ["PLAIN", "LOGIN"],
         "ssl": {
@@ -701,7 +701,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
         "port": 4190,
         "type": 0,
         "timeout": 10,
-        "shortLogin": true,
+        "shortLogin": false,
         "lowerLogin": true,
         "sasl": ["PLAIN", "LOGIN"],
         "ssl": {

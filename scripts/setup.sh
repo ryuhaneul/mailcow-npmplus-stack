@@ -765,11 +765,8 @@ docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains
 fi
 
 # Set default_domain in Snappymail application.ini
-SNAPPY_DEFAULT_DOMAIN=$(docker exec snappymail grep -c "^default_domain = \"${DOMAIN}\"" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null || echo "0")
-if [ "$SNAPPY_DEFAULT_DOMAIN" = "0" ]; then
-    docker exec snappymail sed -i "s|^default_domain = .*|default_domain = \"${DOMAIN}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null
-    log "Snappymail: default_domain set to ${DOMAIN}"
-fi
+docker exec snappymail sed -i "s|^default_domain = .*|default_domain = \"${DOMAIN}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null
+log "Snappymail: default_domain set to ${DOMAIN}"
 
 # Change Snappymail admin password to NPM_ADMIN_PASSWORD
 # Always set it — Snappymail's default password varies by version (not always '12345')

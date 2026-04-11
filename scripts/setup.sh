@@ -528,6 +528,38 @@ else:
     else
         log "Domain ${DOMAIN}: already exists"
     fi
+
+    # --- Create admin mailbox (skip if already exists) ---
+    MBOX_EXISTS=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
+        "https://127.0.0.1:8443/api/v1/get/mailbox/all" 2>/dev/null \
+        | python3 -c "
+import sys,json
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    print('yes' if any(m.get('username')=='admin@${DOMAIN}' for m in data) else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+
+    if [ "$MBOX_EXISTS" = "no" ]; then
+        log "Creating mailbox admin@${DOMAIN}..."
+        MBOX_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/add/mailbox" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            -d "{\"local_part\":\"admin\",\"domain\":\"${DOMAIN}\",\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\",\"quota\":\"0\",\"active\":\"1\",\"force_pw_update\":\"0\",\"tls_enforce_in\":\"0\",\"tls_enforce_out\":\"0\"}" 2>/dev/null || echo "")
+        if echo "$MBOX_RESULT" | grep -q '"mailbox_added"'; then
+            log "Mailbox admin@${DOMAIN} created"
+        else
+            warn "Could not create mailbox (response: ${MBOX_RESULT})"
+        fi
+    else
+        # Ensure mailbox password matches NPM_ADMIN_PASSWORD
+        log "Mailbox admin@${DOMAIN}: exists — syncing password"
+        curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/mailbox" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${MAILCOW_API_KEY}" \
+            -d "{\"items\":[\"admin@${DOMAIN}\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" >/dev/null 2>&1 || true
+    fi
 fi
 
 # Update toolkit config with real API key (skip if already has a real key)
@@ -666,9 +698,9 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
             "allow_self_signed": true,
             "SNI_enabled": true,
             "disable_compression": true,
-            "security_level": 1
+            "security_level": 0
         },
-        "disabled_capabilities": ["METADATA", "OBJECTID", "PREVIEW", "STATUS=SIZE"],
+        "disabled_capabilities": [],
         "use_expunge_all_on_delete": false,
         "fast_simple_search": true,
         "force_select": false,
@@ -690,7 +722,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
             "allow_self_signed": true,
             "SNI_enabled": true,
             "disable_compression": true,
-            "security_level": 1
+            "security_level": 0
         },
         "useAuth": true,
         "setSender": false,
@@ -699,7 +731,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
     "Sieve": {
         "host": "dovecot-mailcow",
         "port": 4190,
-        "type": 0,
+        "type": 2,
         "timeout": 10,
         "shortLogin": false,
         "lowerLogin": true,
@@ -710,7 +742,7 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
             "allow_self_signed": true,
             "SNI_enabled": true,
             "disable_compression": true,
-            "security_level": 1
+            "security_level": 0
         },
         "enabled": true
     },
@@ -719,12 +751,24 @@ DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
 DOMAINJSON
 )
 
-docker exec snappymail sh -c "echo '${DOMAIN_CONFIG}' > /var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
+# Write domain config via temp file + docker cp (avoids shell escaping issues)
+DOMAIN_TMP=$(mktemp)
+echo "$DOMAIN_CONFIG" > "$DOMAIN_TMP"
+docker cp "$DOMAIN_TMP" "snappymail:/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
+rm -f "$DOMAIN_TMP"
+docker exec snappymail chown www-data:www-data "/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
 
 # Remove default localhost domain config
 docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains/default.json"
 
     log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
+fi
+
+# Set default_domain in Snappymail application.ini
+SNAPPY_DEFAULT_DOMAIN=$(docker exec snappymail grep -c "^default_domain = \"${DOMAIN}\"" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null || echo "0")
+if [ "$SNAPPY_DEFAULT_DOMAIN" = "0" ]; then
+    docker exec snappymail sed -i "s|^default_domain = .*|default_domain = \"${DOMAIN}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null
+    log "Snappymail: default_domain set to ${DOMAIN}"
 fi
 
 # Change Snappymail admin password to NPM_ADMIN_PASSWORD
@@ -1016,6 +1060,7 @@ echo ""
 echo "    NPM:         ${NPM_ADMIN_EMAIL} / (above)"
 echo "    Mailcow:     admin / (above)"
 echo "    Snappymail:  admin / (above)"
+echo "    Webmail:     admin@${DOMAIN} / (above)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""

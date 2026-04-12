@@ -529,37 +529,6 @@ else:
         log "Domain ${DOMAIN}: already exists"
     fi
 
-    # --- Create admin mailbox (skip if already exists) ---
-    MBOX_EXISTS=$(curl -sk -H "X-API-Key: ${MAILCOW_API_KEY}" \
-        "https://127.0.0.1:8443/api/v1/get/mailbox/all" 2>/dev/null \
-        | python3 -c "
-import sys,json
-data = json.load(sys.stdin)
-if isinstance(data, list):
-    print('yes' if any(m.get('username')=='admin@${DOMAIN}' for m in data) else 'no')
-else:
-    print('no')
-" 2>/dev/null || echo "no")
-
-    if [ "$MBOX_EXISTS" = "no" ]; then
-        log "Creating mailbox admin@${DOMAIN}..."
-        MBOX_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/add/mailbox" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            -d "{\"local_part\":\"admin\",\"domain\":\"${DOMAIN}\",\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\",\"quota\":\"0\",\"active\":\"1\",\"force_pw_update\":\"0\",\"tls_enforce_in\":\"0\",\"tls_enforce_out\":\"0\"}" 2>/dev/null || echo "")
-        if echo "$MBOX_RESULT" | grep -q '"mailbox_added"'; then
-            log "Mailbox admin@${DOMAIN} created"
-        else
-            warn "Could not create mailbox (response: ${MBOX_RESULT})"
-        fi
-    else
-        # Ensure mailbox password matches NPM_ADMIN_PASSWORD
-        log "Mailbox admin@${DOMAIN}: exists — syncing password"
-        curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/mailbox" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${MAILCOW_API_KEY}" \
-            -d "{\"items\":[\"admin@${DOMAIN}\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" >/dev/null 2>&1 || true
-    fi
 fi
 
 # Update toolkit config with real API key (skip if already has a real key)
@@ -1057,7 +1026,6 @@ echo ""
 echo "    NPM:         ${NPM_ADMIN_EMAIL} / (above)"
 echo "    Mailcow:     admin / (above)"
 echo "    Snappymail:  admin / (above)"
-echo "    Webmail:     admin@${DOMAIN} / (above)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""

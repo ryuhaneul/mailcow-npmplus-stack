@@ -404,7 +404,7 @@ Advanced Config에 같은 location을 수동으로 추가하면 `duplicate locat
    └── docker compose down && docker compose up -d
 
 10. Snappymail 관리자에서 IMAP/SMTP 서버 설정
-    └── dovecot-mailcow:143, postfix-mailcow:587
+    └── dovecot-mailcow:993 (IMAP SSL), postfix-mailcow:465 (SMTP SSL)
 
 11. 검증
 ```
@@ -487,66 +487,9 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 ---
 
-## 9. Git 자동화 구조 (TODO)
+## 9. 검증 체크리스트
 
-이 구성을 git clone + 도메인 변수만 변경하면 배포할 수 있도록:
-
-```
-mailcow-npmplus-stack/
-├── .env.example                    # DOMAIN, CROWDSEC_BOUNCER_KEY 등
-├── setup.sh                        # 도메인 치환 + 설치 자동화
-├── npmplus/
-│   ├── docker-compose.yml
-│   └── .env.example
-├── snappymail/
-│   └── docker-compose.yml
-├── mailcow-override/
-│   ├── docker-compose.override.yml
-│   ├── mailcow.conf.patch          # sed 패치 (포트, 바인드)
-│   └── setup-ssl-symlink.sh        # 인증서 심볼릭 생성 스크립트
-├── toolkit/                        # optional
-│   ├── config.yml.template
-│   └── Dockerfile
-└── docs/
-    └── guide.md                    # 이 문서
-```
-
-### setup.sh 예상 플로우
-
-```bash
-#!/bin/bash
-# Usage: ./setup.sh
-
-DOMAIN=$1
-SERVER_IP=$(curl -s ifconfig.me)
-
-# 1. 변수 치환
-sed -i "s/DOMAIN/${DOMAIN}/g" npmplus/docker-compose.yml snappymail/docker-compose.yml ...
-
-# 2. Bouncer 키 생성
-BOUNCER_KEY=$(openssl rand -hex 32)
-echo "CROWDSEC_BOUNCER_KEY=${BOUNCER_KEY}" > npmplus/.env
-
-# 3. Mailcow 설정 패치
-cd /home/mailcow-dockerized
-patch mailcow.conf < /path/to/mailcow.conf.patch
-cp /path/to/docker-compose.override.yml .
-
-# 4. 서비스 기동 순서
-cd /home/mailcow-dockerized && docker compose up -d
-cd /home/snappymail && docker compose up -d
-cd /home/npmplus && docker compose up -d
-
-# 5. NPM 초기 설정 (API)
-# ... 계정 생성, proxy host 생성, 인증서 발급 ...
-
-# 6. SSL 심볼릭 생성
-# ... cert ID 조회 후 symlink ...
-```
-
----
-
-## 10. 검증 체크리스트
+> `scripts/verify.sh`가 아래 항목을 자동으로 확인합니다.
 
 ### 웹 서비스
 

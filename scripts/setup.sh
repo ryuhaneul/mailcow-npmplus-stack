@@ -333,6 +333,7 @@ if [ -d "$TOOLKIT_DIR" ]; then
 else
     log "Installing Mailcow Toolkit..."
     cp -r "$PROJECT_DIR/toolkit" "$TOOLKIT_DIR"
+    chmod +x "$TOOLKIT_DIR/app_link.sh"
 fi
 # Create placeholder config (API key filled after Mailcow starts)
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"

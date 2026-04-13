@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Groups — Mailcow Toolkit{% endblock %}
+{% block nav_items %}<a href="{{ url_for('dashboard') }}" data-i18n="back_to_dashboard">← Dashboard</a>{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 data-i18n="group_management">Group Management</h1>
+  <button class="btn btn-primary" onclick="showCreateModal()" data-i18n="new_group">+ New Group</button>
+</div>
+
+<div id="groups-container" class="groups-list">
+  <div class="loading" data-i18n="loading">Loading...</div>
+</div>
+
+<!-- Create/Edit Modal -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" onclick="event.stopPropagation()">
+    <h2 id="modal-title" data-i18n="new_group">New Group</h2>
+    <form id="group-form" onsubmit="saveGroup(event)">
+      <input type="hidden" id="group-id" value="">
+      <label><span data-i18n="group_name">Group Name</span>
+        <input type="text" id="group-name" required placeholder="e.g. Sales Team">
+      </label>
+      <label><span data-i18n="domain">Domain</span>
+        <select id="group-domain"></select>
+      </label>
+      <label><span data-i18n="members">Members</span></label>
+      <div id="member-checkboxes" class="checkbox-grid"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" onclick="hideModal()" data-i18n="cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" data-i18n="save">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Add Inbound Modal -->
+<div id="inbound-overlay" class="modal-overlay hidden" onclick="closeInbound(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="inbound-title" onclick="event.stopPropagation()">
+    <h2 id="inbound-title" data-i18n="add_inbound_address">Add Inbound Address</h2>
+    <form id="inbound-form" onsubmit="saveInbound(event)">
+      <input type="hidden" id="inbound-group-addr" value="">
+      <label><span data-i18n="email_forward_hint">Email address that should forward to this group</span>
+        <input type="email" id="inbound-address" required placeholder="sales@example.com">
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn" onclick="hideInbound()" data-i18n="cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" data-i18n="add">Add</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='groups.js') }}"></script>
+{% endblock %}

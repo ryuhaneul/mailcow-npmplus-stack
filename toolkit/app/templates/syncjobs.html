@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Sync Jobs — Mailcow Toolkit{% endblock %}
+{% block nav_items %}<a href="{{ url_for('dashboard') }}" data-i18n="back_to_dashboard">← Dashboard</a>{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 data-i18n="syncjob_management">Sync Job Management</h1>
+</div>
+
+<!-- Batch Create Section -->
+<div class="card">
+  <h2 data-i18n="batch_create">Batch Create</h2>
+  <form id="batch-form" onsubmit="batchCreate(event)">
+    <div class="form-row">
+      <label><span data-i18n="source_host">Source Host</span>
+        <input type="text" id="src-host" required placeholder="mail.old-server.com">
+      </label>
+      <label><span data-i18n="port">Port</span>
+        <input type="number" id="src-port" value="993" class="port-input">
+      </label>
+      <label><span data-i18n="encryption">Encryption</span>
+        <select id="src-enc">
+          <option value="SSL" selected>SSL</option>
+          <option value="TLS">STARTTLS</option>
+          <option value="PLAIN">Plain</option>
+        </select>
+      </label>
+    </div>
+
+    <label><span data-i18n="account_list">Account List</span>
+      <span class="hint" data-i18n="account_list_hint">Format: source_email:password:destination_email (one per line)</span>
+      <textarea id="account-list" rows="6" placeholder="user1@old.com:password123:user1@new.com&#10;user2@old.com:password456:user2@new.com"></textarea>
+    </label>
+
+    <div class="csv-help">
+      <details>
+        <summary data-i18n="csv_format_help">CSV Format Help</summary>
+        <div class="csv-help-content">
+          <p data-i18n="csv_format_desc">Each line represents one account to sync. Supported formats:</p>
+          <pre>source@old.com:password:dest@new.com
+source@old.com,password,dest@new.com
+source@old.com&#9;password&#9;dest@new.com</pre>
+          <p data-i18n="csv_format_note">Lines starting with # are ignored. If destination is omitted, source email is used as destination.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="form-actions">
+      <label class="file-upload btn">
+        <span data-i18n="csv_upload">CSV Upload</span>
+        <input type="file" accept=".csv,.txt" onchange="handleCSV(event)" hidden>
+      </label>
+      <button type="button" class="btn" onclick="parsePreview()" data-i18n="preview">Preview</button>
+      <button type="submit" class="btn btn-primary" data-i18n="create_all">Create All</button>
+    </div>
+  </form>
+
+  <!-- Preview Table -->
+  <div id="preview-container" class="hidden">
+    <h3><span data-i18n="preview_title">Preview</span> (<span id="preview-count">0</span> <span data-i18n="accounts">accounts</span>)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th data-i18n="source">Source</th><th data-i18n="destination">Destination</th><th data-i18n="password">Password</th></tr></thead>
+        <tbody id="preview-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results-container" class="hidden">
+    <h3 data-i18n="results">Results</h3>
+    <div id="results-summary"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th data-i18n="source">Source</th><th data-i18n="destination">Destination</th><th data-i18n="status">Status</th></tr></thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Active Sync Jobs -->
+<div class="card">
+  <div class="card-header">
+    <h2 data-i18n="active_sync_jobs">Active Sync Jobs</h2>
+    <button class="btn btn-sm" onclick="loadJobs()" data-i18n="refresh">Refresh</button>
+  </div>
+
+  <div class="bulk-actions hidden" id="bulk-actions">
+    <span id="selected-count">0</span> <span data-i18n="selected">selected</span>:
+    <button class="btn btn-sm" onclick="bulkToggle(true)" data-i18n="activate">Activate</button>
+    <button class="btn btn-sm" onclick="bulkToggle(false)" data-i18n="deactivate">Deactivate</button>
+    <button class="btn btn-sm btn-danger" onclick="bulkDelete()" data-i18n="delete">Delete</button>
+  </div>
+
+  <div class="table-wrap">
+    <table id="jobs-table">
+      <thead>
+        <tr>
+          <th><input type="checkbox" onchange="toggleAll(this)" aria-label="Select all"></th>
+          <th data-i18n="source">Source</th>
+          <th data-i18n="destination">Destination</th>
+          <th data-i18n="status">Status</th>
+          <th data-i18n="last_run">Last Run</th>
+        </tr>
+      </thead>
+      <tbody id="jobs-body">
+        <tr><td colspan="5" class="loading" data-i18n="loading">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='syncjobs.js') }}"></script>
+{% endblock %}

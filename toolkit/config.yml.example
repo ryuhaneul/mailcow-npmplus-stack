@@ -1,0 +1,15 @@
+# Mailcow Toolkit Configuration
+mailcow:
+  # Internal docker network (HTTPS required for POST requests)
+  api_url: "https://nginx-mailcow"
+  # Or use external URL:
+  # api_url: "https://mail.example.com"
+
+  # Generate in Mailcow Admin > System > Configuration > API
+  api_key: "CHANGE-ME"
+
+toolkit:
+  secret_key: "auto-generated-on-install"
+  modules:
+    - groups
+    - syncjobs

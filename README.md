@@ -67,9 +67,6 @@ NPM_ADMIN_PASSWORD=ChangeMe!Str0ng   # 비워두면 자동 생성
 CROWDSEC_BOUNCER_KEY=
 MAILCOW_API_KEY=
 TOOLKIT_SECRET_KEY=
-
-# === 선택 ===
-GITHUB_TOKEN=                # mailcow-toolkit이 private repo인 경우
 ```
 
 ## setup.sh 수행 내용
@@ -142,8 +139,12 @@ mailcow-npmplus-stack/
 ├── mailcow-override/
 │   ├── docker-compose.override.yml           # Mailcow 오버라이드 (인증서 공유, acme 비활성화)
 │   └── docker-compose.override.toolkit.yml   # Toolkit 추가 템플릿
-├── toolkit/
-│   └── config.yml.template                   # Mailcow Toolkit 설정 템플릿
+├── toolkit/                                  # Mailcow Toolkit (번들 포함)
+│   ├── Dockerfile
+│   ├── app/                                  # Flask 애플리케이션 소스
+│   ├── app_link.sh                           # Mailcow 네비바 등록
+│   ├── config.yml.template                   # 설정 템플릿
+│   └── requirements.txt
 └── scripts/
     ├── setup.sh                              # 전체 설치 자동화
     ├── teardown.sh                           # 완전 제거
@@ -158,7 +159,7 @@ mailcow-npmplus-stack/
 ├── mailcow-dockerized/    # Mailcow (git clone)
 ├── npmplus/                # NPMplus + CrowdSec
 ├── snappymail/             # Snappymail
-└── mailcow-toolkit/        # Toolkit (optional)
+└── mailcow-toolkit/        # Toolkit (setup.sh가 toolkit/에서 복사)
 ```
 
 ## 트러블슈팅
@@ -302,9 +303,6 @@ NPM_ADMIN_PASSWORD=ChangeMe!Str0ng   # Auto-generated if empty
 CROWDSEC_BOUNCER_KEY=
 MAILCOW_API_KEY=
 TOOLKIT_SECRET_KEY=
-
-# === Optional ===
-GITHUB_TOKEN=                # If mailcow-toolkit is a private repo
 ```
 
 ## What setup.sh Does
@@ -377,8 +375,12 @@ mailcow-npmplus-stack/
 ├── mailcow-override/
 │   ├── docker-compose.override.yml           # Mailcow overrides (cert sharing, acme disabled)
 │   └── docker-compose.override.toolkit.yml   # Toolkit addon template
-├── toolkit/
-│   └── config.yml.template                   # Mailcow Toolkit configuration template
+├── toolkit/                                  # Mailcow Toolkit (bundled)
+│   ├── Dockerfile
+│   ├── app/                                  # Flask application source
+│   ├── app_link.sh                           # Mailcow navbar registration
+│   ├── config.yml.template                   # Configuration template
+│   └── requirements.txt
 └── scripts/
     ├── setup.sh                              # Full installation automation
     ├── teardown.sh                           # Full removal
@@ -393,7 +395,7 @@ mailcow-npmplus-stack/
 ├── mailcow-dockerized/    # Mailcow (git clone)
 ├── npmplus/                # NPMplus + CrowdSec
 ├── snappymail/             # Snappymail
-└── mailcow-toolkit/        # Toolkit (optional)
+└── mailcow-toolkit/        # Toolkit (copied from toolkit/ by setup.sh)
 ```
 
 ## Troubleshooting

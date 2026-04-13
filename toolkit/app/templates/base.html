@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="base-url" content="{{ url_for('dashboard') }}">
+<title>{% block title %}Mailcow Toolkit{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% block head %}{% endblock %}
+</head>
+<body>
+<nav class="topbar" aria-label="Main navigation">
+  <a href="{{ url_for('dashboard') }}" class="topbar-brand" data-i18n="app_name">Mailcow Toolkit</a>
+  <div class="topbar-links">
+    {% block nav_items %}{% endblock %}
+    <span class="lang-switcher">
+      <button class="lang-btn" data-lang="ko" onclick="setLang('ko')">한국어</button>
+      <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+      <button class="lang-btn" data-lang="ja" onclick="setLang('ja')">日本語</button>
+    </span>
+  </div>
+</nav>
+
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+
+<script src="{{ url_for('static', filename='translations.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

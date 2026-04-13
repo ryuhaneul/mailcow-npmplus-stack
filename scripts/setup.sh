@@ -326,18 +326,13 @@ if ! docker volume inspect npmplus_npmplus-data &>/dev/null; then
     log "Pre-created npmplus_npmplus-data volume"
 fi
 
-# --- Clone Mailcow Toolkit (needed by override for build) ---
+# --- Install Mailcow Toolkit (bundled in this repo) ---
 TOOLKIT_DIR="/home/mailcow-toolkit"
-TOOLKIT_REPO="https://github.com/ryuhaneul/mailcow-toolkit.git"
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-    TOOLKIT_REPO="https://${GITHUB_TOKEN}@github.com/ryuhaneul/mailcow-toolkit.git"
-fi
-if [ -d "$TOOLKIT_DIR/.git" ]; then
-    log "Toolkit: already cloned at $TOOLKIT_DIR"
-    cd "$TOOLKIT_DIR" && git pull --ff-only 2>&1 | tail -1 || true
+if [ -d "$TOOLKIT_DIR" ]; then
+    log "Toolkit: already installed at $TOOLKIT_DIR"
 else
-    log "Cloning Mailcow Toolkit..."
-    git clone "$TOOLKIT_REPO" "$TOOLKIT_DIR" 2>&1 | tail -1
+    log "Installing Mailcow Toolkit..."
+    cp -r "$PROJECT_DIR/toolkit" "$TOOLKIT_DIR"
 fi
 # Create placeholder config (API key filled after Mailcow starts)
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"

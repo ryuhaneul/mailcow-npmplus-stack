@@ -264,7 +264,41 @@ networks:
     name: mailcowdockerized_mailcow-network
 ```
 
-### 3.2 변경 포인트
+### 3.2 도메인 설정
+
+`setup.sh`가 자동으로 도메인 설정 JSON을 생성한다.
+수동 설정 시 아래 사항을 반드시 준수:
+
+| 항목 | 값 | 이유 |
+|------|-----|------|
+| IMAP host | `dovecot-mailcow` | Docker 내부 네트워크 (DNS 불필요) |
+| IMAP port | `993` (SSL) | |
+| SMTP host | `postfix-mailcow` | Docker 내부 네트워크 |
+| SMTP port | `465` (SSL) | |
+| `shortLogin` | `false` | Dovecot lua passdb는 `user@domain` 형식 필수. `true`이면 `@domain`이 잘려서 인증 실패 |
+| `security_level` | `0` | self-signed 인증서 환경에서 `1` 이상이면 SSL 핸드셰이크 실패 |
+| Sieve type | `2` (STARTTLS) | |
+| `disabled_capabilities` | `[]` (빈 배열) | 값이 있으면 IMAP 기능 제한으로 오동작 가능 |
+
+도메인 설정 파일 경로: `/var/lib/snappymail/_data_/_default_/domains/{DOMAIN}.json`
+
+**주의:**
+- 파일 소유자가 `www-data:www-data`여야 한다. 잘못되면 Snappymail이 읽지 못함.
+- `application.ini`의 `default_domain`을 도메인으로 설정하면 로그인 시 `@domain` 생략 가능.
+
+### 3.3 인증 흐름
+
+```
+Snappymail → IMAP LOGIN user@domain password
+  → dovecot (lua passdb)
+    → POST https://nginx:9082 (mailcowauth.php)
+      → MariaDB 비밀번호 검증
+```
+
+Dovecot은 자체적으로 비밀번호를 검증하지 않고, lua 스크립트가 PHP 엔드포인트를 호출한다.
+`mailcow.conf`의 `API_KEY`가 설정되어 있어야 이 체인이 동작한다.
+
+### 3.4 변경 포인트
 
 - 서브패스용 `ln -sf` symlink 제거 (루트 서빙이므로 불필요)
 - Mailcow nginx의 `site.snappymail.custom` 삭제 (NPM이 직접 라우팅)
@@ -448,6 +482,51 @@ curl -skL -b cookies -X POST http://127.0.0.1:81/api/nginx/proxy-hosts \
   -H "Content-Type: application/json" \
   -d '{ ... }'
 ```
+
+### Snappymail AUTHENTICATIONFAILED
+
+Snappymail에서 메일 계정 로그인 시 `AUTHENTICATIONFAILED Authentication failed` 에러.
+
+**확인 순서:**
+
+1. **shortLogin 확인**: 도메인 설정 JSON에서 IMAP/SMTP/Sieve 모두 `"shortLogin": false`인지 확인.
+   `true`이면 `@domain`을 제거하여 dovecot lua passdb가 도메인을 인식하지 못함.
+
+2. **security_level 확인**: `"security_level": 0`인지 확인. self-signed 인증서 환경에서
+   `1` 이상이면 SSL 연결 실패.
+
+3. **파일 소유자 확인**: 도메인 설정 파일이 `www-data:www-data` 소유인지 확인.
+   ```bash
+   docker exec snappymail ls -la /var/lib/snappymail/_data_/_default_/domains/
+   ```
+
+4. **IMAP 직접 테스트**: Snappymail 컨테이너에서 직접 IMAP 로그인 시도.
+   ```bash
+   docker exec snappymail php -r "
+   \$ctx = stream_context_create(['ssl' => ['verify_peer'=>false,'allow_self_signed'=>true,'security_level'=>0]]);
+   \$fp = stream_socket_client('ssl://dovecot-mailcow:993', \$e, \$es, 10, STREAM_CLIENT_CONNECT, \$ctx);
+   echo fgets(\$fp);
+   fwrite(\$fp, \"A1 LOGIN user@domain password\r\n\");
+   echo fgets(\$fp);
+   "
+   ```
+
+5. **dovecot 로그 확인**: `docker logs mailcowdockerized-dovecot-mailcow-1 --tail 20 2>&1 | grep auth`
+   - `HTTP request failed with 400`: `doveadm auth test`에서는 정상 (real_rip 미제공)
+   - 실제 IMAP 연결에서도 400이면 `mailcow.conf`의 `API_KEY` 설정 확인
+
+### 메일 발송 후 수신 서버에서 거부 (554 5.7.1)
+
+DNS 미설정 시 수신 서버의 rspamd 스코어가 임계값을 초과하여 거부된다.
+
+| 항목 | 감점 | 해결 |
+|------|------|------|
+| PTR(rDNS) 미설정 | ~10.5 | ISP에 PTR 설정 요청 |
+| MX 레코드 없음 | ~4.0 | MX 레코드 추가 |
+| A 레코드 없음 (HELO 호스트) | ~1.3 | mail.DOMAIN A 레코드 추가 |
+| DKIM 서명 실패 | ~0.0-1.0 | DKIM DNS 레코드 추가 |
+
+SPF만으로는 감점 상쇄가 불충분. 최소 **MX + A + PTR** 설정이 필요하다.
 
 ### firewalld + Docker iptables 충돌
 

@@ -13,6 +13,11 @@ ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || { echo "[x] .env not found"; exit 1; }
 set -a; source "$ENV_FILE"; set +a
 
+# Auto-detect SERVER_IP if not set in .env
+if [ -z "${SERVER_IP:-}" ]; then
+    SERVER_IP=$(curl -s4 --connect-timeout 5 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 5 icanhazip.com 2>/dev/null || echo "")
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'

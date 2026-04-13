@@ -84,6 +84,8 @@ services:
       - "127.0.0.1:81:81"  # 관리 UI — localhost only
     environment:
       TZ: Asia/Seoul
+      INITIAL_ADMIN_EMAIL: "${NPM_ADMIN_EMAIL}"
+      INITIAL_ADMIN_PASSWORD: "${NPM_ADMIN_PASSWORD}"
       CROWDSEC: "true"
       CROWDSEC_LAPI: "http://crowdsec:8080"
       CROWDSEC_KEY: "${CROWDSEC_BOUNCER_KEY}"
@@ -296,23 +298,10 @@ toolkit:
 
 Mailcow를 먼저 기동한 후 NPMplus를 올리고, NPM 관리 UI에서 설정.
 
-### 5.1 초기 계정 생성
+### 5.1 초기 계정
 
-NPMplus는 기본 계정이 없다. API로 생성:
-
-```bash
-# 초기 사용자 생성
-curl -skL -X POST http://127.0.0.1:81/api/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Administrator",
-    "nickname": "admin",
-    "email": "admin@DOMAIN",
-    "roles": ["admin"],
-    "is_disabled": false,
-    "secret": "INITIAL_PASSWORD"
-  }'
-```
+`docker-compose.yml`의 `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` 환경변수로
+첫 기동 시 관리자 계정이 자동 생성된다. `setup.sh`는 이 방식을 사용하므로 수동 생성 불필요.
 
 > 로그인 시 토큰은 response body가 아닌 **쿠키 `access_token`**으로 전달된다.
 
@@ -339,19 +328,8 @@ curl -skL -X POST http://127.0.0.1:81/api/users \
 | SSL Certificate | Let's Encrypt (신규 발급) |
 | Force SSL | Yes |
 
-Advanced Config:
-```nginx
-location /toolkit/ {
-    proxy_pass http://toolkit-mailcow:5000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Cookie $http_cookie;
-    proxy_http_version 1.1;
-    proxy_read_timeout 300s;
-}
-```
+> Toolkit은 NPM이 아닌 Mailcow 내부 nginx에서 프록시한다 (`site.toolkit.custom`).
+> `setup.sh`가 자동으로 설치하므로 NPM Advanced Config에 추가할 필요 없음.
 
 #### mail-npm.DOMAIN → NPM Dashboard
 
@@ -376,38 +354,29 @@ Advanced Config에 같은 location을 수동으로 추가하면 `duplicate locat
 ## 6. 작업 순서 (신규 구축)
 
 ```
-1. Mailcow 설치 (표준 절차)
+1. Mailcow 설치 + mailcow.conf 패치
+   └── HTTP_PORT=8080, HTTPS_PORT=8443, *_BIND=127.0.0.1
    └── docker compose up -d → 네트워크 생성됨
 
-2. mailcow.conf 수정
-   └── HTTP_PORT=8080, HTTPS_PORT=8443, *_BIND=127.0.0.1
-
-3. docker-compose.override.yml 생성
+2. docker-compose.override.yml 설치
    └── npmplus-data 볼륨 공유, acme 비활성화, toolkit 추가
 
-4. Snappymail 설치
-   └── mailcow-network 참여, snappymail alias
+3. NPMplus + CrowdSec 설치
+   └── INITIAL_ADMIN_EMAIL/PASSWORD로 관리자 자동 생성
 
-5. NPMplus + CrowdSec 설치
-   └── .env 생성, docker compose up -d
+4. Snappymail 설치 + 도메인 설정 자동화
+   └── mailcow-network 참여, IMAP/SMTP 도메인 설정 자동 적용
 
-6. NPM 초기 계정 생성
-   └── API로 admin 사용자 생성
-
-7. NPM에서 인증서 발급 + Proxy Host 생성
+5. NPM Proxy Host 생성 + SSL 인증서 발급
    └── mail.DOMAIN, mailcow.DOMAIN, mail-npm.DOMAIN
 
-8. SSL 심볼릭 링크 생성
+6. SSL 심볼릭 링크 생성
    └── mail.DOMAIN 인증서의 cert ID 확인 후 symlink
 
-9. Mailcow 재기동
-   └── docker compose down && docker compose up -d
-
-10. Snappymail 관리자에서 IMAP/SMTP 서버 설정
-    └── dovecot-mailcow:993 (IMAP SSL), postfix-mailcow:465 (SMTP SSL)
-
-11. 검증
+7. 인증서 리로드 크론 설치 + 검증
 ```
+
+> `setup.sh`가 위 순서를 자동으로 수행한다. 수동 구축 시 참고.
 
 ### 기존 Mailcow에 추가 구축 시
 
@@ -430,7 +399,7 @@ NPM이 인증서를 자동 갱신하지만, Mailcow의 dovecot/postfix는 갱신
 
 ```bash
 # /etc/cron.d/mailcow-cert-reload (또는 서버 crontab)
-0 4 * * * root docker exec postfix-mailcow postfix reload && docker exec -it dovecot-mailcow doveadm reload 2>/dev/null
+0 4 * * * root docker exec postfix-mailcow postfix reload 2>/dev/null; docker exec dovecot-mailcow doveadm reload 2>/dev/null
 ```
 
 > 매일 04:00에 postfix/dovecot 리로드. 인증서가 변경되지 않아도 리로드는 무해함.

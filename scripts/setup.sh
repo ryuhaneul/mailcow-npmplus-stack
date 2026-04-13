@@ -781,8 +781,7 @@ for attempt in $(seq 1 10); do
         break
     fi
     if [ "$attempt" -eq 10 ]; then
-        error "NPM login failed after 10 attempts (HTTP $LOGIN_RESULT)"
-        exit 1
+        die "NPM login failed after 10 attempts (HTTP $LOGIN_RESULT)"
     fi
     warn "NPM login attempt $attempt failed (HTTP $LOGIN_RESULT), retrying in 3s..."
     sleep 3

@@ -64,8 +64,5 @@ rm -rf "$TOOLKIT_DIR"
 # Remove cron
 rm -f /etc/cron.d/mailcow-cert-reload
 
-# Remove toolkit nginx config
-rm -f "$MAILCOW_DIR/data/conf/nginx/site.toolkit.custom" 2>/dev/null || true
-
 echo ""
 log "Clean removal complete."

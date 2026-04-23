@@ -1017,6 +1017,18 @@ header "Phase 10: Toolkit UI Integration"
 TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
 
+# Install the session-authorization PHP hook the Toolkit sidecar calls for
+# every request. The sidecar's auth.py posts here and only passes if the
+# visitor already holds a Mailcow admin PHP session.
+AUTHZ_SRC="$PROJECT_DIR/toolkit/patches/authz_toolkit_check.php"
+AUTHZ_DST="$MAILCOW_DIR/data/web/inc/ajax/authz_toolkit_check.php"
+if [ -f "$AUTHZ_SRC" ]; then
+    install -D -m 644 "$AUTHZ_SRC" "$AUTHZ_DST"
+    log "Toolkit auth hook installed at $AUTHZ_DST"
+else
+    warn "authz_toolkit_check.php source missing at $AUTHZ_SRC — Toolkit auth will fail"
+fi
+
 if [ -f "$TOOLKIT_UI_PATCHER" ]; then
     log "Applying base.twig UI patches (idempotent)..."
     if MAILCOW_DIR="$MAILCOW_DIR" python3 "$TOOLKIT_UI_PATCHER" 2>&1 | tee -a "$LOGFILE"; then

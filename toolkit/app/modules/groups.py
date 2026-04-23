@@ -7,7 +7,6 @@ Groups are implemented as Mailcow aliases with a naming convention:
 """
 
 from flask import Blueprint, render_template, request, jsonify
-from auth import auth_required
 from mailcow_api import MailcowAPI
 
 bp = Blueprint("groups", __name__, template_folder="../templates")
@@ -53,13 +52,11 @@ def _parse_groups(aliases):
 
 
 @bp.route("/")
-@auth_required
 def index():
     return render_template("groups.html")
 
 
 @bp.route("/api/list")
-@auth_required
 def api_list():
     api = MailcowAPI()
     aliases = api.get_aliases()
@@ -68,7 +65,6 @@ def api_list():
 
 
 @bp.route("/api/mailboxes")
-@auth_required
 def api_mailboxes():
     api = MailcowAPI()
     mailboxes = api.get_mailboxes()
@@ -78,7 +74,6 @@ def api_mailboxes():
 
 
 @bp.route("/api/create", methods=["POST"])
-@auth_required
 def api_create():
     data = request.json
     name = data["name"]
@@ -96,7 +91,6 @@ def api_create():
 
 
 @bp.route("/api/update", methods=["POST"])
-@auth_required
 def api_update():
     data = request.json
     alias_id = data["id"]
@@ -113,7 +107,6 @@ def api_update():
 
 
 @bp.route("/api/delete", methods=["POST"])
-@auth_required
 def api_delete():
     data = request.json
     alias_id = data["id"]
@@ -123,7 +116,6 @@ def api_delete():
 
 
 @bp.route("/api/add_inbound", methods=["POST"])
-@auth_required
 def api_add_inbound():
     """Create a new alias that forwards to a group address."""
     data = request.json
@@ -136,7 +128,6 @@ def api_add_inbound():
 
 
 @bp.route("/api/remove_inbound", methods=["POST"])
-@auth_required
 def api_remove_inbound():
     data = request.json
     alias_id = data["id"]

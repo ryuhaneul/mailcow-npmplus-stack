@@ -135,6 +135,19 @@ fi
 header "Phase 4: Re-apply Toolkit UI patches"
 
 TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
+
+# Re-install Toolkit session-authorization PHP hook (Mailcow's ./update.sh
+# only touches files it tracks, so our added ajax file survives, but we
+# copy defensively in case someone pruned it).
+AUTHZ_SRC="$PROJECT_DIR/toolkit/patches/authz_toolkit_check.php"
+AUTHZ_DST="$MAILCOW_DIR/data/web/inc/ajax/authz_toolkit_check.php"
+if [ -f "$AUTHZ_SRC" ]; then
+    install -D -m 644 "$AUTHZ_SRC" "$AUTHZ_DST"
+    log "Toolkit auth hook re-installed at $AUTHZ_DST"
+else
+    warn "authz_toolkit_check.php source missing at $AUTHZ_SRC"
+fi
+
 if [ -f "$TOOLKIT_UI_PATCHER" ]; then
     log "Running $TOOLKIT_UI_PATCHER..."
     if MAILCOW_DIR="$MAILCOW_DIR" python3 "$TOOLKIT_UI_PATCHER" 2>&1 | tee -a "$LOGFILE"; then

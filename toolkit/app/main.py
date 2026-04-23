@@ -1,6 +1,7 @@
 import os
 import yaml
-from flask import Flask, redirect, url_for, render_template, session, request
+from flask import Flask, abort, render_template, url_for
+from auth import verify_admin_session
 
 
 def load_config():
@@ -12,12 +13,6 @@ def load_config():
 
 
 class ReverseProxied:
-    """WSGI middleware: strip SCRIPT_NAME prefix from PATH_INFO.
-
-    nginx passes the full path (e.g. /toolkit/login) to the backend.
-    This middleware sets SCRIPT_NAME=/toolkit and strips it from PATH_INFO,
-    so Flask routes on /login but generates URLs with /toolkit/ prefix.
-    """
     def __init__(self, app, prefix="/toolkit"):
         self.app = app
         self.prefix = prefix
@@ -33,25 +28,27 @@ class ReverseProxied:
 def create_app():
     app = Flask(__name__)
     cfg = load_config()
-    app.secret_key = cfg["toolkit"]["secret_key"]
     app.config["MAILCOW"] = cfg["mailcow"]
     app.config["TOOLKIT"] = cfg["toolkit"]
 
-    from auth import auth_required
-
-    # Register enabled modules
     enabled = cfg["toolkit"].get("modules", [])
 
     if "groups" in enabled:
         from modules.groups import bp as groups_bp
         app.register_blueprint(groups_bp, url_prefix="/groups")
-
     if "syncjobs" in enabled:
         from modules.syncjobs import bp as syncjobs_bp
         app.register_blueprint(syncjobs_bp, url_prefix="/syncjobs")
+    if "mailboxes" in enabled:
+        from modules.mailboxes import bp as mailboxes_bp
+        app.register_blueprint(mailboxes_bp, url_prefix="/mailboxes")
+
+    @app.before_request
+    def _require_admin_session():
+        if not verify_admin_session():
+            abort(403)
 
     @app.route("/")
-    @auth_required
     def dashboard():
         modules = []
         if "groups" in enabled:
@@ -70,30 +67,15 @@ def create_app():
                 "icon": "sync",
                 "url": url_for("syncjobs.index"),
             })
+        if "mailboxes" in enabled:
+            modules.append({
+                "id": "mailboxes",
+                "name": "Mailboxes",
+                "desc": "Bulk-create mailboxes from CSV with random passwords",
+                "icon": "mailbox",
+                "url": url_for("mailboxes.index"),
+            })
         return render_template("dashboard.html", modules=modules)
-
-    @app.route("/login", methods=["GET", "POST"])
-    def login():
-        error = None
-        if request.method == "POST":
-            from mailcow_api import MailcowAPI
-            with app.app_context():
-                api = MailcowAPI()
-                if api.check_auth():
-                    session["authenticated"] = True
-                    next_url = request.args.get("next")
-                    if next_url:
-                        return redirect("/toolkit" + next_url)
-                    return redirect(url_for("dashboard"))
-                else:
-                    error = "API key invalid or Mailcow unreachable"
-
-        return render_template("login.html", error=error)
-
-    @app.route("/logout")
-    def logout():
-        session.clear()
-        return redirect(url_for("login"))
 
     app.wsgi_app = ReverseProxied(app.wsgi_app, prefix="/toolkit")
     return app

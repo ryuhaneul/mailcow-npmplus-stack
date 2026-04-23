@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Mailboxes — Mailcow Toolkit{% endblock %}
+{% block nav_items %}<a href="{{ url_for('dashboard') }}" data-i18n="back_to_dashboard">← Dashboard</a>{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 data-i18n="mailbox_management">Mailbox Management</h1>
+</div>
+
+<div class="card">
+  <h2 data-i18n="bulk_create">Bulk Create</h2>
+  <form id="mb-form" onsubmit="bulkCreate(event)">
+    <div class="form-row">
+      <label><span data-i18n="default_quota">Default Quota (MB)</span>
+        <input type="number" id="mb-default-quota" value="2048" min="0">
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="mb-auto-domain" checked>
+        <span data-i18n="auto_create_domain">Auto-create missing domain</span>
+      </label>
+    </div>
+
+    <label><span data-i18n="mailbox_list">Mailbox List</span>
+      <span class="hint" data-i18n="mailbox_list_hint">Format: email,password,name,quota_mb (one per line). Empty password → random.</span>
+      <textarea id="mb-list" rows="6" placeholder="user1@example.com,,User One,2048&#10;user2@example.com,MyPass!,User Two,&#10;user3@example.com"></textarea>
+    </label>
+
+    <div class="csv-help">
+      <details>
+        <summary data-i18n="csv_format_help">CSV Format Help</summary>
+        <div class="csv-help-content">
+          <p data-i18n="mb_csv_format_desc">Each line represents one mailbox. Columns:</p>
+          <pre>email,password,name,quota_mb</pre>
+          <p data-i18n="mb_csv_format_note">Empty password → randomly generated (20 chars). Empty name → local part. Empty quota → default above. Lines starting with # are ignored.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="form-actions">
+      <label class="file-upload btn">
+        <span data-i18n="csv_upload">CSV Upload</span>
+        <input type="file" accept=".csv,.txt" onchange="handleCSV(event)" hidden>
+      </label>
+      <button type="button" class="btn" onclick="parsePreview()" data-i18n="preview">Preview</button>
+      <button type="submit" class="btn btn-primary" data-i18n="create_all">Create All</button>
+    </div>
+  </form>
+
+  <!-- Preview Table -->
+  <div id="mb-preview-container" class="hidden">
+    <h3><span data-i18n="preview_title">Preview</span> (<span id="mb-preview-count">0</span> <span data-i18n="mailboxes_word">mailboxes</span>)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th data-i18n="email">Email</th>
+          <th data-i18n="password">Password</th>
+          <th data-i18n="display_name">Name</th>
+          <th data-i18n="quota_mb">Quota (MB)</th>
+        </tr></thead>
+        <tbody id="mb-preview-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="mb-results-container" class="hidden">
+    <h3 data-i18n="results">Results</h3>
+    <div id="mb-results-summary"></div>
+    <div class="form-actions">
+      <button type="button" class="btn" onclick="copyAllCredentials()" data-i18n="copy_all_credentials">Copy all credentials</button>
+      <span id="mb-copy-status" class="hint"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th data-i18n="email">Email</th>
+          <th data-i18n="password">Password</th>
+          <th data-i18n="status">Status</th>
+        </tr></thead>
+        <tbody id="mb-results-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='mailboxes.js') }}"></script>
+{% endblock %}

@@ -16,6 +16,7 @@ set -euo pipefail
 #   Phase 7: NPM proxy hosts + SSL certificates
 #   Phase 8: Mailcow SSL symlinks
 #   Phase 9: Cert reload cron
+#   Phase 10: Toolkit UI Integration (navbar patch + app link)
 #
 # Idempotent: safe to re-run if interrupted.
 # Tested on: Rocky Linux 9
@@ -1002,6 +1003,45 @@ CRON
     log "Cert reload cron: installed (daily 04:00)"
 else
     log "Cert reload cron: already installed"
+fi
+
+# ============================================================
+# Phase 10: Toolkit UI Integration
+# ============================================================
+# Patches Mailcow base.twig so the Apps dropdown only shows for
+# logged-in users, and app_links (Toolkit) only renders for admins.
+# Then registers Toolkit in the Mailcow navbar via Redis APP_LINKS.
+# Runs last so everything downstream (containers, DB, APIs) is ready.
+header "Phase 10: Toolkit UI Integration"
+
+TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
+TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
+
+if [ -f "$TOOLKIT_UI_PATCHER" ]; then
+    log "Applying base.twig UI patches (idempotent)..."
+    if MAILCOW_DIR="$MAILCOW_DIR" python3 "$TOOLKIT_UI_PATCHER" 2>&1 | tee -a "$LOGFILE"; then
+        log "UI patches applied"
+    else
+        warn "UI patch script exited non-zero — Apps dropdown may still leak to anon users"
+    fi
+else
+    warn "UI patcher not found at $TOOLKIT_UI_PATCHER — skipping"
+fi
+
+if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
+    APP_LINK_RESULT=$("$TOOLKIT_DIR/app_link.sh" add "$MAILCOW_DIR" 2>&1 || echo "failed")
+    log "Toolkit App Link: $APP_LINK_RESULT"
+else
+    warn "$TOOLKIT_DIR/app_link.sh missing or not executable — APP_LINKS not registered"
+fi
+
+# Reload php-fpm + nginx so Twig picks up the patched base.twig (twig cache).
+if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
+    log "Restarting php-fpm + nginx to refresh Twig cache..."
+    (cd "$MAILCOW_DIR" && docker compose restart php-fpm-mailcow nginx-mailcow 2>&1 | tee -a "$LOGFILE" | tail -3) || \
+        warn "Failed to restart php-fpm/nginx — UI changes may not be visible until next restart"
+else
+    warn "Mailcow compose file missing at $MAILCOW_DIR — cannot restart for UI refresh"
 fi
 
 # ============================================================

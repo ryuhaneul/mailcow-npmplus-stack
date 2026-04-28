@@ -348,6 +348,7 @@ toolkit:
   modules:
     - groups
     - syncjobs
+    - mailboxes
 TKCFG
 
 # --- Start Mailcow ---
@@ -541,6 +542,7 @@ toolkit:
   modules:
     - groups
     - syncjobs
+    - mailboxes
 TKCFG
     log "Toolkit config.yml updated with API key"
     docker compose restart toolkit-mailcow 2>&1 | tail -1 || true
@@ -1054,6 +1056,15 @@ if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
         warn "Failed to restart php-fpm/nginx — UI changes may not be visible until next restart"
 else
     warn "Mailcow compose file missing at $MAILCOW_DIR — cannot restart for UI refresh"
+fi
+
+# Restart NPMplus once the mailcow upstream is healthy. NPMplus came up in
+# Phase 5 before nginx-mailcow existed, so its upstream DNS cache is empty
+# and every request to mailcow.<domain> returns 502 until we bounce it.
+if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
+    log "Restarting NPMplus to refresh upstream DNS cache..."
+    docker restart npmplus 2>&1 | tee -a "$LOGFILE" | tail -1 || \
+        warn "Failed to restart NPMplus — mailcow.${DOMAIN} may stay 502 until manual restart"
 fi
 
 # ============================================================

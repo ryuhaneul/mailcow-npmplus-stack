@@ -171,6 +171,15 @@ fi
 # ============================================================
 header "Phase 5: Rebuild toolkit-mailcow"
 
+# The toolkit-mailcow image is built with /home/mailcow-toolkit as its
+# build context. Sync the latest sources from this stack repo before
+# building, otherwise application code changes (auth.py, modules, etc.)
+# never reach the running container.
+if [ -d "$PROJECT_DIR/toolkit/app" ] && [ -d "$TOOLKIT_DIR" ]; then
+    log "Syncing toolkit application sources $PROJECT_DIR/toolkit/app/ -> $TOOLKIT_DIR/app/"
+    rsync -a --delete "$PROJECT_DIR/toolkit/app/" "$TOOLKIT_DIR/app/" 2>&1 | tee -a "$LOGFILE" | tail -3
+fi
+
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     log "Building toolkit-mailcow (--pull)..."
     if (cd "$MAILCOW_DIR" && docker compose build --pull toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -10); then
@@ -207,6 +216,15 @@ compose_up() {
 
 compose_up "$NPMPLUS_DIR" "npmplus"
 compose_up "$SNAPPYMAIL_DIR" "snappymail"
+
+# Bounce NPMplus once mailcow is fully up so its upstream DNS cache
+# (server nginx-mailcow:8443 resolve;) is warm. Without this restart a
+# fresh deploy returns 502 on mailcow.<domain> until manual intervention.
+if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
+    log "Restarting NPMplus to refresh upstream DNS cache..."
+    docker restart npmplus 2>&1 | tee -a "$LOGFILE" | tail -1 || \
+        warn "Failed to restart NPMplus — mailcow upstream may stay 502 until manual restart"
+fi
 
 # ============================================================
 # Phase 7: verify.sh

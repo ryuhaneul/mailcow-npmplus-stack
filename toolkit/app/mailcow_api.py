@@ -56,10 +56,80 @@ class MailcowAPI:
             alias_ids = [alias_ids]
         return self._post("/api/v1/delete/alias", [str(i) for i in alias_ids])
 
+    # -- domains -----------------------------------------------------------
+
+    def get_domains(self):
+        return self._get("/api/v1/get/domain/all")
+
+    def domain_exists(self, domain):
+        try:
+            d = self._get(f"/api/v1/get/domain/{domain}")
+        except requests.HTTPError:
+            return False
+        if not d:
+            return False
+        if isinstance(d, dict):
+            return d.get("domain_name") == domain
+        return any(item.get("domain_name") == domain for item in d)
+
+    def add_domain(self, domain, **attrs):
+        payload = {
+            "domain": domain,
+            "active": attrs.get("active", "1"),
+            "mailboxes": attrs.get("mailboxes", "100"),
+            "defquota": attrs.get("defquota", "256"),
+            "maxquota": attrs.get("maxquota", "10240"),
+            "quota": attrs.get("quota", "204800"),
+            "aliases": attrs.get("aliases", "400"),
+            "relay_all_recipients": attrs.get("relay_all_recipients", "0"),
+            "backupmx": attrs.get("backupmx", "0"),
+            "description": attrs.get("description", domain),
+        }
+        return self._post("/api/v1/add/domain", payload)
+
     # -- mailboxes ---------------------------------------------------------
 
     def get_mailboxes(self):
         return self._get("/api/v1/get/mailbox/all")
+
+    def get_mailboxes_by_domain(self, domain):
+        try:
+            return self._get(f"/api/v1/get/mailbox/all/{domain}") or []
+        except requests.HTTPError:
+            return []
+
+    def mailbox_exists(self, email):
+        try:
+            d = self._get(f"/api/v1/get/mailbox/{email}")
+        except requests.HTTPError:
+            return False
+        if not d:
+            return False
+        if isinstance(d, dict):
+            return d.get("username") == email
+        return any(item.get("username") == email for item in d)
+
+    def add_mailbox(self, local_part, domain, password, name="", quota_mb="256",
+                    active="1", force_pw_update="0", tls_enforce_in="1",
+                    tls_enforce_out="1"):
+        payload = {
+            "local_part": local_part,
+            "domain": domain,
+            "name": name or local_part,
+            "password": password,
+            "password2": password,
+            "quota": str(quota_mb),
+            "active": active,
+            "force_pw_update": force_pw_update,
+            "tls_enforce_in": tls_enforce_in,
+            "tls_enforce_out": tls_enforce_out,
+        }
+        return self._post("/api/v1/add/mailbox", payload)
+
+    def delete_mailbox(self, emails):
+        if not isinstance(emails, list):
+            emails = [emails]
+        return self._post("/api/v1/delete/mailbox", emails)
 
     # -- sync jobs ---------------------------------------------------------
 

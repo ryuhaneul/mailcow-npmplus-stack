@@ -29,11 +29,17 @@ NPMPLUS_DIR="/home/npmplus"
 SNAPPYMAIL_DIR="/home/snappymail"
 LOGFILE="/var/log/mailcow-stack-setup.log"
 
-# Non-interactive mode (--non-interactive or piped stdin)
+# Argument parsing (flags may appear in any order)
 NON_INTERACTIVE=false
-if [[ "${1:-}" == "--non-interactive" ]] || [ ! -t 0 ]; then
-    NON_INTERACTIVE=true
-fi
+SKIP_DISK_CHECK=false
+for arg in "$@"; do
+    case "$arg" in
+        --non-interactive) NON_INTERACTIVE=true ;;
+        --skip-disk-check) SKIP_DISK_CHECK=true ;;
+    esac
+done
+# Piped stdin also implies non-interactive
+[ -t 0 ] || NON_INTERACTIVE=true
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -58,6 +64,35 @@ confirm() {
     [[ $REPLY =~ ^[Yy]$ ]]
 }
 
+# Disk space pre-flight guard. Checks the filesystem hosting Docker's data-root
+# (not a hardcoded /var) for free space before the update + image pulls begin.
+check_disk_space() {
+    local min_free="${MIN_FREE_GB:-3}"
+    local docker_root check_path df_line fs avail_gb
+    docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+    # df only works on existing paths; walk up to the nearest existing ancestor
+    check_path="$docker_root"
+    while [ ! -e "$check_path" ] && [ "$check_path" != "/" ]; do
+        check_path="$(dirname "$check_path")"
+    done
+    df_line="$(df -P -BG "$check_path" 2>/dev/null | awk 'NR==2 {print $1, $4}' || true)"
+    fs="${df_line%% *}"
+    avail_gb="${df_line##* }"; avail_gb="${avail_gb%G}"
+    if ! [[ "$avail_gb" =~ ^[0-9]+$ ]]; then
+        warn "Disk check: could not determine free space on $check_path; skipping guard"
+        return 0
+    fi
+    if [ "$avail_gb" -lt "$min_free" ]; then
+        if [ "$SKIP_DISK_CHECK" = true ]; then
+            warn "Disk check bypassed (--skip-disk-check): only ${avail_gb}G free on ${fs} (${check_path}), below ${min_free}G threshold. Proceeding anyway."
+        else
+            die "Insufficient disk space: only ${avail_gb}G free on ${fs} (${check_path}), need ${min_free}G. Free up space or re-run with --skip-disk-check."
+        fi
+    else
+        log "Disk check OK: ${avail_gb}G free on ${fs} (${check_path}), need ${min_free}G"
+    fi
+}
+
 # --- Root check ---
 [ "$(id -u)" -eq 0 ] || die "This script must be run as root (use sudo)"
 
@@ -76,6 +111,9 @@ set -a; source "$ENV_FILE"; set +a
 # Phase 0: System Packages
 # ============================================================
 header "Phase 0: System Update + Packages"
+
+# Disk space pre-flight: the update + image pulls are the first big disk consumer
+check_disk_space
 
 # Full system update first — prevents version mismatches
 # (e.g. openssl update breaking sshd if only Docker deps are updated)

@@ -68,28 +68,40 @@ confirm() {
 # (not a hardcoded /var) for free space before the update + image pulls begin.
 check_disk_space() {
     local min_free="${MIN_FREE_GB:-3}"
-    local docker_root check_path df_line fs avail_gb
-    docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+    local docker_root check_path df_line fs avail_bytes min_bytes avail_gib
+    if ! [[ "$min_free" =~ ^[0-9]+$ ]] || [ "$min_free" -le 0 ]; then
+        die "Invalid MIN_FREE_GB='$min_free' (must be a positive integer)"
+    fi
+    docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+    if [ -z "$docker_root" ]; then
+        if [ -f /etc/docker/daemon.json ]; then
+            docker_root="$(grep -oE '"data-root"[[:space:]]*:[[:space:]]*"[^"]+"' /etc/docker/daemon.json 2>/dev/null | sed -E 's/.*"([^"]+)"$/\1/' | head -1)"
+        fi
+        [ -z "$docker_root" ] && docker_root="/var/lib/docker"
+    fi
     # df only works on existing paths; walk up to the nearest existing ancestor
     check_path="$docker_root"
     while [ ! -e "$check_path" ] && [ "$check_path" != "/" ]; do
         check_path="$(dirname "$check_path")"
     done
-    df_line="$(df -P -BG "$check_path" 2>/dev/null | awk 'NR==2 {print $1, $4}' || true)"
+    # Compare in bytes (not df -BG, which rounds up and can false-pass a near-full disk)
+    df_line="$(df -P -B1 "$check_path" 2>/dev/null | awk 'NR==2 {print $1, $4}' || true)"
     fs="${df_line%% *}"
-    avail_gb="${df_line##* }"; avail_gb="${avail_gb%G}"
-    if ! [[ "$avail_gb" =~ ^[0-9]+$ ]]; then
+    avail_bytes="${df_line##* }"
+    if ! [[ "$avail_bytes" =~ ^[0-9]+$ ]]; then
         warn "Disk check: could not determine free space on $check_path; skipping guard"
         return 0
     fi
-    if [ "$avail_gb" -lt "$min_free" ]; then
+    min_bytes=$(( min_free * 1024 * 1024 * 1024 ))
+    avail_gib=$(( avail_bytes / 1073741824 ))  # floor GiB, for display only
+    if [ "$avail_bytes" -lt "$min_bytes" ]; then
         if [ "$SKIP_DISK_CHECK" = true ]; then
-            warn "Disk check bypassed (--skip-disk-check): only ${avail_gb}G free on ${fs} (${check_path}), below ${min_free}G threshold. Proceeding anyway."
+            warn "Disk check bypassed (--skip-disk-check): only ${avail_gib}G free on ${fs} (${check_path}), below ${min_free}G threshold. Proceeding anyway."
         else
-            die "Insufficient disk space: only ${avail_gb}G free on ${fs} (${check_path}), need ${min_free}G. Free up space or re-run with --skip-disk-check."
+            die "Insufficient disk space: only ${avail_gib}G free on ${fs} (${check_path}), need ${min_free}G. Free up space or re-run with --skip-disk-check."
         fi
     else
-        log "Disk check OK: ${avail_gb}G free on ${fs} (${check_path}), need ${min_free}G"
+        log "Disk check OK: ${avail_gib}G free on ${fs} (${check_path}), need ${min_free}G"
     fi
 }
 

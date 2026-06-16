@@ -10,6 +10,8 @@ const TRANSLATIONS = {
     module_groups_desc: "시각적 계층 구조로 별칭 기반 메일 그룹 관리",
     module_syncjobs: "동기화 작업",
     module_syncjobs_desc: "IMAP 동기화 작업 일괄 생성 및 모니터링",
+    module_mailboxes: "메일박스",
+    module_mailboxes_desc: "CSV로 메일박스 일괄 생성 (무작위 비밀번호)",
 
     // Groups
     group_management: "그룹 관리",
@@ -69,6 +71,24 @@ const TRANSLATIONS = {
     csv_format_help: "CSV 형식 도움말",
     csv_format_desc: "한 줄에 하나의 계정을 입력합니다. 지원되는 형식:",
     csv_format_note: "#으로 시작하는 줄은 무시됩니다. 대상 이메일을 생략하면 소스 이메일이 대상으로 사용됩니다.",
+    default_quota: "기본 용량 (MB)",
+    default_name: "기본 이름",
+    sj_auto_create_target: "없으면 대상 메일박스/도메인 자동 생성",
+    sj_auto_password_note: "자동 생성 시, 소스 비밀번호(password1)가 새 메일박스의 비밀번호로 사용됩니다.",
+
+    // Mailboxes
+    mailbox_management: "메일박스 관리",
+    bulk_create: "일괄 생성",
+    auto_create_domain: "없는 도메인 자동 생성",
+    email: "이메일",
+    display_name: "이름",
+    quota_mb: "용량 (MB)",
+    mailbox_list: "메일박스 목록",
+    mailbox_list_hint: "형식: 이메일,비밀번호,이름,용량(MB) (줄당 하나). 비밀번호 비우면 무작위 생성.",
+    mb_csv_format_desc: "한 줄에 메일박스 하나. 컬럼:",
+    mb_csv_format_note: "비밀번호 비움 → 무작위 20자. 이름 비움 → 로컬 파트. 용량 비움 → 기본값. #으로 시작하는 줄은 무시.",
+    mailboxes_word: "개 메일박스",
+    copy_all_credentials: "전체 자격증명 복사",
 
     // Login
     login_title: "Mailcow Toolkit",
@@ -83,6 +103,7 @@ const TRANSLATIONS = {
     loading: "로딩 중...",
     error_loading: "로딩 오류",
     error_save: "저장 중 오류가 발생했습니다",
+    copied: "복사됨",
     back_to_dashboard: "← 대시보드",
   },
 
@@ -95,6 +116,8 @@ const TRANSLATIONS = {
     module_groups_desc: "Manage alias-based mail groups with visual hierarchy",
     module_syncjobs: "Sync Jobs",
     module_syncjobs_desc: "Batch create and monitor IMAP sync jobs",
+    module_mailboxes: "Mailboxes",
+    module_mailboxes_desc: "Bulk create mailboxes from CSV (random passwords)",
 
     group_management: "Group Management",
     new_group: "+ New Group",
@@ -152,6 +175,23 @@ const TRANSLATIONS = {
     csv_format_help: "CSV Format Help",
     csv_format_desc: "Each line represents one account to sync. Supported formats:",
     csv_format_note: "Lines starting with # are ignored. If destination is omitted, source email is used as destination.",
+    default_quota: "Default Quota (MB)",
+    default_name: "Default Name",
+    sj_auto_create_target: "Auto-create destination mailbox/domain if missing",
+    sj_auto_password_note: "When auto-creating, the source password (password1) is used as the new mailbox password.",
+
+    mailbox_management: "Mailbox Management",
+    bulk_create: "Bulk Create",
+    auto_create_domain: "Auto-create missing domain",
+    email: "Email",
+    display_name: "Name",
+    quota_mb: "Quota (MB)",
+    mailbox_list: "Mailbox List",
+    mailbox_list_hint: "Format: email,password,name,quota_mb (one per line). Empty password → random.",
+    mb_csv_format_desc: "Each line represents one mailbox. Columns:",
+    mb_csv_format_note: "Empty password → randomly generated (20 chars). Empty name → local part. Empty quota → default above. Lines starting with # are ignored.",
+    mailboxes_word: "mailboxes",
+    copy_all_credentials: "Copy all credentials",
 
     login_title: "Mailcow Toolkit",
     login_subtitle: "Verifying Mailcow API connection...",
@@ -164,6 +204,7 @@ const TRANSLATIONS = {
     loading: "Loading...",
     error_loading: "Error loading",
     error_save: "An error occurred while saving",
+    copied: "Copied",
     back_to_dashboard: "← Dashboard",
   },
 
@@ -176,6 +217,8 @@ const TRANSLATIONS = {
     module_groups_desc: "エイリアスベースのメールグループを視覚的に管理",
     module_syncjobs: "同期ジョブ",
     module_syncjobs_desc: "IMAP同期ジョブの一括作成と監視",
+    module_mailboxes: "メールボックス",
+    module_mailboxes_desc: "CSVからメールボックスを一括作成（ランダムパスワード）",
 
     group_management: "グループ管理",
     new_group: "+ 新規グループ",
@@ -233,6 +276,23 @@ const TRANSLATIONS = {
     csv_format_help: "CSV形式ヘルプ",
     csv_format_desc: "1行に1つのアカウントを入力します。対応形式:",
     csv_format_note: "#で始まる行は無視されます。宛先を省略するとソースメールが宛先として使用されます。",
+    default_quota: "デフォルト容量 (MB)",
+    default_name: "デフォルト名",
+    sj_auto_create_target: "宛先メールボックス/ドメインが存在しない場合は自動作成",
+    sj_auto_password_note: "自動作成時、ソースパスワード（password1）が新しいメールボックスのパスワードとして使用されます。",
+
+    mailbox_management: "メールボックス管理",
+    bulk_create: "一括作成",
+    auto_create_domain: "存在しないドメインを自動作成",
+    email: "メール",
+    display_name: "名前",
+    quota_mb: "容量 (MB)",
+    mailbox_list: "メールボックス一覧",
+    mailbox_list_hint: "形式: メール,パスワード,名前,容量(MB)（1行ずつ）。パスワードを空にするとランダム生成。",
+    mb_csv_format_desc: "1行に1つのメールボックス。列:",
+    mb_csv_format_note: "パスワード空 → ランダム生成（20文字）。名前空 → ローカル部。容量空 → 上記デフォルト。#で始まる行は無視。",
+    mailboxes_word: "件のメールボックス",
+    copy_all_credentials: "すべての認証情報をコピー",
 
     login_title: "Mailcow Toolkit",
     login_subtitle: "Mailcow API接続を確認中...",
@@ -245,6 +305,7 @@ const TRANSLATIONS = {
     loading: "読み込み中...",
     error_loading: "読み込みエラー",
     error_save: "保存中にエラーが発生しました",
+    copied: "コピーしました",
     back_to_dashboard: "← ダッシュボード",
   },
 };

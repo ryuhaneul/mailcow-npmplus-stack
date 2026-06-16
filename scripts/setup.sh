@@ -371,6 +371,22 @@ log "mailcow.conf: HTTP_PORT=8080, HTTPS_PORT=8443, BIND=127.0.0.1"
 cp "$PROJECT_DIR/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
 log "docker-compose.override.yml installed"
 
+# --- Optional: bind vmail-vol-1 to a host path (single-disk servers leave VMAIL_DEVICE empty) ---
+if [ -n "${VMAIL_DEVICE:-}" ]; then
+    log "Binding vmail-vol-1 to ${VMAIL_DEVICE}"
+    mkdir -p "${VMAIL_DEVICE}"
+    OVERRIDE_FILE="${MAILCOW_DIR}/docker-compose.override.yml"
+    if grep -qE '^[[:space:]]*vmail-vol-1:' "$OVERRIDE_FILE"; then
+        warn "vmail-vol-1 already present in override; skipping inject"
+    elif grep -qE '^volumes:' "$OVERRIDE_FILE"; then
+        awk -v dev="$VMAIL_DEVICE" '/^volumes:/ && !d { print; print "  vmail-vol-1:"; print "    driver_opts:"; print "      type: none"; print "      o: bind"; print "      device: " dev; d=1; next } { print }' "$OVERRIDE_FILE" > "${OVERRIDE_FILE}.tmp" && mv "${OVERRIDE_FILE}.tmp" "$OVERRIDE_FILE"
+        log "Injected vmail-vol-1 bind into override"
+    else
+        printf '\nvolumes:\n  vmail-vol-1:\n    driver_opts:\n      type: none\n      o: bind\n      device: %s\n' "$VMAIL_DEVICE" >> "$OVERRIDE_FILE"
+        log "Appended volumes block with vmail-vol-1 bind"
+    fi
+fi
+
 # --- Pre-create NPMplus volume (needed by override) ---
 if ! docker volume inspect npmplus_npmplus-data &>/dev/null; then
     docker volume create npmplus_npmplus-data

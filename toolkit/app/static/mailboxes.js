@@ -75,7 +75,7 @@ async function bulkCreate(e) {
     });
 
     if (!items.length) { alert(t('no_valid_accounts')); return; }
-    if (!confirm(t('create_confirm', items.length))) return;
+    if (!confirm(t('mb_create_confirm', items.length))) return;
 
     const auto_create_domain = document.getElementById("mb-auto-domain").checked;
     const default_quota_mb = document.getElementById("mb-default-quota").value || "2048";

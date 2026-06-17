@@ -181,9 +181,13 @@ async function batchCreate(e) {
     if (!accounts.length) { alert(t('no_valid_accounts')); return; }
     if (!confirm(t('create_confirm', accounts.length))) return;
 
+    const auto_create_target = document.getElementById("sj-auto-target").checked;
+    const default_quota_mb = document.getElementById("sj-default-quota").value || "2048";
+    const default_name = document.getElementById("sj-default-name").value;
+
     const result = await api("/syncjobs/api/batch_create", {
       method: "POST",
-      body: JSON.stringify({ host1, port1, enc1, accounts }),
+      body: JSON.stringify({ host1, port1, enc1, auto_create_target, default_quota_mb, default_name, accounts }),
     });
 
     // Show results

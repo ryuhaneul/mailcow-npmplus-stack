@@ -26,10 +26,24 @@ class MailcowAPI:
         r.raise_for_status()
         return r.json()
 
+    def _check(self, data):
+        # Mailcow returns HTTP 200 even on failure, signalling the error in the
+        # body as [{"type": "danger"/"error", "msg": ...}]. Raise so callers'
+        # try/except can catch it instead of treating it as success.
+        items = data if isinstance(data, list) else [data]
+        errs = []
+        for it in items:
+            if isinstance(it, dict) and it.get("type") in ("danger", "error"):
+                m = it.get("msg")
+                errs.append(" ".join(map(str, m)) if isinstance(m, (list, tuple)) else str(m))
+        if errs:
+            raise RuntimeError("; ".join(errs) or "mailcow API error")
+        return data
+
     def _post(self, path, data):
         r = self.session.post(f"{self.base}{path}", json=data, timeout=30)
         r.raise_for_status()
-        return r.json()
+        return self._check(r.json())
 
     # -- aliases -----------------------------------------------------------
 

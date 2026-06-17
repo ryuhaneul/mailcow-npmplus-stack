@@ -135,6 +135,7 @@ h1 { font-size: 1.5rem; margin-bottom: 0.3rem; }
 .btn-danger { color: var(--red); border-color: rgba(248,113,113,0.3); }
 .btn-danger:hover { background: rgba(248,113,113,0.1); }
 .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.78rem; }
+.file-upload { margin: 0; }
 
 /* -- Forms -- */
 label {
@@ -170,7 +171,7 @@ textarea { resize: vertical; font-family: 'JetBrains Mono', monospace; font-size
 .form-row { display: flex; gap: 1rem; }
 .form-row label { flex: 1; }
 input.port-input { width: 80px; }
-.form-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+.form-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem; }
 
 /* -- Tables -- */
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }

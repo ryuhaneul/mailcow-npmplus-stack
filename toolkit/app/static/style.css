@@ -285,6 +285,25 @@ tr:hover td { background: rgba(124, 92, 252, 0.04); }
 .status-active { color: var(--green); }
 .status-inactive { color: var(--text-dim); }
 .status-error { color: var(--red); }
+.status-success { color: var(--green); }
+.status-failed { color: var(--red); }
+.status-running { color: var(--accent-light); }
+.status-pending { color: var(--text-dim); }
+
+/* -- Sync log modal -- */
+.log-pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text);
+  max-height: 55vh;
+  overflow: auto;
+  white-space: pre;
+}
 
 /* -- CSV Help -- */
 .csv-help { margin: 0.5rem 0 1rem; }

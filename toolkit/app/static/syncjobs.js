@@ -26,8 +26,25 @@ async function loadJobs() {
     allJobs = await api("/syncjobs/api/list");
     renderJobs();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="loading">${t('error_loading_syncjobs')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="loading">${t('error_loading_syncjobs')}</td></tr>`;
   }
+}
+
+// mailcow returns last_run as a "YYYY-MM-DD HH:MM:SS" string; unset jobs give
+// null, "", or a zeroed date.
+function hasRealLastRun(lr) {
+  return !!lr && !/^0000-00-00/.test(String(lr));
+}
+
+function syncStatus(j) {
+  const active = j.active === 1 || j.active === "1";
+  if (!active) return { cls: "status-inactive", label: t('inactive') };
+  if (j.is_running === 1 || j.is_running === "1") return { cls: "status-running", label: t('running') };
+  if (!hasRealLastRun(j.last_run)) return { cls: "status-pending", label: t('pending') };
+  const ok = j.success === 1 || j.success === "1";
+  return ok
+    ? { cls: "status-success", label: t('succeeded') }
+    : { cls: "status-failed", label: t('failed') };
 }
 
 function renderJobs() {
@@ -35,28 +52,62 @@ function renderJobs() {
   const headerCheckbox = document.querySelector("#jobs-table thead input[type=checkbox]");
   if (headerCheckbox) headerCheckbox.checked = false;
   if (!allJobs.length) {
-    tbody.innerHTML = `<tr><td colspan="5" class="loading">${t('no_syncjobs_found')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="loading">${t('no_syncjobs_found')}</td></tr>`;
     return;
   }
 
   tbody.innerHTML = allJobs.map(j => {
-    const active = j.active === 1 || j.active === "1";
-    const lastrun = (j.last_run && j.last_run > 0) ? new Date(j.last_run * 1000).toLocaleString() : t('never');
-    const status = active ? t('active') : t('inactive');
-    const cls = active ? "status-active" : "status-inactive";
+    const lastrun = hasRealLastRun(j.last_run) ? esc(j.last_run) : t('never');
+    const st = syncStatus(j);
+    const result = (j.exit_status && j.exit_status !== "0") ? esc(j.exit_status) : "-";
     return `
       <tr>
         <td><input type="checkbox" value="${j.id}" onchange="toggleSelect(this)"></td>
         <td>${esc(j.user1 || "")}@${esc(j.host1 || "")}</td>
         <td>${esc(j.username || j.user2 || "")}</td>
-        <td><span class="${cls}">${status}</span></td>
+        <td><span class="${st.cls}">${st.label}</span></td>
         <td>${lastrun}</td>
+        <td>${result}</td>
+        <td><button class="btn btn-sm" onclick="openSyncLog(${j.id})" data-i18n="log">${t('log')}</button></td>
       </tr>
     `;
   }).join("");
 
   updateBulkActions();
 }
+
+// -- Sync Log Modal --
+
+async function openSyncLog(id) {
+  const overlay = document.getElementById("log-overlay");
+  const pre = document.getElementById("log-content");
+  pre.textContent = t('loading');
+  overlay.classList.remove("hidden");
+  try {
+    const data = await api(`/syncjobs/api/detail/${id}`);
+    const job = Array.isArray(data)
+      ? (data.find(j => String(j.id) === String(id)) || data[0] || {})
+      : (data || {});
+    pre.textContent = job.log ? job.log : t('no_log');
+  } catch (e) {
+    pre.textContent = t('error_loading');
+  }
+}
+
+function hideLog() {
+  document.getElementById("log-overlay").classList.add("hidden");
+}
+
+function closeLog(e) {
+  if (e.target === e.currentTarget) hideLog();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    const overlay = document.getElementById("log-overlay");
+    if (overlay && !overlay.classList.contains("hidden")) hideLog();
+  }
+});
 
 function esc(s) {
   const d = document.createElement("div");

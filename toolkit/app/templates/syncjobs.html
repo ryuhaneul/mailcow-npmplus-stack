@@ -118,12 +118,25 @@ source@old.com&#9;password&#9;dest@new.com</pre>
           <th data-i18n="destination">Destination</th>
           <th data-i18n="status">Status</th>
           <th data-i18n="last_run">Last Run</th>
+          <th data-i18n="result">Result</th>
+          <th data-i18n="log">Log</th>
         </tr>
       </thead>
       <tbody id="jobs-body">
-        <tr><td colspan="5" class="loading" data-i18n="loading">Loading...</td></tr>
+        <tr><td colspan="7" class="loading" data-i18n="loading">Loading...</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<!-- Sync Log Modal -->
+<div id="log-overlay" class="modal-overlay hidden" onclick="closeLog(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="log-title" onclick="event.stopPropagation()">
+    <h2 id="log-title" data-i18n="sync_log">Sync Log</h2>
+    <pre id="log-content" class="log-pre"></pre>
+    <div class="modal-actions">
+      <button type="button" class="btn" onclick="hideLog()" data-i18n="close">Close</button>
+    </div>
   </div>
 </div>
 {% endblock %}

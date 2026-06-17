@@ -151,7 +151,14 @@ class MailcowAPI:
         return self._get("/api/v1/get/syncjobs/all/no_log")
 
     def get_syncjob(self, syncjob_id):
-        return self._get(f"/api/v1/get/syncjobs/{syncjob_id}")
+        # mailcow's /get/syncjobs/<id> endpoint ignores the numeric id (it
+        # overwrites it with the session user), so fetch the full list with
+        # logs and filter by id here.
+        jobs = self._get("/api/v1/get/syncjobs/all") or []
+        for job in jobs:
+            if str(job.get("id")) == str(syncjob_id):
+                return job
+        return {}
 
     def add_syncjob(self, username, data):
         payload = {

@@ -15,12 +15,14 @@ def _build_exclude(include_folders, manual_exclude):
     lookahead regex that excludes every folder except the listed ones, so only
     those folders are synced. Folder names are regex-escaped, which keeps names
     containing spaces (e.g. "[Gmail]/All Mail") valid — unlike custom_params,
-    which mailcow rejects when they contain whitespace. Otherwise fall back to
-    the manually entered exclude regex.
+    which mailcow rejects when they contain whitespace. The '/' is escaped too
+    because mailcow validates the exclude with preg_match("/" . $exclude . "/")
+    and an unescaped '/' would break that delimiter (rejected as access_denied).
+    Otherwise fall back to the manually entered exclude regex.
     """
     folders = [f.strip() for f in (include_folders or "").split(",") if f.strip()]
     if folders:
-        alt = "|".join(re.escape(f) for f in folders)
+        alt = "|".join(re.escape(f).replace("/", r"\/") for f in folders)
         return f"^(?!({alt})$).*$"
     return (manual_exclude or "").strip()
 

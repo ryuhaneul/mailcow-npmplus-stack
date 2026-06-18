@@ -2,9 +2,28 @@
 
 import csv
 import io
+import re
 
 from flask import Blueprint, render_template, request, jsonify
 from mailcow_api import MailcowAPI
+
+
+def _build_exclude(include_folders, manual_exclude):
+    """Resolve the mailcow `exclude` regex for a batch.
+
+    If include_folders (comma-separated) is non-empty, build a negative
+    lookahead regex that excludes every folder except the listed ones, so only
+    those folders are synced. Folder names are regex-escaped, which keeps names
+    containing spaces (e.g. "[Gmail]/All Mail") valid — unlike custom_params,
+    which mailcow rejects when they contain whitespace. Otherwise fall back to
+    the manually entered exclude regex.
+    """
+    folders = [f.strip() for f in (include_folders or "").split(",") if f.strip()]
+    if folders:
+        alt = "|".join(re.escape(f) for f in folders)
+        return f"^(?!({alt})$).*$"
+    return (manual_exclude or "").strip()
+
 
 bp = Blueprint("syncjobs", __name__, template_folder="../templates")
 
@@ -40,6 +59,10 @@ def api_batch_create():
       "auto_create_target": false,
       "default_quota_mb": 2048,
       "default_name": "",
+      "include_folders": "[Gmail]/All Mail",
+      "exclude": "",
+      "maxage": 0,
+      "subfolder2": "",
       "accounts": [
         {"user1": "src@old.com", "password1": "pass", "username": "dest@new.com"},
         ...
@@ -58,6 +81,17 @@ def api_batch_create():
     auto_create = bool(data.get("auto_create_target", False))
     default_quota = int(data.get("default_quota_mb") or 2048)
     default_name = (data.get("default_name") or "").strip()
+
+    # Advanced sync options (all optional). include_folders, when set, takes
+    # precedence over a manual exclude by generating an exclude regex.
+    exclude = _build_exclude(data.get("include_folders"), data.get("exclude"))
+    subfolder2 = (data.get("subfolder2") or "").strip()
+    try:
+        maxage = int(data.get("maxage") or 0)
+    except (TypeError, ValueError):
+        maxage = 0
+    if maxage < 0:
+        maxage = 0
 
     api = MailcowAPI()
 
@@ -122,6 +156,9 @@ def api_batch_create():
                 "enc1": enc1,
                 "user1": acct["user1"],
                 "password1": password1,
+                "exclude": exclude,
+                "maxage": str(maxage),
+                "subfolder2": subfolder2,
             }
             api.add_syncjob(username, job_data)
             result["success"] = True

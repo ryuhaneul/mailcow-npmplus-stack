@@ -61,6 +61,25 @@ source@old.com&#9;password&#9;dest@new.com</pre>
       <p class="hint" data-i18n="sj_auto_password_note">When auto-creating, the source password (password1) is used as the new mailbox password.</p>
     </div>
 
+    <div class="advanced-options-row">
+      <h3 data-i18n="advanced_options">Advanced Options (optional)</h3>
+      <label><span data-i18n="include_folders">Include only these folders (comma-separated, empty = all)</span>
+        <input type="text" id="sj-include-folders" placeholder="[Gmail]/All Mail">
+        <span class="hint" data-i18n="include_folders_hint">When set, only these folders are synced (all others excluded). Overrides the exclude field below.</span>
+      </label>
+      <label><span data-i18n="exclude_folders">Exclude folders (regex, optional)</span>
+        <input type="text" id="sj-exclude" placeholder="Trash|Spam">
+      </label>
+      <div class="form-row">
+        <label><span data-i18n="max_age_days">Max age (days), 0 = all</span>
+          <input type="number" id="sj-maxage" value="0" min="0">
+        </label>
+        <label><span data-i18n="dest_subfolder">Destination subfolder (optional)</span>
+          <input type="text" id="sj-subfolder2" placeholder="Imported">
+        </label>
+      </div>
+    </div>
+
     <div class="form-actions">
       <label class="file-upload btn">
         <span data-i18n="csv_upload">CSV Upload</span>

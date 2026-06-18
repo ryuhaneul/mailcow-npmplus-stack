@@ -236,9 +236,14 @@ async function batchCreate(e) {
     const default_quota_mb = document.getElementById("sj-default-quota").value || "2048";
     const default_name = document.getElementById("sj-default-name").value;
 
+    const include_folders = document.getElementById("sj-include-folders").value;
+    const exclude = document.getElementById("sj-exclude").value;
+    const maxage = document.getElementById("sj-maxage").value || "0";
+    const subfolder2 = document.getElementById("sj-subfolder2").value;
+
     const result = await api("/syncjobs/api/batch_create", {
       method: "POST",
-      body: JSON.stringify({ host1, port1, enc1, auto_create_target, default_quota_mb, default_name, accounts }),
+      body: JSON.stringify({ host1, port1, enc1, auto_create_target, default_quota_mb, default_name, include_folders, exclude, maxage, subfolder2, accounts }),
     });
 
     // Show results

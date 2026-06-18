@@ -83,6 +83,12 @@ const TRANSLATIONS = {
     default_name: "기본 이름",
     sj_auto_create_target: "없으면 대상 메일박스/도메인 자동 생성",
     sj_auto_password_note: "자동 생성 시, 소스 비밀번호(password1)가 새 메일박스의 비밀번호로 사용됩니다.",
+    advanced_options: "고급 옵션 (선택)",
+    include_folders: "포함할 폴더만 (쉼표 구분, 비우면 전체)",
+    include_folders_hint: "입력 시 해당 폴더만 동기화하고 나머지는 모두 제외합니다. 아래 제외 폴더 설정보다 우선합니다.",
+    exclude_folders: "제외 폴더 (정규식, 선택)",
+    max_age_days: "최대 기간 (일), 0 = 전체",
+    dest_subfolder: "대상 하위폴더 (선택)",
 
     // Mailboxes
     mailbox_management: "메일박스 관리",
@@ -195,6 +201,12 @@ const TRANSLATIONS = {
     default_name: "Default Name",
     sj_auto_create_target: "Auto-create destination mailbox/domain if missing",
     sj_auto_password_note: "When auto-creating, the source password (password1) is used as the new mailbox password.",
+    advanced_options: "Advanced Options (optional)",
+    include_folders: "Include only these folders (comma-separated, empty = all)",
+    include_folders_hint: "When set, only these folders are synced (all others excluded). Overrides the exclude field below.",
+    exclude_folders: "Exclude folders (regex, optional)",
+    max_age_days: "Max age (days), 0 = all",
+    dest_subfolder: "Destination subfolder (optional)",
 
     mailbox_management: "Mailbox Management",
     bulk_create: "Bulk Create",
@@ -304,6 +316,12 @@ const TRANSLATIONS = {
     default_name: "デフォルト名",
     sj_auto_create_target: "宛先メールボックス/ドメインが存在しない場合は自動作成",
     sj_auto_password_note: "自動作成時、ソースパスワード（password1）が新しいメールボックスのパスワードとして使用されます。",
+    advanced_options: "詳細オプション（任意）",
+    include_folders: "含めるフォルダのみ（カンマ区切り、空欄で全て）",
+    include_folders_hint: "指定すると該当フォルダのみ同期し、それ以外は全て除外します。下の除外フォルダ設定より優先されます。",
+    exclude_folders: "除外フォルダ（正規表現、任意）",
+    max_age_days: "最大期間（日）、0 = 全て",
+    dest_subfolder: "宛先サブフォルダ（任意）",
 
     mailbox_management: "メールボックス管理",
     bulk_create: "一括作成",

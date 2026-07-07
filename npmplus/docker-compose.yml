@@ -3,6 +3,14 @@ services:
     image: zoeyvid/npmplus:latest
     container_name: npmplus
     restart: always
+    # NPMplus 는 fancyindex header/footer 를 전역 설정으로 열어두는데,
+    # nginx reload 마다 master 가 fd 2개씩 누수 (재현: nginx -s reload 시 +2).
+    # 기본 nofile 1024 로는 약 2개월 만에 고갈되어 웹이 죽음 (2026-07-07 122 장애).
+    # 상향으로 수년치 여유 확보. upstream 리포트 별도.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     ports:
       - "80:80"
       - "443:443"

@@ -19,6 +19,24 @@ def _active_mailboxes():
             if str(m.get("active")) == "1"}
 
 
+def _group_mailboxes():
+    """Usernames of mailboxes with a distribution filter set up in mailcow's
+    filter tab: an active prefilter whose script contains "redirect".
+
+    This is a substring heuristic ("prefilter that mentions redirect"), not a
+    precise detection of group mailboxes. Raises if the filter API fails or
+    does not return a list.
+    """
+    filters = MailcowAPI().get_filters()
+    if not isinstance(filters, list):
+        raise ValueError("unexpected filters response from mailcow")
+    return {f["username"] for f in filters
+            if isinstance(f, dict) and f.get("username")
+            and f.get("filter_type") == "prefilter"
+            and str(f.get("active")) == "1"
+            and "redirect" in str(f.get("script_data") or "")}
+
+
 def _grantees(owner):
     """Grantees of owner's INBOX; get_acl also returns ACLs the owner received."""
     return sorted({e["id"] for e in dockerapi.get_acl(owner)
@@ -40,7 +58,15 @@ def api_mailboxes():
         boxes = _active_mailboxes()
     except Exception as e:
         return _error(str(e), 502)
-    return jsonify([{"username": u, "name": n} for u, n in sorted(boxes.items())])
+    try:
+        groups, groups_error = _group_mailboxes(), None
+    except Exception as e:
+        groups, groups_error = set(), str(e)
+    return jsonify({
+        "mailboxes": [{"username": u, "name": n, "group": u in groups}
+                      for u, n in sorted(boxes.items())],
+        "groups_error": groups_error,
+    })
 
 
 @bp.route("/api/grants")

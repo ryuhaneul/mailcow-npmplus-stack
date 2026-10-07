@@ -145,6 +145,11 @@ class MailcowAPI:
             emails = [emails]
         return self._post("/api/v1/delete/mailbox", emails)
 
+    # -- filters -----------------------------------------------------------
+
+    def get_filters(self):
+        return self._get("/api/v1/get/filters/all")
+
     # -- sync jobs ---------------------------------------------------------
 
     def get_syncjobs(self):

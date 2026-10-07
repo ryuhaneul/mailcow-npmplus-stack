@@ -1,15 +1,20 @@
 const BASE = document.querySelector('meta[name="base-url"]').content.replace(/\/$/, '');
 let allMailboxes = [];
+let groupsError = null;
 let grantees = [];
 let listOwner = "";  // owner that `grantees` was fetched for ("" = no list loaded)
 
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("sh-owner").addEventListener("change", loadGrants);
+  document.getElementById("sh-owner-search").addEventListener("input", () => renderOwnerSelect());
+  document.getElementById("sh-grantee-search").addEventListener("input", renderGranteeSelect);
+  document.getElementById("sh-groups").addEventListener("click", onGroupClick);
   document.getElementById("sh-list").addEventListener("click", onRevokeClick);
   loadMailboxes();
 });
 
 document.addEventListener("langchange", () => {
+  renderGroups();
   renderOwnerSelect();
   renderDetail();
 });
@@ -41,19 +46,49 @@ function showAlert(msg) {
 
 async function loadMailboxes() {
   try {
-    allMailboxes = await api("/shares/api/mailboxes");
+    const data = await api("/shares/api/mailboxes");
+    allMailboxes = data.mailboxes;
+    groupsError = data.groups_error;
+    renderGroups();
     renderOwnerSelect();
   } catch (e) {
     showAlert(`${t('error_loading')}: ${e.message}`);
   }
 }
 
-function renderOwnerSelect() {
+// Search match on address or display name; empty query matches everything.
+function matches(m, query) {
+  const q = query.trim().toLowerCase();
+  return !q || m.username.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q);
+}
+
+// Search narrows the list but never drops (or changes) the selected owner.
+function renderOwnerSelect(selected = owner()) {
   const sel = document.getElementById("sh-owner");
-  const current = sel.value;
+  const q = document.getElementById("sh-owner-search").value;
   sel.innerHTML = `<option value="">${esc(t('shares_select_owner'))}</option>` +
-    allMailboxes.map(m => `<option value="${esc(m.username)}">${esc(m.username)}</option>`).join("");
-  sel.value = current;
+    allMailboxes.filter(m => m.username === selected || matches(m, q))
+      .map(m => `<option value="${esc(m.username)}">${esc(m.username)}</option>`).join("");
+  sel.value = selected;
+}
+
+// Group mailboxes = mailboxes with a distribution (redirect) prefilter; heuristic from the API.
+function renderGroups() {
+  const el = document.getElementById("sh-groups");
+  if (groupsError) {
+    el.innerHTML = `<span class="hint">${esc(t('shares_groups_error'))}</span>`;
+    return;
+  }
+  el.innerHTML = allMailboxes.filter(m => m.group).map(m => `
+    <button type="button" class="btn btn-sm${m.username === owner() ? " btn-primary" : ""}"
+      data-owner="${esc(m.username)}" title="${esc(m.username)}">${esc(m.username.split("@")[0])}</button>`).join("");
+}
+
+function onGroupClick(e) {
+  const btn = e.target.closest("button[data-owner]");
+  if (!btn) return;
+  renderOwnerSelect(btn.dataset.owner);
+  loadGrants();
 }
 
 async function loadGrants() {
@@ -62,6 +97,8 @@ async function loadGrants() {
   grantees = [];
   listOwner = "";
   document.getElementById("sh-list").innerHTML = "";
+  document.getElementById("sh-grantee-search").value = "";
+  renderGroups();
   const detail = document.getElementById("sh-detail");
   detail.classList.add("hidden");
   const requested = owner();
@@ -91,10 +128,19 @@ function renderDetail() {
         </tr>`).join("")}</tbody></table></div>`
     : `<div class="loading">${t('shares_none')}</div>`;
 
-  const candidates = allMailboxes.filter(m => m.username !== owner() && !grantees.includes(m.username));
-  document.getElementById("sh-grantee").innerHTML =
+  renderGranteeSelect();
+}
+
+function renderGranteeSelect() {
+  const sel = document.getElementById("sh-grantee");
+  const current = sel.value;
+  const q = document.getElementById("sh-grantee-search").value;
+  const candidates = allMailboxes.filter(m => m.username !== owner() && !grantees.includes(m.username) &&
+    (m.username === current || matches(m, q)));
+  sel.innerHTML =
     `<option value="">${esc(t('shares_select_grantee'))}</option>` +
     candidates.map(m => `<option value="${esc(m.username)}">${esc(m.username)}</option>`).join("");
+  sel.value = current;
 }
 
 async function change(path, grantee) {

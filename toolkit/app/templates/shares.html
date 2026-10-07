@@ -9,7 +9,10 @@
 
 <div class="card">
   <p class="hint" data-i18n="shares_hint">Only the selected mailbox's INBOX is shared, read-only (lookup, read).</p>
+  <div class="hint" data-i18n="shares_groups">Group mailboxes</div>
+  <div id="sh-groups" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.3rem 0 0.8rem"></div>
   <label><span data-i18n="shares_owner">Mailbox to share (owner)</span>
+    <input type="text" id="sh-owner-search" placeholder="Search" data-i18n="shares_search" autocomplete="off">
     <select id="sh-owner"></select>
   </label>
 </div>
@@ -22,6 +25,7 @@
 
   <form id="sh-form" onsubmit="grant(event)">
     <label><span data-i18n="shares_grantee">Share with</span>
+      <input type="text" id="sh-grantee-search" placeholder="Search" data-i18n="shares_search" autocomplete="off">
       <select id="sh-grantee"></select>
     </label>
     <div class="form-actions">

@@ -29,6 +29,9 @@ const TRANSLATIONS = {
     shares_revoke_confirm: "%s 의 접근 권한을 회수하시겠습니까?",
     shares_not_applied: "요청이 반영되지 않았습니다. 잠시 후 다시 확인해 주세요.",
     shares_error: "처리 중 오류가 발생했습니다",
+    shares_groups: "그룹 메일함",
+    shares_groups_error: "그룹 목록을 불러오지 못했습니다",
+    shares_search: "검색",
 
     // Groups
     group_management: "그룹 관리",
@@ -166,6 +169,9 @@ const TRANSLATIONS = {
     shares_revoke_confirm: "Revoke access for %s?",
     shares_not_applied: "The change was not applied. Please check again shortly.",
     shares_error: "An error occurred",
+    shares_groups: "Group mailboxes",
+    shares_groups_error: "Could not load the group list",
+    shares_search: "Search",
 
     group_management: "Group Management",
     new_group: "+ New Group",

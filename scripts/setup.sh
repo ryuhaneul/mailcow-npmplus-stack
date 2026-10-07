@@ -415,6 +415,7 @@ toolkit:
     - groups
     - syncjobs
     - mailboxes
+    - shares
 TKCFG
 
 # --- Start Mailcow ---
@@ -609,6 +610,7 @@ toolkit:
     - groups
     - syncjobs
     - mailboxes
+    - shares
 TKCFG
     log "Toolkit config.yml updated with API key"
     docker compose restart toolkit-mailcow 2>&1 | tail -1 || true
@@ -1113,6 +1115,13 @@ if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
     log "Toolkit App Link: $APP_LINK_RESULT"
 else
     warn "$TOOLKIT_DIR/app_link.sh missing or not executable — APP_LINKS not registered"
+fi
+
+# Shared-folder INDEX relocation (dovecot shared namespace). Runs once mailcow is up.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-shared-index.sh" apply 2>&1 | tee -a "$LOGFILE"; then
+    log "dovecot shared namespace INDEX config applied (or already present)"
+else
+    warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
 # Reload php-fpm + nginx so Twig picks up the patched base.twig (twig cache).

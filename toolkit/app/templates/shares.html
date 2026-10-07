@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Shared Access — Mailcow Toolkit{% endblock %}
+{% block nav_items %}<a href="{{ url_for('dashboard') }}" data-i18n="back_to_dashboard">← Dashboard</a>{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 data-i18n="shares_title">Shared Access</h1>
+</div>
+
+<div class="card">
+  <p class="hint" data-i18n="shares_hint">Only the selected mailbox's INBOX is shared, read-only (lookup, read).</p>
+  <label><span data-i18n="shares_owner">Mailbox to share (owner)</span>
+    <select id="sh-owner"></select>
+  </label>
+</div>
+
+<div id="sh-alert" class="status-error hidden" role="alert"></div>
+
+<div id="sh-detail" class="card hidden">
+  <h2 data-i18n="shares_current">Currently shared with</h2>
+  <div id="sh-list"></div>
+
+  <form id="sh-form" onsubmit="grant(event)">
+    <label><span data-i18n="shares_grantee">Share with</span>
+      <select id="sh-grantee"></select>
+    </label>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" data-i18n="shares_grant">Share</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='shares.js') }}"></script>
+{% endblock %}

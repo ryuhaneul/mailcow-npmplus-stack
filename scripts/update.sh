@@ -166,6 +166,13 @@ else
     warn "$TOOLKIT_DIR/app_link.sh missing — APP_LINKS not refreshed"
 fi
 
+# Shared-folder INDEX relocation (dovecot shared namespace). Re-applies it if the mailcow update overwrote dovecot.conf.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-shared-index.sh" apply 2>&1 | tee -a "$LOGFILE"; then
+    log "dovecot shared namespace INDEX config applied (or already present)"
+else
+    warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
+fi
+
 # ============================================================
 # Phase 5: Rebuild mailcow-toolkit
 # ============================================================

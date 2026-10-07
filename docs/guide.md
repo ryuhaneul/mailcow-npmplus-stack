@@ -321,10 +321,40 @@ toolkit:
   modules:
     - groups
     - syncjobs
+    - shares
 ```
 
 > `api_url` 포트를 `8443`으로 맞춰야 한다. Mailcow nginx가 기본 443이 아닌
 > 8443에서 리스닝하기 때문.
+
+### 4.2 공유 권한 (shares 모듈)
+
+다른 메일박스의 **받은편지함(INBOX) 하나**를 읽기 전용(`lookup` `read`)으로 공유한다.
+Toolkit → "공유 권한" 에서 주인 메일박스를 고르고, 공유받을 사람을 선택해 [공유] / [회수].
+권한 처리는 mailcow dockerapi 의 `doveadm acl` 로 수행하며, 부여·회수 직후 `get_acl` 로 다시 읽어
+반영되지 않았으면 화면에 빨간 알림을 띄운다. 권한(`lookup` `read`)·폴더(INBOX)는 코드 고정이다.
+
+`config.yml` 의 `toolkit.modules` 에 `shares` 가 있어야 노출된다.
+
+#### 공유 폴더 첫 열기 지연 제거 (`apply-dovecot-shared-index.sh`)
+
+mailcow 기본 설정은 공유 namespace 의 INDEX 를 주인 메일함 안(`~/Maildir/Shared/%%u`)에 따로 만들어,
+공유받은 폴더를 처음 열 때 인덱스를 처음부터 다시 만들어 오래 걸린다. 이 스크립트는 공유 namespace 의
+INDEX 를 주인 본인 INDEX 와 같은 위치(`/var/vmail_index/%%u`)로 옮긴다.
+
+```bash
+sudo scripts/apply-dovecot-shared-index.sh            # 적용 (바뀐 게 있을 때만 dovecot-mailcow 재시작)
+sudo scripts/apply-dovecot-shared-index.sh --check    # 적용 여부만 확인 (적용됨=0, 아니면 1)
+sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으로 복구
+```
+
+- `MAILCOW_DIR` 환경변수로 mailcow 경로 지정 (기본 `/home/mailcow-dockerized`).
+- `data/conf/dovecot/shared_namespace_hc.conf` 를 만들고 `dovecot.conf` 의 include 한 줄을 교체한다.
+  변경 전 `dovecot.conf.bak-shared-index-<날짜시각>` 로 백업.
+- `setup.sh` 는 설치 시, `update.sh` 는 Phase 4 에서 자동으로 `apply` 를 호출한다
+  (mailcow 업데이트가 `dovecot.conf` 를 덮어쓴 경우 재적용).
+
+---
 
 ---
 

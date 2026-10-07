@@ -42,6 +42,9 @@ def create_app():
     if "mailboxes" in enabled:
         from modules.mailboxes import bp as mailboxes_bp
         app.register_blueprint(mailboxes_bp, url_prefix="/mailboxes")
+    if "shares" in enabled:
+        from modules.shares import bp as shares_bp
+        app.register_blueprint(shares_bp, url_prefix="/shares")
 
     @app.before_request
     def _require_admin_session():
@@ -74,6 +77,14 @@ def create_app():
                 "desc": "Bulk-create mailboxes from CSV with random passwords",
                 "icon": "mailbox",
                 "url": url_for("mailboxes.index"),
+            })
+        if "shares" in enabled:
+            modules.append({
+                "id": "shares",
+                "name": "Shared Access",
+                "desc": "Grant read-only access to another mailbox's INBOX",
+                "icon": "share",
+                "url": url_for("shares.index"),
             })
         return render_template("dashboard.html", modules=modules)
 

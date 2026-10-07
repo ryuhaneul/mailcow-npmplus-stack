@@ -13,3 +13,4 @@ toolkit:
   modules:
     - groups
     - syncjobs
+    - shares

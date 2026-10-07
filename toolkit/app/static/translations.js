@@ -12,6 +12,23 @@ const TRANSLATIONS = {
     module_syncjobs_desc: "IMAP 동기화 작업 일괄 생성 및 모니터링",
     module_mailboxes: "메일박스",
     module_mailboxes_desc: "CSV로 메일박스 일괄 생성 (무작위 비밀번호)",
+    module_shares: "공유 권한",
+    module_shares_desc: "다른 메일박스의 받은편지함(INBOX)을 읽기 전용으로 공유",
+
+    // Shared Access
+    shares_title: "공유 권한",
+    shares_hint: "선택한 메일박스의 받은편지함(INBOX)만 읽기 전용(조회·읽기)으로 공유됩니다.",
+    shares_owner: "공유할 메일박스 (주인)",
+    shares_select_owner: "메일박스 선택",
+    shares_current: "현재 공유받은 사람",
+    shares_none: "공유받은 사람이 없습니다.",
+    shares_grantee: "공유받을 사람",
+    shares_select_grantee: "사람 선택",
+    shares_grant: "공유",
+    shares_revoke: "회수",
+    shares_revoke_confirm: "%s 의 접근 권한을 회수하시겠습니까?",
+    shares_not_applied: "요청이 반영되지 않았습니다. 잠시 후 다시 확인해 주세요.",
+    shares_error: "처리 중 오류가 발생했습니다",
 
     // Groups
     group_management: "그룹 관리",
@@ -132,6 +149,23 @@ const TRANSLATIONS = {
     module_syncjobs_desc: "Batch create and monitor IMAP sync jobs",
     module_mailboxes: "Mailboxes",
     module_mailboxes_desc: "Bulk create mailboxes from CSV (random passwords)",
+    module_shares: "Shared Access",
+    module_shares_desc: "Grant read-only access to another mailbox's INBOX",
+
+    // Shared Access
+    shares_title: "Shared Access",
+    shares_hint: "Only the selected mailbox's INBOX is shared, read-only (lookup, read).",
+    shares_owner: "Mailbox to share (owner)",
+    shares_select_owner: "Select a mailbox",
+    shares_current: "Currently shared with",
+    shares_none: "Not shared with anyone.",
+    shares_grantee: "Share with",
+    shares_select_grantee: "Select a person",
+    shares_grant: "Share",
+    shares_revoke: "Revoke",
+    shares_revoke_confirm: "Revoke access for %s?",
+    shares_not_applied: "The change was not applied. Please check again shortly.",
+    shares_error: "An error occurred",
 
     group_management: "Group Management",
     new_group: "+ New Group",

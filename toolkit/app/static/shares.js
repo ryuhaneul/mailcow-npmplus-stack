@@ -1,6 +1,7 @@
 const BASE = document.querySelector('meta[name="base-url"]').content.replace(/\/$/, '');
 let allMailboxes = [];
 let grantees = [];
+let listOwner = "";  // owner that `grantees` was fetched for ("" = no list loaded)
 
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("sh-owner").addEventListener("change", loadGrants);
@@ -57,24 +58,29 @@ function renderOwnerSelect() {
 
 async function loadGrants() {
   showAlert("");
+  // Drop the previous owner's list right away so no stale row can be acted on.
+  grantees = [];
+  listOwner = "";
+  document.getElementById("sh-list").innerHTML = "";
   const detail = document.getElementById("sh-detail");
-  if (!owner()) {
-    detail.classList.add("hidden");
-    return;
-  }
+  detail.classList.add("hidden");
+  const requested = owner();
+  if (!requested) return;
   try {
-    const data = await api(`/shares/api/grants?owner=${encodeURIComponent(owner())}`);
+    const data = await api(`/shares/api/grants?owner=${encodeURIComponent(requested)}`);
+    if (requested !== owner()) return;  // owner changed while loading
     grantees = data.grantees;
+    listOwner = requested;
     renderDetail();
   } catch (e) {
-    detail.classList.add("hidden");
+    if (requested !== owner()) return;
     showAlert(`${t('error_loading')}: ${e.message}`);
   }
 }
 
 function renderDetail() {
   const detail = document.getElementById("sh-detail");
-  if (!owner()) return;
+  if (!listOwner || listOwner !== owner()) return;
   detail.classList.remove("hidden");
 
   document.getElementById("sh-list").innerHTML = grantees.length
@@ -93,15 +99,19 @@ function renderDetail() {
 
 async function change(path, grantee) {
   showAlert("");
+  const targetOwner = owner();  // rows only exist for the selected owner (cleared on switch)
   try {
     const res = await api(path, {
       method: "POST",
-      body: JSON.stringify({ owner: owner(), grantee }),
+      body: JSON.stringify({ owner: targetOwner, grantee }),
     });
+    if (targetOwner !== owner()) return;  // owner changed while waiting
     grantees = res.grantees;
+    listOwner = targetOwner;
     renderDetail();
     if (!res.applied) showAlert(t('shares_not_applied'));
   } catch (e) {
+    if (targetOwner !== owner()) return;
     showAlert(`${t('shares_error')}: ${e.message}`);
   }
 }
@@ -121,5 +131,5 @@ async function onRevokeClick(e) {
   const grantee = btn.dataset.grantee;
   if (!confirm(t('shares_revoke_confirm', grantee))) return;
   btn.disabled = true;
-  await change("/shares/api/revoke", grantee);
+  try { await change("/shares/api/revoke", grantee); } finally { btn.disabled = false; }
 }

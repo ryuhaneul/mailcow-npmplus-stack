@@ -6,10 +6,18 @@
 # (INDEX=~/Maildir/Shared/%%u) to /var/vmail_index/%%u, so the first open of a
 # shared folder reuses the owner's index/cache instead of rebuilding one.
 #
+# It also keeps the sort cache: a managed block in data/conf/dovecot/extra.conf sets
+# mail_cache_unaccessed_field_drop = 3650 days (default 30 days drops cached sort
+# fields of folders not opened for 30 days). Content of extra.conf outside the
+# block is never modified.
+#
 # Usage:
-#   apply-dovecot-shared-index.sh [apply]   write config, restart dovecot if changed, verify
-#   apply-dovecot-shared-index.sh --revert  restore the stock mailcow include, restart, verify
-#   apply-dovecot-shared-index.sh --check   report state only (no change, no restart)
+#   apply-dovecot-shared-index.sh [apply]   write config, verify. A namespace change restarts
+#                                           dovecot-mailcow; a cache-setting-only change
+#                                           re-applies the config without a container restart
+#                                           (doveadm reload; active IMAP/POP sessions reconnect)
+#   apply-dovecot-shared-index.sh --revert  restore the stock include + remove the extra.conf block
+#   apply-dovecot-shared-index.sh --check   report state only (no change, no restart/reload)
 #
 # Env: MAILCOW_DIR (default /home/mailcow-dockerized)
 # Exit: 0 = ok (--check: applied), non-zero = failure (--check: not applied)
@@ -22,6 +30,12 @@ DOVECOT_CONF="$CONF_DIR/dovecot.conf"
 HC_CONF="$CONF_DIR/shared_namespace_hc.conf"
 INC_ORIG='!include_try /etc/dovecot/shared_namespace.conf'
 INC_HC='!include_try /etc/dovecot/shared_namespace_hc.conf'
+EXTRA_CONF="$CONF_DIR/extra.conf"
+BLOCK_BEGIN='# BEGIN mailcow-npmplus-stack (apply-dovecot-shared-index.sh)'
+BLOCK_END='# END mailcow-npmplus-stack'
+CACHE_KEY='mail_cache_unaccessed_field_drop'
+CACHE_VALUE='3650 days'
+CACHE_DEFAULT='30 days'
 
 log() { echo "[apply-dovecot-shared-index] $*"; }
 die() { echo "[apply-dovecot-shared-index] ERROR: $*" >&2; exit 1; }
@@ -97,16 +111,124 @@ restart_dovecot() {
     (cd "$MAILCOW_DIR" && docker compose restart dovecot-mailcow)
 }
 
+backup_file() {
+    local bak
+    bak="$1.bak-shared-index-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$1" "$bak"
+    log "backup: $bak"
+}
+
 # Rewrite dovecot.conf in place (keeps inode/permissions) after a timestamped backup.
 swap_include() {
-    local from="$1" to="$2" bak tmp
-    bak="$DOVECOT_CONF.bak-shared-index-$(date +%Y%m%d-%H%M%S)"
-    cp -p "$DOVECOT_CONF" "$bak"
-    log "backup: $bak"
+    local from="$1" to="$2" tmp
+    backup_file "$DOVECOT_CONF"
     tmp=$(mktemp)
     awk -v from="$from" -v to="$to" '$0 == from { print to; next } { print }' "$DOVECOT_CONF" > "$tmp"
     cat "$tmp" > "$DOVECOT_CONF"
     rm -f "$tmp"
+}
+
+# ---- extra.conf managed block (mail_cache_unaccessed_field_drop) ----
+
+block_text() { printf '%s\n%s = %s\n%s\n' "$BLOCK_BEGIN" "$CACHE_KEY" "$CACHE_VALUE" "$BLOCK_END"; }
+
+# Inspect extra.conf. Sets EXTRA_STATE (absent|none|same|different), EXTRA_L1/EXTRA_L2
+# (first/last line of the block) and EXTRA_OUTKEY (non-comment lines outside the block
+# that set the key). Dies — before anything has been changed — on a missing, duplicated
+# or malformed marker.
+extra_inspect() {
+    EXTRA_STATE=absent; EXTRA_L1=0; EXTRA_L2=0; EXTRA_OUTKEY=0
+    [ -f "$EXTRA_CONF" ] || return 0
+    local res
+    res=$(awk -v B="$BLOCK_BEGIN" -v E="$BLOCK_END" -v K="$CACHE_KEY" -v W="$CACHE_KEY = $CACHE_VALUE" '
+        function bad(m) { if (err == "") err = m }
+        $0 == B { if (nb++ || inb) bad("duplicate or nested BEGIN marker at line " NR); inb = 1; l1 = NR; nbody = 0; differ = 0; next }
+        $0 == E { if (!inb) bad("END marker without BEGIN at line " NR); ne++; inb = 0; l2 = NR; next }
+        index($0, "BEGIN mailcow-npmplus-stack") || index($0, "END mailcow-npmplus-stack") {
+            bad("malformed marker at line " NR); next
+        }
+        inb { nbody++; if ($0 != W) differ = 1; next }
+        $0 ~ ("^[ \t]*" K "[ \t]*=") { outkey++ }
+        END {
+            if (inb) bad("BEGIN marker at line " l1 " has no END marker")
+            if (nb != ne) bad("BEGIN/END marker count mismatch (" nb "/" ne ")")
+            if (err != "") { print "ERR " err; exit }
+            st = (nb == 0) ? "none" : ((nbody == 1 && !differ) ? "same" : "different")
+            print "OK " st " " l1 + 0 " " l2 + 0 " " outkey + 0
+        }' "$EXTRA_CONF")
+    case "$res" in
+        "ERR "*) die "$EXTRA_CONF: ${res#ERR } — nothing was changed; fix the file manually" ;;
+        "OK "*)  read -r _ EXTRA_STATE EXTRA_L1 EXTRA_L2 EXTRA_OUTKEY <<< "$res" ;;
+        *)       die "could not inspect $EXTRA_CONF" ;;
+    esac
+}
+
+extra_die_if_outside_key() {
+    [ "$EXTRA_OUTKEY" -eq 0 ] || die "$EXTRA_CONF sets $CACHE_KEY outside the managed block — nothing was changed; remove or move that line manually"
+}
+
+# Write/replace the managed block. Everything outside it is kept byte for byte
+# (head/tail copy the remaining lines unchanged).
+extra_write_block() {
+    local tmp
+    case "$EXTRA_STATE" in
+        absent)
+            block_text > "$EXTRA_CONF"
+            chmod 644 "$EXTRA_CONF"
+            ;;
+        none)
+            backup_file "$EXTRA_CONF"
+            # file without trailing newline: terminate its last line first
+            [ -z "$(tail -c1 "$EXTRA_CONF")" ] || printf '\n' >> "$EXTRA_CONF"
+            block_text >> "$EXTRA_CONF"
+            ;;
+        different)
+            backup_file "$EXTRA_CONF"
+            tmp=$(mktemp)
+            { head -n $((EXTRA_L1 - 1)) "$EXTRA_CONF"; block_text; tail -n +$((EXTRA_L2 + 1)) "$EXTRA_CONF"; } > "$tmp"
+            cat "$tmp" > "$EXTRA_CONF"
+            rm -f "$tmp"
+            ;;
+    esac
+}
+
+extra_remove_block() {
+    local tmp
+    backup_file "$EXTRA_CONF"
+    tmp=$(mktemp)
+    { head -n $((EXTRA_L1 - 1)) "$EXTRA_CONF"; tail -n +$((EXTRA_L2 + 1)) "$EXTRA_CONF"; } > "$tmp"
+    cat "$tmp" > "$EXTRA_CONF"
+    rm -f "$tmp"
+}
+
+# verify_cache <expected value>: running dovecot reports the expected value.
+verify_cache() {
+    local expected="$1" out=""
+    for _ in $(seq 1 15); do
+        if out=$(cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveconf -h "$CACHE_KEY" 2>/dev/null | tr -d '\r') \
+            && [ "$out" = "$expected" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    log "live $CACHE_KEY: ${out:-<none>} (expected $expected)"
+    return 1
+}
+
+reload_dovecot() {
+    log "re-applying dovecot configuration without a container restart (doveadm reload; active IMAP/POP sessions reconnect)..."
+    (cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveadm reload)
+}
+
+# Restart when the namespace changed (a restart re-reads everything); otherwise reload
+# when only the cache setting changed.
+apply_changes() {
+    local ns="$1" cache="$2"
+    if [ "$ns" -eq 1 ]; then
+        restart_dovecot
+    elif [ "$cache" -eq 1 ]; then
+        reload_dovecot
+    fi
 }
 
 N_ORIG=$(count_line "$INC_ORIG")
@@ -114,65 +236,105 @@ N_HC=$(count_line "$INC_HC")
 
 case "$MODE" in
 check)
+    rc=0
     if [ "$N_HC" -eq 1 ] && [ "$N_ORIG" -eq 0 ] && [ -f "$HC_CONF" ]; then
         if verify_live "$LOC_HC"; then
-            log "applied (config + running dovecot)"
-            exit 0
+            log "shared namespace INDEX: applied (config + running dovecot)"
+        else
+            log "shared namespace INDEX: NOT active — config is applied but running dovecot differs (restart needed?)"
+            rc=1
         fi
-        log "NOT active: config is applied but running dovecot differs (restart needed?)"
-        exit 1
+    else
+        log "shared namespace INDEX: not applied (stock shared_namespace.conf include)"
+        rc=1
     fi
-    log "not applied (stock shared_namespace.conf include)"
-    exit 1
+    extra_inspect
+    if [ "$EXTRA_STATE" = same ] && [ "$EXTRA_OUTKEY" -eq 0 ]; then
+        if verify_cache "$CACHE_VALUE"; then
+            log "$CACHE_KEY: applied ($CACHE_VALUE, config + running dovecot)"
+        else
+            log "$CACHE_KEY: NOT active — block present but running dovecot differs (doveadm reload needed?)"
+            rc=1
+        fi
+    else
+        log "$CACHE_KEY: not applied (extra.conf block missing, outdated or conflicting key)"
+        rc=1
+    fi
+    exit "$rc"
     ;;
 
 apply)
-    changed=0
     if [ "$N_HC" -eq 0 ] && [ "$N_ORIG" -eq 0 ]; then
         die "neither '$INC_ORIG' nor '$INC_HC' found in $DOVECOT_CONF"
     fi
     if [ "$N_HC" -gt 1 ] || [ "$N_ORIG" -gt 1 ] || { [ "$N_HC" -ge 1 ] && [ "$N_ORIG" -ge 1 ]; }; then
         die "unexpected include lines in $DOVECOT_CONF (orig=$N_ORIG, hc=$N_HC) — fix manually"
     fi
+    # Validate everything before the first change.
+    extra_inspect
+    extra_die_if_outside_key
 
+    changed_ns=0
+    changed_cache=0
     if [ ! -f "$HC_CONF" ] || ! hc_content | cmp -s - "$HC_CONF"; then
         hc_content > "$HC_CONF"
         chmod 644 "$HC_CONF"
         log "wrote $HC_CONF"
-        changed=1
+        changed_ns=1
     fi
     if [ "$N_ORIG" -eq 1 ]; then
         swap_include "$INC_ORIG" "$INC_HC"
         log "dovecot.conf: include switched to shared_namespace_hc.conf"
-        changed=1
+        changed_ns=1
+    fi
+    if [ "$EXTRA_STATE" != same ]; then
+        extra_write_block
+        log "extra.conf: managed block written ($CACHE_KEY = $CACHE_VALUE)"
+        changed_cache=1
     fi
 
-    [ "$changed" -eq 1 ] && restart_dovecot
-    verify_live "$LOC_HC" || die "verification failed after apply (use --revert to roll back)"
-    if [ "$changed" -eq 1 ]; then
-        log "applied: shared namespace INDEX=/var/vmail_index/%%u"
+    apply_changes "$changed_ns" "$changed_cache"
+    verify_live "$LOC_HC" || die "namespace verification failed after apply (use --revert to roll back)"
+    verify_cache "$CACHE_VALUE" || die "$CACHE_KEY verification failed after apply (use --revert to roll back)"
+    if [ "$changed_ns" -eq 1 ] || [ "$changed_cache" -eq 1 ]; then
+        log "applied: shared namespace INDEX=/var/vmail_index/%%u, $CACHE_KEY=$CACHE_VALUE"
     else
         log "already applied"
     fi
     ;;
 
 revert)
-    changed=0
     if [ "$N_HC" -eq 0 ] && [ "$N_ORIG" -eq 0 ]; then
         die "neither '$INC_ORIG' nor '$INC_HC' found in $DOVECOT_CONF"
     fi
     if [ "$N_HC" -gt 1 ] || [ "$N_ORIG" -gt 1 ] || { [ "$N_HC" -ge 1 ] && [ "$N_ORIG" -ge 1 ]; }; then
         die "unexpected include lines in $DOVECOT_CONF (orig=$N_ORIG, hc=$N_HC) — fix manually"
     fi
+    extra_inspect
+    has_block=0
+    [ "$EXTRA_STATE" = none ] || [ "$EXTRA_STATE" = absent ] || has_block=1
+    [ "$has_block" -eq 0 ] || extra_die_if_outside_key
+
+    changed_ns=0
+    changed_cache=0
     if [ "$N_HC" -eq 1 ]; then
         swap_include "$INC_HC" "$INC_ORIG"
         log "dovecot.conf: include restored to shared_namespace.conf"
-        changed=1
+        changed_ns=1
     fi
-    [ "$changed" -eq 1 ] && restart_dovecot
-    verify_live "$LOC_ORIG" || die "verification failed after revert"
-    if [ "$changed" -eq 1 ]; then
-        log "reverted: stock shared namespace restored"
+    if [ "$has_block" -eq 1 ]; then
+        extra_remove_block
+        log "extra.conf: managed block removed (other content kept)"
+        changed_cache=1
+    fi
+
+    apply_changes "$changed_ns" "$changed_cache"
+    verify_live "$LOC_ORIG" || die "namespace verification failed after revert"
+    if [ "$has_block" -eq 1 ]; then
+        verify_cache "$CACHE_DEFAULT" || die "$CACHE_KEY did not return to $CACHE_DEFAULT after revert"
+    fi
+    if [ "$changed_ns" -eq 1 ] || [ "$changed_cache" -eq 1 ]; then
+        log "reverted: stock shared namespace restored, extra.conf block removed"
     else
         log "already reverted"
     fi

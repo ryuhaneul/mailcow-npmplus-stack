@@ -343,16 +343,35 @@ mailcow 기본 설정은 공유 namespace 의 INDEX 를 주인 메일함 안(`~/
 INDEX 를 주인 본인 INDEX 와 같은 위치(`/var/vmail_index/%%u`)로 옮긴다.
 
 ```bash
-sudo scripts/apply-dovecot-shared-index.sh            # 적용 (바뀐 게 있을 때만 dovecot-mailcow 재시작)
-sudo scripts/apply-dovecot-shared-index.sh --check    # 적용 여부만 확인 (적용됨=0, 아니면 1)
-sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으로 복구
+sudo scripts/apply-dovecot-shared-index.sh            # 적용 (바뀐 게 있을 때만 반영, 아래 참고)
+sudo scripts/apply-dovecot-shared-index.sh --check    # 적용 여부만 확인 (공유 INDEX·캐시 설정 모두 적용됨=0, 아니면 1)
+sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으로 복구 (공유 INDEX + 캐시 설정 블록)
 ```
 
 - `MAILCOW_DIR` 환경변수로 mailcow 경로 지정 (기본 `/home/mailcow-dockerized`).
 - `data/conf/dovecot/shared_namespace_hc.conf` 를 만들고 `dovecot.conf` 의 include 한 줄을 교체한다.
   변경 전 `dovecot.conf.bak-shared-index-<날짜시각>` 로 백업.
+- 공유 namespace 설정이 바뀌면 `dovecot-mailcow` 를 재시작한다. 캐시 설정(아래)만 바뀌면 컨테이너 재시작 없이
+  `doveadm reload` 로 설정을 다시 적용한다(활성 IMAP/POP 세션은 재접속).
 - `setup.sh` 는 설치 시, `update.sh` 는 Phase 4 에서 자동으로 `apply` 를 호출한다
   (mailcow 업데이트가 `dovecot.conf` 를 덮어쓴 경우 재적용).
+
+#### 정렬 캐시 보존 (`mail_cache_unaccessed_field_drop`)
+
+Dovecot 은 30일 동안 열리지 않은 폴더의 캐시 필드(날짜 정렬 등에 쓰는 정보)를 버린다(기본 `30 days`). 오래 안 열다가
+다시 열면 정렬 정보를 처음부터 다시 만들어 첫 열기가 느려진다. 같은 스크립트가 mailcow 영구 설정 파일
+`data/conf/dovecot/extra.conf`(mailcow 업데이트로 덮이지 않음)에 관리 블록을 넣어 이 값을 `3650 days` 로 올린다(전역, 모든 메일함).
+
+```
+# BEGIN mailcow-npmplus-stack (apply-dovecot-shared-index.sh)
+mail_cache_unaccessed_field_drop = 3650 days
+# END mailcow-npmplus-stack
+```
+
+- 블록 밖의 기존 `extra.conf` 내용은 수정하지 않는다. 파일이 있으면 변경 전 `extra.conf.bak-shared-index-<날짜시각>` 로 백업.
+- 블록 밖에 같은 키가 이미 있거나 BEGIN/END 표식이 불완전·중복이면 **아무것도 바꾸지 않고** 오류로 종료한다(출력된 문제를 직접 정리 후 재실행).
+- 적용 후 `doveconf -h mail_cache_unaccessed_field_drop` 로 `3650 days` 를 확인한다. `--revert` 는 블록만 제거하고 `30 days` 로 돌아왔는지 확인한다.
+- 캐시 설정만 빼려면 `extra.conf` 의 블록만 지우고 `docker compose exec -T dovecot-mailcow doveadm reload`(공유 INDEX 설정은 유지).
 
 ---
 

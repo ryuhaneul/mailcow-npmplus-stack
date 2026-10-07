@@ -11,8 +11,10 @@
   <p class="hint" data-i18n="shares_hint">Only the selected mailbox's INBOX is shared, read-only (lookup, read).</p>
   <div class="hint" data-i18n="shares_groups">Group mailboxes</div>
   <div id="sh-groups" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin:0.3rem 0 0.8rem"></div>
-  <label><span data-i18n="shares_owner">Mailbox to share (owner)</span>
-    <input type="text" id="sh-owner-search" placeholder="Search" data-i18n="shares_search" autocomplete="off">
+  <!-- for= keeps the label bound to the select only; the search input is named via aria-labelledby -->
+  <span id="sh-owner-search-name" class="hidden" data-i18n="shares_owner_search">Search mailboxes to share</span>
+  <label for="sh-owner"><span data-i18n="shares_owner">Mailbox to share (owner)</span>
+    <input type="text" id="sh-owner-search" aria-labelledby="sh-owner-search-name" placeholder="Search" data-i18n="shares_search" autocomplete="off">
     <select id="sh-owner"></select>
   </label>
 </div>
@@ -24,8 +26,9 @@
   <div id="sh-list"></div>
 
   <form id="sh-form" onsubmit="grant(event)">
-    <label><span data-i18n="shares_grantee">Share with</span>
-      <input type="text" id="sh-grantee-search" placeholder="Search" data-i18n="shares_search" autocomplete="off">
+    <span id="sh-grantee-search-name" class="hidden" data-i18n="shares_grantee_search">Search people to share with</span>
+    <label for="sh-grantee"><span data-i18n="shares_grantee">Share with</span>
+      <input type="text" id="sh-grantee-search" aria-labelledby="sh-grantee-search-name" placeholder="Search" data-i18n="shares_search" autocomplete="off">
       <select id="sh-grantee"></select>
     </label>
     <div class="form-actions">

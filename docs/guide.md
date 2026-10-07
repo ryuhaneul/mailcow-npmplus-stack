@@ -358,9 +358,11 @@ sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으
 
 #### 정렬 캐시 보존 (`mail_cache_unaccessed_field_drop`)
 
-Dovecot 은 30일 동안 열리지 않은 폴더의 캐시 필드(날짜 정렬 등에 쓰는 정보)를 버린다(기본 `30 days`). 오래 안 열다가
-다시 열면 정렬 정보를 처음부터 다시 만들어 첫 열기가 느려진다. 같은 스크립트가 mailcow 영구 설정 파일
+Dovecot(2.3.11+)은 캐시 정리(purge) 때 `mail_cache_unaccessed_field_drop` 기간(기본 `30 days`) 동안 접근 없는 캐시 필드를
+`YES`→`TEMP` 로 내리고, 그 기간의 2배가 지나면 제거한다. 제거된 필드(날짜 정렬 등에 쓰는 정보)는 다음에 필요할 때 다시 만들어야
+해서 오래 안 연 폴더의 첫 열기가 느려질 수 있다. 같은 스크립트가 mailcow 영구 설정 파일
 `data/conf/dovecot/extra.conf`(mailcow 업데이트로 덮이지 않음)에 관리 블록을 넣어 이 값을 `3650 days` 로 올린다(전역, 모든 메일함).
+이 값은 사실상 보존(약 10년 뒤 `TEMP`, 20년 뒤 제거)이지 "영구"나 "절대 삭제 안 함"이 아니다. 이미 사라진 캐시를 되살리지는 않는다.
 
 ```
 # BEGIN mailcow-npmplus-stack (apply-dovecot-shared-index.sh)
@@ -370,8 +372,11 @@ mail_cache_unaccessed_field_drop = 3650 days
 
 - 블록 밖의 기존 `extra.conf` 내용은 수정하지 않는다. 파일이 있으면 변경 전 `extra.conf.bak-shared-index-<날짜시각>` 로 백업.
 - 블록 밖에 같은 키가 이미 있거나 BEGIN/END 표식이 불완전·중복이면 **아무것도 바꾸지 않고** 오류로 종료한다(출력된 문제를 직접 정리 후 재실행).
-- 적용 후 `doveconf -h mail_cache_unaccessed_field_drop` 로 `3650 days` 를 확인한다. `--revert` 는 블록만 제거하고 `30 days` 로 돌아왔는지 확인한다.
-- 캐시 설정만 빼려면 `extra.conf` 의 블록만 지우고 `docker compose exec -T dovecot-mailcow doveadm reload`(공유 INDEX 설정은 유지).
+- 적용 후 `doveconf -h mail_cache_unaccessed_field_drop` 로 `3650 days` 를 확인한다.
+- `--revert` 는 `extra.conf` 의 관리 블록 제거(`30 days` 로 돌아왔는지 확인)와 함께 **공유 namespace include 도 mailcow 원래대로 되돌린다.**
+- 캐시 설정만 빼려면 `--revert` 를 쓰지 말고 `extra.conf` 의 관리 블록만 지운 뒤 `docker compose exec -T dovecot-mailcow doveadm reload` 를 실행한다(공유 INDEX 설정은 유지).
+- `doveadm reload` 가 실패하거나 중단된 뒤에는 파일이 이미 같아서 `apply` 를 다시 실행해도 reload 를 다시 하지 않는다.
+  그 경우 `docker compose exec -T dovecot-mailcow doveadm reload`(또는 dovecot 재시작)를 직접 실행한다.
 
 ---
 

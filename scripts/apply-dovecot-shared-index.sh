@@ -7,17 +7,25 @@
 # shared folder reuses the owner's index/cache instead of rebuilding one.
 #
 # It also keeps the sort cache: a managed block in data/conf/dovecot/extra.conf sets
-# mail_cache_unaccessed_field_drop = 3650 days (default 30 days drops cached sort
-# fields of folders not opened for 30 days). Content of extra.conf outside the
-# block is never modified.
+# mail_cache_unaccessed_field_drop = 3650 days. (Dovecot 2.3.11+: at purge, fields not
+# accessed for that period go YES->TEMP and are dropped after twice that period; the
+# default is 30 days. 3650 days is effectively "keep", not "never delete", and cache
+# that is already gone is not restored.) Content of extra.conf outside the block is
+# never modified.
 #
 # Usage:
 #   apply-dovecot-shared-index.sh [apply]   write config, verify. A namespace change restarts
 #                                           dovecot-mailcow; a cache-setting-only change
 #                                           re-applies the config without a container restart
 #                                           (doveadm reload; active IMAP/POP sessions reconnect)
-#   apply-dovecot-shared-index.sh --revert  restore the stock include + remove the extra.conf block
+#   apply-dovecot-shared-index.sh --revert  restore the stock include AND remove the extra.conf block
+#                                           (to drop only the cache setting: delete the block by hand,
+#                                           then doveadm reload)
 #   apply-dovecot-shared-index.sh --check   report state only (no change, no restart/reload)
+#
+# If doveadm reload failed or was interrupted, a re-run does not reload again (the files
+# already match): run "docker compose exec -T dovecot-mailcow doveadm reload" (or restart
+# dovecot-mailcow) by hand.
 #
 # Env: MAILCOW_DIR (default /home/mailcow-dockerized)
 # Exit: 0 = ok (--check: applied), non-zero = failure (--check: not applied)

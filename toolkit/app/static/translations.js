@@ -32,6 +32,8 @@ const TRANSLATIONS = {
     shares_groups: "그룹 메일함",
     shares_groups_error: "그룹 목록을 불러오지 못했습니다",
     shares_search: "검색",
+    shares_owner_search: "공유할 메일박스 검색",
+    shares_grantee_search: "공유받을 사람 검색",
 
     // Groups
     group_management: "그룹 관리",
@@ -172,6 +174,8 @@ const TRANSLATIONS = {
     shares_groups: "Group mailboxes",
     shares_groups_error: "Could not load the group list",
     shares_search: "Search",
+    shares_owner_search: "Search mailboxes to share",
+    shares_grantee_search: "Search people to share with",
 
     group_management: "Group Management",
     new_group: "+ New Group",

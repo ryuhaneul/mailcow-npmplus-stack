@@ -378,6 +378,13 @@ mail_cache_unaccessed_field_drop = 3650 days
 - `doveadm reload` 가 실패하거나 중단된 뒤에는 파일이 이미 같아서 `apply` 를 다시 실행해도 reload 를 다시 하지 않는다.
   그 경우 `docker compose exec -T dovecot-mailcow doveadm reload`(또는 dovecot 재시작)를 직접 실행한다.
 
+### 4.3 Gmail 필터 변환 도구 (`tools/gmail-filter-to-sieve.html`)
+
+Gmail 설정 → 필터에서 내보낸 `mailFilters.xml` 을 웹메일(SnappyMail)에 붙여 넣을 Sieve 스크립트로 바꾸는 단일 HTML 파일이다. 서버에 설치하는 것이 아니라 **이 파일 하나를 직원에게 전달**하면 된다. 더블클릭으로 열어 XML 을 끌어다 놓으면 브라우저 안에서만 변환하고(외부 요청·업로드 없음), 필터별 변환 결과·경고, 만들어질 폴더, 생성된 스크립트(복사 버튼)가 한 화면에 나온다. 사용자는 웹메일 설정 → 필터 → `Add a Script` 에 붙여 넣고 목록에서 새 스크립트를 켠다(한 번에 하나만 켜지므로 기존 스크립트나 웹메일 필터 화면에서 만든 필터는 꺼진다 — 붙여 넣기 전에 기존 스크립트를 복사해 두면 되돌릴 수 있다). 자세한 단계와 주의사항은 화면 아래 안내에 있다.
+
+- 소스는 `tools/gmail2sieve/`(`core.js` 변환 엔진, `app.html` 화면). 산출물은 `node tools/gmail2sieve/build.js` 로 다시 만들고, `--check` 로 커밋본이 최신인지 확인한다.
+- 테스트: `node tools/gmail2sieve/core.test.js`, `node tools/gmail2sieve/app.test.js`.
+
 ---
 
 ---

@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gmail 필터 → 웹메일 필터 변환</title>
+<style>
+  :root{
+    --bg:#DDE2E7; --panel:#F4F6F8; --white:#FFFFFF; --ink:#18212B; --sub:#4A5663; --line:#C3CBD3; --line2:#D9DFE5;
+    --steel:#2C5A85; --steel-ink:#FFFFFF; --steel-soft:#DCE7F2;
+    --ok:#1F6A45; --ok-bg:#DCEFE3; --no:#9B2A1E; --no-bg:#F6E0DC; --warn:#7A5200; --warn-bg:#FBEBC4;
+    --code-bg:#1A222C; --code:#D5DEE8; --code-c:#A3B3C3; --code-hl:#2A3B4F; --code-hlbar:#E8B04A;
+    --sans:"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;
+    --mono:ui-monospace,Consolas,"D2Coding",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  [hidden]{display:none!important}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
+  h1,h2,h3{word-break:keep-all;margin:0}
+  button{font:inherit;cursor:pointer}
+  :focus-visible{outline:3px solid #1F5FA8;outline-offset:2px}
+  .top :focus-visible,.script-pane :focus-visible{outline-color:var(--code-hlbar)}
+  body.dragging::after{content:"";position:fixed;inset:6px;border:3px dashed #1F5FA8;border-radius:10px;pointer-events:none}
+
+  /* top bar */
+  .top{background:var(--ink);color:#EDF1F5;display:flex;flex-wrap:wrap;align-items:center;gap:10px 24px;padding:12px 24px}
+  .top h1{font-size:18px;font-weight:700;letter-spacing:-.01em}
+  .top .local{display:inline-flex;align-items:center;gap:7px;font-size:13.5px;color:#C9D4DF}
+  .top .local b{color:#fff}
+  .top .file{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+  .filechip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px;background:#2A3542;border:1px solid #3C4A5A;border-radius:6px;padding:5px 10px;color:#fff;min-width:0}
+  .filechip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .filechip svg{flex:none}
+  .tbtn{background:transparent;border:1px solid #6F8195;color:#EDF1F5;border-radius:6px;padding:5px 12px;font-size:13.5px;min-height:34px;flex:none}
+
+  /* drop strip */
+  .dropstrip{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin:14px 24px 0;padding:10px 14px;border:1.5px dashed #8C9AA8;border-radius:8px;background:rgba(255,255,255,.45);font-size:14px;color:var(--sub)}
+  .dropstrip .pick{background:var(--white);border:1px solid var(--line);border-radius:6px;padding:4px 12px;min-height:34px;color:var(--ink)}
+  .dropstrip .err{flex-basis:100%;margin:0;padding:6px 10px;background:var(--no-bg);color:var(--no);border-radius:5px;font-weight:700;font-size:13.5px}
+
+  /* summary band */
+  .band{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;margin:14px 24px 0;background:var(--white);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .stat{padding:10px 16px;border-right:1px solid var(--line2);display:flex;align-items:baseline;gap:10px}
+  .stat:last-child{border-right:0}
+  .stat .n{font-family:var(--mono);font-size:26px;font-weight:700;line-height:1.2}
+  .stat .k{font-size:13.5px;color:var(--sub)}
+  .stat.ok .n{color:var(--ok)} .stat.no .n{color:var(--no)} .stat.warn .n{color:var(--warn)} .stat.skip .n{color:var(--sub)}
+  .stat.warn{background:var(--warn-bg)}
+
+  /* workbench */
+  .bench{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:14px;margin:14px 24px 0;align-items:start}
+  .pane{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .pane-h{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--white)}
+  .pane-h h2{font-size:14px;font-weight:700}
+  .pane-h .aux{margin-left:auto;font-size:13px;color:var(--sub)}
+  .filters{list-style:none;margin:0;padding:0}
+  .f{border-bottom:1px solid var(--line2);border-left:3px solid transparent;background:var(--panel)}
+  .f:hover{background:#EAEEF2}
+  .f.sel{background:var(--white);border-left-color:var(--steel);box-shadow:inset 0 0 0 1px var(--steel-soft)}
+  .fh{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:4px 10px;width:100%;text-align:left;background:none;border:0;color:inherit;padding:10px 14px 10px 11px}
+  .fh:focus-visible{outline-offset:-3px}
+  .f .no{font-family:var(--mono);font-size:13px;color:var(--sub);padding-top:2px}
+  .f .cond{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+  .f .act{grid-column:2;font-size:13.5px;color:var(--sub);overflow-wrap:anywhere}
+  .f .act .lab{display:inline-block;background:var(--steel-soft);color:#173E62;border-radius:4px;padding:0 6px;font-weight:600}
+  .f .badges{grid-row:1/span 2;grid-column:3;display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+  .b{font-size:12px;font-weight:700;padding:1px 8px;border-radius:4px;white-space:nowrap}
+  .b.ok{background:var(--ok-bg);color:var(--ok)} .b.no{background:var(--no-bg);color:var(--no)} .b.skip{background:var(--line2);color:var(--sub)}
+  .wi{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:700;color:var(--warn)}
+  .f .detail{display:none;margin:0 14px 10px 51px;padding:8px 10px;background:var(--warn-bg);color:var(--warn);border-radius:5px;font-size:13.5px;overflow-wrap:anywhere}
+  .f .detail p{margin:0}
+  .f .detail p+p{margin-top:4px}
+  .f.sel .detail{display:block}
+  .f.sel .detail.none{background:var(--line2);color:var(--sub)}
+
+  .script-pane{position:sticky;top:12px}
+  .script-pane .pane-h{background:var(--code-bg);border-color:#2E3A47;color:#EDF1F5}
+  .script-pane .pane-h .aux{color:#A9B7C5}
+  .copy{margin-left:auto;display:inline-flex;align-items:center;gap:7px;background:var(--steel);color:var(--steel-ink);border:0;border-radius:6px;padding:7px 14px;font-weight:700;min-height:36px}
+  .copy.done{background:#2E7D55}
+  .copy .i-ok{display:none}
+  .copy.done .i-ok{display:inline}
+  .copy.done .i-copy{display:none}
+  pre{position:relative;margin:0;background:var(--code-bg);color:var(--code);font-family:var(--mono);font-size:12.8px;line-height:1.62;max-height:560px;overflow:auto;padding:10px 0;counter-reset:ln}
+  pre code{display:block;min-width:max-content;font:inherit}
+  pre .l{display:block;padding:0 14px 0 0;white-space:pre;counter-increment:ln;border-left:3px solid transparent;min-height:1.62em}
+  pre .l::before{content:counter(ln);display:inline-block;width:38px;padding-right:12px;text-align:right;color:#97A8BA;user-select:none}
+  pre .c{color:var(--code-c)}
+  pre .l.hl{background:var(--code-hl);border-left-color:var(--code-hlbar)}
+  .script-foot{display:flex;flex-wrap:wrap;gap:6px 16px;padding:8px 14px;background:#222C37;color:#A9B7C5;font-size:12.5px}
+  .script-foot .msg{color:var(--code-hlbar);font-weight:700}
+  .copybuf{position:fixed;left:-9999px;top:0;width:1px;height:1px}
+
+  /* lower */
+  .lower{display:grid;grid-template-columns:0.9fr 1.1fr 1.4fr;gap:14px;margin:14px 24px 32px}
+  .box{background:var(--white);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .box h2{font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .box h2 .aux{margin-left:auto;font-weight:400;font-size:12.5px;color:var(--sub)}
+  .tree{list-style:none;margin:0;padding:0;font-family:var(--mono);font-size:13.5px}
+  .tree li{padding:3px 0;display:flex;align-items:center;gap:7px;overflow-wrap:anywhere}
+  .tree li.sub::before{content:"└";color:var(--sub)}
+  .tree .pend{margin-left:auto;flex:none;font-family:var(--sans);font-size:11.5px;color:var(--sub);border:1px dashed var(--line);border-radius:4px;padding:0 6px}
+  .boxnote{font-size:12.5px;color:var(--sub);margin:8px 0 0}
+  .howto{margin:0;padding-left:20px;font-size:14px}
+  .howto li{padding:2px 0}
+  .howto li::marker{font-family:var(--mono);font-weight:700}
+  .howto .k{color:var(--warn);font-weight:700}
+  .howto q{font-family:var(--mono);font-size:.94em;quotes:"'" "'"}
+  .rad{display:inline-block;width:11px;height:11px;border:2px solid currentColor;border-radius:50%;vertical-align:-1px;margin:0 1px}
+  .rad.on{background:currentColor;box-shadow:inset 0 0 0 2px var(--white)}
+  .cautions{margin:0;padding:0;list-style:none;font-size:13.5px;display:grid;gap:5px}
+  .cautions li{display:grid;grid-template-columns:8px 1fr;gap:8px}
+  .cautions li::before{content:"";width:6px;height:6px;border-radius:1px;background:var(--sub);margin-top:8px}
+  .cautions li.undo::before{background:var(--ok)}
+  code{font-family:var(--mono);font-size:.94em}
+  .path{font-weight:700}
+
+  @media (max-width:1000px){
+    .lower{grid-template-columns:1fr 1fr}
+    .lower .box:last-child{grid-column:1/-1}
+  }
+  @media (max-width:760px){
+    .top{padding:12px 14px}
+    .top .file{margin-left:0;width:100%}
+    .dropstrip,.band,.bench,.lower{margin-left:12px;margin-right:12px}
+    .band{grid-auto-flow:row;grid-template-columns:repeat(3,1fr)}
+    .stat{flex-direction:column;gap:0;padding:8px 10px;border-bottom:1px solid var(--line2)}
+    .stat .n{font-size:22px}
+    .stat:nth-child(3n){border-right:0}
+    .stat:nth-child(n+4){border-bottom:0}
+    .band[data-n="5"] .stat:last-child{grid-column:span 2}
+    .bench{grid-template-columns:1fr}
+    .script-pane{position:static}
+    pre{max-height:340px;font-size:12px}
+    .lower{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Gmail 필터 → 웹메일 필터 변환</h1>
+  <span class="local">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+    <span><b>파일은 이 컴퓨터 밖으로 나가지 않습니다</b> · 브라우저 안에서만 변환</span>
+  </span>
+  <div class="file" id="fileBox" hidden>
+    <span class="filechip">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>
+      <span id="fileName"></span>
+    </span>
+    <button class="tbtn" type="button" id="other">다른 파일</button>
+  </div>
+</header>
+
+<input type="file" id="fileInput" accept=".xml,text/xml,application/xml" hidden>
+
+<div class="dropstrip" id="drop">
+  <span>Gmail 에서 내보낸 <code>mailFilters.xml</code> 을 화면 어디에나 끌어다 놓거나</span>
+  <button class="pick" type="button" id="pick">파일 선택</button>
+  <p class="err" id="err" role="alert" hidden></p>
+</div>
+
+<section class="band" id="band" aria-label="결과 요약" hidden></section>
+
+<div class="bench" id="bench" hidden>
+  <section class="pane" aria-labelledby="fl">
+    <div class="pane-h"><h2 id="fl">필터 목록</h2><span class="aux">눌러서 스크립트 위치 보기</span></div>
+    <ul class="filters" id="filters"></ul>
+  </section>
+
+  <section class="pane script-pane" aria-labelledby="sc">
+    <div class="pane-h">
+      <h2 id="sc">생성된 스크립트</h2><span class="aux" style="margin-left:10px">읽기 전용</span>
+      <button class="copy" type="button" id="copy">
+        <svg class="i-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
+        <svg class="i-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>
+        <span id="copyTxt">스크립트 복사</span>
+      </button>
+    </div>
+    <pre id="code" tabindex="0" role="region" aria-label="생성된 Sieve 스크립트"><code id="lines"></code></pre>
+    <div class="script-foot">
+      <span id="selInfo">필터를 누르면 스크립트에서 해당 위치를 보여 줍니다</span>
+      <span>붙여 넣기 위치: 웹메일 설정 → 필터 → Add a Script</span>
+      <span class="msg" id="copyMsg" role="status"></span>
+    </div>
+    <textarea class="copybuf" id="copyBuf" readonly tabindex="-1" aria-label="복사용 스크립트 원문"></textarea>
+  </section>
+</div>
+
+<div class="lower">
+  <section class="box" aria-labelledby="fd">
+    <h2 id="fd">만들어질 폴더 <span class="aux" id="folderCount"></span></h2>
+    <ul class="tree" id="tree"></ul>
+    <p class="boxnote" id="folderNote">파일을 넣으면 만들어질 폴더가 여기에 표시됩니다.</p>
+  </section>
+  <section class="box" aria-labelledby="ht">
+    <h2 id="ht">웹메일에 붙여 넣기</h2>
+    <ol class="howto">
+      <li>웹메일 로그인 → <span class="path">설정 → 필터</span></li>
+      <li><span class="k">기존 스크립트가 있으면 먼저 복사해 따로 보관.</span> 목록에서 <span class="rad on" role="img" aria-label="켜짐 표시"></span> 로 켜진 스크립트를 눌러 열고, Simple 화면이면 창 아래 코드 아이콘(<q>Use Custom User Script</q>)을 눌러 나온 내용을 복사해 보관한 뒤 × 로 닫기. 웹메일 필터 화면에서 직접 만든 필터(Simple)를 쓰던 분은 4번에서 그 필터가 꺼집니다.</li>
+      <li><q>Add a Script</q> → 이름 입력(예: gmail-filters) → 코드 칸에 붙여 넣기 → 저장 → × 로 창 닫기</li>
+      <li>목록에서 새 스크립트 왼쪽 <span class="rad" role="img" aria-label="꺼짐 표시"></span> 를 눌러 <span class="rad on" role="img" aria-label="켜짐 표시"></span> 로 바꾸기(켜짐). 한 번에 하나만 켜지므로 기존 스크립트는 꺼집니다.</li>
+    </ol>
+  </section>
+  <section class="box" aria-labelledby="ct">
+    <h2 id="ct">주의사항</h2>
+    <ul class="cautions">
+      <li>활성 스크립트는 하나뿐 — 기존 스크립트나 필터가 있으면 합쳐야 함</li>
+      <li>이미 받은 메일은 다시 분류되지 않음</li>
+      <li>폴더로 간 메일은 POP3(Gmail 가져오기)로 넘어가지 않음</li>
+      <li>단어 일부만 같아도 걸림 — '인증' 이 '인증서' 에도</li>
+      <li>라벨과 달리 폴더마다 사본이 따로 — 읽음·삭제도 따로</li>
+      <li>보관(받은편지함 건너뛰기) 필터에 걸린 메일은 스팸 표시가 있어도 그 폴더로 가고, 서버의 중복 메일 제거도 적용되지 않음</li>
+      <li>스팸 안 보냄 필터에 걸린 메일은 받은편지함에 저장되고 서버의 스팸→정크 이동을 건너뜀. 서버의 스팸 판정·거부 자체를 해제하는 기능은 아님</li>
+      <li class="undo">되돌리기: 보관해 둔 기존 스크립트를 다시 켜기(<span class="rad on" role="img" aria-label="켜짐 표시"></span>). 이미 폴더로 들어간 메일 사본은 직접 정리</li>
+    </ul>
+  </section>
+</div>
+
+<template id="tplWarn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M12 3 2 21h20z"/><path d="M12 10v5"/></svg></template>
+
+<!--CORE-->
+
+<script id="view-pure">
+/* 화면 순수 함수(DOM 없음) — app.test.js 가 이 블록만 떼어 Node 에서 실행한다. */
+var G2SView = (function () {
+  'use strict';
+
+  var MAX_BYTES = 5 * 1024 * 1024;
+  var FINAL_HEAD = '# 받은편지함 처리';
+  var MSG = {
+    tooBig: '파일이 5MB 를 넘습니다. Gmail 에서 내보낸 mailFilters.xml 이 맞는지 확인해 주세요.',
+    empty: '빈 파일입니다.',
+    notXml: 'XML 파일로 읽을 수 없습니다. Gmail 설정 → 필터에서 내보낸 mailFilters.xml 을 넣어 주세요.',
+    noFilters: '필터가 하나도 없습니다. Gmail 설정 → 필터에서 내보낸 mailFilters.xml 이 맞는지 확인해 주세요.',
+    read: '파일을 읽지 못했습니다.'
+  };
+  var FLAGS = [['shouldArchive', '받은편지함 건너뛰기'], ['shouldTrash', '휴지통'], ['shouldNeverSpam', '스팸 안 보냄']];
+
+  function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+  // rows[i] 가 차지하는 줄 범위(1부터, 양 끝 포함). 엔진 출력 형식:
+  // 블록은 빈 줄 하나로 구분되고, 각 필터는 '# [n] ' 주석으로 시작하며, 끝 결정 블록은 '# 받은편지함 처리' 로 시작한다.
+  function lineRanges(script, rows) {
+    var lines = script.split('\n');
+    var starts = [];
+    var pos = 0;
+    rows.forEach(function (r) {
+      var prefix = '# [' + r.n + '] ';
+      while (pos < lines.length && lines[pos].indexOf(prefix) !== 0) pos++;
+      if (pos >= lines.length) throw new Error('스크립트에서 필터 ' + r.n + ' 의 위치를 찾지 못했습니다');
+      starts.push(pos);
+      pos++;
+    });
+    while (pos < lines.length && lines[pos].indexOf(FINAL_HEAD) !== 0) pos++;
+    if (pos >= lines.length) throw new Error('스크립트에서 끝 결정 블록의 위치를 찾지 못했습니다');
+    return starts.map(function (s, i) {
+      var next = i + 1 < starts.length ? starts[i + 1] : pos;
+      return { start: s + 1, end: next - 1 };
+    });
+  }
+
+  // 라벨 목록 → 하위 폴더 트리를 펼친 목록. pending = 라벨로 직접 지정된 폴더(첫 메일이 올 때 생김)
+  function folderTree(folders) {
+    var nodes = new Map();
+    var roots = [];
+    folders.forEach(function (f) {
+      var segs = f.split('/').filter(Boolean);
+      if (!segs.length) segs = [f];
+      var path = '';
+      var parent = null;
+      segs.forEach(function (s, i) {
+        path = path ? path + '/' + s : s;
+        var node = nodes.get(path);
+        if (!node) {
+          node = { name: s, depth: i, pending: false, kids: [] };
+          nodes.set(path, node);
+          (parent ? parent.kids : roots).push(node);
+        }
+        parent = node;
+      });
+      parent.pending = true;
+    });
+    var out = [];
+    (function walk(list) {
+      list.forEach(function (n) {
+        out.push({ name: n.name, depth: n.depth, pending: n.pending });
+        walk(n.kids);
+      });
+    })(roots);
+    return out;
+  }
+
+  // 요약 띠: 필터 / 변환 / 제외 / 생략(0이면 숨김) / 경고(경고 붙은 필터 수) / 새 폴더
+  function summaryItems(stats) {
+    var items = [
+      { key: 'total', label: '필터', value: stats.total, tone: '' },
+      { key: 'converted', label: '변환', value: stats.converted, tone: 'ok' },
+      { key: 'excluded', label: '제외', value: stats.excluded, tone: 'no' }
+    ];
+    if (stats.skipped > 0) items.push({ key: 'skipped', label: '생략', value: stats.skipped, tone: 'skip' });
+    items.push({ key: 'warnings', label: '경고', value: stats.filtersWithWarnings, tone: stats.filtersWithWarnings > 0 ? 'warn' : '', title: '경고가 붙은 필터 수' });
+    items.push({ key: 'folders', label: '새 폴더', value: stats.folderCount, tone: '' });
+    return items;
+  }
+
+  function warningView(w, labels) {
+    var label = Object.prototype.hasOwnProperty.call(labels, w.code) ? labels[w.code] : w.code;
+    var text = w.text;
+    // 제외 사유는 라벨이 이미 '변환 제외 — ' 로 시작하므로 본문의 같은 머리말을 뺀다
+    if (label.indexOf('변환 제외') === 0 && text.indexOf('변환 제외 — ') === 0) text = text.slice('변환 제외 — '.length);
+    return { label: label, text: text };
+  }
+
+  // 목록 한 줄에 쓸 값. props = 같은 순번 원본 필터의 속성
+  function rowView(row, props, labels) {
+    var raw = props.label || '';
+    var label = row.folders[0] || String(raw).replace(/\s+/g, ' ').trim();
+    var flags = FLAGS.filter(function (f) { return props[f[0]] === 'true'; }).map(function (f) { return f[1]; });
+    return {
+      n: row.n,
+      no: pad2(row.n),
+      cond: row.conditionSummary || '(조건 없음)',
+      label: label,
+      flags: flags,
+      status: row.status,
+      statusText: row.status === 'converted' ? '변환' : row.status === 'excluded' ? '제외' : '생략',
+      warnings: row.warnings.map(function (w) { return warningView(w, labels); })
+    };
+  }
+
+  function rangeText(no, range) {
+    return '선택: 필터 ' + no + ' → ' + (range.start === range.end ? range.start + '줄' : range.start + '–' + range.end + '줄');
+  }
+
+  // 파일 내용 → 변환 결과 또는 { error }. deps = { G2S, parser, options }
+  function analyze(text, deps) {
+    if (typeof text !== 'string' || !text.trim()) return { error: MSG.empty };
+    var filters;
+    try { filters = deps.G2S.parseFiltersXml(text, deps.parser); } catch (e) { return { error: MSG.notXml }; }
+    if (!filters.length) return { error: MSG.noFilters };
+    try {
+      var result = deps.G2S.convert(filters, deps.options);
+      return { filters: filters, result: result, ranges: lineRanges(result.script, result.rows) };
+    } catch (e) {
+      return { error: '변환 중 오류가 났습니다: ' + e.message };
+    }
+  }
+
+  // 복사. deps.write(text) → Promise(Clipboard API), deps.fallback(text) → boolean(숨김 textarea + execCommand).
+  // 둘 다 실패하면 'failed' — 이때 fallback 쪽이 원문 전체를 선택된 상태로 남겨 둔다.
+  function copyScript(text, deps) {
+    var viaFallback = function () {
+      try { return deps.fallback(text) ? 'fallback' : 'failed'; } catch (e) { return 'failed'; }
+    };
+    if (!deps.write) return Promise.resolve(viaFallback());
+    var first;
+    try { first = Promise.resolve(deps.write(text)); } catch (e) { first = Promise.reject(e); }
+    return first.then(function () { return 'clipboard'; }, viaFallback);
+  }
+
+  return {
+    MAX_BYTES: MAX_BYTES, MSG: MSG, pad2: pad2, lineRanges: lineRanges, folderTree: folderTree,
+    summaryItems: summaryItems, warningView: warningView, rowView: rowView, rangeText: rangeText,
+    analyze: analyze, copyScript: copyScript
+  };
+})();
+</script>
+
+<script id="view-ui">
+(function () {
+  'use strict';
+  var V = G2SView;
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { script: '', result: null, ranges: null, sel: 0, hl: null, lineEls: [], rowEls: [], readSeq: 0 };
+  var copyTimer = null;
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  function empty(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function warnIcon() { return document.getElementById('tplWarn').content.firstElementChild.cloneNode(true); }
+
+  // ---------- 비우기 / 오류 ----------
+  function clearResults() {
+    state.script = ''; state.result = null; state.ranges = null; state.sel = 0; state.hl = null;
+    state.lineEls = []; state.rowEls = [];
+    ['band', 'filters', 'lines', 'tree'].forEach(function (id) { empty($(id)); });
+    $('bench').hidden = true;
+    $('band').hidden = true;
+    $('fileBox').hidden = true;
+    $('folderCount').textContent = '';
+    $('folderNote').textContent = '파일을 넣으면 만들어질 폴더가 여기에 표시됩니다.';
+    $('copyBuf').value = '';
+    $('copyMsg').textContent = '';
+    $('selInfo').textContent = '필터를 누르면 스크립트에서 해당 위치를 보여 줍니다';
+    setCopyDone(false);
+  }
+  function showError(msg) {
+    clearResults();
+    $('drop').hidden = false;
+    $('err').textContent = msg;
+    $('err').hidden = false;
+  }
+
+  // ---------- 그리기 ----------
+  function renderBand(stats) {
+    var items = V.summaryItems(stats);
+    var band = $('band');
+    band.setAttribute('data-n', String(items.length));
+    items.forEach(function (it) {
+      var d = el('div', 'stat' + (it.tone ? ' ' + it.tone : ''));
+      if (it.title) d.title = it.title;
+      d.appendChild(el('span', 'n', String(it.value)));
+      d.appendChild(el('span', 'k', it.label));
+      band.appendChild(d);
+    });
+    band.hidden = false;
+  }
+
+  function renderRow(v) {
+    var li = el('li', 'f');
+    var btn = el('button', 'fh');
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', 'false');
+    btn.setAttribute('aria-controls', 'detail' + v.n);
+    btn.appendChild(el('span', 'no', v.no));
+    btn.appendChild(el('span', 'cond', v.cond));
+    var badges = el('span', 'badges');
+    badges.appendChild(el('span', 'b ' + (v.status === 'converted' ? 'ok' : v.status === 'excluded' ? 'no' : 'skip'), v.statusText));
+    if (v.warnings.length) {
+      var wi = el('span', 'wi');
+      wi.appendChild(warnIcon());
+      wi.appendChild(document.createTextNode('경고' + (v.warnings.length > 1 ? ' ' + v.warnings.length : '')));
+      badges.appendChild(wi);
+    }
+    btn.appendChild(badges);
+    var act = el('span', 'act');
+    var parts = 0;
+    if (v.label) { act.appendChild(el('span', 'lab', v.label)); parts++; }
+    v.flags.forEach(function (f) {
+      if (parts) act.appendChild(document.createTextNode(' · '));
+      act.appendChild(document.createTextNode(f));
+      parts++;
+    });
+    if (!parts) act.textContent = '동작 없음';
+    btn.appendChild(act);
+    li.appendChild(btn);
+
+    var detail = el('div', 'detail' + (v.warnings.length ? '' : ' none'));
+    detail.id = 'detail' + v.n;
+    if (v.warnings.length) {
+      v.warnings.forEach(function (w) {
+        var p = el('p');
+        p.appendChild(el('b', '', w.label));
+        p.appendChild(document.createTextNode(' — ' + w.text));
+        detail.appendChild(p);
+      });
+    } else {
+      detail.textContent = '경고 없음';
+    }
+    li.appendChild(detail);
+    btn.addEventListener('click', function () { select(v.n); });
+    return li;
+  }
+
+  function renderScript(script) {
+    var lines = script.split('\n');
+    if (lines[lines.length - 1] === '') lines.pop(); // 끝 개행 뒤의 빈 조각
+    var box = $('lines');
+    lines.forEach(function (text) {
+      var s = el('span', 'l' + (text.charAt(0) === '#' ? ' c' : ''));
+      s.textContent = text;
+      box.appendChild(s);
+      state.lineEls.push(s);
+    });
+  }
+
+  function renderFolders(folders, folderCount) {
+    var tree = $('tree');
+    V.folderTree(folders).forEach(function (n) {
+      var li = el('li', n.depth ? 'sub' : '');
+      if (n.depth) li.style.paddingLeft = (n.depth * 18) + 'px';
+      li.appendChild(el('span', '', n.name));
+      if (n.pending) li.appendChild(el('span', 'pend', '첫 메일 때'));
+      tree.appendChild(li);
+    });
+    $('folderCount').textContent = folderCount + '개';
+    $('folderNote').textContent = folderCount
+      ? '미리 만들지 않습니다. 해당 메일이 처음 올 때 생깁니다.'
+      : '만들어질 폴더가 없습니다.';
+  }
+
+  function render(a, name) {
+    clearResults();
+    var res = a.result;
+    state.script = res.script; state.result = res; state.ranges = a.ranges;
+    $('drop').hidden = true;
+    $('err').hidden = true;
+    $('fileName').textContent = name;
+    $('fileBox').hidden = false;
+    renderBand(res.stats);
+    var list = $('filters');
+    res.rows.forEach(function (row, i) {
+      var li = renderRow(V.rowView(row, a.filters[i].props, G2S.WARNING_LABELS));
+      state.rowEls.push(li);
+      list.appendChild(li);
+    });
+    renderScript(res.script);
+    $('copyBuf').value = res.script;
+    renderFolders(res.folders, res.stats.folderCount);
+    $('bench').hidden = false;
+  }
+
+  // ---------- 행 선택 ↔ 줄 강조 ----------
+  function select(n) {
+    if (state.sel === n) n = 0;
+    if (state.sel) {
+      var prev = state.rowEls[state.sel - 1];
+      prev.classList.remove('sel');
+      prev.firstChild.setAttribute('aria-expanded', 'false');
+    }
+    if (state.hl) {
+      for (var i = state.hl.start; i <= state.hl.end; i++) state.lineEls[i - 1].classList.remove('hl');
+      state.hl = null;
+    }
+    state.sel = n;
+    if (!n) { $('selInfo').textContent = '필터를 누르면 스크립트에서 해당 위치를 보여 줍니다'; return; }
+    var li = state.rowEls[n - 1];
+    li.classList.add('sel');
+    li.firstChild.setAttribute('aria-expanded', 'true');
+    var r = state.ranges[n - 1];
+    for (var k = r.start; k <= r.end; k++) state.lineEls[k - 1].classList.add('hl');
+    state.hl = r;
+    $('selInfo').textContent = V.rangeText(V.pad2(n), r);
+    var pre = $('code');
+    pre.scrollTop = Math.max(0, state.lineEls[r.start - 1].offsetTop - 28);
+  }
+
+  // ---------- 복사 ----------
+  function setCopyDone(on) {
+    $('copy').classList.toggle('done', on);
+    $('copyTxt').textContent = on ? '복사됨' : '스크립트 복사';
+  }
+  function fallbackCopy(text) {
+    var ta = $('copyBuf');
+    ta.value = text;
+    ta.focus({ preventScroll: true });
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    return document.execCommand('copy');
+  }
+  $('copy').addEventListener('click', function () {
+    if (!state.script) return;
+    var text = state.script;
+    var write = navigator.clipboard && navigator.clipboard.writeText
+      ? function (t) { return navigator.clipboard.writeText(t); } : null;
+    V.copyScript(text, { write: write, fallback: fallbackCopy }).then(function (how) {
+      clearTimeout(copyTimer);
+      if (how === 'failed') {
+        setCopyDone(false);
+        $('copyMsg').textContent = '자동 복사가 막혔습니다. 직접 선택해 복사하세요 — 스크립트 전체가 선택돼 있으니 Ctrl+C(맥은 ⌘C)를 누르면 됩니다.';
+        return;
+      }
+      if (how === 'fallback') $('copy').focus();
+      $('copyMsg').textContent = '';
+      setCopyDone(true);
+      copyTimer = setTimeout(function () { setCopyDone(false); }, 2000);
+    });
+  });
+
+  // ---------- 파일 받기 ----------
+  function handleFile(file) {
+    if (!file) return;
+    if (file.size > V.MAX_BYTES) { showError(V.MSG.tooBig); return; }
+    var seq = ++state.readSeq;
+    var fr = new FileReader();
+    fr.onload = function () {
+      if (seq !== state.readSeq) return;
+      var a = V.analyze(fr.result, { G2S: G2S, parser: new DOMParser() });
+      if (a.error) showError(a.error); else render(a, file.name);
+    };
+    fr.onerror = function () { if (seq === state.readSeq) showError(V.MSG.read); };
+    fr.readAsText(file);
+  }
+  var input = $('fileInput');
+  input.addEventListener('change', function () {
+    handleFile(input.files[0]);
+    input.value = ''; // 같은 파일을 다시 골라도 change 가 나도록
+  });
+  $('pick').addEventListener('click', function () { input.click(); });
+  $('other').addEventListener('click', function () { input.click(); });
+
+  var depth = 0;
+  var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0; };
+  window.addEventListener('dragenter', function (e) { if (hasFiles(e)) { depth++; document.body.classList.add('dragging'); } });
+  window.addEventListener('dragleave', function (e) { if (hasFiles(e) && --depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+  window.addEventListener('dragover', function (e) { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    document.body.classList.remove('dragging');
+    handleFile(e.dataTransfer.files[0]);
+  });
+})();
+</script>
+</body>
+</html>

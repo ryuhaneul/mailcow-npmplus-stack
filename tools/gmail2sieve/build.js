@@ -6,13 +6,15 @@ const path = require('path');
 
 const OUT = path.join(__dirname, '..', 'gmail-filter-to-sieve.html');
 const MARK = '<!--CORE-->';
+// 파일 전체 텍스트에 대해 검사한다(태그가 여러 줄에 걸쳐도 잡히도록 줄 단위로 나누지 않음).
 const EXTERNAL = [
   ['http://', /http:\/\//i],
   ['https://', /https:\/\//i],
-  ['<script src', /<script\b[^>]*\ssrc\b/i],
+  ['<script src', /<script\b[^>]*\bsrc\s*=/i],
   ['<link', /<link\b/i],
   ['@import', /@import/i],
   ['url(', /url\(/i],
+  ['// 로 시작하는 src/href 등', /\b(?:src|href|action|formaction|poster|srcset)\s*=\s*["']?\s*\/\//i],
 ];
 
 function build() {
@@ -23,8 +25,9 @@ function build() {
   const out = app.replace(MARK, () => '<script>\n' + core.replace(/\n*$/, '\n') + '</script>');
 
   const bad = [];
-  out.split('\n').forEach((line, i) => {
-    EXTERNAL.forEach(([name, re]) => { if (re.test(line)) bad.push(name + ' (' + (i + 1) + '번째 줄)'); });
+  EXTERNAL.forEach(([name, re]) => {
+    const m = re.exec(out);
+    if (m) bad.push(name + ' (' + (out.slice(0, m.index).split('\n').length) + '번째 줄)');
   });
   if (bad.length) throw new Error('외부 참조가 있습니다: ' + bad.join(', '));
   return out;

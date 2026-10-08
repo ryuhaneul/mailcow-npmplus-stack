@@ -107,6 +107,7 @@
   .howto li::marker{font-family:var(--mono);font-weight:700}
   .howto .k{color:var(--warn);font-weight:700}
   .howto q{font-family:var(--mono);font-size:.94em;quotes:"'" "'"}
+  .nb{white-space:nowrap}
   .rad{display:inline-block;width:11px;height:11px;border:2px solid currentColor;border-radius:50%;vertical-align:-1px;margin:0 1px}
   .rad.on{background:currentColor;box-shadow:inset 0 0 0 2px var(--white)}
   .cautions{margin:0;padding:0;list-style:none;font-size:13.5px;display:grid;gap:5px}
@@ -213,8 +214,8 @@
       <li>단어 일부만 같아도 걸림 — '인증' 이 '인증서' 에도</li>
       <li>라벨과 달리 폴더마다 사본이 따로 — 읽음·삭제도 따로</li>
       <li>보관(받은편지함 건너뛰기) 필터에 걸린 메일은 스팸 표시가 있어도 그 폴더로 가고, 서버의 중복 메일 제거도 적용되지 않음</li>
-      <li>스팸 안 보냄 필터에 걸린 메일은 받은편지함에 저장되고 서버의 스팸→정크 이동을 건너뜀. 서버의 스팸 판정·거부 자체를 해제하는 기능은 아님</li>
-      <li class="undo">되돌리기: 보관해 둔 기존 스크립트를 다시 켜기(<span class="rad on" role="img" aria-label="켜짐 표시"></span>). 이미 폴더로 들어간 메일 사본은 직접 정리</li>
+      <li>스팸 안 보냄 필터만 걸린 메일(휴지통·보관 필터에 함께 걸리지 않은 경우)은 받은편지함에 저장되고 서버의 스팸→정크 이동을 건너뜀. 서버의 스팸 판정·거부 자체를 해제하는 기능은 아님</li>
+      <li class="undo"><span>되돌리기: 보관해 둔 기존 스크립트를 <span class="nb">다시 켜기(<span class="rad on" role="img" aria-label="켜짐 표시"></span>).</span> 이미 폴더로 들어간 메일 사본은 직접 정리</span></li>
     </ul>
   </section>
 </div>
@@ -349,16 +350,20 @@ var G2SView = (function () {
     }
   }
 
-  // 복사. deps.write(text) → Promise(Clipboard API), deps.fallback(text) → boolean(숨김 textarea + execCommand).
+  // 복사. deps.write(text) → Promise(Clipboard API), deps.fallback(text) → boolean(숨김 textarea + execCommand),
+  // deps.valid() → 요청 뒤 결과가 바뀌지 않았는지(없으면 항상 유효).
   // 둘 다 실패하면 'failed' — 이때 fallback 쪽이 원문 전체를 선택된 상태로 남겨 둔다.
+  // 결과가 바뀐 뒤에는 폴백을 실행하지 않고 'stale' 을 돌려준다(호출자는 아무것도 표시하지 않는다).
   function copyScript(text, deps) {
+    var valid = deps.valid || function () { return true; };
     var viaFallback = function () {
+      if (!valid()) return 'stale';
       try { return deps.fallback(text) ? 'fallback' : 'failed'; } catch (e) { return 'failed'; }
     };
     if (!deps.write) return Promise.resolve(viaFallback());
     var first;
     try { first = Promise.resolve(deps.write(text)); } catch (e) { first = Promise.reject(e); }
-    return first.then(function () { return 'clipboard'; }, viaFallback);
+    return first.then(function () { return valid() ? 'clipboard' : 'stale'; }, viaFallback);
   }
 
   return {
@@ -374,7 +379,7 @@ var G2SView = (function () {
   'use strict';
   var V = G2SView;
   var $ = function (id) { return document.getElementById(id); };
-  var state = { script: '', result: null, ranges: null, sel: 0, hl: null, lineEls: [], rowEls: [], readSeq: 0 };
+  var state = { script: '', result: null, ranges: null, sel: 0, hl: null, lineEls: [], rowEls: [], gen: 0 };
   var copyTimer = null;
 
   function el(tag, cls, text) {
@@ -387,7 +392,11 @@ var G2SView = (function () {
   function warnIcon() { return document.getElementById('tplWarn').content.firstElementChild.cloneNode(true); }
 
   // ---------- 비우기 / 오류 ----------
+  // state.gen = 세대 번호. 새 입력이 시작될 때와 화면을 비울 때 올려서, 그 이전에 시작된
+  // 파일 읽기·복사 요청이 뒤늦게 화면을 바꾸지 못하게 한다.
   function clearResults() {
+    state.gen++;
+    clearTimeout(copyTimer);
     state.script = ''; state.result = null; state.ranges = null; state.sel = 0; state.hl = null;
     state.lineEls = []; state.rowEls = [];
     ['band', 'filters', 'lines', 'tree'].forEach(function (id) { empty($(id)); });
@@ -558,9 +567,11 @@ var G2SView = (function () {
   $('copy').addEventListener('click', function () {
     if (!state.script) return;
     var text = state.script;
+    var gen = state.gen;
     var write = navigator.clipboard && navigator.clipboard.writeText
       ? function (t) { return navigator.clipboard.writeText(t); } : null;
-    V.copyScript(text, { write: write, fallback: fallbackCopy }).then(function (how) {
+    V.copyScript(text, { write: write, fallback: fallbackCopy, valid: function () { return gen === state.gen; } }).then(function (how) {
+      if (how === 'stale') return;
       clearTimeout(copyTimer);
       if (how === 'failed') {
         setCopyDone(false);
@@ -577,15 +588,15 @@ var G2SView = (function () {
   // ---------- 파일 받기 ----------
   function handleFile(file) {
     if (!file) return;
+    var seq = ++state.gen; // 용량 초과로 바로 끝나는 입력도 이전 읽기를 무효로 만든다
     if (file.size > V.MAX_BYTES) { showError(V.MSG.tooBig); return; }
-    var seq = ++state.readSeq;
     var fr = new FileReader();
     fr.onload = function () {
-      if (seq !== state.readSeq) return;
+      if (seq !== state.gen) return;
       var a = V.analyze(fr.result, { G2S: G2S, parser: new DOMParser() });
       if (a.error) showError(a.error); else render(a, file.name);
     };
-    fr.onerror = function () { if (seq === state.readSeq) showError(V.MSG.read); };
+    fr.onerror = function () { if (seq === state.gen) showError(V.MSG.read); };
     fr.readAsText(file);
   }
   var input = $('fileInput');

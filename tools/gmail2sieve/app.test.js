@@ -227,6 +227,25 @@ asyncTest('복사: API 없음(동기 예외 포함) → 폴백, 둘 다 실패�
   assert.strictEqual(await V.copyScript(script, { write: () => Promise.reject(new Error('x')), fallback: () => { throw new Error('y'); } }), 'failed');
 });
 
+asyncTest('복사: 요청 뒤 결과가 바뀌면 폴백을 실행하지 않고 stale (거부 뒤·API 없음·성공 뒤 모두)', async () => {
+  let fb = 0; let ok = true;
+  const deps = (write) => ({ write, fallback: () => { fb++; return true; }, valid: () => ok });
+  let reject;
+  const p1 = V.copyScript('x\n', deps(() => new Promise((res, rej) => { reject = rej; })));
+  ok = false; reject(new Error('denied'));
+  assert.strictEqual(await p1, 'stale');
+  assert.strictEqual(await V.copyScript('x\n', deps(null)), 'stale');
+  let resolve;
+  ok = true;
+  const p2 = V.copyScript('x\n', deps(() => new Promise((res) => { resolve = res; })));
+  ok = false; resolve();
+  assert.strictEqual(await p2, 'stale');
+  assert.strictEqual(fb, 0, '폴백 실행 ' + fb + '회');
+  ok = true;
+  assert.strictEqual(await V.copyScript('x\n', deps(() => Promise.reject(new Error('d')))), 'fallback');
+  assert.strictEqual(fb, 1);
+});
+
 // ---------- 화면 코드 점검 ----------
 test('app.html: 사용자 데이터가 들어갈 수 있는 HTML 삽입 API 사용 0', () => {
   ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function', 'createContextualFragment'].forEach((w) => {
@@ -237,6 +256,39 @@ test('app.html: 외부 참조·네트워크 API 0', () => {
   [/https?:\/\//, /<script\b[^>]*\ssrc\b/, /<link\b/, /@import/, /url\(/, /\bfetch\(/, /XMLHttpRequest/, /sendBeacon/, /WebSocket/].forEach((re) => {
     assert.ok(!re.test(appHtml), String(re));
   });
+});
+test('build.js: 여러 줄에 걸친 외부 참조를 놓치지 않음 (합성 복제본)', () => {
+  const os = require('os');
+  const cp = require('child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'g2s-build-'));
+  const dir = path.join(root, 'tools', 'gmail2sieve');
+  fs.mkdirSync(dir, { recursive: true });
+  ['build.js', 'core.js'].forEach((f) => fs.copyFileSync(path.join(__dirname, f), path.join(dir, f)));
+  const run = (html) => {
+    fs.writeFileSync(path.join(dir, 'app.html'), html);
+    return cp.spawnSync(process.execPath, [path.join(dir, 'build.js')], { encoding: 'utf8' });
+  };
+  try {
+    const base = run(appHtml);
+    assert.strictEqual(base.status, 0, '원본 복제본은 통과해야 함: ' + base.stderr);
+    const inject = (frag) => appHtml.replace('</body>', frag + '\n</body>');
+    [
+      ['<script\n src="//example.test/x.js"></script>', /<script src/],
+      ['<SCRIPT\n\tSRC = "x.js"></SCRIPT>', /<script src/],
+      ['<link\nrel="stylesheet" href="x.css">', /<link/],
+      ['<style>\n@IMPORT "x.css";\n</style>', /@import/],
+      ['<style>a{background:url\n(x.png)}</style>'.replace('url\n(', 'url('), /url\(/],
+      ['<img\nsrc=\n"//example.test/a.png">', /\/\/ 로 시작/],
+      ['<a href="//example.test/">x</a>', /\/\/ 로 시작/],
+      ['<a href="https://example.test/">x</a>', /https:\/\//],
+    ].forEach(([frag, re]) => {
+      const r = run(inject(frag));
+      assert.strictEqual(r.status, 1, JSON.stringify(frag) + ' 가 통과함');
+      assert.ok(re.test(r.stderr), JSON.stringify(frag) + ' → ' + r.stderr);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 test('빌드 산출물: 최신 (build.js --check 와 같은 검사)', () => {
   const cp = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'build.js'), '--check'], { encoding: 'utf8' });

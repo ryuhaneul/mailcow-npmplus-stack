@@ -324,6 +324,12 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+/* native checkbox/radio have no border to recolor; use the same outline as buttons and links */
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 input[type="checkbox"] {
   width: 18px;
   height: 18px;
@@ -616,13 +622,26 @@ tr:hover td { background: var(--hover); }
 /* -- Starflow: dark-only decoration; panels turn transparent so the stars show through -- */
 html[data-theme="dark"] { background: var(--bg); }
 [data-theme="dark"] body { isolation: isolate; background: transparent; }
-[data-theme="dark"] .topbar { background: transparent; backdrop-filter: none; }
+/* Panels and the top bar are nearly opaque so star light never sits behind text (AA); stars show between panels and in the margins. */
+[data-theme="dark"] .topbar { background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: none; }
 [data-theme="dark"] .card,
 [data-theme="dark"] .group-card,
 [data-theme="dark"] .module-card,
 [data-theme="dark"] .toggle-label,
 [data-theme="dark"] .csv-help-content,
-[data-theme="dark"] .theme-btn { background: transparent; }
+[data-theme="dark"] .theme-btn { background: color-mix(in srgb, var(--surface) 97%, transparent); }
+/* Text that sits outside a panel gets the same kind of backing. */
+[data-theme="dark"] .subtitle,
+[data-theme="dark"] .groups-list > .loading,
+[data-theme="dark"] #tm-status:not(:empty),
+[data-theme="dark"] .container > .hint {
+  width: fit-content;
+  max-width: 100%;
+  padding-inline: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+}
+[data-theme="dark"] .groups-list > .loading { margin-inline: auto; }
 [data-theme="dark"] .module-card:hover,
 [data-theme="dark"] .theme-btn:hover { background: var(--hover); }
 #starflow-background {

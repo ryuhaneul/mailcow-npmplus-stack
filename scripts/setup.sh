@@ -402,6 +402,9 @@ else
     cp -r "$PROJECT_DIR/toolkit" "$TOOLKIT_DIR"
     chmod +x "$TOOLKIT_DIR/app_link.sh"
 fi
+# Persistent data (team distribution screen writes filter backups here; mounted at /data)
+mkdir -p "$TOOLKIT_DIR/data/filter-backups"
+chmod 700 "$TOOLKIT_DIR/data" "$TOOLKIT_DIR/data/filter-backups"
 # Create placeholder config (API key filled after Mailcow starts)
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32) && log "Generated TOOLKIT_SECRET_KEY"
 cat > "$TOOLKIT_DIR/config.yml" <<TKCFG

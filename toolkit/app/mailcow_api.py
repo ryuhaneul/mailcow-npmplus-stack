@@ -150,6 +150,12 @@ class MailcowAPI:
     def get_filters(self):
         return self._get("/api/v1/get/filters/all")
 
+    def edit_filter(self, filter_id, data):
+        return self._post("/api/v1/edit/filter", {
+            "items": [str(filter_id)],
+            "attr": data,
+        })
+
     # -- sync jobs ---------------------------------------------------------
 
     def get_syncjobs(self):

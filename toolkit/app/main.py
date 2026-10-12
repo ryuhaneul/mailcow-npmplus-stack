@@ -58,7 +58,7 @@ def create_app():
             modules.append({
                 "id": "groups",
                 "name": "Group Management",
-                "desc": "Manage alias-based mail groups with visual hierarchy",
+                "desc": "Manage which mailboxes receive copies of each team mailbox",
                 "icon": "group",
                 "url": url_for("groups.index"),
             })

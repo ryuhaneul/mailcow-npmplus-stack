@@ -187,6 +187,14 @@ if [ -d "$PROJECT_DIR/toolkit/app" ] && [ -d "$TOOLKIT_DIR" ]; then
     rsync -a --delete "$PROJECT_DIR/toolkit/app/" "$TOOLKIT_DIR/app/" 2>&1 | tee -a "$LOGFILE" | tail -3
 fi
 
+# Existing installs: add the /data mount (team distribution backups) to the
+# installed override if it is missing. Idempotent; the override is otherwise kept.
+if [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" TOOLKIT_DIR="$TOOLKIT_DIR" \
+        bash "$SCRIPT_DIR/apply-toolkit-data-mount.sh" 2>&1 | tee -a "$LOGFILE" | tail -5 \
+        || warn "apply-toolkit-data-mount.sh had issues — team distribution backups may be unavailable"
+fi
+
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     log "Building toolkit-mailcow (--pull)..."
     if (cd "$MAILCOW_DIR" && docker compose build --pull toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -10); then

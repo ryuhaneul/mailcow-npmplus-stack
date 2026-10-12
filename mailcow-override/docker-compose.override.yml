@@ -19,6 +19,7 @@ services:
     command: ["gunicorn", "-b", "0.0.0.0:5000", "-w", "2", "--access-logfile", "-", "main:app"]
     volumes:
       - /home/mailcow-toolkit/config.yml:/config/config.yml:ro
+      - /home/mailcow-toolkit/data:/data
     networks:
       mailcow-network:
     labels:

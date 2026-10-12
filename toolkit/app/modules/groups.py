@@ -14,7 +14,9 @@ not closed.
 
 import fcntl
 import json
+import logging
 import os
+import uuid
 from datetime import datetime, timezone
 
 from flask import Blueprint, render_template, request, jsonify
@@ -24,6 +26,7 @@ from mailcow_api import MailcowAPI
 bp = Blueprint("groups", __name__, template_folder="../templates")
 
 BACKUP_SUBDIR = "filter-backups"
+log = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -119,8 +122,10 @@ def api_teams():
         names = _active_mailboxes()
         teams, forwards = _team_view(_filters(), names)
     except Exception as e:
-        return jsonify({"teams": [], "forwards": [], "error": str(e)}), 502
-    return jsonify({"teams": teams, "forwards": forwards, "error": None})
+        return jsonify({"teams": [], "forwards": [], "mailboxes": [], "error": str(e)}), 502
+    # active mailboxes are listed so the screen can offer them as new members
+    return jsonify({"teams": teams, "forwards": forwards, "error": None,
+                    "mailboxes": [{"address": u, "name": n} for u, n in sorted(names.items())]})
 
 
 # -- writes -----------------------------------------------------------------
@@ -132,9 +137,8 @@ def _ensure_backup_dir():
     return d
 
 
-def _write_backup(d, record):
-    """Append one JSON line and fsync it. Raises on any failure."""
-    path = os.path.join(d, datetime.now(timezone.utc).strftime("%Y-%m") + ".jsonl")
+def _append_line(d, path, record):
+    """Append one JSON line to path and fsync it. Raises on any failure."""
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.fchmod(fd, 0o600)
@@ -147,6 +151,10 @@ def _write_backup(d, record):
         os.fsync(dfd)
     finally:
         os.close(dfd)
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _team_filter(filters, team):
@@ -197,16 +205,37 @@ def _apply_locked(action, team, address, backup_dir):
         return False, _members_out(sieve_dist.analyze(before), names)
 
     # 1. backup first; a failure here stops everything before mailcow is called
+    op_id = uuid.uuid4().hex
+    path = os.path.join(backup_dir, datetime.now(timezone.utc).strftime("%Y-%m") + ".jsonl")
     try:
-        _write_backup(backup_dir, {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        _append_line(backup_dir, path, {
+            "id": op_id, "ts": _now(),
             "mailbox": team, "filter_id": f.get("id"), "action": action,
             "address": address, "before": before, "after": after,
         })
     except OSError as e:
         raise ApiError(500, "backup_failed", f"could not write backup: {e}")
 
-    # 2. re-read right before saving; refuse if the script moved underneath us
+    # 2-4. the attempt; a result line follows whatever happens (the backup line
+    # alone does not mean the script was saved)
+    result = "error"
+    try:
+        _save(api, f, team, before, after)
+        result = "saved"
+    except ApiError as e:
+        if e.code == "conflict":
+            result = "conflict"
+        raise
+    finally:
+        try:
+            _append_line(backup_dir, path, {"id": op_id, "result": result, "ts": _now()})
+        except OSError:
+            log.exception("could not write result line for filter backup %s", op_id)
+    return True, _members_out(sieve_dist.analyze(after), names)
+
+
+def _save(api, f, team, before, after):
+    # re-read right before saving; refuse if the script moved underneath us
     try:
         again = _team_filter(_filters(), team)
     except ApiError:
@@ -216,7 +245,7 @@ def _apply_locked(action, team, address, backup_dir):
     if again.get("id") != f.get("id") or again.get("script_data") != before:
         raise ApiError(409, "conflict", "changed elsewhere; reload and try again")
 
-    # 3. save script_data only; keep description / active / type as they are
+    # save script_data only; keep description / active / type as they are
     attr = {"script_data": after}
     for k in ("script_desc", "active", "filter_type"):
         if f.get(k) is not None:
@@ -229,10 +258,9 @@ def _apply_locked(action, team, address, backup_dir):
     except Exception as e:
         raise ApiError(502, "mailcow_error", str(e))
 
-    # 4. confirm what mailcow now holds is what we meant to save
+    # confirm what mailcow now holds is what we meant to save
     if check.get("script_data") != after:
         raise ApiError(502, "verify_failed", "saved filter does not match; check it in mailcow")
-    return True, _members_out(sieve_dist.analyze(after), names)
 
 
 def _change(action):

@@ -20,6 +20,12 @@
       </label>
     </div>
 
+    <div class="team-picker">
+      <div class="hint" id="mb-teams-label" data-i18n="mb_teams_label">Teams (optional)</div>
+      <div id="mb-teams" class="chip-row" role="group" aria-labelledby="mb-teams-label"></div>
+      <span class="hint" id="mb-teams-hint" data-i18n="mb_teams_hint">Every account created successfully is added to the selected teams as a member.</span>
+    </div>
+
     <label><span data-i18n="mailbox_list">Mailbox List</span>
       <span class="hint" data-i18n="mailbox_list_hint">Format: email,password,name,quota_mb (one per line). Empty password → random.</span>
       <textarea id="mb-list" rows="6" placeholder="user1@example.com,,User One,2048&#10;user2@example.com,MyPass!,User Two,&#10;user3@example.com"></textarea>
@@ -66,6 +72,8 @@
   <div id="mb-results-container" class="hidden">
     <h3 data-i18n="results">Results</h3>
     <div id="mb-results-summary"></div>
+    <div id="mb-dist-summary" role="status" aria-live="polite"></div>
+    <p class="hint hidden" id="mb-dist-note" data-i18n="mb_dist_note">A failed team assignment does not delete the mailbox. Retry only repeats the assignment.</p>
     <div class="form-actions">
       <button type="button" class="btn" onclick="copyAllCredentials()" data-i18n="copy_all_credentials">Copy all credentials</button>
       <span id="mb-copy-status" class="hint"></span>
@@ -75,7 +83,8 @@
         <thead><tr>
           <th data-i18n="email">Email</th>
           <th data-i18n="password">Password</th>
-          <th data-i18n="status">Status</th>
+          <th data-i18n="mb_col_create">Create result</th>
+          <th id="mb-col-dist" class="hidden" data-i18n="mb_col_dist">Team assignment</th>
         </tr></thead>
         <tbody id="mb-results-body"></tbody>
       </table>

@@ -1,76 +1,38 @@
 const BASE = document.querySelector('meta[name="base-url"]').content.replace(/\/$/, '');
-let allMailboxes = [];
-let allGroups = [];
+let teams = [];
+let forwards = [];
+let mailboxes = [];
+let loadError = null;
+let actionError = "";   // last failed add/remove, shown until the next one starts
+let loaded = false;
+let loadGen = 0;       // only the newest list response may replace the screen
+let openTeam = "";     // team whose add panel is open
+let addSearch = "";
+const busy = new Set(); // teams with a save in flight
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadGroups();
-  loadMailboxes();
+  document.getElementById("tm-search").addEventListener("input", render);
+  const list = document.getElementById("tm-list");
+  list.addEventListener("click", onClick);
+  list.addEventListener("input", onInput);
+  loadTeams();
 });
 
-document.addEventListener("langchange", () => {
-  renderGroups();
-});
+document.addEventListener("langchange", render);
 
 async function api(path, opts = {}) {
   const res = await fetch(BASE + path, {
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-async function loadGroups() {
-  const container = document.getElementById("groups-container");
-  try {
-    allGroups = await api("/groups/api/list");
-    renderGroups();
-  } catch (e) {
-    container.innerHTML = `<div class="loading">${t('error_loading')}</div>`;
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* non-JSON error body */ }
+  if (!res.ok || (body && body.ok === false)) {
+    const err = new Error((body && body.error) || `API error: ${res.status}`);
+    err.code = body && body.code;
+    throw err;
   }
-}
-
-async function loadMailboxes() {
-  try {
-    allMailboxes = await api("/groups/api/mailboxes");
-  } catch (e) {
-    console.error("Failed to load mailboxes:", e);
-  }
-}
-
-function renderGroups() {
-  const container = document.getElementById("groups-container");
-  if (!allGroups.length) {
-    container.innerHTML = `<div class="loading">${t('no_groups_yet')}</div>`;
-    return;
-  }
-
-  container.innerHTML = allGroups.map(g => `
-    <div class="group-card">
-      <div class="group-header">
-        <div class="group-name">${esc(g.name)}</div>
-        <div class="group-actions">
-          <button class="btn btn-sm" onclick="showEditModal('${esc(g.address)}')">${t('edit')}</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteGroup(${g.id}, '${esc(g.name)}')">${t('delete')}</button>
-        </div>
-      </div>
-
-      <div class="group-section">
-        <div class="group-section-title">${t('inbound_addresses')}</div>
-        ${g.inbound.map(i => `
-          <span class="tag">${esc(i.address)}
-            <button class="tag-remove" onclick="removeInbound(${i.id})" aria-label="${t('delete')}">&times;</button>
-          </span>
-        `).join("") || `<span class="tag tag-empty">${t('none')}</span>`}
-        <button class="btn btn-sm tag-add-btn" onclick="showInboundModal('${esc(g.address)}')" aria-label="${t('add_inbound_address')}">+</button>
-      </div>
-
-      <div class="group-section">
-        <div class="group-section-title">${t('members')}</div>
-        ${g.members.map(m => `<span class="tag tag-member">${esc(m)}</span>`).join("") || `<span class="tag tag-empty">${t('none')}</span>`}
-      </div>
-    </div>
-  `).join("");
+  return body;
 }
 
 function esc(s) {
@@ -79,151 +41,182 @@ function esc(s) {
   return d.innerHTML.replace(/'/g, "&#39;").replace(/"/g, "&quot;");
 }
 
-// -- Create/Edit Modal --
-
-let lastFocusedElement = null;
-
-function showCreateModal() {
-  lastFocusedElement = document.activeElement;
-  document.getElementById("modal-title").textContent = t("new_group");
-  document.getElementById("group-id").value = "";
-  document.getElementById("group-name").value = "";
-  renderDomainSelect();
-  renderMemberCheckboxes([]);
-  document.getElementById("modal-overlay").classList.remove("hidden");
-  document.getElementById("group-name").focus();
+function showAlert(msg) {
+  const el = document.getElementById("tm-alert");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
 }
 
-function showEditModal(address) {
-  lastFocusedElement = document.activeElement;
-  const g = allGroups.find(g => g.address === address);
-  if (!g) return;
-  document.getElementById("modal-title").textContent = t("edit_group");
-  document.getElementById("group-id").value = g.id;
-  document.getElementById("group-name").value = g.name;
-  renderDomainSelect();
-  renderMemberCheckboxes(g.members);
-  document.getElementById("modal-overlay").classList.remove("hidden");
-  document.getElementById("group-name").focus();
+function setStatus(msg) { document.getElementById("tm-status").textContent = msg || ""; }
+
+// Translated text for an API error; unknown codes fall back to the server text.
+function errText(e) {
+  const key = e.code ? `tm_err_${e.code}` : "";
+  if (key && t(key) !== key) return t(key);
+  return `${t('tm_error')}: ${e.message}`;
 }
 
-function renderDomainSelect() {
-  const sel = document.getElementById("group-domain");
-  const domains = [...new Set(allMailboxes.map(m => m.username.split("@")[1]))];
-  sel.innerHTML = domains.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join("");
-}
-
-function renderMemberCheckboxes(selected) {
-  const container = document.getElementById("member-checkboxes");
-  container.innerHTML = allMailboxes.map(m => `
-    <label>
-      <input type="checkbox" value="${esc(m.username)}" ${selected.includes(m.username) ? "checked" : ""}>
-      ${esc(m.username)}
-    </label>
-  `).join("");
-}
-
-function hideModal() {
-  document.getElementById("modal-overlay").classList.add("hidden");
-  if (lastFocusedElement) lastFocusedElement.focus();
-}
-function closeModal(e) { if (e.target === e.currentTarget) hideModal(); }
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    if (!document.getElementById("inbound-overlay").classList.contains("hidden")) hideInbound();
-    else if (!document.getElementById("modal-overlay").classList.contains("hidden")) hideModal();
-  }
-});
-
-async function saveGroup(e) {
-  e.preventDefault();
-  const submitBtn = e.target.querySelector('[type="submit"]');
-  submitBtn.disabled = true;
-  const id = document.getElementById("group-id").value;
-  const name = document.getElementById("group-name").value;
-  const domain = document.getElementById("group-domain").value;
-  const checks = document.querySelectorAll("#member-checkboxes input:checked");
-  const members = Array.from(checks).map(c => c.value);
-
+async function loadTeams() {
+  const gen = ++loadGen;
   try {
-    if (id) {
-      await api("/groups/api/update", {
-        method: "POST",
-        body: JSON.stringify({ id: parseInt(id), name, members }),
-      });
-    } else {
-      await api("/groups/api/create", {
-        method: "POST",
-        body: JSON.stringify({ name, domain, members }),
-      });
+    const data = await api("/groups/api/teams");
+    if (gen !== loadGen) return;  // a newer request owns the screen
+    teams = data.teams || [];
+    forwards = data.forwards || [];
+    mailboxes = data.mailboxes || [];
+    loadError = null;
+  } catch (e) {
+    if (gen !== loadGen) return;
+    loadError = e.message;
+  }
+  loaded = true;
+  render();
+}
+
+function has(text, q) { return String(text || "").toLowerCase().includes(q); }
+
+function teamMatches(tm, q) {
+  return !q || has(tm.mailbox, q) || tm.members.some(m => has(m.address, q) || has(m.name, q));
+}
+
+function isMember(tm, address) {
+  return tm.members.some(m => m.address.toLowerCase() === address.toLowerCase());
+}
+
+function candidates(tm) {
+  const q = addSearch.trim().toLowerCase();
+  return mailboxes.filter(m => m.address.toLowerCase() !== tm.mailbox.toLowerCase() && !isMember(tm, m.address) &&
+    (!q || has(m.address, q) || has(m.name, q)));
+}
+
+function optionsHtml(tm) {
+  return `<option value="">${esc(t('tm_add_select'))}</option>` +
+    candidates(tm).map(m => `<option value="${esc(m.address)}">${esc(m.address)}${m.name ? ` — ${esc(m.name)}` : ""}</option>`).join("");
+}
+
+function memberRow(tm, m, canRemove, isBusy, onlyOne) {
+  const hintId = `tm-last-${teams.indexOf(tm)}`;
+  let btn = "";
+  if (canRemove) {
+    btn = `<button type="button" class="btn btn-sm btn-danger" data-act="remove" data-team="${esc(tm.mailbox)}" data-addr="${esc(m.address)}"` +
+      `${isBusy || onlyOne ? " disabled" : ""}${onlyOne ? ` aria-describedby="${hintId}"` : ""}>${t('tm_remove')}</button>`;
+  }
+  return `<li class="member-row">
+      <span class="member-info">${m.name ? `<span class="member-name">${esc(m.name)}</span>` : ""}<span class="member-addr">${esc(m.address)}</span></span>
+      ${btn}
+    </li>`;
+}
+
+function reasonText(reason) {
+  const key = `tm_reason_${reason}`;
+  return t(key) !== key ? t(key) : t('tm_reason_unparseable');
+}
+
+function teamCard(tm) {
+  const isBusy = busy.has(tm.mailbox);
+  const canEdit = tm.editable;
+  const onlyOne = canEdit && tm.members.length === 1;
+  const idx = teams.indexOf(tm);
+  const open = canEdit && openTeam === tm.mailbox;
+  const header = `<div class="group-header">
+      <h2 class="group-name">${esc(tm.mailbox)}</h2>
+      <div class="group-actions">
+        ${tm.members.length ? `<span class="tag">${esc(t('tm_members_count', tm.members.length))}</span>` : ""}
+        ${canEdit ? `<button type="button" class="btn btn-sm" data-act="toggle-add" data-team="${esc(tm.mailbox)}" aria-expanded="${open}"${isBusy ? " disabled" : ""}>${t('tm_add_member')}</button>` : ""}
+      </div>
+    </div>`;
+  const reason = !canEdit ? `<p class="team-reason" role="note">${esc(reasonText(tm.reason))}</p>` : "";
+  const rows = tm.members.map(m => memberRow(tm, m, canEdit, isBusy, onlyOne)).join("");
+  const lastHint = onlyOne ? `<p class="hint" id="tm-last-${idx}">${esc(t('tm_last_member'))}</p>` : "";
+  const panel = open ? `<div class="add-panel">
+      <input type="text" class="tm-add-search" data-team="${esc(tm.mailbox)}" value="${esc(addSearch)}" aria-label="${esc(t('tm_add_search'))}" placeholder="${esc(t('tm_search'))}" autocomplete="off">
+      <select class="tm-add-select" aria-label="${esc(t('tm_add_select'))}">${optionsHtml(tm)}</select>
+      <button type="button" class="btn btn-sm btn-primary" data-act="add" data-team="${esc(tm.mailbox)}"${isBusy ? " disabled" : ""}>${t('tm_add_submit')}</button>
+    </div>` : "";
+  return `<div class="group-card${canEdit ? "" : " team-readonly"}">${header}${reason}${rows ? `<ul class="member-list">${rows}</ul>` : ""}${lastHint}${panel}</div>`;
+}
+
+// Re-render keeps keyboard focus on the same control when it still exists.
+function focusKey() {
+  const a = document.activeElement;
+  return a && a.dataset && a.dataset.act ? { act: a.dataset.act, team: a.dataset.team, addr: a.dataset.addr } : null;
+}
+function restoreFocus(k) {
+  if (!k) return;
+  // a removed member's button is gone: land on the team's "add member" button instead
+  const hit = [...document.querySelectorAll("#tm-list [data-act]")].find(el =>
+    el.dataset.act === k.act && el.dataset.team === k.team && el.dataset.addr === k.addr && !el.disabled);
+  const fallback = [...document.querySelectorAll("#tm-list [data-act=toggle-add]")].find(el => el.dataset.team === k.team);
+  (hit || fallback || document.getElementById("tm-list")).focus();
+}
+
+function render() {
+  const list = document.getElementById("tm-list");
+  const q = document.getElementById("tm-search").value.trim().toLowerCase();
+  const key = focusKey();
+  showAlert(loadError ? `${t('tm_load_error')}: ${loadError}` : actionError);
+  if (!loaded) return;
+  if (loadError && !teams.length) {
+    list.innerHTML = `<div class="loading">${esc(t('tm_load_error'))}</div>`;
+  } else {
+    const shown = teams.filter(tm => teamMatches(tm, q));
+    list.innerHTML = shown.length ? shown.map(teamCard).join("")
+      : `<div class="loading">${esc(t(teams.length ? 'tm_no_match' : 'tm_empty'))}</div>`;
+  }
+  const fw = forwards.filter(f => !q || has(f.mailbox, q) || has(f.to, q));
+  document.getElementById("tm-forwards").classList.toggle("hidden", !fw.length);
+  document.getElementById("tm-forwards-list").innerHTML = fw.map(f =>
+    `<li class="member-row"><span class="member-info"><span class="member-addr">${esc(f.mailbox)}</span><span class="fwd-arrow" aria-label="${esc(t('tm_forward_to'))}">→</span><span class="member-addr">${esc(f.to)}</span></span></li>`).join("");
+  restoreFocus(key);
+}
+
+function onInput(e) {
+  const input = e.target.closest(".tm-add-search");
+  if (!input) return;
+  addSearch = input.value;
+  const tm = teams.find(x => x.mailbox === input.dataset.team);
+  const sel = input.parentElement.querySelector(".tm-add-select");
+  if (tm && sel) sel.innerHTML = optionsHtml(tm);  // only the options; the input keeps focus
+}
+
+function onClick(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn || btn.disabled) return;
+  const { act, team, addr } = btn.dataset;
+  if (act === "toggle-add") {
+    openTeam = openTeam === team ? "" : team;
+    addSearch = "";
+    render();
+    if (openTeam) {
+      const inp = document.querySelector(".tm-add-search");
+      if (inp) inp.focus();
     }
-    hideModal();
-    loadGroups();
-  } catch (err) {
-    alert(t('error_save'));
+  } else if (act === "add") {
+    const sel = btn.parentElement.querySelector(".tm-add-select");
+    if (sel && sel.value) mutate("add", team, sel.value);
+  } else if (act === "remove") {
+    if (confirm(t('tm_remove_confirm', team, addr))) mutate("remove", team, addr);
+  }
+}
+
+// One save at a time per team; the screen is reloaded afterwards so it always
+// shows what mailcow holds, whatever the outcome.
+async function mutate(action, team, address) {
+  if (busy.has(team)) return;
+  const key = focusKey();   // the control disables while saving; give focus back afterwards
+  busy.add(team);
+  setStatus(t('tm_saving'));
+  actionError = "";
+  render();
+  try {
+    const res = await api(`/groups/api/${action}`, { method: "POST", body: JSON.stringify({ team, address }) });
+    setStatus(res.changed ? t(action === "add" ? 'tm_added' : 'tm_removed', address) : t('tm_nochange'));
+  } catch (e) {
+    setStatus("");
+    actionError = errText(e);
   } finally {
-    submitBtn.disabled = false;
+    busy.delete(team);
   }
-}
-
-async function deleteGroup(id, name) {
-  if (!confirm(t('delete_group_confirm', name))) return;
-  try {
-    await api("/groups/api/delete", {
-      method: "POST",
-      body: JSON.stringify({ id }),
-    });
-    loadGroups();
-  } catch (err) {
-    alert(t('error_save'));
-  }
-}
-
-// -- Inbound Modal --
-
-function showInboundModal(groupAddress) {
-  lastFocusedElement = document.activeElement;
-  document.getElementById("inbound-group-addr").value = groupAddress;
-  document.getElementById("inbound-address").value = "";
-  document.getElementById("inbound-overlay").classList.remove("hidden");
-  document.getElementById("inbound-address").focus();
-}
-function hideInbound() {
-  document.getElementById("inbound-overlay").classList.add("hidden");
-  if (lastFocusedElement) lastFocusedElement.focus();
-}
-function closeInbound(e) { if (e.target === e.currentTarget) hideInbound(); }
-
-async function saveInbound(e) {
-  e.preventDefault();
-  const submitBtn = e.target.querySelector('[type="submit"]');
-  submitBtn.disabled = true;
-  const address = document.getElementById("inbound-address").value;
-  const groupAddress = document.getElementById("inbound-group-addr").value;
-  try {
-    await api("/groups/api/add_inbound", {
-      method: "POST",
-      body: JSON.stringify({ address, group_address: groupAddress }),
-    });
-    hideInbound();
-    loadGroups();
-  } catch (err) {
-    alert(t('error_save'));
-  } finally {
-    submitBtn.disabled = false;
-  }
-}
-
-async function removeInbound(id) {
-  if (!confirm(t('remove_inbound_confirm'))) return;
-  try {
-    await api("/groups/api/remove_inbound", {
-      method: "POST",
-      body: JSON.stringify({ id }),
-    });
-    loadGroups();
-  } catch (err) {
-    alert(t('error_save'));
-  }
+  await loadTeams();
+  if (!busy.has(team)) restoreFocus(key);
 }

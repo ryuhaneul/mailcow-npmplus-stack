@@ -179,6 +179,7 @@ services:
     command: ["gunicorn", "-b", "0.0.0.0:5000", "-w", "2", "--access-logfile", "-", "main:app"]
     volumes:
       - /home/mailcow-toolkit/config.yml:/config/config.yml:ro
+      - /home/mailcow-toolkit/data:/data      # 팀 분배 변경 전 필터 백업 (4.2)
     networks:
       mailcow-network:
     labels:
@@ -329,7 +330,30 @@ toolkit:
 
 화면 오른쪽 위 해/달 버튼으로 라이트·다크 테마를 전환한다(선택은 브라우저에 저장, 저장 전에는 시스템 설정을 따른다). 다크 테마에서만 배경에 별 장식이 로드된다.
 
-### 4.2 공유 권한 (shares 모듈)
+### 4.2 팀 분배 관리 (groups 모듈)
+
+"팀"은 메일박스의 mailcow **prefilter**(활성, 메일박스당 1개)에서 맨 앞 단계(`{ }` 밖)에 있는 `redirect :copy "<주소>";` 줄로 정해진다. 그 줄의 주소가 **구성원**이고, 팀 메일함으로 온 메일의 사본을 받는다. 구성원이 1명 이상인 메일함이 팀이다. 별칭(alias)은 쓰지 않으며 서버의 별칭은 건드리지 않는다.
+
+**그룹 관리 화면**: 팀 카드(팀 주소·구성원 수·구성원 이름/주소), 검색(팀·구성원), [구성원 추가](메일박스를 검색해 선택, 이미 구성원인 사람은 제외), [빼기](확인 후; 마지막 1명은 비활성). 받은 메일을 통째로 다른 메일함으로 넘기는 메일함(`redirect "<주소>";` 만 있는 경우)은 아래에 읽기 전용으로 나온다. 내용을 해석할 수 없거나 안전하게 고칠 수 없는 필터(활성 prefilter 2개 이상, 구성원 앞에 `stop`/`discard`/이동 명령, 구성원 줄에 다른 명령이 같이 있음 등)는 편집 버튼 없이 "mailcow 필터 화면에서 직접 수정"으로 표시된다.
+
+**메일박스 생성 화면**: 일괄 생성 위의 팀 버튼(여러 개 선택 가능)을 고르면, **생성에 성공한 계정만** 선택한 팀에 구성원으로 추가된다. 결과 표에 "생성 결과"와 팀별 "팀 분배" 결과가 따로 나오고, 분배에 실패한 칸은 [다시 시도]로 분배만 다시 한다(이미 구성원이면 변경 없이 성공). 분배가 실패해도 메일박스는 삭제되지 않는다. 팀 목록을 못 불러오면 안내 한 줄만 나오고 생성은 그대로 된다.
+
+**저장 방식**: 넣기·빼기는 그 줄 하나만 추가·삭제하고 나머지 원문은 그대로 둔다. 저장할 때마다 파일 잠금 → 조회 → 백업 기록 → 저장 직전 재조회(다르면 "다른 곳에서 바뀌었습니다" 409) → `edit/filter`(script_data 만 변경) → 재조회 확인 순서로 처리한다. mailcow 필터 화면에서 동시에 저장하는 경우까지 막아 주지는 않는다.
+
+**백업**: `/home/mailcow-toolkit/data/filter-backups/YYYY-MM.jsonl` (컨테이너 안 `/data/filter-backups/`, 디렉터리 0700·파일 0600). 변경마다 `{id, ts, mailbox, filter_id, action, address, before, after}` 한 줄을 mailcow 호출 **전에** 기록하고, 시도가 끝나면 `{id, result: "saved"|"conflict"|"error", ts}` 한 줄을 이어 쓴다. 필터를 되돌릴 때는 해당 줄의 `before` 를 그 메일함 필터의 스크립트로 복원한다.
+
+**기존 설치에 마운트 추가** (메일 서비스는 건드리지 않는다. 전체 `update.sh` 와 별개):
+
+```bash
+sudo <스택 레포>/scripts/apply-toolkit-data-mount.sh   # 멱등: 디렉터리 생성 + override 에 마운트가 없을 때만 한 줄 추가(.bak 백업)
+cd /home/mailcow-dockerized && docker compose up -d --build toolkit-mailcow
+```
+
+신규 설치는 `setup.sh` 가, 전체 업데이트는 `update.sh` 5단계가 같은 일을 한다. Toolkit 디렉터리를 백업본으로 복원(롤백)할 때도 `data/filter-backups` 는 지우거나 덮어쓰지 말고 보존한다(변경 전 필터 원문의 유일한 사본이다).
+
+`config.yml` 의 `toolkit.modules` 에 `groups` 가 있어야 노출된다. 생성 화면의 팀 버튼은 `groups` 모듈이 꺼져 있으면 안내 한 줄로 대체된다.
+
+### 4.3 공유 권한 (shares 모듈)
 
 다른 메일박스의 **받은편지함(INBOX) 하나**를 읽기 전용(`lookup` `read`)으로 공유한다.
 Toolkit → "공유 권한" 에서 주인 메일박스를 고르고, 공유받을 사람을 선택해 [공유] / [회수].
@@ -380,7 +404,7 @@ mail_cache_unaccessed_field_drop = 3650 days
 - `doveadm reload` 가 실패하거나 중단된 뒤에는 파일이 이미 같아서 `apply` 를 다시 실행해도 reload 를 다시 하지 않는다.
   그 경우 `docker compose exec -T dovecot-mailcow doveadm reload`(또는 dovecot 재시작)를 직접 실행한다.
 
-### 4.3 Gmail 필터 변환 도구 (`tools/gmail-filter-to-sieve.html`)
+### 4.4 Gmail 필터 변환 도구 (`tools/gmail-filter-to-sieve.html`)
 
 Gmail 설정 → 필터에서 내보낸 `mailFilters.xml` 을 웹메일(SnappyMail)에 붙여 넣을 Sieve 스크립트로 바꾸는 단일 HTML 파일이다. 서버에 설치하는 것이 아니라 **이 파일 하나를 직원에게 전달**하면 된다. 더블클릭으로 열어 XML 을 끌어다 놓으면 브라우저 안에서만 변환하고(외부 요청·업로드 없음), 필터별 변환 결과·경고, 만들어질 폴더, 생성된 스크립트(복사 버튼)가 한 화면에 나온다. 사용자는 웹메일 설정 → 필터 → `Add a Script` 에 붙여 넣고 목록에서 새 스크립트를 켠다(한 번에 하나만 켜지므로 기존 스크립트나 웹메일 필터 화면에서 만든 필터는 꺼진다 — 붙여 넣기 전에 기존 스크립트를 복사해 두면 되돌릴 수 있다). 자세한 단계와 주의사항은 화면 아래 안내에 있다.
 

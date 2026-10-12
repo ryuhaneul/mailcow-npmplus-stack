@@ -4,7 +4,7 @@ Modular management tools for Mailcow, served as a sidecar container with Mailcow
 
 ## Modules
 
-- **Groups** — Visual alias-based mail group management (inbound addresses → group → members)
+- **Groups** — Team distribution: see which mailboxes receive a copy of each team mailbox's mail, and add or remove members (edits the mailcow prefilter)
 - **Sync Jobs** — Batch create and monitor IMAP sync jobs
 
 ## Installation (Integrated)

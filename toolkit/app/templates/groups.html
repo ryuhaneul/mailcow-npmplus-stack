@@ -5,50 +5,25 @@
 {% block content %}
 <div class="page-header">
   <h1 data-i18n="group_management">Group Management</h1>
-  <button class="btn btn-primary" onclick="showCreateModal()" data-i18n="new_group">+ New Group</button>
 </div>
 
-<div id="groups-container" class="groups-list">
+<div class="card">
+  <p class="hint" data-i18n="tm_hint">Manage who receives a copy of the mail sent to each team mailbox. Changes are saved to the mailcow filter right away, and the previous script is backed up on the server first.</p>
+  <span id="tm-search-name" class="hidden" data-i18n="tm_search_label">Search teams and members</span>
+  <input type="text" id="tm-search" aria-labelledby="tm-search-name" placeholder="Search" data-i18n="tm_search" autocomplete="off">
+</div>
+
+<div id="tm-alert" class="status-error hidden" role="alert"></div>
+<div id="tm-status" class="hint" role="status" aria-live="polite"></div>
+
+<div id="tm-list" class="groups-list">
   <div class="loading" data-i18n="loading">Loading...</div>
 </div>
 
-<!-- Create/Edit Modal -->
-<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal(event)">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" onclick="event.stopPropagation()">
-    <h2 id="modal-title" data-i18n="new_group">New Group</h2>
-    <form id="group-form" onsubmit="saveGroup(event)">
-      <input type="hidden" id="group-id" value="">
-      <label><span data-i18n="group_name">Group Name</span>
-        <input type="text" id="group-name" required placeholder="e.g. Sales Team">
-      </label>
-      <label><span data-i18n="domain">Domain</span>
-        <select id="group-domain"></select>
-      </label>
-      <label><span data-i18n="members">Members</span></label>
-      <div id="member-checkboxes" class="checkbox-grid"></div>
-      <div class="modal-actions">
-        <button type="button" class="btn" onclick="hideModal()" data-i18n="cancel">Cancel</button>
-        <button type="submit" class="btn btn-primary" data-i18n="save">Save</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Add Inbound Modal -->
-<div id="inbound-overlay" class="modal-overlay hidden" onclick="closeInbound(event)">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="inbound-title" onclick="event.stopPropagation()">
-    <h2 id="inbound-title" data-i18n="add_inbound_address">Add Inbound Address</h2>
-    <form id="inbound-form" onsubmit="saveInbound(event)">
-      <input type="hidden" id="inbound-group-addr" value="">
-      <label><span data-i18n="email_forward_hint">Email address that should forward to this group</span>
-        <input type="email" id="inbound-address" required placeholder="sales@example.com">
-      </label>
-      <div class="modal-actions">
-        <button type="button" class="btn" onclick="hideInbound()" data-i18n="cancel">Cancel</button>
-        <button type="submit" class="btn btn-primary" data-i18n="add">Add</button>
-      </div>
-    </form>
-  </div>
+<div id="tm-forwards" class="card hidden">
+  <h2 data-i18n="tm_forwards_title">Forwarded to another mailbox</h2>
+  <p class="hint" data-i18n="tm_forwards_hint">These mailboxes pass every incoming mail on to another mailbox. They cannot be edited here.</p>
+  <ul id="tm-forwards-list" class="member-list"></ul>
 </div>
 {% endblock %}
 

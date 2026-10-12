@@ -386,8 +386,8 @@ tr:hover td { background: var(--hover); }
   gap: 10px;
   margin-bottom: 12px;
 }
-.group-name { font-weight: 600; font-size: 1.05rem; min-width: 0; overflow-wrap: anywhere; }
-.group-actions { display: flex; gap: 6px; flex: none; }
+.group-name { margin: 0; font-weight: 600; font-size: 1.05rem; min-width: 0; overflow-wrap: anywhere; }
+.group-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
 .group-section { margin-bottom: 12px; }
 .group-section-title {
@@ -437,6 +437,38 @@ tr:hover td { background: var(--hover); }
 .tag-remove:hover { background: var(--hover); color: var(--danger); }
 .tag-empty { font-family: inherit; }
 .tag-add-btn { margin-left: 4px; min-width: 36px; padding: 0; }
+
+/* -- Team distribution (groups + mailbox create) -- */
+#tm-status { min-height: 1.3em; margin: 0 0 10px; }
+.member-list { list-style: none; margin: 0; padding: 0; }
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--rule);
+}
+.member-info { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; overflow-wrap: anywhere; }
+.member-name { font-weight: 600; }
+.member-addr { font-family: var(--mono); font-size: 0.82rem; color: var(--muted); }
+.fwd-arrow { color: var(--muted); }
+.team-reason {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
+  border-radius: 8px;
+  color: var(--warn);
+  font-size: 0.9rem;
+}
+.add-panel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.add-panel input, .add-panel select { margin-top: 0; width: auto; flex: 1 1 180px; min-width: 0; }
+.team-picker { margin-bottom: 16px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.3rem 0 0.8rem; }
+.dist-list { list-style: none; margin: 0; padding: 0; }
+.dist-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 2px 0; }
+.dist-team { font-family: var(--mono); font-size: 0.82rem; }
 
 /* -- Modal -- */
 .modal-overlay {
@@ -511,7 +543,8 @@ tr:hover td { background: var(--hover); }
 .status-failed { color: var(--danger); }
 .status-running { color: var(--accent); }
 .status-pending { color: var(--muted); }
-#sh-alert {
+#sh-alert,
+#tm-alert {
   margin: 0 0 18px;
   padding: 12px 14px;
   background: var(--danger-soft);
@@ -613,6 +646,7 @@ html[data-theme="dark"] { background: var(--bg); }
   .card { padding: 16px; }
   .group-card { padding: 16px; }
   .group-header { flex-wrap: wrap; }
+  .member-row { flex-wrap: wrap; }
   .modal { padding: 18px; }
 }
 

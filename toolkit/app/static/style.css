@@ -242,7 +242,7 @@ h3 { font-size: 1rem; margin: 1.2rem 0 0.6rem; }
 .module-icon svg { width: 100%; height: 100%; color: var(--accent); }
 .module-info { min-width: 0; }
 .module-name { font-weight: 600; letter-spacing: -0.01em; word-break: keep-all; }
-.module-desc { font-size: 0.92rem; color: var(--muted); margin-top: 2px; word-break: keep-all; }
+.module-desc { font-size: 0.92rem; color: var(--muted); margin-top: 2px; word-break: keep-all; overflow-wrap: anywhere; }
 
 /* -- Cards -- */
 .card {
@@ -623,23 +623,24 @@ tr:hover td { background: var(--hover); }
 html[data-theme="dark"] { background: var(--bg); }
 [data-theme="dark"] body { isolation: isolate; background: transparent; }
 /* Panels and the top bar are nearly opaque so star light never sits behind text (AA); stars show between panels and in the margins. */
-[data-theme="dark"] .topbar { background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: none; }
+[data-theme="dark"] .topbar { background: color-mix(in srgb, var(--bg) 97%, transparent); backdrop-filter: none; }
 [data-theme="dark"] .card,
 [data-theme="dark"] .group-card,
 [data-theme="dark"] .module-card,
 [data-theme="dark"] .toggle-label,
 [data-theme="dark"] .csv-help-content,
-[data-theme="dark"] .theme-btn { background: color-mix(in srgb, var(--surface) 97%, transparent); }
+[data-theme="dark"] .theme-btn { background: color-mix(in srgb, var(--surface) 99%, transparent); }
 /* Text that sits outside a panel gets the same kind of backing. */
+[data-theme="dark"] h1,
 [data-theme="dark"] .subtitle,
 [data-theme="dark"] .groups-list > .loading,
-[data-theme="dark"] #tm-status:not(:empty),
-[data-theme="dark"] .container > .hint {
+[data-theme="dark"] .container > .hint:not(:empty) {
   width: fit-content;
   max-width: 100%;
   padding-inline: 10px;
+  margin-left: -10px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  background: color-mix(in srgb, var(--bg) 97%, transparent);
 }
 [data-theme="dark"] .groups-list > .loading { margin-inline: auto; }
 [data-theme="dark"] .module-card:hover,

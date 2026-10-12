@@ -12,6 +12,7 @@ can still change a script between that last read and the save; that window is
 not closed.
 """
 
+import errno
 import fcntl
 import json
 import logging
@@ -63,7 +64,7 @@ def _active_prefilters(filters):
     """username -> list of active prefilters."""
     out = {}
     for f in filters:
-        if f.get("username") and f.get("filter_type") == "prefilter" \
+        if isinstance(f.get("username"), str) and f["username"] and f.get("filter_type") == "prefilter" \
                 and str(f.get("active")) == "1":
             out.setdefault(f["username"], []).append(f)
     return out
@@ -83,31 +84,43 @@ def _members_out(analysis, names):
     return out
 
 
+def _team_entry(user, fl, names):
+    """(team dict or None, forwards list) for one mailbox's active prefilters."""
+    if len(fl) > 1:
+        if any(_mentions_redirect(f) for f in fl):
+            return {"mailbox": user, "filter_id": None, "members": [],
+                    "editable": False, "reason": "multiple_prefilters"}, []
+        return None, []
+    f = fl[0]
+    a = sieve_dist.analyze(f.get("script_data"))
+    if not a.parsed:
+        if _mentions_redirect(f):
+            return {"mailbox": user, "filter_id": f.get("id"), "members": [],
+                    "editable": False, "reason": "unparseable"}, []
+        return None, []
+    if a.members:
+        reason = "stopper_before_member" if a.stopper_before_member else (
+            "line_not_simple" if not a.members[-1].simple else "")
+        return {"mailbox": user, "filter_id": f.get("id"),
+                "members": _members_out(a, names),
+                "editable": not reason, "reason": reason}, []
+    return None, [{"mailbox": user, "to": to} for to in a.forwards]
+
+
 def _team_view(filters, names):
-    """(teams, forwards) from the mailcow filter list."""
+    """(teams, forwards) from the mailcow filter list. One mailbox's filter that
+    cannot be handled is shown as unreadable; it never breaks the others."""
     teams, forwards = [], []
     for user, fl in sorted(_active_prefilters(filters).items()):
-        if len(fl) > 1:
-            if any(_mentions_redirect(f) for f in fl):
-                teams.append({"mailbox": user, "filter_id": None, "members": [],
-                              "editable": False, "reason": "multiple_prefilters"})
-            continue
-        f = fl[0]
-        a = sieve_dist.analyze(f.get("script_data"))
-        if not a.parsed:
-            if _mentions_redirect(f):
-                teams.append({"mailbox": user, "filter_id": f.get("id"), "members": [],
-                              "editable": False, "reason": "unparseable"})
-            continue
-        if a.members:
-            reason = "stopper_before_member" if a.stopper_before_member else (
-                "line_not_simple" if not a.members[-1].simple else "")
-            teams.append({"mailbox": user, "filter_id": f.get("id"),
-                          "members": _members_out(a, names),
-                          "editable": not reason, "reason": reason})
-        elif a.forwards:
-            for to in a.forwards:
-                forwards.append({"mailbox": user, "to": to})
+        try:
+            team, fw = _team_entry(user, fl, names)
+        except Exception:
+            log.exception("could not read the filter of %s", user)
+            team, fw = {"mailbox": user, "filter_id": None, "members": [],
+                        "editable": False, "reason": "unparseable"}, []
+        if team:
+            teams.append(team)
+        forwards.extend(fw)
     return teams, forwards
 
 
@@ -138,12 +151,30 @@ def _ensure_backup_dir():
 
 
 def _append_line(d, path, record):
-    """Append one JSON line to path and fsync it. Raises on any failure."""
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    """Append one JSON line to path and fsync it; raise unless the whole line is
+    written. A file that does not end in a newline (an earlier partial write) is
+    first closed with one, so a bad line never swallows the next record."""
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.fchmod(fd, 0o600)
-        os.write(fd, (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
-        os.fsync(fd)
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            line = b"\n" + line
+        try:
+            view = memoryview(line)
+            while view:
+                n = os.write(fd, view)
+                if n <= 0:
+                    raise OSError(errno.EIO, "short write (0 bytes)")
+                view = view[n:]
+            os.fsync(fd)
+        except OSError:
+            try:  # leave the file at a line boundary for whatever is written next
+                os.write(fd, b"\n")
+            except OSError:
+                pass
+            raise
     finally:
         os.close(fd)
     dfd = os.open(d, os.O_RDONLY)
@@ -245,11 +276,12 @@ def _save(api, f, team, before, after):
     if again.get("id") != f.get("id") or again.get("script_data") != before:
         raise ApiError(409, "conflict", "changed elsewhere; reload and try again")
 
-    # save script_data only; keep description / active / type as they are
+    # save script_data only; description / active / type go back exactly as the
+    # fresh read above holds them, so a change made meanwhile is not lost
     attr = {"script_data": after}
     for k in ("script_desc", "active", "filter_type"):
-        if f.get(k) is not None:
-            attr[k] = str(f[k])
+        if again.get(k) is not None:
+            attr[k] = str(again[k])
     try:
         api.edit_filter(f.get("id"), attr)
         check = _team_filter(_filters(), team)

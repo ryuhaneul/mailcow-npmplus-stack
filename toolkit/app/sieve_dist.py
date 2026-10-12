@@ -106,7 +106,7 @@ def _tokenize(script):
                 raise Unparseable("multi-line text or unsupported syntax")
             toks.append(("id", m.group(0).lower(), i, m.end()))
             i = m.end()
-        elif c.isdigit():
+        elif c in "0123456789":   # ASCII only; str.isdigit() also accepts e.g. full-width digits
             m = _NUM.match(script, i)
             toks.append(("num", m.group(0), i, m.end()))
             i = m.end()
@@ -198,6 +198,9 @@ def analyze(script):
         cmds = _top_level_commands(_tokenize(script))
     except Unparseable as e:
         a.reason = str(e)
+        return a
+    except Exception as e:  # anything unexpected is "cannot read", never a crash
+        a.reason = f"unexpected: {type(e).__name__}"
         return a
     a.parsed = True
     stoppers = []

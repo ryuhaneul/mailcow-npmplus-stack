@@ -14,6 +14,10 @@
 #      that mount is not there yet. Everything else in the override is kept
 #      as is; the original is copied to docker-compose.override.yml.bak.<time>
 #      first, and restored if "docker compose config" rejects the result.
+#      "docker compose config" must pass BEFORE the edit too (and docker must be
+#      present); otherwise nothing is changed and the script fails. Overrides
+#      whose toolkit volumes use the long form (type/source/target), an inline
+#      list, or already mount something at /data are refused: add the line by hand.
 # It does NOT restart anything and does not run the full update.sh. Afterwards
 # recreate only the Toolkit (mail services are not touched):
 #   cd $MAILCOW_DIR && docker compose up -d --build toolkit-mailcow
@@ -77,23 +81,36 @@ if [ "$MODE" = check ]; then
     exit $rc
 fi
 
-# 1. data directory (the container runs as root, so root-owned 0700 is writable)
-mkdir -p "$DATA_DIR/filter-backups"
-chmod 700 "$DATA_DIR" "$DATA_DIR/filter-backups"
-log "directory ready: $DATA_DIR/filter-backups (0700)"
+# 1. the override must already be valid as seen by docker compose, or nothing is touched
+compose_ok() { (cd "$MAILCOW_DIR" && docker compose config -q) >/dev/null 2>&1; }
+command -v docker >/dev/null 2>&1 || die "docker not found; cannot validate the override, nothing changed"
+compose_ok || die "'docker compose config' fails on the current override; fix it first, nothing changed"
 
-# 2. override
+mkdirs() {
+    # the container runs as root, so a root-owned 0700 directory is writable
+    mkdir -p "$DATA_DIR/filter-backups"
+    chmod 700 "$DATA_DIR" "$DATA_DIR/filter-backups"
+    log "directory ready: $DATA_DIR/filter-backups (0700)"
+}
+
 if has_mount; then
+    mkdirs
     log "override already mounts $MOUNT_LINE; nothing to change"
     exit 0
 fi
+
+# 2. only a plain short-form volume list gets the new line
 if service_block | grep -Eq ":/data(:[a-z]+)?[\"']?[[:space:]]*(#.*)?\$"; then
     die "$SERVICE already mounts something else at /data; resolve by hand"
 fi
 if service_block | grep -Eq '^    volumes:[[:space:]]*[^[:space:]#]'; then
     die "$SERVICE has an inline 'volumes:' value; add '- $MOUNT_LINE' by hand"
 fi
+if service_block | grep -Eq '^[[:space:]]*(-[[:space:]]+)?(type|source|target):([[:space:]]|$)'; then
+    die "$SERVICE uses the long volume form (type/source/target); add '- $MOUNT_LINE' by hand"
+fi
 
+mkdirs
 BAK="$OVERRIDE.bak.$(date +%Y%m%d-%H%M%S)"
 cp -p "$OVERRIDE" "$BAK"
 TMP="$OVERRIDE.tmp.$$"
@@ -125,16 +142,11 @@ awk -v svc="  $SERVICE:" -v mount="$MOUNT_LINE" '
     }
 ' "$OVERRIDE" > "$TMP" || die "could not edit override (backup kept: $BAK)"
 
-compose_ok() { (cd "$MAILCOW_DIR" && docker compose config -q) >/dev/null 2>&1; }
-if command -v docker >/dev/null 2>&1 && compose_ok; then
-    # the current override is valid, so the edited one must be too
-    cp "$TMP" "$OVERRIDE"
-    if ! compose_ok; then
-        cp -p "$BAK" "$OVERRIDE"
-        die "docker compose rejected the edited override; original restored (backup: $BAK)"
-    fi
-fi
 cp "$TMP" "$OVERRIDE"
+if ! compose_ok; then
+    cp -p "$BAK" "$OVERRIDE"
+    die "docker compose rejected the edited override; original restored (backup: $BAK)"
+fi
 has_mount || { cp -p "$BAK" "$OVERRIDE"; die "mount not found after edit; original restored (backup: $BAK)"; }
 log "added $MOUNT_LINE to $SERVICE volumes (backup: $BAK)"
 log "next: cd $MAILCOW_DIR && docker compose up -d --build $SERVICE   (mail services are not touched)"

@@ -201,7 +201,7 @@
     <ol class="howto">
       <li>웹메일 로그인 → <span class="path">설정 → 필터</span></li>
       <li><span class="k">기존 스크립트가 있으면 먼저 복사해 따로 보관.</span> 목록에서 <span class="rad on" role="img" aria-label="켜짐 표시"></span> 로 켜진 스크립트를 눌러 열고, Simple 화면이면 창 아래 코드 아이콘(<q>Use Custom User Script</q>)을 눌러 나온 내용을 복사해 보관한 뒤 × 로 닫기. 웹메일 필터 화면에서 직접 만든 필터(Simple)를 쓰던 분은 4번에서 그 필터가 꺼집니다.</li>
-      <li><q>Add a Script</q> → 이름 입력(예: gmail-filters) → 코드 칸에 붙여 넣기 → 저장 → × 로 창 닫기</li>
+      <li><q>Add a Script</q> → 이름 입력(예: gmail-filters) → 코드 칸에 붙여 넣기 → 코드 칸 <span class="k">아래</span>(창을 내려야 보임) <q>저장</q> 버튼 → × 로 창 닫기. 붙여 넣으면 뜨는 노란 안내 <q>These changes need to be saved to the server.</q> 는 오류가 아니라 아직 저장 전이라는 뜻이며, 저장하면 사라집니다. 저장에 실패하면 빨간 안내가 따로 뜹니다.</li>
       <li>목록에서 새 스크립트 왼쪽 <span class="rad" role="img" aria-label="꺼짐 표시"></span> 를 눌러 <span class="rad on" role="img" aria-label="켜짐 표시"></span> 로 바꾸기(켜짐). 한 번에 하나만 켜지므로 기존 스크립트는 꺼집니다.</li>
     </ol>
   </section>
@@ -210,6 +210,7 @@
     <ul class="cautions">
       <li>활성 스크립트는 하나뿐 — 기존 스크립트나 필터가 있으면 합쳐야 함</li>
       <li>이미 받은 메일은 다시 분류되지 않음</li>
+      <li>메일 이전 동기화로 복사돼 들어온 메일에는 필터가 돌지 않음 — 서버가 직접 받는 메일부터 분류</li>
       <li>폴더로 간 메일은 POP3(Gmail 가져오기)로 넘어가지 않음</li>
       <li>단어 일부만 같아도 걸림 — '인증' 이 '인증서' 에도</li>
       <li>라벨과 달리 폴더마다 사본이 따로 — 읽음·삭제도 따로</li>

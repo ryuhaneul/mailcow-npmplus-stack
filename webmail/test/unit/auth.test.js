@@ -139,8 +139,8 @@ test('login: unavailable verifier gives 503 MAIL_UNAVAILABLE and wipes password'
   assert.ok(!f.logs.includes(secret));
 });
 
-test('login: default verifier stays unavailable until W03 supplies real connection', async t => {
-  const f = await fixture(t, { auth: { verifyLogin: undefined } });
+test('login: default verifier maps connection failure to unavailable', async t => {
+  const f = await fixture(t, { auth: { verifyLogin: undefined, clientFactory: options => ({ options, on() {}, close() {}, async connect() { throw new Error('synthetic connection unavailable'); } }) } });
   assertFailure(await login(f.app), 503, 'MAIL_UNAVAILABLE');
 });
 

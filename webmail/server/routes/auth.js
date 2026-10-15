@@ -1,4 +1,5 @@
 import cookie from '@fastify/cookie';
+import { createImapPool } from '../mail/imap-pool.js';
 import { AppError } from '../errors.js';
 import { createSessionStore, cookieOptions, cookieName } from '../security/session.js';
 import { createRateLimiter } from '../security/ratelimit.js';
@@ -6,17 +7,13 @@ import { checkOrigin, checkCsrf } from '../security/csrf.js';
 
 const changing = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-// W03에서 실제 IMAP 로그인과 작업용 연결을 넘긴다.
-// verifyLogin({email, password: Buffer, ip}) -> {name, connection:{logout()}}.
-// 인증 거절은 code=AUTH_FAILED 또는 authenticationFailed=true, 그 외는 연결 불가다.
-async function unavailable() {
-  throw new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요.');
-}
-
-export async function installAuth(app, { config, verifyLogin = unavailable, now = Date.now, tempRoot }) {
+export async function installAuth(app, { config, verifyLogin, clientFactory, now = Date.now, tempRoot }) {
   await app.register(cookie);
   const sessions = await createSessionStore({ config, logger: app.log, now, tempRoot });
   const rateLimiter = createRateLimiter({ now });
+  const imap = createImapPool({ config, clientFactory, logger: app.log, destroySession: (session, code) => sessions.destroy(session, code) });
+  app.decorate('imap', imap);
+  verifyLogin ??= imap.verifyLogin;
   app.decorate('sessions', sessions);
   app.decorate('rateLimiter', rateLimiter);
   app.decorateRequest('session', null);

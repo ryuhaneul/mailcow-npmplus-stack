@@ -1,6 +1,7 @@
 import { AppError } from './errors.js';
 import { themes, modes } from './config.js';
 import { getMetadata, setMetadata } from './mail/imap-raw.js';
+import { sanitizeComposeHtml } from './mail/sanitize.js';
 
 export const MAX_PREFS_BYTES = 64 * 1024;
 export const PREFS_ENTRY = '/private/vendor/mailstack-webmail/prefs';
@@ -48,19 +49,19 @@ const fields = {
     if (!Array.isArray(value) || value.length > 500) throw invalid();
     return [...new Set(value.map(address))];
   },
-  signatures: value => map(value, (key, item) => {
+  signatures: (value, config) => map(value, (key, item) => {
     exact(item, ['html', 'auto']);
     if (typeof item.html !== 'string' || typeof item.auto !== 'boolean') throw invalid();
-    return [address(key), { html: item.html, auto: item.auto }];
+    return [address(key), { html: sanitizeComposeHtml(item.html, { publicHostnames: config.publicHostnames }), auto: item.auto }];
   }),
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
   return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, imageAllow: [], signatures: {}, defaultFrom: null };
 }
-function normalize(doc) {
+function normalize(doc, config) {
   exact(doc, Object.keys(fields));
-  return Object.fromEntries(Object.entries(fields).map(([key, parse]) => [key, parse(doc[key])]));
+  return Object.fromEntries(Object.entries(fields).map(([key, parse]) => [key, parse(doc[key], config)]));
 }
 function readDocument(raw, config, logger) {
   const result = defaults(config);
@@ -77,7 +78,7 @@ function readDocument(raw, config, logger) {
     discarded ||= Object.keys(doc).some(key => !Object.hasOwn(fields, key));
     for (const [key, parse] of Object.entries(fields)) {
       if (!Object.hasOwn(doc, key)) continue;
-      try { result[key] = parse(doc[key]); } catch { discarded = true; }
+      try { result[key] = parse(doc[key], config); } catch { discarded = true; }
     }
   }
   if (discarded) logger?.warn({ code: 'PREFS_DISCARDED' }, '저장된 설정에서 사용할 수 없는 항목을 제외했습니다.');
@@ -99,7 +100,7 @@ export function createPrefsService({ config, imap, logger }) {
     },
     async put(session, body) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
-      const doc = normalize(body);
+      const doc = normalize(body, config);
       const json = JSON.stringify(doc);
       if (Buffer.byteLength(json) > MAX_PREFS_BYTES) throw tooLarge();
       await mailCall(session, client => setMetadata(client, '', PREFS_ENTRY, json));

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { createPrefsService, MAX_PREFS_BYTES, PREFS_ENTRY } from '../../server/prefs.js';
+import { sanitizeComposeHtml } from '../../server/mail/sanitize.js';
 
 const config = {
   publicHostnames: ['newmail.example.com'], trustProxy: ['127.0.0.0/8'], logLevel: 'silent', sessionIdleMin: 480, sessionMaxHours: 24,
@@ -61,10 +62,35 @@ test('prefs: full document METADATA round trip, address normalization and sessio
   const f = await fixture(t);
   const doc = { ...defaults(), theme: 'terra', mode: 'system', accent: { ink: 0, olive: 6, terra: '#abC123' }, layout: { pane: 'right', density: 'compact', compose: 'drawer' }, folderColors: { 'Projects/견적': 7 }, imageAllow: [' Sender@EXAMPLE.COM ', 'sender@example.com'], signatures: { ' USER@EXAMPLE.COM ': { html: '<script>raw signature</script>', auto: true } }, defaultFrom: ' Alias@EXAMPLE.COM ' };
   status(await f.request('PUT', doc), 204);
-  const expected = { ...doc, imageAllow: ['sender@example.com'], signatures: { 'user@example.com': { html: '<script>raw signature</script>', auto: true } }, defaultFrom: 'alias@example.com' };
+  const expected = { ...doc, imageAllow: ['sender@example.com'], signatures: { 'user@example.com': { html: '', auto: true } }, defaultFrom: 'alias@example.com' };
   assert.deepEqual(JSON.parse(f.client.value), expected); assert.deepEqual(f.session.prefs, expected);
   status(await f.request('GET'), 200); assert.deepEqual(f.session.prefs, expected);
   assert.deepEqual(f.client.calls.map(call => call.command), ['SETMETADATA', 'GETMETADATA']);
+});
+test('prefs: signature scripts, event handlers and javascript links are sanitized before storage', async t => {
+  const f = await fixture(t);
+  const html = '<script>alert(1)</script><img src="https://images.example.com/logo.png" onerror="alert(2)"><a href="javascript:alert(3)">Contact</a>';
+  status(await f.request('PUT', { ...defaults(), signatures: { 'user@example.com': { html, auto: true } } }), 204);
+  const saved = JSON.parse(f.client.value).signatures['user@example.com'];
+  assert.equal(saved.html, sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }));
+  assert.doesNotMatch(saved.html, /script|onerror|javascript:/i);
+  assert.equal(saved.auto, true);
+  assert.deepEqual(f.session.prefs.signatures['user@example.com'], saved);
+  const response = await f.request('GET'); status(response, 200);
+  assert.deepEqual(response.json().signatures['user@example.com'], saved);
+});
+test('prefs: signature business card formatting and image host policy match sending', async t => {
+  const f = await fixture(t);
+  const html = '<table cellpadding="4"><tr><td style="color:#123456;font-weight:bold">Example Team<br><a href="mailto:user@example.com">user@example.com</a></td><td><img src="https://images.example.com/card.png" width="80" alt="Card"><img src="https://newmail.example.com/api/messages/private/parts/1"></td></tr></table>';
+  status(await f.request('PUT', { ...defaults(), signatures: { 'user@example.com': { html, auto: false } } }), 204);
+  const saved = JSON.parse(f.client.value).signatures['user@example.com'].html;
+  assert.equal(saved, sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }));
+  assert.match(saved, /<table cellpadding="4">/);
+  assert.match(saved, /style="color:.*font-weight: bold;/);
+  assert.match(saved, /mailto:user@example.com/);
+  assert.match(saved, /src="https:\/\/images\.example\.com\/card\.png"/);
+  assert.doesNotMatch(saved, /newmail\.example\.com|\/api\//);
+  assert.equal(f.session.prefs.signatures['user@example.com'].html, saved);
 });
 for (const [label, patch] of [
   ['theme', { theme: 'unknown' }], ['mode', { mode: 'auto' }], ['unknown top-level', { extra: true }],

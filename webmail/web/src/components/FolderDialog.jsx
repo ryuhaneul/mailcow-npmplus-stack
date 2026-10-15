@@ -19,6 +19,18 @@ export default function FolderDialog({folder}) {
     try {
       const path=folder?`/api/folders/${encodeURIComponent(folder.path)}`:'/api/folders';
       const result=await api(path,{method:deleting?'DELETE':folder?'PATCH':'POST',...(deleting?{}:{body:{name}})});
+      if(folder && !deleting && result.folder.path !== folder.path) {
+        const colors = {...prefs.value.folderColors};
+        let changed = false;
+        for(const [path,color] of Object.entries(prefs.value.folderColors)) {
+          if(path === folder.path || path.startsWith(`${folder.path}/`)) {
+            delete colors[path];
+            colors[result.folder.path + path.slice(folder.path.length)] = color;
+            changed = true;
+          }
+        }
+        if(changed) updatePrefs({folderColors:colors});
+      }
       folders.value=await api('/api/folders');
       if(folder && route.value.name==='f' && route.value.value===folder.path)navigate(deleting?'inbox':`f/${encodeURIComponent(result.folder.path)}`);
       toast.value={kind:'success',message:deleting?'폴더를 지웠어요.':folder?'폴더 이름을 바꿨어요.':'폴더를 만들었어요.'};close();

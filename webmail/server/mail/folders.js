@@ -107,13 +107,13 @@ export function createFolderService({ imap, rulesService, logger, now = Date.now
       const rows = await list(client);
       const folder = find(rows, path);
       if (!(await rights(client, path)).write) throw readonly();
-      if (await rulesService.getState(session) !== 'ok') throw locked();
+      if (!['ok', 'none'].includes(await rulesService.getState(session, client))) throw locked();
       const parent = parentOf(path);
       const newPath = parent ? `${parent}/${name}` : name;
       if (rows.some(row => row.path === newPath)) throw new AppError(409, 'EXISTS', '같은 이름의 폴더가 있어요.');
       if (!await mailCall(() => client.mailboxRename(path, newPath))) throw unavailable();
       invalidate(session);
-      try { await rulesService.renameFolderRefs(session, path, newPath); } catch (error) {
+      try { await rulesService.renameFolderRefs(session, path, newPath, client); } catch (error) {
         try {
           if (!await mailCall(() => client.mailboxRename(newPath, path))) throw unavailable();
         } catch (rollbackError) {
@@ -133,7 +133,7 @@ export function createFolderService({ imap, rulesService, logger, now = Date.now
       const folder = find(rows, path);
       if (!(await rights(client, path)).delete) throw readonly();
       if (folder.specialUse || specialNames[path]) throw new AppError(422, 'SPECIAL_FOLDER', '기본 폴더는 지울 수 없어요.');
-      if (await rulesService.folderInUse(session, path)) throw new AppError(409, 'FOLDER_IN_USE', '필터에서 쓰는 폴더예요. 필터를 먼저 바꿔 주세요.');
+      if (await rulesService.folderInUse(session, path, client)) throw new AppError(409, 'FOLDER_IN_USE', '필터에서 쓰는 폴더예요. 필터를 먼저 바꿔 주세요.');
       const status = await mailboxStatus(client, path);
       if (status.messages || rows.some(row => row.path.startsWith(`${path}/`))) throw new AppError(409, 'FOLDER_NOT_EMPTY', '빈 폴더만 지울 수 있어요.');
       if (!await mailCall(() => client.mailboxDelete(path))) throw unavailable();

@@ -12,7 +12,7 @@ function number(value, fallback) {
   if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw invalid();
   return Number(value);
 }
-export function listOptions(query = {}) {
+export function listOptions(query = {}, folders = []) {
   for (const key of ['view', 'folder', 'quick', 'q', 'in']) if (query[key] !== undefined && (typeof query[key] !== 'string' || !query[key].isWellFormed() || /[\x00-\x1f\x7f]/.test(query[key]))) throw invalid();
   const view = query.view ?? 'inbox', quick = query.quick ?? 'all';
   if (!['inbox', 'allmail', 'folder', 'spam'].includes(view) || !['all', 'unread', 'starred', 'attach'].includes(quick)) throw invalid();
@@ -20,9 +20,11 @@ export function listOptions(query = {}) {
   const parsed = parseSearchQuery(query.q ?? '');
   const page = number(query.page, 1), pageSize = number(query.pageSize, 50);
   if (!Number.isSafeInteger((page - 1) * pageSize)) throw invalid();
-  const selected = view === 'spam' ? 'Junk' : view === 'folder' ? query.folder : 'INBOX';
+  const junk = folders.find(folder => folder.specialUse === '\\Junk')?.path ?? 'Junk';
+  const trash = folders.find(folder => folder.specialUse === '\\Trash')?.path ?? 'Trash';
+  const selected = view === 'spam' ? junk : view === 'folder' ? query.folder : 'INBOX';
   // K13: 스팸·휴지통에서의 검색은 그 폴더 안에 머문다.
-  const scoped = ['Junk', 'Trash'].includes(selected) && (view === 'spam' || view === 'folder');
+  const scoped = [junk, trash].includes(selected) && (view === 'spam' || view === 'folder');
   const mailbox = !scoped && (view === 'allmail' || query.q?.trim()) ? allmail : selected;
   const filters = [...parsed.folderFilters, ...(query.in ? [query.in] : [])];
   const imap = [...parsed.imap];
@@ -76,10 +78,16 @@ export function item(message, source) {
 
 export function createListService({ imap, now = Date.now }) {
   const sessions = new WeakMap();
-  async function messages(session, query) {
-    const options = listOptions(query);
-    const { mailbox, page, pageSize } = options;
+  const invalidate = session => sessions.delete(session);
+  async function messages(session, query = {}) {
+    let options = listOptions(query);
+    let { mailbox, page, pageSize } = options;
     try {
+      if (query.view === 'spam' || (query.view === 'folder' && query.q?.trim())) {
+        const folders = await imap.withMailbox(session, 'INBOX', client => client.list({ listOnly: true }));
+        options = listOptions(query, folders);
+        mailbox = options.mailbox;
+      }
       return await imap.withMailbox(session, mailbox, async client => {
         const key = JSON.stringify([mailbox, options.imap, options.filters]);
         let cache = sessions.get(session);
@@ -125,5 +133,5 @@ export function createListService({ imap, now = Date.now }) {
       throw unavailable();
     }
   }
-  return { messages };
+  return { messages, invalidate };
 }

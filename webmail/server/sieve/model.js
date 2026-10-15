@@ -15,9 +15,10 @@ function object(value, path, allowed, required = allowed) {
   for (const key of Object.keys(value)) if (!allowed.includes(key)) invalid(`${path}.${key}`, 'unknown_field');
   for (const key of required) if (!Object.hasOwn(value, key)) invalid(`${path}.${key}`, 'required');
 }
-function text(value, path, { min = 0, max = Infinity } = {}) {
+function text(value, path, { min = 0, max = Infinity, multiline = false } = {}) {
   if (typeof value !== 'string') invalid(path, 'string_required');
-  if (!value.isWellFormed() || /[\u0000-\u001f\u007f-\u009f]/u.test(value) || value.includes('${')) invalid(path, 'unsafe_text');
+  const controls = multiline ? /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u : /[\u0000-\u001f\u007f-\u009f]/u;
+  if (!value.isWellFormed() || controls.test(value) || value.includes('${')) invalid(path, 'unsafe_text');
   const length = [...value].length;
   if (length < min || length > max) invalid(path, 'length');
 }
@@ -116,7 +117,8 @@ export function validateDocument(doc, { internalDomains = [], folders = [], maxR
   date(doc.vacation.end, '$.vacation.end');
   if (doc.vacation.start && doc.vacation.end && doc.vacation.start > doc.vacation.end) invalid('$.vacation.end', 'date_order');
   text(doc.vacation.subject, '$.vacation.subject');
-  text(doc.vacation.body, '$.vacation.body', { max: 4000 });
+  if (typeof doc.vacation.body === 'string') doc.vacation.body = doc.vacation.body.replace(/\r\n/g, '\n');
+  text(doc.vacation.body, '$.vacation.body', { max: 4000, multiline: true });
   if (Object.hasOwn(doc, 'importedFrom')) {
     object(doc.importedFrom, '$.importedFrom', ['name', 'sha256', 'at']);
     text(doc.importedFrom.name, '$.importedFrom.name', { min: 1 });

@@ -1,3 +1,4 @@
+import { fakeSettings } from './fake-settings.js';
 import { parseSearch } from '../src/search.js';
 import { fakeRules, rulesFixture } from './fake-rules.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
@@ -48,6 +49,7 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers['x-webmail-csrf']!==state.csrf)return fail(response,'CSRF');
     if(path==='/api/auth/session')return send(response,200,publicSession());
     if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
+    if(await fakeSettings(request,response,state,send,recorded))return;
     if(path==='/api/prefs')return send(response,200,state.prefs);
     if(path==='/api/events'){
       response.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store'});response.write(': ready\n\n');streams.add(response);response.on('close',()=>streams.delete(response));return;

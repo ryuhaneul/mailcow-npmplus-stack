@@ -69,7 +69,7 @@ export default function Shell() {
       </main>
     </div>
     {keysOpen.value && <KeysDialog onClose={()=>navigate(current.name+(current.value?'/'+encodeURIComponent(current.value):'')+(current.q?'?q='+encodeURIComponent(current.q):''))}/>}
-    {toast.value && <div class="toast open" role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
+    {folderDialog.value && <FolderDialog folder={folderDialog.value.folder}/>}
     {toast.value && <div class={`toast open${toast.value.kind === 'rule-apply-result' ? ' rule-result' : ''}`} role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
   </>;
 }

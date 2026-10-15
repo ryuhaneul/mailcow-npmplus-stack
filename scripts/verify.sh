@@ -181,7 +181,28 @@ echo ""
 
 # --- Cert reload cron ---
 echo "[Maintenance]"
-check "Cert reload cron installed" sh -c '[ -f /etc/cron.d/mailcow-cert-reload ]'
+check "Cert reload cron installed" test -f /etc/cron.d/mailcow-cert-reload
+check "Cert reload targets: unique Postfix/Dovecot compose labels" bash "$SCRIPT_DIR/mailcow-cert-reload.sh" --check
+
+check_mail_certificate() {
+    local service="$1" port="$2" hostname expected actual
+    hostname=$(
+        # shellcheck disable=SC1090,SC1091
+        source "$MAILCOW_DIR/mailcow.conf" 2>/dev/null && printf '%s' "${MAILCOW_HOSTNAME:-}"
+    ) || hostname=""
+    expected=$(openssl x509 -in "$MAILCOW_DIR/data/assets/ssl/cert.pem" -noout -enddate 2>/dev/null) || expected=""
+    actual=""
+    if [ -n "$hostname" ]; then
+        actual=$(timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$hostname" </dev/null 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null) || actual=""
+    fi
+    if [ -n "$expected" ] && [ "$actual" = "$expected" ]; then
+        check "$service $port certificate expiry matches cert.pem" true
+    else
+        check "$service $port certificate expiry mismatch/unavailable — 인증서 갱신 뒤 reload 안 됨, mailcow-cert-reload 실행 필요" false
+    fi
+}
+check_mail_certificate Dovecot 993
+check_mail_certificate Postfix 465
 
 echo ""
 echo "============================================"

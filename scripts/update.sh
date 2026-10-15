@@ -447,6 +447,13 @@ if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
         warn "Failed to restart NPMplus — mailcow upstream may stay 502 until manual restart"
 fi
 
+# Maintain the certificate reload job before verification.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/cert-reload.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/cert-reload.sh"
+cert_reload_install || die "Cert reload cron installation failed"
+
 # ============================================================
 # Phase 7: verify.sh
 # ============================================================

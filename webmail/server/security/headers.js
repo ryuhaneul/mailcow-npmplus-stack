@@ -20,7 +20,8 @@ export function installHeaders(app) {
       payload = JSON.stringify(errorBody('AUTH_FAILED', '접근할 수 없어요.'));
       reply.removeHeader('content-length');
     }
-    for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, value);
+    const pdfSandbox = reply.getHeader('content-security-policy') === 'sandbox';
+    for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, name === 'content-security-policy' && pdfSandbox ? `${value}; sandbox` : value);
     return payload;
   });
 }

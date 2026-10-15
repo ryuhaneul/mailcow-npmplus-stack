@@ -439,8 +439,8 @@ docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
 # Wait for unbound to be healthy (other containers depend on it)
 log "Waiting for unbound-mailcow health check..."
 for i in $(seq 1 36); do
-    STATUS=$(docker ps --filter "name=unbound-mailcow" --format '{{.Status}}' 2>/dev/null || echo "")
-    if echo "$STATUS" | grep -q "healthy"; then
+    STATUS=$(docker inspect unbound-mailcow --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
+    if [ "$STATUS" = healthy ]; then
         log "unbound-mailcow: healthy"
         break
     fi

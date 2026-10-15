@@ -43,7 +43,12 @@ fi
 if [ -d "$NPMPLUS_DIR" ]; then
     log "Stopping NPMplus + CrowdSec..."
     cd "$NPMPLUS_DIR"
-    docker compose down --remove-orphans -v 2>&1 | tail -3 || true
+    if ! NPM_DOWN_OUTPUT=$(docker compose down --remove-orphans -v 2>&1); then
+        printf '%s\n' "$NPM_DOWN_OUTPUT" | tail -3
+        warn '일부 볼륨이 이미 지워졌을 수 있음 — docker volume ls 로 남은 것과 표식 디렉터리를 확인'
+        exit 1
+    fi
+    printf '%s\n' "$NPM_DOWN_OUTPUT" | tail -3
 fi
 
 # Stop Snappymail
@@ -61,7 +66,21 @@ if [ -d "$WEBMAIL_DIR" ]; then
 fi
 
 # Remove external volume
-docker volume rm npmplus_npmplus-data 2>/dev/null && log "Removed npmplus_npmplus-data volume" || true
+if ! NPM_VOLUME=$(docker volume ls --quiet --filter 'name=^npmplus_npmplus-data$'); then
+    warn '일부 볼륨이 이미 지워졌을 수 있음 — docker volume ls 로 남은 것과 표식 디렉터리를 확인'
+    exit 1
+fi
+if [ -n "$NPM_VOLUME" ]; then
+    if [ "$NPM_VOLUME" != npmplus_npmplus-data ] || ! docker volume rm npmplus_npmplus-data >/dev/null 2>&1; then
+        warn '일부 볼륨이 이미 지워졌을 수 있음 — docker volume ls 로 남은 것과 표식 디렉터리를 확인'
+        exit 1
+    fi
+    if ! NPM_VOLUME=$(docker volume ls --quiet --filter 'name=^npmplus_npmplus-data$') || [ -n "$NPM_VOLUME" ]; then
+        warn '일부 볼륨이 이미 지워졌을 수 있음 — docker volume ls 로 남은 것과 표식 디렉터리를 확인'
+        exit 1
+    fi
+    log "Removed npmplus_npmplus-data volume"
+fi
 
 # Remove directories
 log "Removing installation directories..."

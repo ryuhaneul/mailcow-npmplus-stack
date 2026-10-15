@@ -40,7 +40,18 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 웹메일과 SnappyMail은 함께 켤 수 있습니다. 웹메일 기본 주소는 `newmail.${DOMAIN}`입니다.
 웹메일만 켜면 `mail.${DOMAIN}`도 연결하고 로그인 허용 주소에 자동 추가합니다.
 둘 다 끄면 해당 서비스를 설치·기동하지 않으며, update는 기존 SnappyMail 컨테이너를 삭제하지 않습니다.
-**새 기능은 기본 꺼짐(opt-in)입니다.** 새 선택값이 없는 기존 `.env`에서는 기존 update 실행 목록을 유지합니다. 자동 삭제는 공지 후 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 설정해 켜세요. setup·update는 선택값을 기록하거나 바꾸지 않으며, 켜진 기능에 필요한 빈 비밀값만 생성합니다. 스내피 대체 후에도 레포 기본값은 바꾸지 않고 서버별 `.env`로 전환합니다.
+**새 웹메일과 자동 삭제는 기본 꺼짐(opt-in)입니다.** 이 두 선택값이 없는 기존 `.env`에서는 해당 선택 기능의 update 실행 목록을 유지합니다. 자동 삭제는 공지 후 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 설정해 켜세요. setup·update는 선택값을 기록하거나 바꾸지 않으며, 켜진 기능에 필요한 빈 비밀값만 생성합니다. 스내피 대체 후에도 레포 기본값은 바꾸지 않고 서버별 `.env`로 전환합니다.
+
+CrowdSec 보안 필터는 기본 켬(`WAF_ENABLE=true`, 키가 없어도 켬)이며, NPMplus 요청을 AppSec CRS로 검사하고 접근 로그의 반복 공격을 로컬 IP 밴으로 차단합니다. CAPI 외부 결정은 받지 않습니다. setup·update가 설정을 적용하며 선택값을 `.env`에 쓰지 않습니다.
+
+| 키 | 기본값 | 설명 |
+|---|---|---|
+| `WAF_ENABLE` | `true` | `false`면 스택 관리 보안 필터 해제 |
+| `WAF_MODE` | `block` | `block`은 공격 403, `detect`는 앱 통과·경보 기록(튜닝용) |
+| `WAF_ALLOWLIST` | 빈 값 | IP·CIDR 쉼표 목록. IP 밴만 제외하고 AppSec 403은 유지 |
+
+**운영 detect 경보에는 사용자 입력이 남을 수 있습니다.** 짧게 재현·튜닝한 뒤 block으로 복귀하고 `docker exec crowdsec cscli alerts delete --all`로 경보를 삭제하세요. 밴 해제와 요청 오탐 예외는 별도입니다. [튜닝·오탐 대응 절차](docs/guide.md#14-crowdsec-보안-필터)를 따르세요. NPMplus의 `npmplus_crowdsec_appsec=true`는 AppSec를 끈다는 뜻입니다.
+
 주소 전환은 `scripts/webmail-cutover.sh`, 관찰 정지·백업·제거·복원은 `scripts/snappymail-remove.sh`를 관리자가 직접 실행합니다. 두 도구는 `.env`를 수정하지 않습니다. 브랜드·접속 제한·TLS·전환·되돌리기는 [웹메일 운영 가이드](docs/guide.md#10-웹메일)를 참고하세요.
 
 ## 테스트 환경
@@ -259,6 +270,8 @@ DNS 레코드(MX, A, PTR, DKIM, DMARC)가 미설정이면 수신 서버의 스�
 
 An all-in-one automated deployment of Mailcow mail server behind NPMplus (reverse proxy)
 + CrowdSec (WAF), with integrated Snappymail webmail.
+
+CrowdSec request filtering and local log-based IP bans are enabled by default (`WAF_ENABLE=true`, `WAF_MODE=block`). `WAF_ALLOWLIST` exempts IP ban decisions only; AppSec can still return 403. CAPI is disabled. Detect mode passes requests and records alerts that may contain user input: use briefly, return to block, then run `docker exec crowdsec cscli alerts delete --all`. See the [WAF operations guide](docs/guide.md#14-crowdsec-보안-필터).
 
 ## Architecture
 

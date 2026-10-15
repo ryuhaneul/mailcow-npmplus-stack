@@ -124,6 +124,10 @@ set -a; source "$ENV_FILE"; set +a
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/webmail-env.sh
 source "$SCRIPT_DIR/lib/webmail-env.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/waf.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 
 
@@ -171,6 +175,8 @@ install_pkg curl
 install_pkg dig bind-utils
 install_pkg openssl
 install_pkg git
+install_pkg python3
+waf_options || die "Invalid WAF options"
 [ "$WEBMAIL_ENABLE" != true ] || install_pkg rsync
 
 # ============================================================
@@ -265,7 +271,10 @@ else
 fi
 
 # Generate secrets if empty
+waf_resolve_bouncer_key "$NPMPLUS_DIR" true || die "Bouncer key selection failed"
 [ -z "${CROWDSEC_BOUNCER_KEY:-}" ] && CROWDSEC_BOUNCER_KEY=$(openssl rand -hex 32) && log "Generated CROWDSEC_BOUNCER_KEY"
+WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
+export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32)
 NPM_ADMIN_EMAIL="${NPM_ADMIN_EMAIL:-admin@${DOMAIN}}"
 NPM_ADMIN_PASSWORD="${NPM_ADMIN_PASSWORD:-$(openssl rand -base64 18)}"
@@ -672,14 +681,14 @@ header "Phase 5: NPMplus + CrowdSec"
 mkdir -p "$NPMPLUS_DIR"
 cp "$PROJECT_DIR/npmplus/docker-compose.yml" "$NPMPLUS_DIR/docker-compose.yml"
 cat > "$NPMPLUS_DIR/.env" <<NPMENV
-CROWDSEC_BOUNCER_KEY=${CROWDSEC_BOUNCER_KEY}
+CROWDSEC_BOUNCER_KEY=${WAF_BOUNCER_KEY_RESOLVED}
 NPM_ADMIN_EMAIL=${NPM_ADMIN_EMAIL}
 NPM_ADMIN_PASSWORD=${NPM_ADMIN_PASSWORD}
 NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
-docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
+_waf_npmplus_compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
 
 log "Waiting for NPMplus health check..."
 for i in $(seq 1 60); do
@@ -1203,6 +1212,9 @@ create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" "$ADMIN_AC
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
 create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
+
+# Apply WAF after both services/proxy hosts exist; the final DNS restart reads it.
+waf_reconcile "$NPMPLUS_DIR" || die "WAF reconciliation failed"
 
 # ============================================================
 # Phase 8: SSL Symlinks

@@ -78,7 +78,15 @@ set +a
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/webmail-env.sh
 source "$SCRIPT_DIR/lib/webmail-env.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/waf.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+waf_options || die "Invalid WAF options; update stopped before changes"
+waf_resolve_bouncer_key "$NPMPLUS_DIR" "$([ "$WAF_ENABLE" = false ] && echo true || echo false)" || die "Bouncer key selection failed; update stopped before changes"
+WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
+export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
@@ -203,9 +211,14 @@ compose_pull() {
         warn "$label: docker-compose.yml missing at $dir — skipping"
         return 0
     fi
+    if [ "$label" = npmplus ] && [ "$WAF_ENABLE" = true ]; then
+        waf_runtime_compose "$dir/docker-compose.yml" || die "WAF runtime compose preparation failed"
+    fi
     pin_runtime_images "$dir" "$label" || die "$label: image pin preparation failed; pull stopped"
     log "$label: docker compose pull"
-    (cd "$dir" && docker compose pull 2>&1 | tee -a "$LOGFILE" | tail -5) \
+    (cd "$dir" && {
+        if [ "$label" = npmplus ]; then _waf_npmplus_compose pull; else docker compose pull; fi
+    } 2>&1 | tee -a "$LOGFILE" | tail -5) \
         || warn "$label: docker compose pull had issues (non-fatal)"
 }
 
@@ -436,12 +449,17 @@ compose_up() {
         return 0
     fi
     log "$label: docker compose up -d"
-    (cd "$dir" && docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5) \
+    (cd "$dir" && {
+        if [ "$label" = npmplus ]; then _waf_npmplus_compose up -d; else docker compose up -d; fi
+    } 2>&1 | tee -a "$LOGFILE" | tail -5) \
         || warn "$label: docker compose up -d had issues"
 }
 
 compose_up "$NPMPLUS_DIR" "npmplus"
 [ "$SNAPPYMAIL_ENABLE" != true ] || compose_up "$SNAPPYMAIL_DIR" "snappymail"
+
+# Reconcile before the existing DNS restart; WAF never adds a second restart.
+waf_reconcile "$NPMPLUS_DIR" || die "WAF reconciliation failed"
 
 # Bounce NPMplus once mailcow is fully up so its upstream DNS cache
 # (server nginx-mailcow:8443 resolve;) is warm. Without this restart a

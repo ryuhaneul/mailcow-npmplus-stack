@@ -454,6 +454,25 @@ fi
 source "$SCRIPT_DIR/lib/cert-reload.sh"
 cert_reload_install || die "Cert reload cron installation failed"
 
+CERT_RELOAD_IMAP_STATUS=0
+cert_reload_certificate_matches "$MAILCOW_DIR" 993 || CERT_RELOAD_IMAP_STATUS=$?
+CERT_RELOAD_SMTP_STATUS=0
+cert_reload_certificate_matches "$MAILCOW_DIR" 465 || CERT_RELOAD_SMTP_STATUS=$?
+if [ "$CERT_RELOAD_IMAP_STATUS" -eq 2 ]; then
+    warn "메일 포트 993 인증서 만료일 확인 불가"
+fi
+if [ "$CERT_RELOAD_SMTP_STATUS" -eq 2 ]; then
+    warn "메일 포트 465 인증서 만료일 확인 불가"
+fi
+if [ "$CERT_RELOAD_IMAP_STATUS" -eq 1 ] || [ "$CERT_RELOAD_SMTP_STATUS" -eq 1 ]; then
+    warn "메일 포트 인증서가 cert.pem 과 달라 reload — IMAP·POP 연결이 한 번 끊김"
+    if bash "$SCRIPT_DIR/mailcow-cert-reload.sh"; then
+        log "메일 포트 인증서 reload: 성공"
+    else
+        warn "메일 포트 인증서 reload: 실패 — update를 계속하며 verify 결과를 확인하세요"
+    fi
+fi
+
 # ============================================================
 # Phase 7: verify.sh
 # ============================================================

@@ -29,7 +29,7 @@ export default function MailList({currentRoute,reader}) {
     {current.name==='allmail'&&<FolderFilter/>}
     {value.params.view==='spam'&&<SpamBanner/>}
     <ListTools/>
-    <div class="scroll" aria-busy={value.loading}><ul class="list">{value.loading&&!value.items.length?<li class="grp" role="status">메일을 불러오는 중…</li>:value.error?<li class="grp" role="alert">{value.error.message}</li>:!value.items.length?<li class="grp">이 보기에 맞는 메일이 없습니다</li>:value.items.map((item,index)=><Fragment key={item.ref}>{(index===0||group(value.items[index-1].date)!==group(item.date))&&<li class="grp" role="presentation">{group(item.date)}</li>}<MailRow item={item} mode={mode}/></Fragment>)}</ul></div>
+    <div class="scroll" aria-busy={value.loading}><ul class="list">{value.loading&&!value.items.length?<li class="grp" role="status">메일을 불러오는 중…</li>:value.error?<li class="grp" role="alert">{value.error.message}{value.error.code==='SEARCH_SLOW'&&<> <button class="btn sm" type="button" onClick={()=>void loadMessages()}>다시 검색</button></>}</li>:!value.items.length?<li class="grp">이 보기에 맞는 메일이 없습니다</li>:value.items.map((item,index)=><Fragment key={item.ref}>{(index===0||group(value.items[index-1].date)!==group(item.date))&&<li class="grp" role="presentation">{group(item.date)}</li>}<MailRow item={item} mode={mode}/></Fragment>)}</ul></div>
     <div class="foot"><span><span class="kbd">J</span><span class="kbd">K</span> 이동</span><span><span class="kbd">E</span> 보관</span><span><span class="kbd">#</span> 삭제</span><span><span class="kbd">?</span> 단축키 전체</span></div>
   </div><div class="readcol">{reader}</div></section>;
 }

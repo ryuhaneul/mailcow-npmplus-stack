@@ -25,44 +25,29 @@ export CUTOVER_BACKUP="${WEBMAIL_BACKUP_DIR:-/root/webmail-backup-$(date +%Y%m%d
 export DOMAIN="${DOMAIN:?DOMAIN required}" NPM_ADMIN_EMAIL
 export SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}" WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
 export WEBMAIL_ACCESS_LIST="${WEBMAIL_ACCESS_LIST:-}" WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
-python3 - "$@" <<'PY'
-import argparse, http.cookiejar, json, os, pathlib, re, shutil, ssl, subprocess, sys, urllib.error, urllib.request, uuid
+python3 -B - "$@" <<'PY'
+import argparse, json, os, pathlib, re, shutil, subprocess, sys, uuid
 
 work = pathlib.Path(os.environ['CUTOVER_WORK'])
 backup_dir = pathlib.Path(os.environ['CUTOVER_BACKUP'])
 api = os.environ['CUTOVER_API'].rstrip('/')
 domain = os.environ['DOMAIN'].lower()
 fields = ('forward_host', 'forward_port', 'forward_scheme', 'advanced_config', 'http2_support', 'allow_websocket_upgrade', 'block_exploits', 'ssl_forced')
-jar = http.cookiejar.MozillaCookieJar(str(work / 'cookies'))
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+sys.path.insert(0, str(pathlib.Path(os.environ['CUTOVER_SCRIPT_DIR']) / 'lib'))
+from npm_api import NpmApi, proxy_access_fields
+client = NpmApi(api, work)
 os.umask(0o077)
 
 def fail(message):
     raise RuntimeError(message)
 
-def request(method, path, payload=None, body=None, content_type=None, timeout=30):
-    data = body if body is not None else (json.dumps(payload).encode() if payload is not None else None)
-    headers = {'Content-Type': content_type or 'application/json'}
-    req = urllib.request.Request(api + path, data=data, headers=headers, method=method)
-    try:
-        with opener.open(req, timeout=timeout) as response:
-            raw = response.read()
-        return json.loads(raw) if raw.strip() else None
-    except (urllib.error.URLError, ValueError, TimeoutError) as error:
-        # Response bodies may include sensitive backend details. Keep diagnostics generic.
-        raise RuntimeError(f'NPM {method} {path} failed') from error
+request = client.request
 
 def login():
-    try:
-        request('POST', '/tokens', json.loads((work / 'login.json').read_text()))
-        jar.save(ignore_discard=True, ignore_expires=True)
-    finally:
-        (work / 'login.json').unlink(missing_ok=True)
+    client.login(work / 'login.json')
 
 def hosts():
-    result = request('GET', '/nginx/proxy-hosts')
-    if not isinstance(result, list): fail('invalid proxy-host response')
-    return result
+    return client.hosts()
 
 def save_json(path, value):
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -163,12 +148,7 @@ def add(names):
         raise
     access_fields = {}
     if access:
-        if not current or any('npmplus_access_list_ids' in item for item in current):
-            access_fields = dict(npmplus_access_list_ids=[access], npmplus_access_list_type='custom')
-        elif any('access_list_id' in item for item in current):
-            access_fields = dict(access_list_id=access)
-        else:
-            fail('NPM API 형식을 판별할 수 없음')
+        access_fields = proxy_access_fields(current, access)
     for name in names:
         existing = next((item for item in current if name in item.get('domain_names', [])), None)
         if existing:

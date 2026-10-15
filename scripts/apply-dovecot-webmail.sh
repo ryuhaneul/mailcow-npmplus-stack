@@ -138,6 +138,7 @@ login_trusted_networks = \$login_trusted_networks $WEBMAIL_IPV4/32
 # END mailstack-webmail trusted
 EOF
     fi
+    # 2026-09a: POP3/Sieve inherit global plugins; only IMAP/LMTP override them.
     cat > "$WORK/virtual" <<'EOF'
 # BEGIN mailstack-webmail virtual (apply-dovecot-webmail.sh)
 mail_plugins = $mail_plugins virtual
@@ -145,9 +146,6 @@ protocol imap {
   mail_plugins = $mail_plugins virtual
 }
 protocol lmtp {
-  mail_plugins = $mail_plugins virtual
-}
-protocol pop3 {
   mail_plugins = $mail_plugins virtual
 }
 namespace webmail_virtual {

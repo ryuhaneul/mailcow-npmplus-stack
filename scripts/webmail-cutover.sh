@@ -146,13 +146,25 @@ def add(names):
     names = list(dict.fromkeys(valid_name(name) for name in names))
     access = select_access()
     if access is None: return
-    current = hosts()
+    try:
+        current = hosts()
+    except RuntimeError:
+        if access: fail('NPM API 형식을 판별할 수 없음')
+        raise
+    access_fields = {}
+    if access:
+        if not current or any('npmplus_access_list_ids' in item for item in current):
+            access_fields = dict(npmplus_access_list_ids=[access], npmplus_access_list_type='custom')
+        elif any('access_list_id' in item for item in current):
+            access_fields = dict(access_list_id=access)
+        else:
+            fail('NPM API 형식을 판별할 수 없음')
     for name in names:
         existing = next((item for item in current if name in item.get('domain_names', [])), None)
         if existing:
             print(f'[webmail-cutover] {name}: existing target {existing.get("forward_host", "unknown")}; skipped')
             continue
-        payload = dict(domain_names=[name], **target_patch(), access_list_id=access,
+        payload = dict(domain_names=[name], **target_patch(), **access_fields,
                        certificate_id='new', locations=[],
                        meta=dict(letsencrypt_email=os.environ['NPM_ADMIN_EMAIL'], letsencrypt_agree=True, dns_challenge=False))
         try:

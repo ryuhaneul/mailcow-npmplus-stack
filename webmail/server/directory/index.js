@@ -62,10 +62,13 @@ export function createDirectoryService({ config, db, imap, now = Date.now, recen
       ...rows.alias_domain.filter(row => String(row.active) === '1').map(row => lower(row.alias_domain))])].sort();
   }
   async function contacts(session, query) {
+    if (config.contactsEnabled === false) return { items: [] };
     const { q, limit } = contactOptions(query);
+    const domains = new Set([lower(session.email).split('@').at(-1), ...(config.internalDomains || []).map(lower)]);
+    const inScope = address => domains.has(lower(address).split('@').at(-1));
     const [rows, history] = await Promise.all([data(), recentFor(session)]);
-    const people = rows.mailbox.filter(row => active(row.active)).map(row => ({ name: row.name || '', address: row.username, kind: 'person' }));
-    const teams = rows.alias.filter(row => active(row.active) && !row.address.startsWith('@')).map(row => ({ name: '', address: row.address, kind: 'team' }));
+    const people = rows.mailbox.filter(row => active(row.active) && inScope(row.username)).map(row => ({ name: row.name || '', address: row.username, kind: 'person' }));
+    const teams = rows.alias.filter(row => active(row.active) && !row.address.startsWith('@') && inScope(row.address)).map(row => ({ name: '', address: row.address, kind: 'team' }));
     const order = (a, b) => (a.name || a.address).localeCompare(b.name || b.address, 'ko') || a.address.localeCompare(b.address, 'en');
     const candidates = [...history.map(item => ({ name: item.name || '', address: item.address, kind: 'recent' })), ...people.sort(order), ...teams.sort(order)];
     const unique = new Map();

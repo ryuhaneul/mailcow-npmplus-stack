@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { logout } from '../api.js';
-import { navigate } from '../router.js';
 import { session } from '../state/session.js';
 import { prefs } from '../state/prefs.js';
 import Icon from './Icon.jsx';
+import SearchBar from './SearchBar.jsx';
 import OooBadge from './OooBadge.jsx';
 export default function TopBar({ mode, navOpen, toggleNav }) {
   const [accountOpen, setAccountOpen] = useState(false);
@@ -17,11 +17,10 @@ export default function TopBar({ mode, navOpen, toggleNav }) {
     document.addEventListener('keydown', escape);
     return () => {document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
   }, [accountOpen]);
-  const [query, setQuery] = useState('');
   const user = session.value.user;
   return <header class="top">
     <button class="ib menu-btn" type="button" aria-label="메일함 열기" aria-controls="mail-sidebar" aria-expanded={navOpen} onClick={toggleNav}><Icon name="menu"/></button>
-    <form class="search" role="search" onSubmit={event => {event.preventDefault(); if(query.trim()) navigate(`search/${encodeURIComponent(query.trim())}`);}}><Icon name="search" size="s"/><input placeholder="메일 검색 — 예: 보낸사람:partner 견적" aria-label="메일 검색" enterKeyHint="search" value={query} onInput={event=>setQuery(event.currentTarget.value)}/><span class="kbd">/</span></form>
+    <SearchBar/>
     <div class="r"><OooBadge/>
       <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {prefs.value = {...prefs.value, mode:mode === 'dark' ? 'light' : 'dark'};}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
       <a class="ib" href="#settings" aria-label="보기 설정"><Icon name="palette"/></a>

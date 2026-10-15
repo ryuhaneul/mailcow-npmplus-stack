@@ -40,12 +40,30 @@ cert_reload_install() {
 
 # Read-only comparison: 0=equal, 1=different, 2=unavailable.
 cert_reload_certificate_matches() {
-    local mailcow_dir="$1" port="$2" hostname expected actual
+    local mailcow_dir="$1" port="$2" hostname expected actual ids expected_reason
+    local -a matches=()
     hostname=$(
         # shellcheck disable=SC1090,SC1091
         source "$mailcow_dir/mailcow.conf" 2>/dev/null && printf '%s' "${MAILCOW_HOSTNAME:-}"
     ) || hostname=""
-    expected=$(openssl x509 -in "$mailcow_dir/data/assets/ssl/cert.pem" -noout -enddate 2>/dev/null) || expected=""
+    expected=""
+    expected_reason="Dovecot /etc/ssl/mail/cert.pem 기대 만료일 읽기 실패 (openssl·인증서 경로 확인 필요)"
+    if ids=$(docker ps -q --filter label=com.docker.compose.service=dovecot-mailcow 2>/dev/null); then
+        [ -z "$ids" ] || mapfile -t matches <<< "$ids"
+        if [ "${#matches[@]}" -eq 1 ]; then
+            expected=$(docker exec "${matches[0]}" openssl x509 -in /etc/ssl/mail/cert.pem -noout -enddate 2>/dev/null) || expected=""
+        else
+            expected_reason="메일 인증서 기대 만료일 확인 불가: dovecot-mailcow 컨테이너 ${#matches[@]}개 (정확히 1개 필요)"
+        fi
+    else
+        expected_reason="메일 인증서 기대 만료일 확인 불가: Dovecot 컨테이너 조회 실패"
+    fi
+    if [ -z "$expected" ]; then
+        if [ -L "$mailcow_dir/data/assets/ssl/cert.pem" ] && [ ! -e "$mailcow_dir/data/assets/ssl/cert.pem" ]; then
+            expected_reason="호스트 cert.pem 링크 깨짐; $expected_reason"
+        fi
+        echo "$expected_reason" >&2
+    fi
     actual=""
     if [ -n "$hostname" ]; then
         actual=$(timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$hostname" </dev/null 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null) || actual=""

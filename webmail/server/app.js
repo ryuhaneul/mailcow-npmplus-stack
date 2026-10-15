@@ -38,9 +38,10 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
   const folderService = createFolderService({ rulesService, ...folders, imap: app.imap, logger: app.log });
-  await app.register(folderRoutes, { service: folderService });
+  const listService = createListService({ ...messages, imap: app.imap });
+  await app.register(folderRoutes, { service: folderService, listService });
   await app.register(storageRoutes, { service: folderService });
-  await app.register(messageRoutes, { service: createListService({ ...messages, imap: app.imap }), reader: createReadService({ imap: app.imap }) });
+  await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap }) });
   await app.register(eventRoutes);
   await app.register(prefsRoutes, { config });
   await app.register(passwordRoutes, { config });

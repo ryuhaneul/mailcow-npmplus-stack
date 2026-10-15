@@ -248,3 +248,34 @@ test('removed folders and changed domain policies warn without damaging stored d
   assert.deepEqual(classifyState({ activeName: 'webmail-rules', webmailScript: script, folders: context.folders }).missingFolders, []);
   expectInvalid(doc, 'FORWARD_EXTERNAL', { ...context, internalDomains: [] });
 });
+
+
+test('vacation body: LF, blank lines, dot lines and escaped quotes roundtrip; CRLF normalizes', () => {
+  for (const body of ['첫 줄\n\n마지막 줄', '.\n.leading\n..two\n"quoted" and \\ slash\n', 'first\r\n\r\n.last']) {
+    const doc = empty();
+    doc.vacation = { enabled: true, start: null, end: null, subject: '부재중', body };
+    const expected = body.replace(/\r\n/g, '\n');
+    validateDocument(doc, context);
+    assert.equal(doc.vacation.body, expected);
+    const script = generateScript(doc, context);
+    const quoted = '"' + expected.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    assert.ok(script.includes(`:addresses ["user@example.com", "alias@alias.example.com"] ${quoted};`));
+    const parsed = parseScript(script);
+    assert.equal(parsed.state, 'ok');
+    assert.deepEqual(parsed.doc, doc);
+    assert.equal(generateScript(parsed.doc, context), script);
+    assert.equal(generateScript(doc, context), script);
+  }
+});
+
+test('vacation body: other controls stay 422, LF is allowed only in body, normalized limit is 4000', () => {
+  for (const value of ['x\r', 'x\t', 'x\0', 'x\u000b', 'x\u001f', 'x\u007f', 'x\u0085', '${wm_stop}', '\ud800']) {
+    const doc = empty(); doc.vacation.body = value; expectInvalid(doc);
+  }
+  const doc = empty(); doc.vacation.subject = 'first\nsecond'; expectInvalid(doc);
+  doc.vacation.subject = '';
+  doc.vacation.body = 'a'.repeat(3999) + '\r\n';
+  validateDocument(doc, context);
+  assert.equal([...doc.vacation.body].length, 4000);
+  doc.vacation.body += 'a'; expectInvalid(doc);
+});

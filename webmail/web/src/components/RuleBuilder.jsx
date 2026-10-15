@@ -49,12 +49,20 @@ export default function RuleBuilder({ id, query }) {
     let current = true;
     setPreview(null); setPreviewError(null); setPending(Boolean(rule && !problem));
     if (!rule || problem) return () => {current = false;};
-    const timer = setTimeout(async () => {
-      try {const result = await api('/api/rules/preview', {method:'POST',body:{rule:JSON.parse(serialized)}}); if (current) setPreview(result);}
+    let timer;
+    const controller = new AbortController();
+    const refresh = async () => {
+      try {
+        const result = await api('/api/rules/preview', {method:'POST',body:{rule:JSON.parse(serialized)},signal:controller.signal});
+        if (!current) return;
+        setPreview(result);
+        if (result.partial) {setApplyOld(false); timer = setTimeout(refresh, 1500);}
+      }
       catch (e) {if (current) setPreviewError(e);}
       finally {if (current) setPending(false);}
-    }, 300);
-    return () => {current = false; clearTimeout(timer);};
+    };
+    timer = setTimeout(refresh, 300);
+    return () => {current = false; clearTimeout(timer); controller.abort();};
   }, [serialized, problem]);
   function updateCondition(index, patch) {
     setDraft({...draft,conditions:draft.conditions.map((condition, i) => i === index ? {...condition,...patch} : condition)});
@@ -67,7 +75,7 @@ export default function RuleBuilder({ id, query }) {
   }
   async function save(event) {
     event.preventDefault();
-    if (saving.current || problem || !rule || error || busy) return;
+    if (saving.current || problem || !rule || error || busy || (applyOld && (pending || !preview || preview.partial))) return;
     saving.current = true; setBusy(true); setError(null);
     let saved = false;
     try {
@@ -114,7 +122,8 @@ export default function RuleBuilder({ id, query }) {
           </div></div>
           <div class="step rule-stop"><label><input type="checkbox" checked={rule.stop} onChange={e => setDraft({...draft,stop:e.currentTarget.checked})}/>이후 규칙 멈춤</label><p class="rule-note">이 규칙에 맞으면 뒤에 있는 규칙은 적용하지 않아요.</p></div>
           {problem && <p class="rule-note" role="status">{problem}</p>}
-          <div class="save-row"><label><input type="checkbox" checked={applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>이미 받은 메일 <b class="num">{pending || !preview ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= 100)}>규칙 저장</button></div></div>
+          <div class="save-row"><label><input type="checkbox" disabled={pending || !preview || preview.partial} checked={applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>이미 받은 메일 <b class="num">{pending || !preview ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= 100)}>규칙 저장</button></div></div>
+          {preview?.partial && <p class="rule-note" role="status">받은 메일 확인이 끝나면 이미 받은 메일에도 적용할 수 있어요.</p>}
           {!id && data.doc.rules.length >= 100 && <p class="rule-note">규칙은 최대 100개까지 저장할 수 있어요.</p>}
         </fieldset>
       </form><RulePreview data={preview} pending={pending} error={previewError} problem={problem}/></div>}

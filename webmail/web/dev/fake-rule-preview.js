@@ -8,5 +8,5 @@ const rows = Array.from({length:24}, (_, index) => ({
 }));
 export function previewFixture(rule) {
   const items = rows.filter(row => matches(rule, {from:`${row.from.name} <${row.from.address}>`,to:'이서윤 <user@example.com>',subject:row.subject,'content-type':row.hasAttachment?'multipart/mixed':'text/plain'}));
-  return {count:items.length,items:items.slice(0,20),scanned:rows.length,limited:false};
+  return {count:items.length,items:items.slice(0,20),scanned:rows.length,limited:false,partial:false};
 }

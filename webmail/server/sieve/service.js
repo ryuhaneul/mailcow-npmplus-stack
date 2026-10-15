@@ -7,6 +7,7 @@ import { parseScript } from './parse.js';
 import { classifyState } from './state.js';
 import { importScript, rulesDocument } from './import.js';
 import { invalidateInboxHeaders, loadInboxHeaders, matches, preview as previewMatches } from './match.js';
+import { assertUidValidity, decodeRef } from '../mail/ref.js';
 import { createActionService } from '../mail/actions.js';
 
 const previousName = `${SCRIPT_NAME}.prev`;
@@ -158,27 +159,42 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (changed) { doc.rev++; await write(client, current, doc, policy); }
     });
   }
-  async function validateRule(session, body, ignoreExternalForward = false) {
+  async function validateRule(session, body, ignoreExternalForward = false, previewOnly = false) {
     object(body, ['rule']);
     const doc = rulesDocument([body.rule]);
     // Validate every address before selectively ignoring the forwarding policy.
     // A first external recipient must not hide a malformed later recipient.
     validateDocument(doc, { checkPolicy: false });
-    const policy = await context(session);
+    const policy = previewOnly ? { internalDomains: await directory.internalDomains(), checkFolders: false } : await context(session);
     try { validateDocument(doc, policy); }
     catch (error) { if (!ignoreExternalForward || error.code !== 'FORWARD_EXTERNAL') throw error; }
     return body.rule;
   }
   async function previewRule(session, body) {
-    const rule = await validateRule(session, body);
-    return previewMatches(rule, await loadInboxHeaders(imap, session, { now }));
+    const started = performance.now();
+    const rule = await validateRule(session, body, false, true);
+    return previewMatches(rule, await loadInboxHeaders(imap, session, { now, budgetMs: Math.max(0, 3500 - (performance.now() - started)) }));
   }
   async function applyExisting(session, body) {
+    // Do not queue folder validation behind an unfinished scan.
+    await validateRule(session, body, true, true);
+    const snapshot = await loadInboxHeaders(imap, session, { now, budgetMs: 0 });
+    if (snapshot.partial) throw new AppError(409, 'PREVIEW_NOT_READY', '받은 메일 확인이 끝난 뒤 적용해 주세요.');
     const rule = await validateRule(session, body, true);
-    invalidateInboxHeaders(session);
     try {
-      const snapshot = await loadInboxHeaders(imap, session, { now });
-      const found = snapshot.items.filter(record => matches(rule, record.headers));
+      const candidates = snapshot.items.filter(record => matches(rule, record.headers));
+      const found = [];
+      // The snapshot can contain mail moved/deleted by another client since
+      // preview. Check live UIDs before counting targets; no content rescan.
+      await imap.withMailbox(session, 'INBOX', async client => {
+        for (let start = 0; start < candidates.length; start += 1000) {
+          const batch = candidates.slice(start, start + 1000);
+          for (const record of batch) assertUidValidity(client, decodeRef(record.ref));
+          const existing = new Set();
+          for await (const row of client.fetch(batch.map(record => record.uid).join(','), { uid: true }, { uid: true })) existing.add(row.uid);
+          found.push(...batch.filter(record => existing.has(record.uid)));
+        }
+      });
       const result = { matched: found.length, moved: 0, trashed: 0, flagged: 0, failed: [] };
       const actions = [];
       if (rule.actions.read) actions.push(['seen', 'flagged']);
@@ -194,7 +210,9 @@ export function createRulesService({ config, imap, directory, connect = connectM
           const refs = pending.slice(start, start + 1000);
           try {
             const outcome = await mailActions.run(session, { refs, action, ...(action === 'move' ? { target: rule.actions.move } : {}) });
-            result.failed.push(...outcome.failed);
+            const vanished = outcome.failed.filter(item => item.code === 'MESSAGE_NOT_FOUND');
+            result.matched -= vanished.length;
+            result.failed.push(...outcome.failed.filter(item => item.code !== 'MESSAGE_NOT_FOUND'));
             const rejected = new Set(outcome.failed.map(item => item.ref));
             const succeeded = refs.filter(ref => !rejected.has(ref));
             next.push(...succeeded);

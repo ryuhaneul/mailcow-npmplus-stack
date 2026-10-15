@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import { formatBytes } from '../format.js';
 import Icon from '../components/Icon.jsx';
+import { deleteConfirmation, settleDeleteConfirmation } from '../state/list.js';
 
 export default function EmptyFolderDialog({ folder, quota, onClose, onEmptied }) {
   const dialog = useRef(null);
@@ -34,6 +35,22 @@ export default function EmptyFolderDialog({ folder, quota, onClose, onEmptied })
       <div class="note" id="empty-hint">이름이 똑같아야 ‘영구 삭제’ 단추가 켜집니다.</div>
       {error && <div class="field-err" role="alert">{error}</div>}
       <div class="acts2"><button class="btn ghost" type="button" onClick={onClose} disabled={busy}>취소</button><button class="btn dan" type="submit" disabled={busy || name !== folder.name}>{busy ? '비우는 중…' : '영구 삭제'}</button></div>
+    </form>
+  </dialog>;
+}
+
+export function DeleteMessagesDialog() {
+  const dialog=useRef(null),pending=deleteConfirmation.value;
+  useEffect(()=>{
+    const opener=document.activeElement,element=dialog.current;
+    element.showModal();
+    return()=>{element.close();opener?.focus();};
+  },[]);
+  return <dialog class="account-dialog" ref={dialog} aria-labelledby="delete-messages-title" aria-describedby="delete-messages-description" onCancel={event=>{event.preventDefault();settleDeleteConfirmation();}}>
+    <form class="dlg" style="width:min(480px,calc(100vw - 40px))" onSubmit={event=>{event.preventDefault();settleDeleteConfirmation(true);}}>
+      <div class="ico"><Icon name="trash"/></div><h2 id="delete-messages-title">영구 삭제</h2>
+      <p id="delete-messages-description">선택한 {pending.refs.length}통을 <b>영구 삭제</b>합니다. 지운 메일은 되살릴 수 없습니다.</p>
+      <div class="acts2"><button class="btn ghost" type="button" autoFocus onClick={()=>settleDeleteConfirmation()}>취소</button><button class="btn dan" type="submit">영구 삭제</button></div>
     </form>
   </dialog>;
 }

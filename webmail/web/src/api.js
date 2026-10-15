@@ -3,11 +3,12 @@ import { toast } from './state/toast.js';
 
 export async function api(path, { method = 'GET', body, ...options } = {}) {
   const headers = new Headers(options.headers);
-  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  const multipart = body instanceof FormData;
+  if (body !== undefined && !multipart) headers.set('Content-Type', 'application/json');
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.toUpperCase()) && session.value?.csrf) {
     headers.set('X-Webmail-CSRF', session.value.csrf);
   }
-  const response = await fetch(path, { ...options, method, headers, credentials: 'same-origin', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const response = await fetch(path, { ...options, method, headers, credentials: 'same-origin', ...(body === undefined ? {} : { body: multipart ? body : JSON.stringify(body) }) });
   const payload = response.status === 204 ? null : await response.json();
   if (!response.ok) {
     const error = payload.error;

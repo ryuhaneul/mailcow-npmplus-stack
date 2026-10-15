@@ -1,3 +1,4 @@
+import { previewFixture } from './fake-rule-preview.js';
 // Synthetic development fixtures. API fields follow server/sieve/service.js.
 export const exampleRules = [
   {id:'rule0001',enabled:true,match:'all',conditions:[{field:'from',op:'has',value:'@partner.example.com'},{field:'subject',op:'has',value:'명세서'}],actions:{move:'거래처'},stop:false},
@@ -20,12 +21,16 @@ export async function fakeRules(request, response, state, send) {
   let raw='';for await(const chunk of request) raw+=chunk;
   let body;try{body=raw?JSON.parse(raw):undefined;}catch{send(response,400,{error:{code:'BAD_REQUEST',message:'요청을 확인해 주세요.'}});return true;}
   state.requests[state.requests.length-1].body=body;
+  if (request.method==='POST' && path==='/api/rules/preview') {send(response,200,state.rulePreview ?? previewFixture(body.rule));return true;}
   const fail = (code,message) => send(response,409,{error:{code,message}});
   if (state.rulesError) {fail(state.rulesError,'필터가 바뀌었어요. 다시 확인해 주세요.');return true;}
   if (request.method==='PUT' && path==='/api/rules') {
     if (!['ok','none'].includes(state.rules.state)) fail('RULES_STATE','현재 필터 상태에서는 이 작업을 할 수 없어요.');
     else if (body.baseRev!==state.rules.rev) fail('RULES_CONFLICT','필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.');
     else {const rev=state.rules.rev+1;state.rules={...rulesFixture(),doc:{...body.doc,rev},rev};send(response,200,{rev});}
+  } else if (request.method==='POST' && path==='/api/rules/apply-existing') {
+    const matched=previewFixture(body.rule).count;
+    send(response,200,state.ruleApplyResult ?? {matched,moved:body.rule.actions.move?matched:0,trashed:body.rule.actions.trash?matched:0,flagged:body.rule.actions.read||body.rule.actions.star?matched:0,failed:[]});
   } else if (request.method==='POST' && path==='/api/rules/import') {
     if(state.rules.state!=='import_pending')fail('RULES_STATE','현재 필터 상태에서는 이 작업을 할 수 없어요.');
     else if(body.sourceName!==state.rules.importReport.sourceName || body.sourceSha256!==state.rules.importReport.sourceSha256)fail('IMPORT_SOURCE_CHANGED','가져올 필터가 바뀌었어요. 다시 확인해 주세요.');

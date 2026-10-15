@@ -1,0 +1,20 @@
+.common-dialog{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:20px;border:0;background:var(--scrim);color:var(--ink)}
+.common-dialog[open]{display:grid;place-items:center}
+.common-dialog::backdrop{background:transparent}
+.common-dialog .keys-dialog{width:620px}
+.common-dialog kbd+kbd{margin-left:4px}
+.common-dialog .field{margin-bottom:16px}
+.common-dialog label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}
+.common-dialog .dialog-actions{display:flex;justify-content:space-between;gap:8px;margin-top:22px;flex-wrap:wrap}
+.common-dialog .dialog-actions>div{display:flex;gap:8px}
+.common-dialog button:disabled{opacity:.45;cursor:not-allowed}
+@media(max-width:600px){.common-dialog{padding:12px}.common-dialog .dlg{padding:20px}.common-dialog .keys{grid-template-columns:minmax(0,1fr)}}
+.folder-row{display:flex;align-items:center}
+.folder-row>.nv{flex:1;min-width:0;width:auto}
+.folder-row>.ib{opacity:0}
+.folder-row:hover>.ib,.folder-row:focus-within>.ib{opacity:1}
+.common-dialog .swb[aria-pressed=true]{box-shadow:0 0 0 2px var(--ink)}
+.common-dialog .swb[aria-pressed=true] svg{opacity:1}
+@media(max-width:760px){.folder-row>.ib{opacity:1}}
+.common-dialog{grid-template-columns:minmax(0,1fr);justify-items:center}
+.common-dialog .dlg{min-width:0}

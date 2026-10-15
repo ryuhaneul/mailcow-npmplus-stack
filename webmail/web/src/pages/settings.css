@@ -1,0 +1,10 @@
+.view.settings-view{display:flex;min-width:0}
+.settings-view .vs>div{min-width:0}
+.settings-view .settings-modes{margin-left:0;display:inline-flex}
+.settings-view .thumb{width:100%}
+.settings-view .preview-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.settings-view .preview-text{font-size:13px;color:var(--ink-2)}
+.settings-view .preview-text>span{color:var(--accent-ink);font-weight:700}
+.settings-view .custom>label{font-size:13px;font-weight:700}
+@media(max-width:1050px){.settings-view .vs{grid-template-columns:minmax(0,1fr)}.settings-view .pvbox{position:static}}
+@media(max-width:760px){.settings-view .cr div{grid-template-columns:minmax(0,1fr)}.settings-view .cr .v{white-space:normal;flex-wrap:wrap}.settings-view .keys{grid-template-columns:minmax(0,1fr)}}

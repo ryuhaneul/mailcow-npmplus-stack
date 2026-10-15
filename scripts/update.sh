@@ -114,12 +114,87 @@ git_pull_if_repo "$NPMPLUS_DIR" "npmplus (runtime)"
 # ============================================================
 header "Phase 2: docker compose pull (npmplus / snappymail)"
 
+pin_runtime_images() {
+    local dir="$1" component="$2"
+    # Replace only old stack defaults; keep operator-selected versions and all other bytes.
+    python3 - "$PROJECT_DIR/$component/docker-compose.yml" "$dir/docker-compose.yml" <<'PY' | tee -a "$LOGFILE"
+import datetime, os, pathlib, re, shutil, sys, tempfile
+
+source, target = map(pathlib.Path, sys.argv[1:])
+repositories = {'npmplus': 'zoeyvid/npmplus', 'crowdsec': 'crowdsecurity/crowdsec', 'snappymail': 'djmaze/snappymail'}
+image_line = re.compile(r'''^(?P<prefix> *image[ \t]*:[ \t]*)(?P<quote>['"]?)(?P<image>[^\s'"#]+)(?P=quote)(?P<suffix>[ \t]*(?:#[^\r\n]*)?)(?P<end>\r?\n|\r|)$''')
+
+def images(lines):
+    # The stack uses block-style services. Reject ambiguous image definitions rather
+    # than re-serializing YAML or guessing where an operator's setting belongs.
+    result = {}
+    inside, service, service_indent, field_indent = False, None, None, None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'): continue
+        if line.startswith('services:') and stripped == 'services:':
+            inside = True
+            continue
+        if not inside: continue
+        indent = len(line) - len(line.lstrip(' '))
+        if indent == 0:
+            inside = False
+            continue
+        if service_indent is None: service_indent = indent
+        if indent == service_indent:
+            match = re.fullmatch(r' *([A-Za-z0-9_.-]+):[ \t]*(?:#[^\r\n]*)?\r?\n?', line)
+            if not match: raise ValueError('unsupported service declaration')
+            service, field_indent = match[1], None
+            continue
+        if service not in repositories: continue
+        if field_indent is None: field_indent = indent
+        if indent == field_indent and re.match(r' *image[ \t]*:', line):
+            match = image_line.fullmatch(line)
+            if not match or service in result: raise ValueError('ambiguous image declaration')
+            result[service] = (index, match)
+    if not result: raise ValueError('no supported service image declaration')
+    return result
+
+try:
+    pins = images(source.read_bytes().decode('utf-8').splitlines(keepends=True))
+    original = target.read_bytes()
+    lines = original.decode('utf-8').splitlines(keepends=True)
+    installed = images(lines)
+    changes = []
+    for service, (_, definition) in pins.items():
+        desired = definition['image']
+        if not re.fullmatch(re.escape(repositories[service]) + r':[^@\s]+@sha256:[0-9a-f]{64}', desired):
+            raise ValueError('repository image is not pinned by tag and digest')
+        if service not in installed: raise ValueError('runtime service image is missing')
+        index, current = installed[service]
+        existing = current['image']
+        if existing == desired: continue
+        if existing not in (repositories[service], repositories[service] + ':latest'):
+            print(f'[image-pin] {service}: 레포 고정값과 다름 — 그대로 둠, 맞추려면 docs 절차')
+            continue
+        lines[index] = current['prefix'] + current['quote'] + desired + current['quote'] + current['suffix'] + current['end']
+        changes.append((service, existing, desired))
+    if changes:
+        prefix = target.name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '.'
+        descriptor, backup = tempfile.mkstemp(prefix=prefix, dir=target.parent)
+        with os.fdopen(descriptor, 'wb') as stream: stream.write(original)
+        shutil.copystat(target, backup)
+        print(f'[image-pin] backup: {backup}', flush=True)
+        target.write_bytes(''.join(lines).encode('utf-8'))
+        for service, before, after in changes: print(f'[image-pin] {service}: {before} -> {after}')
+except (OSError, UnicodeError, ValueError) as error:
+    print(f'[image-pin] ERROR: {error}; inspect runtime compose and follow docs image-version procedure', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 compose_pull() {
     local dir="$1" label="$2"
     if [ ! -f "$dir/docker-compose.yml" ]; then
         warn "$label: docker-compose.yml missing at $dir — skipping"
         return 0
     fi
+    pin_runtime_images "$dir" "$label" || die "$label: image pin preparation failed; pull stopped"
     log "$label: docker compose pull"
     (cd "$dir" && docker compose pull 2>&1 | tee -a "$LOGFILE" | tail -5) \
         || warn "$label: docker compose pull had issues (non-fatal)"

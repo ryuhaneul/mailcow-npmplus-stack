@@ -1266,16 +1266,11 @@ fi
 # ============================================================
 header "Phase 9: Maintenance"
 
-if [ ! -f /etc/cron.d/mailcow-cert-reload ]; then
-    cat > /etc/cron.d/mailcow-cert-reload <<'CRON'
-# Reload Mailcow services to pick up renewed NPM certificates
-0 4 * * * root docker exec postfix-mailcow postfix reload 2>/dev/null; docker exec dovecot-mailcow doveadm reload 2>/dev/null
-CRON
-    chmod 644 /etc/cron.d/mailcow-cert-reload
-    log "Cert reload cron: installed (daily 04:00)"
-else
-    log "Cert reload cron: already installed"
-fi
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/cert-reload.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/cert-reload.sh"
+cert_reload_install || die "Cert reload cron installation failed"
 
 # ============================================================
 # Phase 10: Toolkit UI Integration

@@ -73,6 +73,7 @@ rm -rf "$WEBMAIL_DIR"
 
 # Remove cron
 rm -f /etc/cron.d/mailcow-cert-reload
+rm -f /usr/local/sbin/mailcow-cert-reload
 
 echo ""
 log "Clean removal complete."

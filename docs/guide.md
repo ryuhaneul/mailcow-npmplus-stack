@@ -530,10 +530,12 @@ NPM이 인증서를 자동 갱신하지만, Mailcow의 dovecot/postfix는 갱신
 
 ```bash
 # /etc/cron.d/mailcow-cert-reload (또는 서버 crontab)
-0 4 * * * root docker exec postfix-mailcow postfix reload 2>/dev/null; docker exec dovecot-mailcow doveadm reload 2>/dev/null
+0 4 * * * root /usr/local/sbin/mailcow-cert-reload
 ```
 
 > 매일 04:00에 postfix/dovecot 리로드. 인증서가 변경되지 않아도 리로드는 무해함.
+
+setup·update는 cron이 없으면 설치하고, 스택의 옛 두 줄과 정확히 같으면 `.bak.<날짜시각>`으로 백업 후 교체합니다. 다른 사용자 내용은 보존하고 경고합니다. reload 도구는 실행 시 compose 서비스 라벨로 대상을 각각 하나씩 찾으며, 실패와 성공을 `logger -t mailcow-cert-reload`로 기록합니다. 수동 실행은 `sudo /usr/local/sbin/mailcow-cert-reload`입니다. verify는 대상의 개수와 로컬 993·465 인증서의 만료일이 `cert.pem`과 같은지 확인합니다.
 > nginx-mailcow은 심볼릭을 통해 매 요청 시 읽으므로 별도 리로드 불필요.
 
 ---

@@ -1,30 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
+import { get } from 'node:http';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createActionService } from '../../server/mail/actions.js';
 import { createEventService } from '../../server/mail/events.js';
-import { encodeRef, decodeRef, assertUidValidity } from '../../server/mail/ref.js';
+import { encodeRef } from '../../server/mail/ref.js';
 import { createApp } from '../../server/app.js';
 
 const ref = (path = 'INBOX', uid = 7) => encodeRef(path, 123, uid);
 class ActionImap extends EventEmitter {
-  constructor(options = {}) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.calls = []; this.access = new Map(); this.usable = false; this.archive = 'Saved'; this.total = 3; this.unseen = 2; this.usage = 100; this.limit = 1000; }
+  constructor(options = {}) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.calls = []; this.access = new Map(); this.usable = false; this.archive = 'Saved'; this.locks = []; this.rightsQueries = []; this.fetches = []; this.total = 3; this.unseen = 2; this.usage = 100; this.limit = 1000; }
   async connect() { this.usable = true; }
   close() { this.usable = false; this.emit('close'); }
   async logout() { this.close(); }
-  async getMailboxLock(path) { this.mailbox = { path, uidValidity: 123n }; return { release() {} }; }
+  async getMailboxLock(path) { this.locks.push(path); this.mailbox = { path, uidValidity: 123n }; return { release() {} }; }
   async mailboxOpen(path) { this.mailbox = { path, uidValidity: 123n }; }
   async idle() { return new Promise(() => {}); }
   async exec(command, attrs, {untagged} = {}) {
-    if (command === 'MYRIGHTS') untagged.MYRIGHTS({attributes:[attrs[0],{value:this.access.get(attrs[0].value) ?? 'lrswite'}]});
+    if (command === 'MYRIGHTS') { this.rightsQueries.push(attrs[0].value); untagged.MYRIGHTS({attributes:[attrs[0],{value:this.access.get(attrs[0].value) ?? 'lrswite'}]}); }
     else this.calls.push([command,attrs]);
     return {next:()=>{ if(command==='UID EXPUNGE') this.calls.push(['next']); }};
   }
-  async fetchOne(uid) { return this.missing ? false : {uid}; }
+  async *fetch(range, query, options) { this.fetches.push({ range, query, options }); for (const uid of range.split(',').map(Number)) if (!this.missing && !this.missingUids?.has(uid)) yield {uid}; }
   async list() { return this.archive ? [{path:this.archive,specialUse:'\\Archive'}] : this.existingArchive ? [{path:'Archive'}] : []; }
   async mailboxCreate(path) { this.calls.push(['create',path]); return true; }
   async messageMove(...args) { this.calls.push(['move',...args]); if(this.reject) throw new Error('synthetic failure'); return true; }
@@ -35,18 +36,18 @@ class ActionImap extends EventEmitter {
 }
 function fixture() {
   const client = new ActionImap();
-  const imap = {async withRef(_session, token, operation) { const value = decodeRef(token); await client.getMailboxLock(value.path); assertUidValidity(client,value); return operation(client); }};
+  const imap = {async withMailbox(_session, path, operation) { const lock = await client.getMailboxLock(path); try { return await operation(client); } finally { lock.release(); } }};
   return {client,service:createActionService({imap})};
 }
 for (const [action,method,flag] of [['seen','add','\\Seen'],['unseen','remove','\\Seen'],['flag','add','\\Flagged'],['unflag','remove','\\Flagged']]) test(`action ${action}: expected UID flag call`, async()=>{
-  const f=fixture(); assert.deepEqual(await f.service.run({}, {refs:[ref()],action}),{done:1,failed:[]}); assert.deepEqual(f.client.calls,[[method,7,[flag],{uid:true}]]);
+  const f=fixture(); assert.deepEqual(await f.service.run({}, {refs:[ref()],action}),{done:1,failed:[]}); assert.deepEqual(f.client.calls,[[method,'7',[flag],{uid:true}]]);
 });
 for (const [action,target] of [['move','Projects/합성'],['archive','Saved'],['trash','Trash'],['spam','Junk'],['notspam','INBOX']]) test(`action ${action}: expected original-folder UID MOVE`,async()=>{
-  const f=fixture(); const token=ref('Projects/원본',9); assert.equal((await f.service.run({}, {refs:[token],action,target})).done,1); assert.equal(f.client.mailbox.path,'Projects/원본'); assert.deepEqual(f.client.calls,[['move',9,target,{uid:true}]]);
+  const f=fixture(); const token=ref('Projects/원본',9); assert.equal((await f.service.run({}, {refs:[token],action,target})).done,1); assert.equal(f.client.mailbox.path,'Projects/원본'); assert.deepEqual(f.client.calls,[['move','9',target,{uid:true}]]);
 });
 test('action delete-forever: Trash and Junk use Deleted plus UID EXPUNGE only',async()=>{
   const f=fixture(); assert.equal((await f.service.run({}, {refs:[ref('Trash'),ref('Junk',8)],action:'delete-forever'})).done,2);
-  assert.deepEqual(f.client.calls.slice(0,3),[['add',7,['\\Deleted'],{uid:true}],['UID EXPUNGE',[{type:'SEQUENCE',value:'7'}]],['next']]);
+  assert.deepEqual(f.client.calls.slice(0,3),[['add','7',['\\Deleted'],{uid:true}],['UID EXPUNGE',[{type:'SEQUENCE',value:'7'}]],['next']]);
 });
 test('action validation: permanent deletion outside Trash/Junk rejects entire batch before mutation',async()=>{
   const f=fixture(); await assert.rejects(f.service.run({}, {refs:[ref('Trash'),ref()],action:'delete-forever'}),{statusCode:422}); assert.deepEqual(f.client.calls,[]);
@@ -71,7 +72,7 @@ test('actions: per-ref partial failure, stale ref and missing UID',async()=>{
 });
 test('actions: archive creates fallback once, reuses existing fallback and trash no-op',async()=>{
   const f=fixture(); f.client.archive=null;
-  assert.equal((await f.service.run({}, {refs:[ref()],action:'archive'})).done,1); assert.deepEqual(f.client.calls,[['create','Archive'],['move',7,'Archive',{uid:true}]]);
+  assert.equal((await f.service.run({}, {refs:[ref()],action:'archive'})).done,1); assert.deepEqual(f.client.calls,[['create','Archive'],['move','7','Archive',{uid:true}]]);
   f.client.calls=[]; f.client.existingArchive=true; await f.service.run({}, {refs:[ref()],action:'archive'}); assert.equal(f.client.calls[0][0],'move');
   f.client.calls=[]; assert.equal((await f.service.run({}, {refs:[ref('Trash')],action:'trash'})).done,1); assert.deepEqual(f.client.calls,[]);
 });
@@ -107,11 +108,12 @@ test('SSE: concurrent notifications coalesce while IMAP refresh is pending',asyn
   const f=eventFixture();let release,count=0;const original=f.client.status.bind(f.client);f.client.status=async(...args)=>{count++;if(count===1) await new Promise(resolve=>{release=resolve;});return original(...args);};
   const stream=f.open();stream.resume();await nextTurn();for(let i=0;i<10;i++) f.event();release();await nextTurn();assert.equal(count,2);stream.destroy();
 });
-test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, monitor cleanup',async t=>{
+test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, monitor cleanup',{timeout:5000},async t=>{
   const clients=[];const tempRoot=await mkdtemp(join(tmpdir(),'webmail-w07-test-'));
   const config={publicHostnames:['newmail.example.com'],trustProxy:['127.0.0.0/8'],logLevel:'silent',sessionIdleMin:480,sessionMaxHours:24,imapHost:'imap.example.com',imapPort:993,mailTlsMode:'verify',mailTlsServername:'mail.example.com'};
   const app=await createApp({config,logger:false,auth:{tempRoot,clientFactory:options=>{const client=new ActionImap(options);clients.push(client);return client;}}});
-  t.after(async()=>{await app.close();await rm(tempRoot,{recursive:true,force:true});});
+  let eventsRequest;
+  t.after(async()=>{eventsRequest?.destroy();await app.close();await rm(tempRoot,{recursive:true,force:true});});
   await app.listen({host:'127.0.0.1',port:0});const base=`http://127.0.0.1:${app.server.address().port}`;
   assert.equal((await fetch(base+'/api/events')).status,403);
   const logged=await fetch(base+'/api/auth/login',{method:'POST',headers:{origin:'https://newmail.example.com','content-type':'application/json'},body:JSON.stringify({email:'user@example.com',password:'synthetic-actions-password'})});assert.equal(logged.status,200);const session=await logged.json();
@@ -119,8 +121,66 @@ test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, moni
   const body=JSON.stringify({refs:[ref()],action:'seen'});
   assert.equal((await fetch(base+'/api/messages/actions',{method:'POST',headers,body})).status,403);
   const action=await fetch(base+'/api/messages/actions',{method:'POST',headers:{...headers,'x-webmail-csrf':session.csrf},body});assert.equal(action.status,200);assert.deepEqual(await action.json(),{done:1,failed:[]});
-  const controller=new AbortController();const events=await fetch(base+'/api/events',{headers:{cookie:headers.cookie},signal:controller.signal});assert.equal(events.status,200);
-  assert.match(events.headers.get('content-type'),/^text\/event-stream/);assert.equal(events.headers.get('cache-control'),'no-store');assert.equal(events.headers.get('x-accel-buffering'),'no');assert.equal(events.headers.get('www-authenticate'),null);assert.equal(events.headers.get('x-content-type-options'),'nosniff');
-  const reader=events.body.getReader();const chunk=await reader.read();assert.match(new TextDecoder().decode(chunk.value),/event: mailbox/);assert.equal(clients.length,2);
-  const closed=once(clients[1],'close');controller.abort();await closed;assert.equal(clients[1].usable,false);assert.equal(clients[0].usable,true);
+  // A fetch abort may open a replacement pooled socket with no HTTP request,
+  // which server.close() must wait to time out. Keep this SSE client unpooled.
+  eventsRequest=get(base+'/api/events',{headers:{cookie:headers.cookie},agent:false});
+  const [events]=await once(eventsRequest,'response');assert.equal(events.statusCode,200);
+  assert.match(events.headers['content-type'],/^text\/event-stream/);assert.equal(events.headers['cache-control'],'no-store');assert.equal(events.headers['x-accel-buffering'],'no');assert.equal(events.headers['www-authenticate'],undefined);assert.equal(events.headers['x-content-type-options'],'nosniff');
+  const [chunk]=await once(events,'data');assert.match(chunk.toString(),/event: mailbox/);assert.equal(clients.length,2);
+  const closed=once(clients[1],'close');eventsRequest.destroy();await closed;assert.equal(clients[1].usable,false);assert.equal(clients[0].usable,true);
+});
+
+test('actions: 1000 refs share one lock, rights query, existence FETCH and UID STORE', async () => {
+  const f = fixture();
+  const refs = Array.from({ length: 1000 }, (_, i) => ref('INBOX', i + 1));
+  assert.deepEqual(await f.service.run({}, { refs, action: 'seen' }), { done: 1000, failed: [] });
+  assert.deepEqual(f.client.locks, ['INBOX']); assert.deepEqual(f.client.rightsQueries, ['INBOX']);
+  assert.equal(f.client.fetches.length, 1); assert.deepEqual(f.client.fetches[0].query, { uid: true });
+  assert.deepEqual(f.client.fetches[0].options, { uid: true });
+  assert.deepEqual(f.client.calls, [['add', Array.from({ length: 1000 }, (_, i) => i + 1).join(','), ['\\Seen'], { uid: true }]]);
+});
+
+test('actions: mixed validity and missing UID fail only those refs in the same folder', async () => {
+  const f = fixture(); f.client.missingUids = new Set([2]);
+  const stale = encodeRef('INBOX', 124, 3), missing = ref('INBOX', 2);
+  const result = await f.service.run({}, { refs: [ref('INBOX', 1), missing, stale, ref('INBOX', 4)], action: 'move', target: 'Projects' });
+  assert.equal(result.done, 2);
+  assert.deepEqual(result.failed, [{ ref: stale, code: 'STALE_REF' }, { ref: missing, code: 'MESSAGE_NOT_FOUND' }]);
+  assert.deepEqual(f.client.calls, [['move', '1,4', 'Projects', { uid: true }]]);
+  assert.deepEqual(f.client.rightsQueries, ['INBOX', 'Projects']);
+  assert.equal(f.client.fetches[0].range, '1,2,4');
+});
+
+test('actions: interleaved source folders get one lock and UID set each', async () => {
+  const f = fixture();
+  const result = await f.service.run({}, { refs: [ref('INBOX', 1), ref('Other', 2), ref('INBOX', 3)], action: 'move', target: 'Projects' });
+  assert.deepEqual(result, { done: 3, failed: [] });
+  assert.deepEqual(f.client.locks, ['INBOX', 'Other']);
+  assert.deepEqual(f.client.rightsQueries, ['INBOX', 'Projects', 'Other', 'Projects']);
+  assert.equal(f.client.fetches.length, 2);
+  assert.deepEqual(f.client.calls, [['move', '1,3', 'Projects', { uid: true }], ['move', '2', 'Projects', { uid: true }]]);
+});
+
+test('actions: readonly source group fails without blocking a writable group', async () => {
+  const f = fixture(); f.client.access.set('Other', 'lr');
+  const tokens = [ref('Other', 1), ref('INBOX', 2), ref('Other', 3)];
+  assert.deepEqual(await f.service.run({}, { refs: tokens, action: 'seen' }), {
+    done: 1, failed: [tokens[0], tokens[2]].map(ref => ({ ref, code: 'FOLDER_READONLY' })),
+  });
+  assert.deepEqual(f.client.calls, [['add', '2', ['\\Seen'], { uid: true }]]);
+});
+
+for (const [action, code] of [['seen', 'MAIL_REJECTED'], ['move', 'MAIL_UNAVAILABLE']]) {
+  test(`actions: ${action} command failure reports every ref in that UID set`, async () => {
+    const f = fixture(); f.client.reject = true;
+    const refs = [ref('INBOX', 1), ref('INBOX', 2)];
+    assert.deepEqual(await f.service.run({}, { refs, action, target: 'Projects' }), { done: 0, failed: refs.map(ref => ({ ref, code })) });
+    assert.equal(f.client.calls.length, 1);
+  });
+}
+
+test('actions: grouped permanent delete stores Deleted and expunges the same UID set', async () => {
+  const f = fixture();
+  assert.deepEqual(await f.service.run({}, { refs: [ref('Trash', 1), ref('Trash', 2)], action: 'delete-forever' }), { done: 2, failed: [] });
+  assert.deepEqual(f.client.calls, [['add', '1,2', ['\\Deleted'], { uid: true }], ['UID EXPUNGE', [{ type: 'SEQUENCE', value: '1,2' }]], ['next']]);
 });

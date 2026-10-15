@@ -1,6 +1,7 @@
 import { fakeSettings } from './fake-settings.js';
 import { parseSearch } from '../src/search.js';
 import { fakeRules, rulesFixture } from './fake-rules.js';
+import { fakeIdentities, exampleIdentities, examplePrefs } from './fake-identities.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
 export const fakeConfigs = {
   a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, version: '0.1.0' },
@@ -23,7 +24,7 @@ const messages = {
 };
 export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
   const streams=new Set();
-  const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], prefs:{theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode,accent:{},layout:null,folderColors:{},imageAllow:[],signatures:{},defaultFrom:null}, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
+  const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], identities: structuredClone(exampleIdentities), prefs: {...structuredClone(examplePrefs),theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode}, prefsError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
   function emit(type,value){for(const response of streams)response.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);}
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
@@ -50,7 +51,7 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(path==='/api/auth/session')return send(response,200,publicSession());
     if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
     if(await fakeSettings(request,response,state,send,recorded))return;
-    if(path==='/api/prefs')return send(response,200,state.prefs);
+    if(path==='/api/prefs'&&request.method==='GET')return send(response,200,state.prefs);
     if(path==='/api/events'){
       response.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store'});response.write(': ready\n\n');streams.add(response);response.on('close',()=>streams.delete(response));return;
     }
@@ -113,7 +114,7 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
       state.authenticated=false;return send(response,200,{relogin:true});
     }
     if(await fakeRules(request,response,state,send))return;
-    if(path==='/api/dev/vacation')return send(response,200,state.vacation);
+    if(await fakeIdentities(request,response,state,send))return;
     send(response,404,{error:{code:'NOT_FOUND',message:'요청한 경로를 찾을 수 없어요.'}});
   }
   return {state,middleware,emit,close(){for(const response of streams)response.end();streams.clear();}};

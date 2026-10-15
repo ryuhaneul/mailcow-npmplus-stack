@@ -728,6 +728,8 @@ TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 �
 
 Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 있으므로 근무 시간 밖에 사용자 공지 후 실행합니다. 되돌리기는 프록시 추가 주소 제거 → 웹메일 `docker compose down` → `.env`에서 `WEBMAIL_ENABLE=false` → `apply-dovecot-webmail.sh --revert -y` → `apply-webmail-dbuser.sh --revert` 순서입니다. 색인은 남기며 사용자 설정·메일 데이터는 지우지 않습니다. `teardown.sh`는 별도의 전체 제거 명령으로 확인 후 웹메일까지 제거합니다.
 
+2026-09a의 `Global setting mail_plugins won't change ...` 경고는 기본 conf의 IMAP·LMTP 설정(183·188행) 뒤에 `extra.conf`가 포함되어 발생합니다([Dovecot 2.3.21.1 config-parser.c 902~916](https://github.com/dovecot/core/blob/2.3.21.1/src/config/config-parser.c#L902)); 전역 가상 네임스페이스를 프로토콜 필터 없는 도구에서도 열 수 있도록 전역 virtual을 유지하고 IMAP·LMTP에도 명시적으로 추가하므로, 각 프로토콜에 virtual이 한 번씩 있는 현재 설정에서는 무해합니다.
+
 ### 스내피에서 웹메일로 바꾸기
 
 아래 도구는 관리자가 직접 실행하며 setup·update는 자동으로 호출하지 않습니다. 각 단계는 운영자 승인과 공지 후 진행합니다. 두 도구는 `.env`를 수정하지 않고 운영자에게 변경할 선택값만 안내합니다.

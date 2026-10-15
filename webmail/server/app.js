@@ -14,6 +14,7 @@ import folderRoutes from './routes/folders.js';
 import storageRoutes from './routes/storage.js';
 import messageRoutes from './routes/messages.js';
 import eventRoutes from './routes/events.js';
+import passwordRoutes from './routes/password.js';
 import { createReadService } from './mail/read.js';
 import { createListService } from './mail/list.js';
 import { createFolderService } from './mail/folders.js';
@@ -29,6 +30,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await app.register(storageRoutes, { service: folderService });
   await app.register(messageRoutes, { service: createListService({ ...messages, imap: app.imap }), reader: createReadService({ imap: app.imap }) });
   await app.register(eventRoutes);
+  await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });
   const root = resolve(staticDir);

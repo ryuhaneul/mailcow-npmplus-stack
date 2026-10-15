@@ -14,9 +14,12 @@ import folderRoutes from './routes/folders.js';
 import storageRoutes from './routes/storage.js';
 import messageRoutes from './routes/messages.js';
 import eventRoutes from './routes/events.js';
+import prefsRoutes from './routes/prefs.js';
+import passwordRoutes from './routes/password.js';
 import { createReadService } from './mail/read.js';
 import { createListService } from './mail/list.js';
 import { createFolderService } from './mail/folders.js';
+import installDirectory from './routes/directory.js';
 
 export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
@@ -24,11 +27,14 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   installHeaders(app);
   installClientIp(app);
   await installAuth(app, { ...auth, config });
+  await installDirectory(app, { config });
   const folderService = createFolderService({ ...folders, imap: app.imap, logger: app.log });
   await app.register(folderRoutes, { service: folderService });
   await app.register(storageRoutes, { service: folderService });
   await app.register(messageRoutes, { service: createListService({ ...messages, imap: app.imap }), reader: createReadService({ imap: app.imap }) });
   await app.register(eventRoutes);
+  await app.register(prefsRoutes, { config });
+  await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });
   const root = resolve(staticDir);

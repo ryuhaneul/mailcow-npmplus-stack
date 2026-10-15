@@ -24,10 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MAILCOW_DIR="/home/mailcow-dockerized"
-NPMPLUS_DIR="/home/npmplus"
-SNAPPYMAIL_DIR="/home/snappymail"
-LOGFILE="/var/log/mailcow-stack-setup.log"
+MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
+NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
+SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
+LOGFILE="${LOGFILE:-/var/log/mailcow-stack-setup.log}"
 
 # Argument parsing (flags may appear in any order)
 NON_INTERACTIVE=false
@@ -115,9 +115,17 @@ echo "=== Setup started at $(date) ===" >> "$LOGFILE"
 # --- Load .env ---
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || die ".env file not found. Copy .env.example to .env and fill in values."
+WEBMAIL_ENABLE=false
+SNAPPYMAIL_ENABLE=true
+MAIL_AUTOEXPUNGE_ENABLE=
 set -a; source "$ENV_FILE"; set +a
 
 [ -z "${DOMAIN:-}" ] && die "DOMAIN is required in .env"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/webmail-env.sh
+source "$SCRIPT_DIR/lib/webmail-env.sh"
+webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+
 
 # ============================================================
 # Phase 0: System Packages
@@ -163,6 +171,7 @@ install_pkg curl
 install_pkg dig bind-utils
 install_pkg openssl
 install_pkg git
+[ "$WEBMAIL_ENABLE" != true ] || install_pkg rsync
 
 # ============================================================
 # Phase 1: Docker Engine
@@ -394,7 +403,8 @@ if ! docker volume inspect npmplus_npmplus-data &>/dev/null; then
 fi
 
 # --- Install Mailcow Toolkit (bundled in this repo) ---
-TOOLKIT_DIR="/home/mailcow-toolkit"
+TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 if [ -d "$TOOLKIT_DIR" ]; then
     log "Toolkit: already installed at $TOOLKIT_DIR"
 else
@@ -679,6 +689,7 @@ done
 # ============================================================
 # Phase 6: Snappymail
 # ============================================================
+if [ "$SNAPPYMAIL_ENABLE" = true ]; then
 header "Phase 6: Snappymail"
 
 mkdir -p "$SNAPPYMAIL_DIR"
@@ -827,15 +838,50 @@ else
     warn "Could not generate Snappymail admin password hash"
 fi
 
+else
+    log "Phase 6: Snappymail disabled — skipping"
+fi
+
+# ============================================================
+# Phase 6b: Webmail
+# ============================================================
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    header "Phase 6b: Webmail"
+    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Webmail configuration failed"
+    webmail_ensure_db_password || die "Webmail DB password preparation failed"
+    mkdir -p "$WEBMAIL_DIR"
+    rsync -a --delete --exclude=node_modules --exclude=webmail.env \
+        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml \
+        "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
+    webmail_prepare "$ENV_FILE" "$MAILCOW_DIR" "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" apply -y
+    (cd "$WEBMAIL_DIR" && docker compose build && docker compose up -d)
+fi
+
+# ============================================================
+# Phase 6c: Junk/Trash retention (independent of Webmail)
+# ============================================================
+if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
+    header "Phase 6c: Junk/Trash retention"
+    warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" apply -y
+elif grep -Eq '^[[:space:]]*(export[[:space:]]+)?MAIL_AUTOEXPUNGE_ENABLE=' "$ENV_FILE" && grep -qFx '# BEGIN mailstack autoexpunge (apply-dovecot-autoexpunge.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" --revert -y
+fi
+
 # ============================================================
 # Phase 7: NPM Proxy Hosts + SSL
 # ============================================================
 header "Phase 7: NPM Proxy Hosts + SSL Certificates"
 
 sleep 3
-NPM_API="https://127.0.0.1:81/api"
+NPM_API="${NPM_API:-https://127.0.0.1:81/api}"
 COOKIE_JAR=$(mktemp)
-trap 'rm -f "$COOKIE_JAR"' EXIT
+LOGIN_PAYLOAD=$(mktemp)
+chmod 600 "$LOGIN_PAYLOAD"
+trap 'rm -f "$COOKIE_JAR" "$LOGIN_PAYLOAD"' EXIT
+python3 -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_ADMIN_EMAIL"],"secret":os.environ["NPM_ADMIN_PASSWORD"]}))' > "$LOGIN_PAYLOAD"
 
 # --- NPM admin login ---
 # Admin account is auto-created by INITIAL_ADMIN_EMAIL/PASSWORD env vars
@@ -845,7 +891,7 @@ for attempt in $(seq 1 10); do
     LOGIN_RESULT=$(curl -sk -c "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
         -X POST "${NPM_API}/tokens" \
         -H "Content-Type: application/json" \
-        -d "{\"identity\": \"${NPM_ADMIN_EMAIL}\", \"secret\": \"${NPM_ADMIN_PASSWORD}\"}" 2>/dev/null)
+        -d "@$LOGIN_PAYLOAD" 2>/dev/null)
     if [ "$LOGIN_RESULT" = "200" ]; then
         log "NPM admin: logged in"
         break
@@ -856,6 +902,8 @@ for attempt in $(seq 1 10); do
     warn "NPM login attempt $attempt failed (HTTP $LOGIN_RESULT), retrying in 3s..."
     sleep 3
 done
+
+rm -f "$LOGIN_PAYLOAD"
 
 # --- Create proxy hosts ---
 # Check if hosts already exist (idempotent)
@@ -906,11 +954,29 @@ upload_selfsigned_cert() {
 }
 
 create_proxy_host() {
-    local domain="$1" host="$2" port="$3" scheme="$4" advanced="${5:-}"
+    local domain="$1" host="$2" port="$3" scheme="$4" advanced="${5:-}" access_list_id="${6:-0}"
+    local http2=false
+    [ "$host" != webmail ] || http2=true
 
     # Skip if already exists
-    if echo "$EXISTING_HOSTS" | grep -qx "$domain"; then
-        log "  $domain: already exists, skipping"
+    if echo "$EXISTING_HOSTS" | grep -qFx "$domain"; then
+        if [ "$host" = webmail ]; then
+            local existing_target
+            existing_target=$(curl -sk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
+import sys,json
+host=sys.argv[1]
+for item in json.load(sys.stdin):
+    if host in item.get("domain_names",[]):
+        print(item.get("forward_host","")); break
+' "$domain") || return 1
+            if [ "$existing_target" != webmail ]; then
+                warn "  $domain: existing target is $existing_target; skipping (use webmail-cutover.sh switch for a deliberate cutover)"
+            else
+                log "  $domain: already points to webmail, skipping"
+            fi
+        else
+            log "  $domain: already exists, skipping"
+        fi
         curl -sk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" 2>/dev/null | python3 -c "
 import sys, json
 for h in json.load(sys.stdin):
@@ -946,7 +1012,8 @@ for h in json.load(sys.stdin):
                 \"ssl_forced\": true,
                 \"block_exploits\": false,
                 \"allow_websocket_upgrade\": false,
-                \"http2_support\": false,
+                \"http2_support\": ${http2},
+                \"access_list_id\": ${access_list_id},
                 \"advanced_config\": ${adv_json},
                 \"meta\": {\"letsencrypt_email\": \"${NPM_ADMIN_EMAIL}\", \"letsencrypt_agree\": true, \"dns_challenge\": false},
                 \"locations\": []
@@ -986,7 +1053,8 @@ for h in json.load(sys.stdin):
             \"ssl_forced\": true,
             \"block_exploits\": false,
             \"allow_websocket_upgrade\": false,
-            \"http2_support\": false,
+            \"http2_support\": ${http2},
+                \"access_list_id\": ${access_list_id},
             \"advanced_config\": ${adv_json},
             \"locations\": []
         }" 2>/dev/null)
@@ -1005,8 +1073,50 @@ for h in json.load(sys.stdin):
 
 log "Creating proxy hosts..."
 
-# 1. mail.DOMAIN -> snappymail
-MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "" || true)
+# An absent or authenticated access list must never silently make Webmail public.
+WEBMAIL_ACCESS_ID=0
+WEBMAIL_PROXY_ALLOWED=true
+if [ "$WEBMAIL_ENABLE" = true ] && [ -n "${WEBMAIL_ACCESS_LIST:-}" ]; then
+    WEBMAIL_ACCESS_ID=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/access-lists" | python3 -c '
+import sys,json
+name=sys.argv[1]
+items=[item for item in json.load(sys.stdin) if item.get("name")==name]
+if len(items)!=1: sys.exit(1)
+print(int(items[0]["id"]))
+' "$WEBMAIL_ACCESS_LIST") || WEBMAIL_PROXY_ALLOWED=false
+    if [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
+        if ! curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/access-lists/${WEBMAIL_ACCESS_ID}?expand=items,clients" | python3 -c '
+import sys,json
+item=json.load(sys.stdin)
+# items are HTTP-auth users; clients are IP allow/deny entries.
+sys.exit(0 if isinstance(item.get("items"),list) and not item["items"] else 1)
+'; then
+            WEBMAIL_PROXY_ALLOWED=false
+        fi
+    fi
+    if [ "$WEBMAIL_PROXY_ALLOWED" = false ]; then
+        warn "Webmail access list missing, unreadable or contains authentication users; proxy creation skipped"
+    fi
+fi
+
+# 1. mail.DOMAIN follows the selected webmail service. Both disabled: no proxy.
+MAIL_CERT_ID=0
+if [ "$SNAPPYMAIL_ENABLE" = true ]; then
+    MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "" || true)
+elif [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
+    MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "webmail" 8080 "http" \
+        "client_max_body_size $((WEBMAIL_ATTACH_MAX_MB + 5))m;" "$WEBMAIL_ACCESS_ID" || true)
+fi
+
+if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
+    IFS=, read -r -a WEBMAIL_PROXY_HOSTS <<< "$WEBMAIL_HOSTNAMES"
+    for webmail_host in "${WEBMAIL_PROXY_HOSTS[@]}"; do
+        # The implicit mail alias above already has its own certificate ID.
+        if [ "$SNAPPYMAIL_ENABLE" = false ] && [ "$webmail_host" = "mail.${DOMAIN}" ]; then continue; fi
+        create_proxy_host "$webmail_host" webmail 8080 http \
+            "client_max_body_size $((WEBMAIL_ATTACH_MAX_MB + 5))m;" "$WEBMAIL_ACCESS_ID" >/dev/null
+    done
+fi
 
 # 2. mailcow.DOMAIN -> nginx-mailcow
 # Toolkit is proxied by Mailcow's internal nginx (site.toolkit.custom), not NPM
@@ -1062,6 +1172,12 @@ log "Restarting Mailcow mail services..."
 cd "$MAILCOW_DIR"
 docker compose restart nginx-mailcow dovecot-mailcow postfix-mailcow 2>&1 | tail -3 || true
 
+# Phase 8 may replace the leaf certificate that Phase 6b initially pinned.
+if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
+    webmail_refresh_pin "$WEBMAIL_DIR" || die "Webmail TLS pin refresh failed"
+fi
+
+
 # ============================================================
 # Phase 9: Cert Reload Cron
 # ============================================================
@@ -1089,6 +1205,7 @@ header "Phase 10: Toolkit UI Integration"
 
 TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 
 # Install the session-authorization PHP hook the Toolkit sidecar calls for
 # every request. The sidecar's auth.py posts here and only passes if the
@@ -1151,17 +1268,23 @@ fi
 header "Setup Complete"
 
 echo "  Services:"
-echo "    Webmail:       https://mail.${DOMAIN}"
+if [ "$SNAPPYMAIL_ENABLE" = true ] || [ "$WEBMAIL_ENABLE" = true ]; then
+    echo "    Mail:          https://mail.${DOMAIN}"
+fi
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    IFS=, read -r -a WEBMAIL_DISPLAY_HOSTS <<< "$WEBMAIL_HOSTNAMES"
+    for webmail_host in "${WEBMAIL_DISPLAY_HOSTS[@]}"; do echo "    Webmail:       https://$webmail_host"; done
+fi
 echo "    Mailcow Admin: https://mailcow.${DOMAIN}"
 echo "    NPM Dashboard: https://mail-npm.${DOMAIN}"
-echo "    Snappymail:    https://mail.${DOMAIN}/?admin"
+[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    Snappymail:    https://mail.${DOMAIN}/?admin"
 echo ""
 echo "  Admin Password (shared):"
 echo "    Password:    ${NPM_ADMIN_PASSWORD}"
 echo ""
 echo "    NPM:         ${NPM_ADMIN_EMAIL} / (above)"
 echo "    Mailcow:     admin / (above)"
-echo "    Snappymail:  admin / (above)"
+[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    Snappymail:  admin / (above)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""
@@ -1174,7 +1297,7 @@ echo "    sudo reboot"
 echo ""
 echo "  After reboot:"
 echo "    1. sudo ./scripts/verify.sh"
-echo "    2. Snappymail admin: https://mail.${DOMAIN}/?admin"
+[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    2. Snappymail admin: https://mail.${DOMAIN}/?admin"
 echo ""
 if [ "${DNS_OK:-true}" = false ]; then
     echo -e "  ${YELLOW}Self-signed certs in use (DNS not configured)${NC}"

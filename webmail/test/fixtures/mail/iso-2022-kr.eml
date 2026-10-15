@@ -1,0 +1,8 @@
+From: sender@example.com
+To: user@example.com
+Subject: Synthetic mail
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-2022-kr
+Content-Transfer-Encoding: 7bit
+
+안녕하세요 합성 메일

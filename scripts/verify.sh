@@ -127,8 +127,34 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
         fi
     done
 fi
+if [ -n "${ADMIN_ACCESS_LIST:-}" ]; then
+    echo "  SKIP  mailcow.${DOMAIN} HTTPS 200 (access list: $ADMIN_ACCESS_LIST)"
+    echo "  SKIP  mail-npm.${DOMAIN} HTTPS 200 (access list: $ADMIN_ACCESS_LIST)"
+else
 check "mailcow.${DOMAIN} HTTPS 200"    check_http "https://mailcow.${DOMAIN}" "200"
 check "mail-npm.${DOMAIN} HTTPS 200"   check_http "https://mail-npm.${DOMAIN}" "200"
+fi
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/admin-access.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/admin-access.sh"
+ADMIN_ACCESS_STATUS=0
+ADMIN_ACCESS_FAILURES=0
+ADMIN_ACCESS_RESULT=$(admin_access verify) || ADMIN_ACCESS_STATUS=$?
+if [ "$ADMIN_ACCESS_STATUS" -ne 0 ] && [ -z "${ADMIN_ACCESS_LIST:-}" ]; then
+    ADMIN_ACCESS_RESULT="SKIP admin access check: helper failed (exit $ADMIN_ACCESS_STATUS)"
+fi
+while IFS= read -r admin_line; do
+    echo "  $admin_line"
+    case "$admin_line" in
+        PASS\ *) PASS=$((PASS + 1)) ;;
+        FAIL\ *) FAIL=$((FAIL + 1)); ADMIN_ACCESS_FAILURES=$((ADMIN_ACCESS_FAILURES + 1)) ;;
+    esac
+done <<< "$ADMIN_ACCESS_RESULT"
+if [ "$ADMIN_ACCESS_STATUS" -ne 0 ] && [ -n "${ADMIN_ACCESS_LIST:-}" ] && [ "$ADMIN_ACCESS_FAILURES" -eq 0 ]; then
+    echo "  FAIL admin access check: helper failed (exit $ADMIN_ACCESS_STATUS)"
+    FAIL=$((FAIL + 1))
+fi
 [ "$SNAPPYMAIL_ENABLE" != true ] || check "HTTP->HTTPS redirect (mail)"    sh -c '[ "$(curl -sk -o /dev/null -w "%{http_code}" "http://mail.${DOMAIN}")" = "301" ]'
 
 echo ""

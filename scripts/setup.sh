@@ -1025,7 +1025,7 @@ for h in json.load(sys.stdin):
     # ACL fields were resolved before any proxy creation (unknown formats fail closed).
     local access_json=""
     if [ -n "$access_list_id" ] && [ "$access_list_id" != 0 ]; then
-        access_json="$WEBMAIL_ACCESS_FIELDS"
+        access_json=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 "$SCRIPT_DIR/lib/npm_api.py" fields "$access_list_id") || return 1
     fi
 
     local result host_id=0 cert_id
@@ -1137,6 +1137,12 @@ print(identity,certificate)
     return 1
 }
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/admin-access.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/admin-access.sh"
+ADMIN_ACCESS_ID=$(admin_access preflight) || die "Invalid ADMIN_ACCESS_LIST; admin hosts not created"
+
 log "Creating proxy hosts..."
 
 # An absent or authenticated access list must never silently make Webmail public.
@@ -1166,20 +1172,8 @@ sys.exit(0 if isinstance(item.get("items"),list) and not item["items"] else 1)
 fi
 
 # Resolve restricted-host API fields before any create call; never fall back to public.
-WEBMAIL_ACCESS_FIELDS=""
 if [ "$WEBMAIL_PROXY_ALLOWED" = true ] && [ "$WEBMAIL_ACCESS_ID" != 0 ]; then
-    WEBMAIL_ACCESS_FIELDS=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
-import sys,json
-hosts=json.load(sys.stdin)
-identity=int(sys.argv[1])
-if not isinstance(hosts,list) or identity < 1: sys.exit(1)
-if not hosts or any("npmplus_access_list_ids" in host for host in hosts):
-    fields={"npmplus_access_list_ids":[identity],"npmplus_access_list_type":"custom"}
-elif any("access_list_id" in host for host in hosts):
-    fields={"access_list_id":identity}
-else: sys.exit(1)
-print(json.dumps(fields)[1:-1]+",")
-' "$WEBMAIL_ACCESS_ID") || die "NPM API 형식을 판별할 수 없음"
+    curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 "$SCRIPT_DIR/lib/npm_api.py" fields "$WEBMAIL_ACCESS_ID" >/dev/null || die "NPM API 형식을 판별할 수 없음"
 fi
 
 # 1. mail.DOMAIN follows the selected webmail service. Both disabled: no proxy.
@@ -1201,12 +1195,14 @@ if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
     done
 fi
 
+admin_access apply || die "Admin access-list application failed"
+
 # 2. mailcow.DOMAIN -> nginx-mailcow
 # Toolkit is proxied by Mailcow's internal nginx (site.toolkit.custom), not NPM
-create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" >/dev/null || true
+create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
-create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" >/dev/null || true
+create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
 
 # ============================================================
 # Phase 8: SSL Symlinks

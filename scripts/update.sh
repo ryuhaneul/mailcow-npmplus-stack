@@ -79,6 +79,11 @@ set +a
 # shellcheck source=lib/webmail-env.sh
 source "$SCRIPT_DIR/lib/webmail-env.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/admin-access.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/admin-access.sh"
+admin_access preflight >/dev/null || die "Invalid ADMIN_ACCESS_LIST; update stopped before changes"
 if [ "$SNAPPYMAIL_ENABLE" = false ] && docker ps -a --format '{{.Names}}' | grep -qFx snappymail; then
     warn "SnappyMail is disabled but its container exists; preserving it. Removal: scripts/snappymail-remove.sh"
 fi
@@ -448,6 +453,7 @@ if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
 fi
 
 # Maintain the certificate reload job before verification.
+admin_access apply || die "Admin access-list application failed"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/cert-reload.sh
 # shellcheck disable=SC1091

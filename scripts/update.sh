@@ -393,10 +393,20 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     fi
     webmail_generate_env "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
     (cd "$WEBMAIL_DIR" && docker compose build --pull)
+    WEBMAIL_IP_BEFORE=""
+    if [ -z "${WEBMAIL_IPV4:-}" ]; then
+        WEBMAIL_IP_BEFORE=$(docker inspect --format '{{with index .NetworkSettings.Networks "mailcowdockerized_mailcow-network"}}{{.IPAddress}}{{end}}' webmail 2>/dev/null || true)
+    fi
     if [ "$WEBMAIL_PIN_CHANGED" = true ]; then
         (cd "$WEBMAIL_DIR" && docker compose up -d --force-recreate webmail)
     else
         (cd "$WEBMAIL_DIR" && docker compose up -d)
+    fi
+    if [ -z "${WEBMAIL_IPV4:-}" ] && [ -n "$WEBMAIL_IP_BEFORE" ]; then
+        WEBMAIL_IP_AFTER=$(docker inspect --format '{{with index .NetworkSettings.Networks "mailcowdockerized_mailcow-network"}}{{.IPAddress}}{{end}}' webmail 2>/dev/null || true)
+        if [ -n "$WEBMAIL_IP_AFTER" ] && [ "$WEBMAIL_IP_BEFORE" != "$WEBMAIL_IP_AFTER" ]; then
+            warn "웹메일 내부 주소가 ${WEBMAIL_IP_BEFORE}→${WEBMAIL_IP_AFTER}로 바뀜 — 앞단 NPMplus가 최대 10분 옛 주소를 쓸 수 있음. 예방: WEBMAIL_IPV4 지정. 조치: docs/guide.md#웹메일-고정-주소와-ip-변경 (전체 update는 Phase6의 기존 NPMplus 재시작으로 캐시 초기화)"
+        fi
     fi
     warn "웹메일 재시작으로 사용자 전원 다시 로그인"
 fi

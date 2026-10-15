@@ -17,7 +17,7 @@ W17a seed를 적용하고 모든 구현 레인(특히 W13b)을 병합한 시험 
 - M02: user1 20,000통/한글 폴더 12개, user2 두 sender ACL와 @도메인 권한, user3 sender 허용 별칭 2개, user4 user1 INBOX 읽기 전용 공유, user5 2FA, user6 Gmail/user7 rainloop/user8 모르는 형식의 활성 필터가 필요하다.
 - seed의 user3 별칭 추가 JSON은 `sender_allowed: '1'`을 명시한다. [mailcow 2026-09a 별칭 추가 구현](https://github.com/mailcow/mailcow-dockerized/blob/2026-09a/data/web/inc/functions.mailbox.inc.php#L701-L705)은 해당 필드를 `intval`로 변환하므로 누락 값을 보낼 권한 1로 간주할 수 없다. 기존 별칭의 권한이 다르면 seed를 자동 덮어쓰지 않고 main이 판단한다.
 - user5의 계정 암호 웹메일 로그인은 `403 AUTH_FAILED`가 기대값이다. [mailcow 2026-09a user_login](https://github.com/mailcow/mailcow-dockerized/blob/2026-09a/data/web/inc/functions.auth.inc.php#L363-L408)은 2FA 계정의 내부 인증에서 일반 암호 로그인을 허용하지 않는다(앱 암호는 별도 인증 경로). 암호 변경 대행의 `403 MAILCOW_2FA` 경로는 W15 단위 시험으로 확인하며 이 계정으로 통합 로그인 후 검사하지 않는다.
-- `team-sales`, `team-support`는 mailbox(person), `team-int`는 두 mailbox로 전달하는 활성 alias(team)다. 최근 자동완성 자료는 시험이 user3 Sent에 합성 메일을 넣고 원복한다.
+- `team-sales`, `team-support`는 mailbox(person)다. 자동완성의 team 판정은 seed `user3.aliases` 첫 번째 활성 별칭으로 확인한다(자기 도메인, catch-all 아님). 최근 자동완성 자료는 시험이 user3 Sent에 합성 메일을 넣고 원복한다.
 - user1 외의 프로그램 접근/새 메일 수신을 시험 중 멈춘다. 암호·필터·설정을 바꾸며 모든 세션을 폐기하는 시험이 있다. 각 시험의 finally/정리 훅이 원복하고, 원복 실패도 시험 실패로 기록한다.
 
 ## IR1 → IR2 명령 순서 (main, VM)
@@ -61,7 +61,7 @@ cd webmail
 node --env-file=/home/rocky/webmail-int.env test/int/lib/sieve-host.js
 ```
 
-T-SIEVE는 Docker 소켓을 시험 컨테이너에 열지 않기 위해 **VM 호스트에서 별도 실행**한다. 실제 `docker compose exec -T dovecot-mailcow sieve-test`로 40통 × 30규칙을 `match.js`와 비교한다. `doveconf -n`에서 번호가 붙은 전역 before/after와 디렉터리의 `.sieve`를 수집하고, 실제 실행 순서에 넣는다. 전역 before/after가 없거나 해석할 수 없으면 실패한다. [Pigeonhole sieve-test의 `-s` 순서](https://raw.githubusercontent.com/dovecot/pigeonhole/release-0.5.21/doc/man/sieve-test.1.in)를 사용한다. `-e`를 쓰지 않아 실제 저장/전달은 하지 않는다. 추가로 여러 규칙이 맞는 10건의 배달 위치 1개와 부재중 기간 안/밖·스팸 3건을 검사한다. 출력 형식을 인식하지 못해도 실패하며, 합성 임시 자료의 호스트/컨테이너 경로를 보고한다.
+T-SIEVE는 Docker 소켓을 시험 컨테이너에 열지 않기 위해 **VM 호스트에서 별도 실행**한다. 실제 `docker compose exec -T dovecot-mailcow sieve-test`로 40통 × 30규칙을 `match.js`와 비교한다. `doveconf -n`에서 번호가 붙은 전역 before/after와 디렉터리의 `.sieve`를 수집하고, 실제 실행 순서에 넣는다. 전역 before/after가 없거나 해석할 수 없으면 실패한다. [Pigeonhole sieve-test의 `-s` 순서](https://raw.githubusercontent.com/dovecot/pigeonhole/release-0.5.21/doc/man/sieve-test.1.in)를 사용한다. `-e`를 쓰지 않아 실제 저장/전달은 하지 않는다. 추가로 여러 규칙이 맞는 10건의 배달 위치 1개와 부재중 기간 안/밖·스팸 3건을 검사한다. 출력 형식을 인식하지 못해도 실패한다. 일치 표시는 stdout·stderr 양쪽에서 판정하되 stderr 원문은 출력하지 않는다. 합성 임시 자료의 호스트/컨테이너 경로를 보고하고 성공·실패 모두 종료 시 해당 디렉터리를 정리한다. 정리 실패도 시험 실패다.
 
 경로 수집은 `/`로 시작하는 파일/디렉터리만 대상으로 한다. `mysql:`·`dict:proxy::` 등의 저장소 항목은 `파일 아님 — 건너뜀`과 종류만 출력하며 원문은 출력하지 않는다. IR2의 mailcow 2026-09a에서는 전역 `global_sieve_before.sieve`·`global_sieve_after.sieve` 두 파일이 대상이고 사용자별 before/after는 0개다. 사용자별 dict 스크립트를 검증한 것으로 기록하지 않는다.
 
@@ -92,6 +92,8 @@ WEBMAIL_INT_GROUP=mail,sieve,account npm run test:int
 `npm run test:int -- --group core`는 Node 기본 테스트 실행기가 임의 인자를 받지 않으므로 사용하지 않는다. 그룹 인자는 위 실행기/compose entrypoint에 전달하거나 `WEBMAIL_INT_GROUP`을 사용한다. 활성화한 전체 그룹은 **한 번에 실행 불가(실패 제한 공유)**다. user5의 로그인 실패가 core의 5회 실패 전제에 영향을 주므로 위 분리 실행과 필수 대기/재시작 단계를 따른다. VM 실측 없이 로컬 건너뜀 결과를 IR 통과로 기록하지 않는다.
 
 ## IR1 시험 수정과 잔여 자료 조회
+
+W13b 시험은 첫 미리보기 응답이 5초 미만이고 `partial`이 불리언인지 확인한다. 중간 결과이면 완료 전 적용이 `409 PREVIEW_NOT_READY`인지 확인하고 1.5초 간격으로 다시 조회한다(첫 요청부터 상한 60초). 처음부터 완료면 완료 전 적용 확인은 건너뛴 이유를 남긴다. 각 미리보기 응답의 `partial`·`scanned`를 진단에 남기고, 완료 응답으로 25통·항목 수·검색 수·정렬을 검증한다.
 
 가상 목록 동작 시험은 HTTP 스팸 이동 뒤 **새로 인증한 IMAP 연결**로 원 폴더의 STATUS MESSAGES=0을 확인한다. 기존 관찰 연결이 그 폴더를 SELECT한 상태에서 받은 값에 의존하지 않는다. [RFC 9051 STATUS](https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.11)도 선택된 폴더 상태 조회에는 STATUS를 쓰지 않도록 한다. IR1의 간헐적 60초 검색 지연은 이 수정으로 해결됐다고 간주하지 않으며 VM 재실행으로 확인한다.
 

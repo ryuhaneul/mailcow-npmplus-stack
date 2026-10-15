@@ -2,13 +2,14 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 import { createConnection } from 'node:net';
-import { integration, api, login, imap, sieve, scratch, message, email, password, unique, cleanup, eventually, required } from './lib/runtime.js';
+import { integration, api, login, imap, sieve, scratch, message, email, password, unique, cleanup, eventually, required, waitForPreview } from './lib/runtime.js';
 import { mailboxStatus, fetchOriginals, getMetadata, setMetadata } from '../../server/mail/imap-raw.js';
 import { decodeRef, encodeRef } from '../../server/mail/ref.js';
 import { generateScript } from '../../server/sieve/generate.js';
 import { parseScript } from '../../server/sieve/parse.js';
 import { rulesDocument } from '../../server/sieve/import.js';
 import { PREFS_ENTRY } from '../../server/prefs.js';
+import { seedPlan } from './seed/plan.mjs';
 
 integration('mail', 'user2 sender ACL·@도메인 각 주소 실제 Postfix 발송·목록 밖 403', async t => {
   const receiver = await imap(t, 'user1');
@@ -62,8 +63,9 @@ integration('mail', 'user3 받는 사람 별칭 2개·자동완성 최근/사람
   assert.ok(recent.items.some(row => row.kind === 'recent'), 'M02 합성 외부 최근 수신자 필요');
   const people = await web.get('/api/contacts?q=user&limit=100');
   assert.ok(people.items.some(row => row.kind === 'person'));
-  const teams = await web.get('/api/contacts?q=team-int&limit=100');
-  assert.ok(teams.items.some(row => row.address === email('team-int') && row.kind === 'team'));
+  const alias = seedPlan({ domain: required('WEBMAIL_INT_DOMAIN') }).users[2].aliases[0];
+  const teams = await web.get(`/api/contacts?q=${encodeURIComponent(alias)}&limit=100`);
+  assert.ok(teams.items.some(row => row.address === alias && row.kind === 'team'));
   for (const local of ['team-sales', 'team-support']) {
     const people = await web.get(`/api/contacts?q=${local}&limit=100`);
     assert.ok(people.items.some(row => row.address === email(local) && row.kind === 'person'));
@@ -240,9 +242,7 @@ integration('sieve', 'W13b HTTP 미리보기·25통 적용·메일당 flagged=1�
   });
   for (let i = 0; i < 25; i++) await direct.append('INBOX', message(`${subject} ${i}`, email()));
   const selected = rule(subject, { move: target, read: true, star: true });
-  const started = performance.now();
-  const preview = await web.request('POST', '/api/rules/preview', { rule: selected });
-  assert.ok(performance.now() - started < 5000, '첫 미리보기 < 5초');
+  const preview = await waitForPreview(t, web, selected);
   assert.equal(preview.count, 25); assert.equal(preview.items.length, 20);
   assert.ok(preview.scanned >= 25 && preview.scanned <= 20_000);
   assert.equal(typeof preview.limited, 'boolean');
@@ -250,6 +250,8 @@ integration('sieve', 'W13b HTTP 미리보기·25통 적용·메일당 flagged=1�
   const againAt = performance.now();
   const again = await web.request('POST', '/api/rules/preview', { rule: { ...selected, conditions: [{ field: 'subject', op: 'has', value: `${subject} 24` }] } });
   assert.ok(performance.now() - againAt < 200, '미리보기 재계산 < 200ms');
+  assert.equal(again.partial, false);
+  t.diagnostic(`미리보기 재계산 partial=${again.partial}, scanned=${again.scanned}`);
   assert.equal(again.count, 1);
   const result = await web.request('POST', '/api/rules/apply-existing', { rule: selected });
   assert.deepEqual(result, { matched: 25, moved: 25, trashed: 0, flagged: 25, failed: [] });

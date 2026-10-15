@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { ImapFlow } from 'imapflow';
 import { mailTlsOptions } from '../../../server/mail/imap-pool.js';
 import { connectManageSieve } from '../../../server/sieve/managesieve.js';
@@ -77,10 +78,10 @@ export async function api(user = 'user1', pass = password(), base = process.env.
   const origin = required('WEBMAIL_INT_ORIGIN');
   let cookie = '', csrf = '';
   let retryAfter = 0;
-  async function request(method, path, payload, expected = 200, extra = {}) {
+  async function request(method, path, payload, expected = 200, extra = {}, signal) {
     const multipart = payload instanceof FormData;
     const response = await fetch(new URL(path, base), {
-      method, redirect: 'manual', signal: AbortSignal.timeout(60_000),
+      method, redirect: 'manual', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
       headers: { origin, ...(cookie ? { cookie, 'x-webmail-csrf': csrf } : {}),
         ...(payload === undefined || multipart ? {} : { 'content-type': 'application/json' }), ...extra },
       ...(payload === undefined ? {} : { body: multipart ? payload : JSON.stringify(payload) }),
@@ -107,6 +108,33 @@ export async function login(t, user = 'user1', pass = password()) {
   await client.login();
   cleanup(t, () => client.logout());
   return client;
+}
+export async function waitForPreview(t, web, rule) {
+  const started = performance.now();
+  const deadline = started + 60_000;
+  const signal = AbortSignal.timeout(60_000);
+  let preview = await web.request('POST', '/api/rules/preview', { rule }, 200, {}, signal);
+  assert.ok(performance.now() - started < 5000, '첫 미리보기 < 5초');
+  const observe = () => {
+    assert.equal(typeof preview.partial, 'boolean');
+    assert.ok(Number.isSafeInteger(preview.scanned) && preview.scanned >= 0);
+    t.diagnostic(`미리보기 partial=${preview.partial}, scanned=${preview.scanned}`);
+    assert.ok(performance.now() < deadline, '미리보기 완료 상한 60초');
+  };
+  observe();
+  if (preview.partial) {
+    const rejected = await web.request('POST', '/api/rules/apply-existing', { rule }, 409, {}, signal);
+    assert.equal(rejected.error.code, 'PREVIEW_NOT_READY');
+  } else {
+    t.diagnostic('첫 응답에서 미리보기 완료 — 완료 전 PREVIEW_NOT_READY 확인 건너뜀');
+  }
+  while (preview.partial) {
+    assert.ok(performance.now() + 1500 < deadline, '미리보기 완료 상한 60초');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    preview = await web.request('POST', '/api/rules/preview', { rule }, 200, {}, signal);
+    observe();
+  }
+  return preview;
 }
 export function message(subject, to = 'recipient@example.com', extra = '') {
   return Buffer.from(`From: Synthetic Sender <sender@example.com>\r\nTo: ${to}\r\nSubject: ${subject}\r\nMessage-ID: <${randomUUID()}@example.com>\r\nDate: ${new Date().toUTCString()}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n${extra}\r\nSynthetic integration message.\r\n`);

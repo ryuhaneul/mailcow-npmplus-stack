@@ -439,7 +439,17 @@ docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
 # Wait for unbound to be healthy (other containers depend on it)
 log "Waiting for unbound-mailcow health check..."
 for i in $(seq 1 36); do
-    STATUS=$(docker inspect unbound-mailcow --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
+    STATUS=""
+    UNBOUND_REASON=""
+    mapfile -t UNBOUND_IDS < <(docker ps -q --filter name=unbound-mailcow 2>/dev/null)
+    case "${#UNBOUND_IDS[@]}" in
+        0) UNBOUND_REASON="unbound 컨테이너를 찾지 못함" ;;
+        1) STATUS=$(docker inspect "${UNBOUND_IDS[0]}" --format '{{.State.Health.Status}}' 2>/dev/null || echo "") ;;
+        *)
+            UNBOUND_NAMES=$(docker ps --filter name=unbound-mailcow --format '{{.Names}}' 2>/dev/null || echo "")
+            UNBOUND_REASON="unbound 컨테이너가 ${#UNBOUND_IDS[@]}개라 판단 못 함 (${UNBOUND_NAMES//$'\n'/, })"
+            ;;
+    esac
     if [ "$STATUS" = healthy ]; then
         log "unbound-mailcow: healthy"
         break
@@ -447,7 +457,7 @@ for i in $(seq 1 36); do
     if [ "$i" -eq 36 ]; then
         warn "unbound-mailcow: not healthy after 3 min. Possible iptables/NAT issue."
         warn "Fix: systemctl restart docker"
-        warn "Continuing anyway — dependent containers may fail."
+        warn "Continuing anyway — dependent containers may fail.${UNBOUND_REASON:+ ($UNBOUND_REASON)}"
     fi
     sleep 5
 done

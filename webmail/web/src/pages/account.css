@@ -1,0 +1,26 @@
+.view.account-view{display:flex;min-width:0}
+.account-head-space{height:16px}
+.account-view .big small{display:inline-block;line-height:1.5}
+.account-view .ft{table-layout:fixed}
+.account-view .ft th:first-child{width:34%}
+.account-view .ft th:last-child{width:86px}
+.account-view .ft td.f{white-space:normal;overflow-wrap:anywhere}
+.account-view .ft td.f>span{max-width:100%}
+.account-dialog{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;padding:20px;background:var(--scrim);color:var(--ink)}
+.account-dialog[open]{display:grid;place-items:center}
+.account-dialog::backdrop{background:transparent}
+.account-dialog .dlg{margin:0;min-width:0}
+.account-dialog .account-confirm-label{display:block;font-weight:700;margin-bottom:6px}
+.account-dialog .note{margin-top:6px}
+.account-actions{display:flex;gap:8px;margin-top:18px}
+.account-view button:disabled{cursor:not-allowed;opacity:.45}
+@media(max-width:700px){
+  .account-view .st-sum{padding:20px 16px;gap:24px}
+  .account-view .ft th,.account-view .ft td{padding-left:4px;padding-right:4px}
+  .account-view .ft th:first-child{width:33%}
+  .account-view .ft th:last-child{width:64px}
+  .account-view .ft .empty-btn{padding:0 6px}
+  .account-view .ft .num{font-size:12px}
+  .account-view .ft td.f>span{gap:4px}
+  .account-dialog .dlg{padding:20px}
+}

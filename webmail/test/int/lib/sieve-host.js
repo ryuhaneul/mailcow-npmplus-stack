@@ -1,7 +1,7 @@
 // VM host only: no Docker socket is mounted in the integration container.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +17,31 @@ export function sieveFileEntries(config, skipped = () => {}) {
     skipped(`sieve_${row[1]}${row[2]}: 파일 아님 — 건너뜀 (${scheme}:)`);
     return [];
   });
+}
+
+export function sieveTestOutput(result, marker) {
+  assert.ok(!result.error && result.status === 0, 'sieve-test 실행 실패 (원문 출력 생략)');
+  const stdout = result.stdout || '';
+  const stderr = result.stderr || '';
+  return { stdout, matched: marker === undefined ? false : new RegExp(`\\bWM_MATCH_${marker}\\b`).test(`${stdout}\n${stderr}`) };
+}
+
+export function withSieveTemps(exec, work) {
+  const root = mkdtempSync(join(tmpdir(), 'webmail-int-sieve-'));
+  let remote = '';
+  try {
+    chmodSync(root, 0o755);
+    remote = exec(['mktemp', '-d', '/tmp/webmail-int-sieve.XXXXXX']).trim();
+    assert.match(remote, /^\/tmp\/webmail-int-sieve\.[A-Za-z0-9]+$/);
+    exec(['chmod', '755', remote]);
+    return work(root, remote);
+  } finally {
+    try {
+      if (/^\/tmp\/webmail-int-sieve\.[A-Za-z0-9]+$/.test(remote)) exec(['rm', '-rf', '--', remote]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 }
 
 function main() {
@@ -41,60 +66,59 @@ function main() {
   });
   const before = global('before'), after = global('after');
   assert.ok(before.length && after.length, 'mailcow 전역 before/after가 모두 있어야 함 (누락 시 통과 처리 금지)');
-  const root = mkdtempSync(join(tmpdir(), 'webmail-int-sieve-'));
-  chmodSync(root, 0o755);
-  const remote = exec(['mktemp', '-d', '/tmp/webmail-int-sieve.XXXXXX']).trim();
-  assert.match(remote, /^\/tmp\/webmail-int-sieve\.[A-Za-z0-9]+$/);
-  exec(['chmod', '755', remote]);
-  process.stdout.write(`합성 임시 자료: ${root}\nDovecot 임시 자료: ${remote}\n전역 before=${before.length}, after=${after.length}\n`);
-  const { mails, rules, scripts } = sieveCorpus();
-  assert.equal(mails.length, 40); assert.equal(rules.length, 30);
-  const today = exec(['date', '+%F']).trim();
-  assert.match(today, /^\d{4}-\d{2}-\d{2}$/);
-  const cases = deliveryCases(today);
-  const put = (name, value) => { writeFileSync(join(root, name), value, { mode: 0o644 }); };
-  mails.forEach((mail, i) => put(`mail-${i}.eml`, mail));
-  scripts.forEach((script, i) => put(`rule-${i}.sieve`, script));
-  for (const value of cases) {
-    put(`${value.name}.sieve`, value.script);
-    put(`${value.name}.eml`, `From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: COPY\r\nMessage-ID: <${value.name}@example.com>\r\nDate: ${new Date().toUTCString()}\r\n${value.spam ? 'X-Spam-Flag: YES\r\n' : ''}\r\nSynthetic mail\r\n`);
-  }
-  docker(['cp', `${root}/.`, `dovecot-mailcow:${remote}/`]);
-  // sieve-test drops to the selected mailbox user and may write .svbin caches.
-  // This unique directory contains only synthetic messages and scripts.
-  exec(['chmod', '777', remote]);
-  const run = (script, mail) => {
-    // sieve-test has -s for preceding scripts. The final global after is the
-    // positional main script, preserving before -> personal -> after order.
-    const chain = [...before, `${remote}/${script}`, ...after];
-    return exec(['sieve-test', '-u', `user1@${domain}`, '-a', 'recipient@example.com', '-r', 'recipient@example.com', '-f', 'sender@example.com',
-      ...chain.slice(0, -1).flatMap(path => ['-s', path]), chain.at(-1), `${remote}/${mail}`]);
-  };
-  let mismatches = 0, checked = 0;
-  for (const [i, mail] of mails.entries()) {
-    for (const [j, rule] of rules.entries()) {
-      const output = run(`rule-${j}.sieve`, `mail-${i}.eml`);
-      const actual = output.includes(`WM_MATCH_${j}`);
-      if (actual !== matches(rule, mail.split('\r\n\r\n')[0])) {
-        mismatches++;
-        process.stdout.write(`불일치: mail=${i}, rule=${j}\n`);
+  withSieveTemps(exec, (root, remote) => {
+    process.stdout.write(`합성 임시 자료: ${root}\nDovecot 임시 자료: ${remote}\n전역 before=${before.length}, after=${after.length}\n`);
+    const { mails, rules, scripts } = sieveCorpus();
+    assert.equal(mails.length, 40); assert.equal(rules.length, 30);
+    const today = exec(['date', '+%F']).trim();
+    assert.match(today, /^\d{4}-\d{2}-\d{2}$/);
+    const cases = deliveryCases(today);
+    const put = (name, value) => { writeFileSync(join(root, name), value, { mode: 0o644 }); };
+    mails.forEach((mail, i) => put(`mail-${i}.eml`, mail));
+    scripts.forEach((script, i) => put(`rule-${i}.sieve`, script));
+    for (const value of cases) {
+      put(`${value.name}.sieve`, value.script);
+      put(`${value.name}.eml`, `From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: COPY\r\nMessage-ID: <${value.name}@example.com>\r\nDate: ${new Date().toUTCString()}\r\n${value.spam ? 'X-Spam-Flag: YES\r\n' : ''}\r\nSynthetic mail\r\n`);
+    }
+    docker(['cp', `${root}/.`, `dovecot-mailcow:${remote}/`]);
+    // sieve-test drops to the selected mailbox user and may write .svbin caches.
+    // This unique directory contains only synthetic messages and scripts.
+    exec(['chmod', '777', remote]);
+    const run = (script, mail, marker) => {
+      // sieve-test has -s for preceding scripts. The final global after is the
+      // positional main script, preserving before -> personal -> after order.
+      const chain = [...before, `${remote}/${script}`, ...after];
+      const result = spawnSync('docker', ['compose', 'exec', '-T', 'dovecot-mailcow', 'sieve-test', '-u', `user1@${domain}`, '-a', 'recipient@example.com', '-r', 'recipient@example.com', '-f', 'sender@example.com',
+        ...chain.slice(0, -1).flatMap(path => ['-s', path]), chain.at(-1), `${remote}/${mail}`], {
+        cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
+      });
+      return sieveTestOutput(result, marker);
+    };
+    let mismatches = 0, checked = 0;
+    for (const [i, mail] of mails.entries()) {
+      for (const [j, rule] of rules.entries()) {
+        const actual = run(`rule-${j}.sieve`, `mail-${i}.eml`, j).matched;
+        if (actual !== matches(rule, mail.split('\r\n\r\n')[0])) {
+          mismatches++;
+          process.stdout.write(`불일치: mail=${i}, rule=${j}\n`);
+        }
+        checked++;
       }
-      checked++;
+      process.stdout.write(`T-SIEVE ${checked}/1200, 불일치 ${mismatches}\n`);
     }
-    process.stdout.write(`T-SIEVE ${checked}/1200, 불일치 ${mismatches}\n`);
-  }
-  assert.equal(mismatches, 0, 'T-SIEVE 조건 판정 불일치');
-  for (const value of cases) {
-    const output = run(`${value.name}.sieve`, `${value.name}.eml`);
-    if (value.expectedFolder) {
-      const stores = [...output.matchAll(/store message in folder:\s*([^\r\n]+)/gi)];
-      assert.equal(stores.length, 1, `${value.name}: 배달 위치 수=1 (출력 형식이 달라도 실패)`);
-      assert.equal(stores[0][1].trim().replace(/^"|"$/g, ''), value.expectedFolder, `${value.name}: 첫 이동/휴지통 우선`);
-    } else {
-      assert.equal(/send vacation message:/i.test(output), value.expectedVacation, value.name);
+    assert.equal(mismatches, 0, 'T-SIEVE 조건 판정 불일치');
+    for (const value of cases) {
+      const output = run(`${value.name}.sieve`, `${value.name}.eml`).stdout;
+      if (value.expectedFolder) {
+        const stores = [...output.matchAll(/store message in folder:\s*([^\r\n]+)/gi)];
+        assert.equal(stores.length, 1, `${value.name}: 배달 위치 수=1 (출력 형식이 달라도 실패)`);
+        assert.equal(stores[0][1].trim().replace(/^"|"$/g, ''), value.expectedFolder, `${value.name}: 첫 이동/휴지통 우선`);
+      } else {
+        assert.equal(/send vacation message:/i.test(output), value.expectedVacation, value.name);
+      }
     }
-  }
-  process.stdout.write('T-SIEVE 1200쌍 불일치 0, R-COPY 10건, 부재중 기간 안/밖·스팸 3건 통과\n');
+    process.stdout.write('T-SIEVE 1200쌍 불일치 0, R-COPY 10건, 부재중 기간 안/밖·스팸 3건 통과\n');
+  });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { main(); } catch {

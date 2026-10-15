@@ -1,11 +1,92 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { validateDocument, canonicalJSON, MAX_SCRIPT_BYTES } from '../../server/sieve/model.js';
 import { conditionTest, generateScript, hashBody, MAGIC } from '../../server/sieve/generate.js';
 import { parseScript } from '../../server/sieve/parse.js';
 import { classifyState } from '../../server/sieve/state.js';
-import { sieveFileEntries } from '../int/lib/sieve-host.js';
+import { sieveFileEntries, sieveTestOutput, withSieveTemps } from '../int/lib/sieve-host.js';
+import { api, waitForPreview } from '../int/lib/runtime.js';
+
+for (const partialResponses of [2, 0]) {
+  test(`HTTP integration preview waits for completion: ${partialResponses} partial responses`, async t => {
+    let previews = 0;
+    const calls = [], diagnostics = [];
+    const selected = { id: 'int00001', conditions: [{ field: 'subject', op: 'has', value: 'Synthetic preview' }], actions: { read: true } };
+    const server = http.createServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      calls.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/api/rules/apply-existing') {
+        response.statusCode = 409;
+        response.end(JSON.stringify({ error: { code: 'PREVIEW_NOT_READY' } }));
+      } else {
+        const partial = previews++ < partialResponses;
+        response.end(JSON.stringify({ partial, scanned: partial ? previews * 10 : 25, count: partial ? 0 : 25 }));
+      }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+    const origin = process.env.WEBMAIL_INT_ORIGIN;
+    process.env.WEBMAIL_INT_ORIGIN = 'https://mail.example.com';
+    t.after(() => { if (origin === undefined) delete process.env.WEBMAIL_INT_ORIGIN; else process.env.WEBMAIL_INT_ORIGIN = origin; });
+    const web = await api('user1', 'synthetic-password', `http://127.0.0.1:${server.address().port}`);
+    const result = await waitForPreview({ diagnostic: line => diagnostics.push(line) }, web, selected);
+    assert.equal(result.partial, false);
+    assert.equal(result.count, 25);
+    assert.equal(previews, partialResponses + 1);
+    assert.deepEqual(calls.map(call => call.path), partialResponses ? [
+      '/api/rules/preview', '/api/rules/apply-existing', '/api/rules/preview', '/api/rules/preview',
+    ] : ['/api/rules/preview']);
+    assert.ok(calls.every(call => JSON.stringify(call.body) === JSON.stringify({ rule: selected })));
+    assert.equal(diagnostics.filter(line => line.startsWith('미리보기 partial=')).length, previews);
+    if (!partialResponses) assert.ok(diagnostics.some(line => line.includes('건너뜀')));
+  });
+}
+
+test('T-SIEVE matches markers from stdout, stderr or both without returning or printing stderr', t => {
+  const output = [];
+  t.mock.method(process.stdout, 'write', value => { output.push(value); return true; });
+  t.mock.method(process.stderr, 'write', value => { output.push(value); return true; });
+  for (const [stdout, stderr] of [
+    ['debug: WM_MATCH_3', 'synthetic-private-diagnostic'],
+    ['', 'synthetic-private-diagnostic\ndebug: WM_MATCH_3'],
+    ['debug: WM_MATCH_3', 'synthetic-private-diagnostic\ndebug: WM_MATCH_3'],
+  ]) {
+    assert.deepEqual(sieveTestOutput({ status: 0, stdout, stderr }, 3), { stdout, matched: true });
+  }
+  assert.equal(sieveTestOutput({ status: 0, stdout: 'WM_MATCH_30', stderr: 'other diagnostic' }, 3).matched, false);
+  assert.throws(() => sieveTestOutput({ status: 1, stderr: 'synthetic-private-diagnostic' }, 3), error =>
+    error.message === 'sieve-test 실행 실패 (원문 출력 생략)');
+  assert.deepEqual(output, []);
+});
+
+for (const failure of ['none', 'work', 'remote-cleanup']) {
+  test(`T-SIEVE removes local and remote temporary directories: ${failure}`, () => {
+    const calls = [];
+    let local;
+    const exec = args => {
+      calls.push(args);
+      if (args[0] === 'mktemp') return '/tmp/webmail-int-sieve.Synthetic123\n';
+      if (failure === 'remote-cleanup' && args[0] === 'rm') throw new Error('synthetic cleanup failure');
+      return '';
+    };
+    const work = root => {
+      local = root;
+      writeFileSync(`${root}/example.eml`, 'Synthetic mail');
+      if (failure === 'work') throw new Error('synthetic work failure');
+      return 'completed';
+    };
+    if (failure === 'none') assert.equal(withSieveTemps(exec, work), 'completed');
+    else assert.throws(() => withSieveTemps(exec, work), /synthetic/);
+    assert.deepEqual(calls.at(-1), ['rm', '-rf', '--', '/tmp/webmail-int-sieve.Synthetic123']);
+    assert.ok(local);
+    assert.equal(existsSync(local), false);
+  });
+}
 
 test('T-SIEVE doveconf discovery keeps absolute files and skips dict/mysql without exposing descriptors', () => {
   const skipped = [];

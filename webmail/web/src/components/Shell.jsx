@@ -37,8 +37,7 @@ export default function Shell() {
     let active = true;
     folders.value = { folders: [], virtualAllMail: null }; storage.value = null; vacation.value = null;
     Promise.all([api('/api/folders'),api('/api/storage?quotaOnly=1')]).then(([f,s]) => { if (active) {folders.value=f;storage.value=s;} }).catch(error => {if(active) onError(error);});
-    // Vacation has no production endpoint yet; only the development fixture provides it.
-    if (import.meta.env.DEV && import.meta.env.VITE_WEBMAIL_FAKE_API === '1') api('/api/dev/vacation').then(value => {if(active) vacation.value=value;}).catch(error => {if(active) onError(error);});
+    api('/api/rules').then(value => {if(active) vacation.value=value.doc?.vacation ?? null;}).catch(error => {if(active) onError(error);});
     return () => {active=false;};
   }, []);
   useEffect(() => {

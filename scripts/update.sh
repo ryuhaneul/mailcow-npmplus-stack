@@ -17,11 +17,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MAILCOW_DIR="/home/mailcow-dockerized"
-TOOLKIT_DIR="/home/mailcow-toolkit"
-NPMPLUS_DIR="/home/npmplus"
-SNAPPYMAIL_DIR="/home/snappymail"
-LOGFILE="/var/log/mailcow-stack-update.log"
+MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
+TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
+NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
+SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
+LOGFILE="${LOGFILE:-/var/log/mailcow-stack-update.log}"
 
 NON_INTERACTIVE=false
 case "${1:-}" in
@@ -60,6 +61,24 @@ command -v git >/dev/null 2>&1 || die "git not found"
 command -v docker >/dev/null 2>&1 || die "docker not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin not available"
 
+# Read feature selection before pulling or starting optional stacks.
+ENV_FILE="${PROJECT_DIR}/.env"
+[ -f "$ENV_FILE" ] || die ".env not found"
+WEBMAIL_ENABLE=false
+SNAPPYMAIL_ENABLE=true
+MAIL_AUTOEXPUNGE_ENABLE=
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/webmail-env.sh
+source "$SCRIPT_DIR/lib/webmail-env.sh"
+webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+if [ "$SNAPPYMAIL_ENABLE" = false ] && docker ps -a --format '{{.Names}}' | grep -qFx snappymail; then
+    warn "SnappyMail is disabled but its container exists; preserving it. Removal: scripts/snappymail-remove.sh"
+fi
+
 # ============================================================
 # Phase 1: git pull for component repos
 # ============================================================
@@ -88,7 +107,7 @@ git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"
 # mailcow-dockerized is managed by its own update.sh; pulling here races with Phase 3.
 # npmplus / snappymail dirs are typically not git repos (compose files copied from stack).
 git_pull_if_repo "$NPMPLUS_DIR" "npmplus (runtime)"
-git_pull_if_repo "$SNAPPYMAIL_DIR" "snappymail (runtime)"
+[ "$SNAPPYMAIL_ENABLE" != true ] || git_pull_if_repo "$SNAPPYMAIL_DIR" "snappymail (runtime)"
 
 # ============================================================
 # Phase 2: docker compose pull for external stacks
@@ -107,7 +126,7 @@ compose_pull() {
 }
 
 compose_pull "$NPMPLUS_DIR" "npmplus"
-compose_pull "$SNAPPYMAIL_DIR" "snappymail"
+[ "$SNAPPYMAIL_ENABLE" != true ] || compose_pull "$SNAPPYMAIL_DIR" "snappymail"
 
 # ============================================================
 # Phase 3: Mailcow official update
@@ -173,6 +192,18 @@ else
     warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
+# Re-apply Webmail configuration after mailcow's update, before app rebuild.
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" apply -y
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply
+fi
+if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
+    warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" apply -y
+elif grep -Eq '^[[:space:]]*(export[[:space:]]+)?MAIL_AUTOEXPUNGE_ENABLE=' "$ENV_FILE" && grep -qFx '# BEGIN mailstack autoexpunge (apply-dovecot-autoexpunge.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" --revert -y
+fi
+
 # ============================================================
 # Phase 5: Rebuild mailcow-toolkit
 # ============================================================
@@ -214,6 +245,39 @@ else
 fi
 
 # ============================================================
+# Phase 5b: Webmail source/environment refresh and rebuild
+# ============================================================
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    header "Phase 5b: Webmail"
+    mkdir -p "$WEBMAIL_DIR"
+    rsync -a --delete --exclude=node_modules --exclude=webmail.env \
+        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml \
+        "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
+    # Mailcow's Phase 3 update may have renewed its certificate. Refresh a pin
+    # before the rebuild; a changed certificate alone forces recreation.
+    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Webmail configuration failed"
+    webmail_ensure_db_password || die "Webmail DB password preparation failed"
+    WEBMAIL_PIN_BEFORE=""
+    WEBMAIL_PIN_CHANGED=false
+    if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
+        WEBMAIL_PIN_BEFORE=$(webmail_pin_fingerprint "$WEBMAIL_DIR/mail-tls-pin.pem") || true
+    fi
+    webmail_extract_tls_pin "$WEBMAIL_DIR" || die "Webmail TLS configuration failed"
+    if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
+        WEBMAIL_PIN_AFTER=$(webmail_pin_fingerprint "$WEBMAIL_DIR/mail-tls-pin.pem") || die "Webmail TLS pin fingerprint failed"
+        if [ "$WEBMAIL_PIN_BEFORE" != "$WEBMAIL_PIN_AFTER" ]; then WEBMAIL_PIN_CHANGED=true; fi
+    fi
+    webmail_generate_env "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
+    (cd "$WEBMAIL_DIR" && docker compose build --pull)
+    if [ "$WEBMAIL_PIN_CHANGED" = true ]; then
+        (cd "$WEBMAIL_DIR" && docker compose up -d --force-recreate webmail)
+    else
+        (cd "$WEBMAIL_DIR" && docker compose up -d)
+    fi
+    warn "웹메일 재시작으로 사용자 전원 다시 로그인"
+fi
+
+# ============================================================
 # Phase 6: Bring up remaining stacks
 # ============================================================
 header "Phase 6: Bring up remaining stacks"
@@ -230,7 +294,7 @@ compose_up() {
 }
 
 compose_up "$NPMPLUS_DIR" "npmplus"
-compose_up "$SNAPPYMAIL_DIR" "snappymail"
+[ "$SNAPPYMAIL_ENABLE" != true ] || compose_up "$SNAPPYMAIL_DIR" "snappymail"
 
 # Bounce NPMplus once mailcow is fully up so its upstream DNS cache
 # (server nginx-mailcow:8443 resolve;) is warm. Without this restart a

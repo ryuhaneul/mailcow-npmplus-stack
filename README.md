@@ -27,6 +27,21 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 | acme-mailcow | 비활성화 (`sleep infinity`) — NPMplus가 인증서 담당 |
 | SMTP/IMAP | 리버스 프록시 우회, 직접 노출 |
 | Snappymail | Docker 내부 네트워크로 Dovecot/Postfix 연결 (DNS 불필요) |
+| 웹메일 | 선택 설치하는 메일스택 웹메일. `webmail:8080`, 사용자 IMAP/Sieve/SMTP 자격과 열 단위 DB 읽기 계정 사용 |
+
+## 웹메일 선택값
+
+| 변수 | 기본값 | 동작 |
+|---|---|---|
+| `WEBMAIL_ENABLE` | `false` | 웹메일 설치·빌드·기동·검증 |
+| `SNAPPYMAIL_ENABLE` | `true` | SnappyMail 설치·업데이트·기동·검증 |
+| `MAIL_AUTOEXPUNGE_ENABLE` | `false` | 모든 메일 프로그램의 Junk·Trash 자동 삭제. `MAIL_AUTOEXPUNGE_DAYS=30`(1~365일) |
+
+웹메일과 SnappyMail은 함께 켤 수 있습니다. 웹메일 기본 주소는 `newmail.${DOMAIN}`입니다.
+웹메일만 켜면 `mail.${DOMAIN}`도 연결하고 로그인 허용 주소에 자동 추가합니다.
+둘 다 끄면 해당 서비스를 설치·기동하지 않으며, update는 기존 SnappyMail 컨테이너를 삭제하지 않습니다.
+**새 기능은 기본 꺼짐(opt-in)입니다.** 새 선택값이 없는 기존 `.env`에서는 기존 update 실행 목록을 유지합니다. 자동 삭제는 공지 후 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 설정해 켜세요. setup·update는 선택값을 기록하거나 바꾸지 않으며, 켜진 기능에 필요한 빈 비밀값만 생성합니다. 스내피 대체 후에도 레포 기본값은 바꾸지 않고 서버별 `.env`로 전환합니다.
+브랜드·접속 제한·TLS·전환·되돌리기는 [웹메일 운영 가이드](docs/guide.md#10-웹메일)를 참고하세요.
 
 ## 테스트 환경
 

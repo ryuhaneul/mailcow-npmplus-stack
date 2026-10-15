@@ -55,3 +55,29 @@ export function sanitizeHtml(html, { ref, cidParts = new Map(), images = false }
   const container = window.document.createElement('div'); container.append(fragment);
   return { html: container.innerHTML, blockedImages };
 }
+
+// Sending preserves remote images and CID URLs, without reader-only rewrites.
+export function sanitizeComposeHtml(html, { publicHostnames = [] } = {}) {
+  const fragment = purify.sanitize(html, { ALLOWED_TAGS: tags, ALLOWED_ATTR: [...attrs, 'data-wm-blocked'], ALLOW_DATA_ATTR: false, RETURN_DOM_FRAGMENT: true, FORCE_BODY: true });
+  for (const element of fragment.querySelectorAll('*')) {
+    if (element.hasAttribute('style')) {
+      cleanDeclarations(element.style);
+      element.setAttribute('style', element.style.cssText);
+    }
+    if (element.tagName === 'STYLE') element.textContent = cleanStyle(element.textContent);
+    if (element.tagName !== 'IMG') { element.removeAttribute('src'); element.removeAttribute('data-wm-blocked'); continue; }
+    const blocked = element.getAttribute('data-wm-blocked');
+    if (blocked && /^(https?:)?\/\//i.test(blocked.trim())) element.setAttribute('src', blocked.trim());
+    element.removeAttribute('data-wm-blocked');
+    const src = (element.getAttribute('src') || '').trim();
+    let internal = /^\/?api\//i.test(src);
+    try {
+      const url = new URL(src.startsWith('//') ? `https:${src}` : src);
+      internal ||= publicHostnames.includes(url.hostname) && url.pathname.startsWith('/api/');
+    } catch { /* CID, data and relative URLs have no absolute hostname. */ }
+    if (internal) { element.remove(); continue; }
+    if (!/^(https?:|cid:|\/\/)/i.test(src) && !/^data:image\/(png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(src)) element.removeAttribute('src');
+  }
+  const container = window.document.createElement('div'); container.append(fragment);
+  return container.innerHTML;
+}

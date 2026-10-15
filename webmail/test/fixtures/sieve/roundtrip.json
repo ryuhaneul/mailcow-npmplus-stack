@@ -1,0 +1,510 @@
+[
+  {
+    "name": "from has",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "from",
+              "op": "has",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "from not",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "from",
+              "op": "not",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "from eq",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "from",
+              "op": "eq",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "from start",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "from",
+              "op": "start",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "to has",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "to",
+              "op": "has",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "to not",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "to",
+              "op": "not",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "to eq",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "to",
+              "op": "eq",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "to start",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "to",
+              "op": "start",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "subject has",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "has",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "subject not",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "not",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "subject eq",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "eq",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "subject start",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "start",
+              "value": "회의 \"자료\" \\ *?"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "attachment",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "attachment",
+              "op": "has",
+              "value": ""
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      }
+    }
+  },
+  {
+    "name": "blocked and disabled import",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": false,
+          "match": "all",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "has",
+              "value": "회의"
+            }
+          ],
+          "actions": {
+            "read": true
+          },
+          "stop": false
+        }
+      ],
+      "blocked": [
+        "blocked@example.com",
+        "@spam.example.com"
+      ],
+      "vacation": {
+        "enabled": false,
+        "start": null,
+        "end": null,
+        "subject": "",
+        "body": ""
+      },
+      "importedFrom": {
+        "name": "legacy-example",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-10-15T00:00:00.000Z"
+      }
+    }
+  },
+  {
+    "name": "vacation and combined actions",
+    "doc": {
+      "v": 1,
+      "rev": 7,
+      "rules": [
+        {
+          "id": "rule0001",
+          "enabled": true,
+          "match": "any",
+          "conditions": [
+            {
+              "field": "subject",
+              "op": "has",
+              "value": "회의"
+            }
+          ],
+          "actions": {
+            "move": "Projects/팀",
+            "read": true,
+            "star": true,
+            "forward": [
+              "member@example.com"
+            ]
+          },
+          "stop": true
+        }
+      ],
+      "blocked": [],
+      "vacation": {
+        "enabled": true,
+        "start": "2026-10-15",
+        "end": "2026-10-31",
+        "subject": "부재중 \"안내\"",
+        "body": "11월에 답변하겠습니다. \\ 감사합니다."
+      }
+    }
+  }
+]

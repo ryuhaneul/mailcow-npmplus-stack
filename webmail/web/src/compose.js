@@ -18,7 +18,7 @@ export function replaceSignature(html,signature) {
 }
 export function initialComposition(seed,identities,preferences,email) {
   const from=identities.defaultFrom||identities.identities[0]?.address||email,kind=seed?.kind||'new',message=seed?.message;
-  const base={kind,from,to:[],cc:[],bcc:[],pendingTo:'',pendingCc:'',pendingBcc:'',subject:'',html:'<p><br></p>',attachments:[],forwardFiles:[],draftRef:null,internalImages:false};
+  const base={composeId:crypto.randomUUID(),kind,from,to:[],cc:[],bcc:[],pendingTo:'',pendingCc:'',pendingBcc:'',subject:'',html:'<p><br></p>',attachments:[],forwardFiles:[],draftRef:null,internalImages:false};
   if(message){
     const own=new Set([email,...identities.identities.map(item=>item.address)].map(value=>value.toLowerCase()));
     const other=items=>recipients((items||[]).filter(item=>!own.has(item.address.toLowerCase())));
@@ -34,7 +34,7 @@ export function initialComposition(seed,identities,preferences,email) {
     base.subject=(kind==='forward'?/^fwd?:/i:/^re:/i).test(message.subject||'')?message.subject:`${prefix} ${message.subject||''}`;
     const body=message.html??`<pre>${escapeHtml(message.text||'')}</pre>`;
     base.internalImages=/(?:cid:|\/api\/messages\/[^"'<> ]+\/parts\/)/i.test(body);
-    base.html=`<p><br></p><blockquote><p>${escapeHtml((message.from||[]).map(item=>item.name?`${item.name} <${item.address}>`:item.address).join(', '))}<br>${escapeHtml(message.date||'')}<br>${escapeHtml(message.subject||'')}</p>${body}</blockquote>`;
+    base.html=`<p><br></p><blockquote><p>${escapeHtml((message.from||[]).map(item=>item.name?`${item.name} <${item.address}>`:item.address).join(', '))}<br>${escapeHtml(message.date?new Date(message.date).toLocaleString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'short',hour:'numeric',minute:'2-digit'}):'')}<br>${escapeHtml(message.subject||'')}</p>${body}</blockquote>`;
   }
   base.html=replaceSignature(base.html,signatureMarkup(preferences,from,kind!=='forward'));return base;
 }

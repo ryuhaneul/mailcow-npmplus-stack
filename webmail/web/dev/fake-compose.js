@@ -10,12 +10,13 @@ export async function fakeCompose(request,response,state,send,recorded){
   if(path.startsWith('/api/attachments/')&&request.method==='DELETE'){const id=decodeURIComponent(path.split('/').at(-1));if(!fixture.attachments.delete(id))return fail(404,'ATTACHMENT_NOT_FOUND','첨부 파일을 찾을 수 없어요.');send(response,204);return true;}
   let raw=[];for await(const chunk of request)raw.push(chunk);raw=Buffer.concat(raw);
   if(path==='/api/attachments'){
-    const incoming=new Request('http://localhost/api/attachments',{method:'POST',headers:{'Content-Type':request.headers['content-type']},body:raw});const data=await incoming.formData(),file=data.get('file');
+    const incoming=new Request('http://localhost/api/attachments',{method:'POST',headers:{'Content-Type':request.headers['content-type']},body:raw});const data=await incoming.formData(),file=data.get('file'),composeId=data.get('composeId')??undefined;
     if(!file||typeof file==='string')return fail(422,'BAD_REQUEST','작성 내용을 확인해 주세요.');
-    recorded.body={filename:file.name,size:file.size,contentType:file.type};
-    const total=[...fixture.attachments.values()].reduce((sum,item)=>sum+item.size,0)+file.size;
+    if(composeId!==undefined&&(typeof composeId!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(composeId)))return fail(422,'BAD_REQUEST','작성 내용을 확인해 주세요.');
+    recorded.body={filename:file.name,size:file.size,contentType:file.type,composeId};
+    const total=[...fixture.attachments.values()].filter(item=>composeId===undefined||item.composeId===composeId).reduce((sum,item)=>sum+item.size,0)+file.size;
     if(total>state.config.attachMaxMb*1024**2)return fail(413,'ATTACH_TOO_LARGE','첨부 파일 합계가 허용 크기를 넘었어요.');
-    const value={id:`example-upload-${++fixture.nextId}`,filename:file.name,size:file.size,contentType:file.type||'application/octet-stream'};fixture.attachments.set(value.id,value);send(response,201,value);return true;
+    const value={id:`example-upload-${++fixture.nextId}`,filename:file.name,size:file.size,contentType:file.type||'application/octet-stream'};fixture.attachments.set(value.id,{...value,composeId});send(response,201,value);return true;
   }
   const body=JSON.parse(raw.toString());recorded.body=body;
   if(path==='/api/drafts'){fixture.draftActive++;fixture.maxDraftActive=Math.max(fixture.maxDraftActive,fixture.draftActive);try{if(fixture.draftGate)await fixture.draftGate;if(fixture.draftError)return fail(fixture.draftError.status,fixture.draftError.code,fixture.draftError.message);return writeDraft();}finally{fixture.draftActive--;}}

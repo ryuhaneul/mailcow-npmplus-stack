@@ -97,7 +97,7 @@ export default function Composer() {
     patch({attachments:[...current.current.attachments,...accepted]});
     const pending=uploads.current.then(async()=>{
       for(const item of accepted){if(!active())return;try{
-        const body=new FormData();body.append('file',item.file);const file=await api('/api/attachments',{method:'POST',body});if(active())patch({attachments:current.current.attachments.map(value=>value.key===item.key?{...item,...file,uploading:false}:value)});
+        const body=new FormData();body.append('composeId',current.current.composeId);body.append('file',item.file);const file=await api('/api/attachments',{method:'POST',body});if(active())patch({attachments:current.current.attachments.map(value=>value.key===item.key?{...item,...file,uploading:false}:value)});
       }catch(value){if(active()){patch({attachments:current.current.attachments.filter(value=>value.key!==item.key)});fail(value.code==='ATTACH_TOO_LARGE'?{...value,message:attachmentLimitMessage(item.filename,limit,total)}:value);}}}
     });uploads.current=pending.catch(fail);await pending;
   }

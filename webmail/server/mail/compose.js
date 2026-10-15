@@ -74,20 +74,26 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
   }
   async function upload(session, parts) {
     return serial(session, async state => {
-      let file, path;
+      let file, path, composeId;
       try {
         const dir = await directoryFor(session);
-        const existing = [...state.attachments.values()].reduce((sum, item) => sum + item.size, 0);
         for await (const part of parts) {
+          if (part.type === 'field') {
+            if (part.fieldname !== 'composeId' || composeId !== undefined || part.valueTruncated || typeof part.value !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(part.value)) throw invalid();
+            composeId = part.value;
+            continue;
+          }
           if (file || part.type !== 'file' || part.fieldname !== 'file') throw invalid();
           file = { id: id(), filename: String(part.filename || 'attachment').replace(/[\x00-\x1f\x7f\\/]/g, '_'), size: 0, contentType: part.mimetype || 'application/octet-stream' };
           path = join(dir, file.id);
-          await pipeline(part.file, limiter(bytes => { file.size += bytes; if (existing + file.size > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
+          await pipeline(part.file, limiter(bytes => { file.size += bytes; if (file.size > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           if (part.file.truncated) throw tooLarge();
         }
         if (!file) throw invalid();
+        const existing = [...state.attachments.values()].filter(item => composeId === undefined || item.composeId === composeId).reduce((sum, item) => sum + item.size, 0);
+        if (existing + file.size > maxBytes) throw tooLarge();
         active(session);
-        state.attachments.set(file.id, file);
+        state.attachments.set(file.id, { ...file, composeId });
         return file;
       } catch (error) {
         if (path) await rm(path, { force: true });
@@ -215,7 +221,6 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
       const appended = await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']));
       if (!appended?.uid || !appended.uidValidity) throw unavailable();
       await deleteDraft(session, body.draftRef);
-      await cleanup();
       return { draftRef: encodeRef(path, appended.uidValidity, appended.uid) };
     }).catch(error => { if (error instanceof AppError) throw error; throw unavailable(); });
   }

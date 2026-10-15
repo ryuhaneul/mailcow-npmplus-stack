@@ -76,9 +76,10 @@ async function fixture(t, { smtp, overrides = {}, clientSetup } = {}) {
   return { app, calls, clients, service, attempts, headers, session, login, tempRoot, dir: join(tempRoot, session.id), get logs() { return logs; }, advance(ms) { time += ms; } };
 }
 const body = extra => ({ from: 'user@example.com', to: ['recipient@example.com'], cc: [], bcc: [], subject: 'synthetic subject', html: '<p>synthetic private body</p>', attachmentIds: [], ...extra });
-function upload(f, content, headers = f.headers, filename = 'example.txt') {
+function upload(f, content, headers = f.headers, filename = 'example.txt', composeId) {
   const boundary = 'synthetic-compose-boundary';
-  return f.app.inject({ method: 'POST', url: '/api/attachments', headers: { ...headers, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: text/plain\r\n\r\n`), Buffer.from(content), Buffer.from(`\r\n--${boundary}--\r\n`)]) });
+  const field = composeId === undefined ? '' : `--${boundary}\r\nContent-Disposition: form-data; name="composeId"\r\n\r\n${composeId}\r\n`;
+  return f.app.inject({ method: 'POST', url: '/api/attachments', headers: { ...headers, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: Buffer.concat([Buffer.from(field), Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: text/plain\r\n\r\n`), Buffer.from(content), Buffer.from(`\r\n--${boundary}--\r\n`)]) });
 }
 function request(f, method, url, payload, headers = f.headers) { return f.app.inject({ method, url, headers, ...(payload === undefined ? {} : { payload }) }); }
 function failure(response, status, code) { assert.equal(response.statusCode, status, response.body); assert.equal(response.json().error.code, code); assert.equal(response.headers['www-authenticate'], undefined); }
@@ -137,7 +138,7 @@ test('draft: empty recipients allowed, Draft Seen APPEND before old delete, Bcc 
   const f = await fixture(t), attachment = (await upload(f, 'draft attachment')).json();
   const response = await request(f, 'PUT', '/api/drafts', body({ to: [], bcc: ['hidden@example.com'], draftRef: draft, attachmentIds: [attachment.id], html: '<script>evil()</script><p onclick="evil()" style="color:red">draft</p>' }));
   assert.equal(response.statusCode, 200, response.body); assert.deepEqual(decodeRef(response.json().draftRef), { path: 'Drafts', uidValidity: 123, uid: 31 }); const append = f.calls.find(call => call.action === 'append'); assert.deepEqual(append.flags, ['\\Draft', '\\Seen']);
-  assert.ok(!append.raw.toString().includes('onclick')); assert.ok(!append.raw.toString().includes('<script>')); assert.ok(append.raw.toString().includes('Bcc: hidden@example.com')); assert.ok(f.calls.indexOf(append) < f.calls.findIndex(call => call.action === 'delete')); assert.equal(f.attempts.length, 0); assert.deepEqual(await readdir(f.dir), []);
+  assert.ok(!append.raw.toString().includes('onclick')); assert.ok(!append.raw.toString().includes('<script>')); assert.ok(append.raw.toString().includes('Bcc: hidden@example.com')); assert.ok(f.calls.indexOf(append) < f.calls.findIndex(call => call.action === 'delete')); assert.equal(f.attempts.length, 0); assert.deepEqual(await readdir(f.dir), [attachment.id]);
 });
 test('draft: failed append preserves old draft and temporary attachment', async t => {
   const f = await fixture(t, { clientSetup(client) { client.append = async () => false; } }), attachment = (await upload(f, 'draft attachment')).json();
@@ -205,4 +206,56 @@ test('send postprocessing: independent failures produce exactly their warning co
   const f = await fixture(t, { clientSetup(client) { client.messageDelete = async () => false; client.messageFlagsAdd = async () => false; } });
   const response = await request(f, 'POST', '/api/send', body({ draftRef: draft, replyToRef: original }));
   assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['DRAFT_DELETE_FAILED', 'ANSWERED_FAILED'] }); assert.equal(f.calls.filter(call => call.action === 'append').length, 1); assert.match(f.logs, /DRAFT_DELETE_FAILED/); assert.match(f.logs, /ANSWERED_FAILED/);
+});
+
+
+test('draft attachments: two saves keep the same ID usable for send, success removes it', async t => {
+  const f = await fixture(t), attachment = (await upload(f, 'retained draft attachment', f.headers, 'draft.txt', 'compose-draft')).json();
+  let draftRef;
+  for (let index = 0; index < 2; index++) {
+    const response = await request(f, 'PUT', '/api/drafts', body({ attachmentIds: [attachment.id], ...(draftRef ? { draftRef } : {}) }));
+    assert.equal(response.statusCode, 200, response.body);
+    draftRef = response.json().draftRef;
+    await access(join(f.dir, attachment.id));
+  }
+  const sent = await request(f, 'POST', '/api/send', body({ draftRef, attachmentIds: [attachment.id] }));
+  assert.equal(sent.statusCode, 200, sent.body); assert.equal(f.attempts.length, 1);
+  await assert.rejects(access(join(f.dir, attachment.id)), { code: 'ENOENT' });
+});
+
+test('compose upload quotas are independent, but combining IDs in send or draft still gives 413', async t => {
+  const f = await fixture(t);
+  const a = await upload(f, Buffer.alloc(800000), f.headers, 'a.txt', 'compose-a');
+  const b = await upload(f, Buffer.alloc(800000), f.headers, 'b.txt', 'compose-b');
+  assert.equal(a.statusCode, 201, a.body); assert.equal(b.statusCode, 201, b.body);
+  failure(await upload(f, Buffer.alloc(300000), f.headers, 'over.txt', 'compose-a'), 413, 'ATTACH_TOO_LARGE');
+  // Missing composeId retains the legacy session-wide upload limit.
+  failure(await upload(f, 'x'), 413, 'ATTACH_TOO_LARGE');
+  const attachmentIds = [a.json().id, b.json().id];
+  for (const [method, endpoint] of [['POST', '/api/send'], ['PUT', '/api/drafts']]) {
+    failure(await request(f, method, endpoint, body({ attachmentIds })), 413, 'ATTACH_TOO_LARGE');
+  }
+  assert.equal(f.attempts.length, 0);
+  assert.equal((await request(f, 'POST', '/api/send', body({ attachmentIds: [a.json().id] }))).statusCode, 200);
+  await assert.rejects(access(join(f.dir, a.json().id)), { code: 'ENOENT' });
+  await access(join(f.dir, b.json().id));
+});
+
+test('same compose concurrent uploads cannot exceed the per-message cap', async t => {
+  const f = await fixture(t);
+  const responses = await Promise.all([upload(f, Buffer.alloc(700000), f.headers, 'a.txt', 'compose-one'), upload(f, Buffer.alloc(700000), f.headers, 'b.txt', 'compose-one')]);
+  assert.deepEqual(responses.map(response => response.statusCode).sort(), [201, 413]);
+  assert.equal((await readdir(f.dir)).length, 1);
+});
+
+test('composeId is validated and may follow the multipart file', async t => {
+  const f = await fixture(t);
+  for (const composeId of ['', '../example', 'a'.repeat(129)]) {
+    failure(await upload(f, 'synthetic', f.headers, 'example.txt', composeId), 422, 'BAD_REQUEST');
+  }
+  const boundary = 'synthetic-field-after-file';
+  const payload = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="example.txt"\r\nContent-Type: text/plain\r\n\r\nsynthetic\r\n--${boundary}\r\nContent-Disposition: form-data; name="composeId"\r\n\r\ncompose-after\r\n--${boundary}--\r\n`;
+  const response = await f.app.inject({ method: 'POST', url: '/api/attachments', headers: { ...f.headers, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload });
+  assert.equal(response.statusCode, 201, response.body);
+  assert.equal((await readdir(f.dir)).length, 1);
 });

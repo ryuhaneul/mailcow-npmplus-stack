@@ -30,3 +30,5 @@
 .compose-source-shell.is-composing .compose-source-pre{visibility:hidden}
 .compose-source-shell.is-composing .compose-source-input{-webkit-text-fill-color:var(--ink)}
 @media(forced-colors:active){.compose-source-pre{visibility:hidden}.compose-source-input{background:Canvas;color:CanvasText;-webkit-text-fill-color:CanvasText;caret-color:CanvasText}}
+
+.composer .fmt{flex-wrap:wrap;height:auto;min-height:44px;padding-top:6px;padding-bottom:6px;row-gap:4px;overflow:visible}

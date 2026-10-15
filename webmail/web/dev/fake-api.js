@@ -1,3 +1,4 @@
+import { fakeRules, rulesFixture } from './fake-rules.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
 export const fakeConfigs = {
   a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, version: '0.1.0' },
@@ -13,7 +14,7 @@ const messages = {
   EMAIL_FORMAT: '메일 주소를 확인해 주세요.', AUTH_FAILED: '메일 주소나 암호가 맞지 않아요.', RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤 다시 시도해 주세요.', MAIL_UNAVAILABLE: '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.', NO_SESSION: '로그인이 필요해요.', SESSION_EXPIRED: '로그인이 만료됐어요. 다시 로그인해 주세요.', CSRF: '요청을 확인할 수 없어요.',
 };
 export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
-  const state = { authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:[] }, vacation: {enabled:true,until:'2026-10-17'} };
+  const state = { rules: rulesFixture(), rulesError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:[] }, vacation: {enabled:true,until:'2026-10-17'} };
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
     response.statusCode=status;response.setHeader('Content-Type','application/json; charset=utf-8');response.setHeader('Cache-Control','no-store');response.end(payload===undefined ? undefined : JSON.stringify(payload));
@@ -40,6 +41,7 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
     if(path==='/api/folders')return send(response,200,{folders:state.folders,virtualAllMail:'WebmailVirtual/AllMail'});
     if(path==='/api/storage')return send(response,200,state.storage);
+    if(await fakeRules(request,response,state,send))return;
     if(path==='/api/dev/vacation')return send(response,200,state.vacation);
     send(response,404,{error:{code:'NOT_FOUND',message:'요청한 경로를 찾을 수 없어요.'}});
   }

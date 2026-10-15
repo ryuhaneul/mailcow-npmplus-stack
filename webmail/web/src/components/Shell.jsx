@@ -6,6 +6,7 @@ import { toast } from '../state/toast.js';
 import { route } from '../router.js';
 import { api } from '../api.js';
 import { initStars } from '../theme/stars.js';
+import FiltersPage from './FiltersPage.jsx';
 import Sidebar from './Sidebar.jsx';
 import TopBar from './TopBar.jsx';
 import MobileQuota from './MobileQuota.jsx';
@@ -54,7 +55,7 @@ export default function Shell() {
       <main class="main">
         <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
         <MobileQuota/>
-        <div class="stage"><section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section></div>
+        <div class="stage">{current.name === 'filters' ? <FiltersPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
       </main>
     </div>
     {toast.value && <div class="toast open" role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}

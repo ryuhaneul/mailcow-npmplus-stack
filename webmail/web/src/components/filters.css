@@ -15,3 +15,7 @@
 .import-items span,.import-items p{color:var(--ink-2);margin:4px 0 0}
 .rules-confirm{border:1px solid var(--line);color:var(--ink)}
 .rules-confirm::backdrop{background:var(--scrim)}
+
+.signature-editor.c-body{min-height:calc(var(--row-h) + var(--row-h) + var(--row-h))}
+.signature-editor:is(:empty,:has(>br:only-child))::before{content:attr(aria-placeholder);color:var(--ink-3);pointer-events:none}
+.from-addresses .rule{grid-template-columns:minmax(0,1fr) auto auto}

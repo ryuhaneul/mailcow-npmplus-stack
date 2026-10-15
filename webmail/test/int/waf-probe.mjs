@@ -21,7 +21,7 @@ export function classifyResponse({ status, contentType = '', body, failed = fals
 }
 
 export function exitCode(rows, incomplete = false) {
-  if (rows.some(row => row.source !== '웹메일 앱 JSON')) return 1;
+  if (rows.some(row => !['웹메일 앱 JSON', '건너뜀'].includes(row.source))) return 1;
   return incomplete ? 2 : 0;
 }
 
@@ -59,13 +59,18 @@ export async function runProbe(base, { email, password, request = fetch, timeout
   let original; let savedRev;
   try {
     const rules = await send('규칙 원본 조회', 'GET', '/api/rules');
-    if (rules.value?.doc && Number.isInteger(rules.value.rev)) {
+    if (['ok', 'none'].includes(rules.value?.state) && rules.value?.doc && Number.isInteger(rules.value.rev)) {
       original = structuredClone(rules.value.doc);
       const doc = structuredClone(original);
-      doc.rules.push({ id: 'wafprobe', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: '${waf}; "quoted"' }], actions: { read: true }, stop: false });
+      doc.rules.push({ id: 'wafprobe', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: '합성 "<태그>"; quoted' }], actions: { read: true }, stop: false });
       const saved = await send('Sieve 기호 규칙 저장', 'PUT', '/api/rules', { baseRev: rules.value.rev, doc });
       if (saved.business === '성공') savedRev = saved.value.rev;
-    } else { incomplete = true; }
+    } else {
+      const states = ['ok', 'none', 'import_pending', 'import_blocked', 'inactive_other', 'modified_externally', 'damaged'];
+      const state = states.includes(rules.value?.state) ? rules.value.state : 'unknown';
+      rows.push({ request: 'Sieve 기호 규칙 저장', status: '-', source: '건너뜀', business: `건너뜀(상태: ${state})` });
+      incomplete = true;
+    }
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(20 * 1024 * 1024)], { type: 'application/octet-stream' }), 'synthetic-20mb.bin');
     await send('첨부 업로드 20MiB', 'POST', '/api/attachments', form);

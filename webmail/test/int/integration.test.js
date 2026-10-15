@@ -488,7 +488,10 @@ integration('core', '가상 목록 원본 ref로 읽음·별표·이동·휴지�
     assert.equal(found.length, 1);
     return encodeRef(path, direct.mailbox.uidValidity, found[0]);
   };
-  assert.equal((await mailboxStatus(direct, folder, ['MESSAGES'])).messages, 0);
+  // Observe the external MOVE on a fresh authenticated connection, with no
+  // selected mailbox or prior STATUS state from before the HTTP action.
+  const observer = await imap(t);
+  assert.equal((await mailboxStatus(observer, folder, ['MESSAGES'])).messages, 0);
   ref = await find('Junk'); await actions('notspam');
   ref = await find('INBOX'); await actions('move', folder);
   ref = await find(folder); await actions('archive');
@@ -536,9 +539,9 @@ integration('core', 'user4 공유 폴더 읽기·쓰기 동작 403', async t => 
   await web.request('POST', `/api/folders/${encodeURIComponent(shared.path)}/empty`, { confirmName: shared.name }, 403);
 });
 
-integration('core', 'XFF 위조로 실패 제한 우회 불가·6회째 429 (core 마지막)', async t => {
-  // A dedicated email avoids locking a fixture account; this source IP is blocked for 15 minutes.
-  // Keep this last and run each subsequent group in a fresh container (new source IP).
+integration('core', '같은 출발 IP의 합성 계정 5회 실패→6회째 429 (위조 XFF는 바깥 R-XFF 수동 게이트)', async t => {
+  // Trusted internal sources cannot prove spoofed-XFF rejection. Do not send XFF.
+  // Distinct non-existent accounts separate IP limiting from account limiting.
   const web = await api();
   const target = new URL(process.env.WEBMAIL_INT_URL || 'http://webmail:8080');
   const sourceIP = await new Promise((resolve, reject) => {
@@ -547,14 +550,13 @@ integration('core', 'XFF 위조로 실패 제한 우회 불가·6회째 429 (cor
     socket.once('timeout', () => { socket.destroy(); reject(new Error('IP 연결 시간 초과')); });
     socket.once('connect', () => { const address = socket.localAddress; socket.destroy(); resolve(address); });
   });
-  const account = `invalid-int-${Date.now()}@${required('WEBMAIL_INT_DOMAIN')}`;
+  const nonce = unique().toLowerCase();
   for (let i = 0; i < 6; i++) {
-    const body = await web.request('POST', '/api/auth/login', { email: account, password: 'synthetic-invalid-password' }, i < 5 ? 403 : 429,
-      { 'x-forwarded-for': `198.51.100.${i + 1}` });
+    const account = `invalid-${nonce}-${i}@${required('WEBMAIL_INT_DOMAIN')}`;
+    const body = await web.request('POST', '/api/auth/login', { email: account, password: 'synthetic-invalid-password' }, i < 5 ? 403 : 429);
     assert.equal(body.error.code, i < 5 ? 'AUTH_FAILED' : 'RATE_LIMITED');
   }
-  const blocked = await web.request('POST', '/api/auth/login', { email: email(), password: password() }, 429, { 'x-forwarded-for': '1.2.3.4' });
-  assert.equal(blocked.error.code, 'RATE_LIMITED');
   assert.ok(web.retryAfter > 0 && web.retryAfter <= 900, 'Retry-After 남은 시간');
   t.diagnostic(`실패 제한 출발 IP: ${sourceIP}, 남은 시간: ${web.retryAfter}초`);
+  t.diagnostic('위조 XFF 무시는 내부망 안에서 자동으로 확인 불가 — 수동 게이트 R-XFF(바깥 주소)로 확인');
 });

@@ -21,7 +21,20 @@ export function installHeaders(app) {
       reply.removeHeader('content-length');
     }
     const pdfSandbox = reply.getHeader('content-security-policy') === 'sandbox';
-    for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, name === 'content-security-policy' && pdfSandbox ? `${value}; sandbox` : value);
+    let pathname = '';
+    try {
+      const url = new URL(request.url, 'http://localhost');
+      url.pathname = decodeURIComponent(url.pathname);
+      pathname = url.pathname;
+    } catch {}
+    for (const [name, value] of Object.entries(securityHeaders)) {
+      let header = value;
+      if (name === 'content-security-policy') {
+        if (pathname.startsWith('/starflow/')) header = header.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+        if (pdfSandbox) header = `${header}; sandbox`;
+      }
+      reply.header(name, header);
+    }
     return payload;
   });
 }

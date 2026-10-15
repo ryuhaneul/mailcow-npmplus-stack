@@ -1,0 +1,26 @@
+services:
+  webmail:
+    build: /home/webmail
+    image: mailstack-webmail:local
+    container_name: webmail
+    restart: always
+    read_only: true
+    user: "node"
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    env_file: /home/webmail/webmail.env
+    # pin 모드에서만 setup/update가 override에 추가:
+    # volumes: ["/home/webmail/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z"]
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      mailcow-network:
+        aliases: [webmail]
+networks:
+  mailcow-network:
+    external: true
+    name: mailcowdockerized_mailcow-network

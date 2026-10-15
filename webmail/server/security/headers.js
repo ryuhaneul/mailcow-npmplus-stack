@@ -1,0 +1,25 @@
+import { safeStatus, errorBody } from '../errors.js';
+
+export const securityHeaders = Object.freeze({
+  'content-security-policy': "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'strict-transport-security': 'max-age=31536000',
+});
+
+export function installHeaders(app) {
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (reply.hasHeader('www-authenticate')) {
+      reply.removeHeader('www-authenticate');
+      request.log.error({ code: 'AUTH_CHALLENGE_REMOVED' }, '금지된 인증 응답 머리글을 제거했습니다.');
+    }
+    const status = safeStatus(reply.statusCode, request.log);
+    if (status !== reply.statusCode) {
+      reply.code(status).type('application/json');
+      payload = JSON.stringify(errorBody('AUTH_FAILED', '접근할 수 없어요.'));
+      reply.removeHeader('content-length');
+    }
+    for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, value);
+    return payload;
+  });
+}

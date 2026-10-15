@@ -28,6 +28,7 @@ export default function Login() {
       <div class="field"><label for="login-email">메일 주소</label><input id="login-email" class="inp" type="email" name="email" autoComplete="username" required value={email} onInput={event => setEmail(event.currentTarget.value)} /></div>
       <div class="field"><label for="login-password">암호</label><input id="login-password" class="inp" type="password" name="password" autoComplete="current-password" required value={password} onInput={event => setPassword(event.currentTarget.value)} /></div>
       <p class="login-error" role="alert" aria-live="polite">{error}</p>
+      {error && <p class="note">2단계 인증을 켠 계정은 mailcow에서 만든 앱 암호로 로그인해요.</p>}
       <button class="btn pri login-submit" type="submit" disabled={busy}>{busy ? '로그인 중…' : '로그인'}</button>
     </form>
   </section></main>;

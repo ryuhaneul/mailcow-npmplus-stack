@@ -53,7 +53,8 @@ export function createImapPool({ config, destroySession, clientFactory = options
     client.on('error', () => {});
     onClient?.(client);
     try {
-      await deadline(client.connect(), 10000, client);
+      // Keep native connect/greeting at 10s; allow the 15s auth penalty + 2s failure delay below the 60s proxy limit.
+      await deadline(client.connect(), 40000, client);
       return client;
     } catch (error) {
       client.close();

@@ -58,13 +58,13 @@ check_http() {
 # shellcheck disable=SC2329
 webmail_container_running() { [ "$(docker inspect webmail --format '{{.State.Running}}' 2>/dev/null)" = true ]; }
 check_container_healthy() {
-    local container="$1" state waited=0
-    state=$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
+    local container="$1" target="${2:-$1}" state waited=0
+    state=$(docker inspect "$target" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
     # Allow three 30s healthcheck intervals after a restart; retry only starting.
     while [ "$state" = starting ] && [ "$waited" -lt 90 ]; do
         sleep 5
         waited=$((waited + 5))
-        state=$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
+        state=$(docker inspect "$target" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
     done
     check "$container healthy (state=${state:-unavailable}, waited=${waited}s)" test "$state" = healthy
 }
@@ -103,7 +103,12 @@ fi
 check "nginx-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q nginx-mailcow'
 check "postfix-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q postfix-mailcow'
 check "dovecot-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q dovecot-mailcow'
-check_container_healthy unbound-mailcow
+mapfile -t UNBOUND_IDS < <(docker ps -q --filter name=unbound-mailcow 2>/dev/null)
+case "${#UNBOUND_IDS[@]}" in
+    0) check "unbound-mailcow healthy (not found, waited=0s)" false ;;
+    1) check_container_healthy unbound-mailcow "${UNBOUND_IDS[0]}" ;;
+    *) check "unbound-mailcow healthy (ambiguous: ${#UNBOUND_IDS[@]} containers, waited=0s)" false ;;
+esac
 
 echo ""
 

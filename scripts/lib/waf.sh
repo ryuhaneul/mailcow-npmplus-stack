@@ -534,6 +534,64 @@ _waf_restore_originals() {
     done
 }
 
+
+# Select credentials without sourcing executable runtime .env content or logging keys.
+# Setup allows an empty result only so its existing first-install generation can run.
+waf_resolve_bouncer_key() {
+    set +x
+    local dir=$1 allow_empty=${2:-false} runtime cs stack_match=불일치 runtime_match=불일치
+    runtime=$(python3 - "$dir/.env" <<'PYKEY'
+import pathlib,re,shlex,sys
+try:
+    path=pathlib.Path(sys.argv[1]); values=[]
+    if path.exists():
+        for line in path.read_text().splitlines():
+            match=re.match(r'^\s*(?:export\s+)?CROWDSEC_BOUNCER_KEY\s*=\s*(.*)$',line)
+            if match:
+                parts=shlex.split(match[1],comments=True,posix=True)
+                if len(parts)>1: raise ValueError()
+                values.append(parts[0] if parts else '')
+    if len(values)>1: raise ValueError()
+    print(values[0] if values else '',end='')
+except (OSError,UnicodeError,ValueError):
+    sys.exit(1)
+PYKEY
+) || { waf_error 'runtime bouncer key could not be read; no credential values logged'; return 1; }
+    if [ -n "${CROWDSEC_BOUNCER_KEY:-}" ] && [ -n "$runtime" ] && [ "$CROWDSEC_BOUNCER_KEY" != "$runtime" ]; then
+        cs=$(_waf_container "$dir" crowdsec) || return 1
+        if printf '%s' "$CROWDSEC_BOUNCER_KEY" | docker exec -i "$cs" sh -c \
+            'candidate=$(cat); test -n "${BOUNCER_KEY_npmplus:-}" && test "$candidate" = "$BOUNCER_KEY_npmplus"'; then stack_match=일치; fi
+        if printf '%s' "$runtime" | docker exec -i "$cs" sh -c \
+            'candidate=$(cat); test -n "${BOUNCER_KEY_npmplus:-}" && test "$candidate" = "$BOUNCER_KEY_npmplus"'; then runtime_match=일치; fi
+        waf_error "stack/runtime bouncer keys differ; CrowdSec BOUNCER_KEY_npmplus: stack=$stack_match runtime=$runtime_match"
+        return 1
+    fi
+    CROWDSEC_BOUNCER_KEY=${CROWDSEC_BOUNCER_KEY:-$runtime}
+    if [ -z "$CROWDSEC_BOUNCER_KEY" ]; then
+        [ "$allow_empty" = true ] && return 0
+        waf_error 'invalid bouncer key'
+        return 1
+    fi
+    [[ ! "$CROWDSEC_BOUNCER_KEY" =~ [[:cntrl:]] ]] || { waf_error 'invalid bouncer key'; return 1; }
+}
+
+# Hash content and explicit absence; credentials never appear in the manifest.
+_waf_current_manifest() {
+    local id=$1
+    shift
+    docker exec "$id" sh -c '
+        for path do
+            if test -f "$path"; then
+                sha256sum "$path" || exit 1
+            elif test ! -e "$path" && test ! -L "$path"; then
+                printf "absent  %s\n" "$path"
+            else
+                exit 1
+            fi
+        done
+    ' sh "$@"
+}
+
 _waf_reconcile() (
     set +x
     set -o pipefail
@@ -571,14 +629,29 @@ _waf_reconcile() (
     cs=$(_waf_container "$dir" crowdsec) || return 1
     if docker exec "$cs" test -f "$state/active"; then
         docker exec "$cs" cat "$state/active" > "$work/marker" || return 1
-        grep -qx mailstack-waf-v1 "$work/marker" || { waf_error "unknown WAF marker preserved"; return 1; }
+        grep -qx mailstack-waf-v2 "$work/marker" || { waf_error "unknown WAF marker/state — 수동 정리 필요"; return 1; }
         marked=true
     fi
     # A disabled, never-managed installation must perform no writes at all.
     if [ "$WAF_ENABLE" = false ] && [ "$marked" = false ]; then return 0; fi
     npm=$(_waf_container "$dir" npmplus) || return 1
     mapfile -t paths < <(_waf_cs_paths)
+    if [ "$marked" = true ]; then
+        if ! docker exec "$cs" test -f "$state/last-applied.sha256" ||
+            ! docker exec "$npm" test -f "$npm_state/last-applied.sha256"; then
+            waf_error 'unknown WAF ownership state (manifest missing) — 수동 정리 필요'; return 1
+        fi
+        if ! _waf_current_manifest "$cs" "${paths[@]}" > "$work/cs.manifest" ||
+            ! _waf_current_manifest "$npm" /data/crowdsec/crowdsec.conf > "$work/npm.manifest"; then
+            waf_error 'managed WAF file state cannot be verified; preserved — 수동 정리 필요'; return 1
+        fi
+        if ! _waf_matches "$cs" "$state/last-applied.sha256" < "$work/cs.manifest" ||
+            ! _waf_matches "$npm" "$npm_state/last-applied.sha256" < "$work/npm.manifest"; then
+            waf_error 'operator changed managed WAF files; preserved — 수동 정리 필요'; return 1
+        fi
+    fi
     if [ "$WAF_ENABLE" = true ]; then
+        waf_resolve_bouncer_key "$dir" || return 1
         _waf_capi_disabled "$cs" || return 1
         if [ "$marked" = false ]; then
             docker exec "$cs" cat /etc/crowdsec/profiles.yaml > "$work/profiles.current" || return 1
@@ -675,8 +748,16 @@ _waf_reconcile() (
         fi
         _waf_purge_external "$cs" || return 1
         if [ "$marked" = false ]; then
-            printf 'mailstack-waf-v1\n' > "$work/active" || return 1
+            printf 'mailstack-waf-v2\n' > "$work/active" || return 1
             _waf_write "$cs" "$state/active" "$work/active" || return 1
+        fi
+        _waf_current_manifest "$cs" "${paths[@]}" > "$work/cs.manifest" || return 1
+        _waf_current_manifest "$npm" /data/crowdsec/crowdsec.conf > "$work/npm.manifest" || return 1
+        if ! _waf_matches "$cs" "$state/last-applied.sha256" < "$work/cs.manifest"; then
+            _waf_write "$cs" "$state/last-applied.sha256" "$work/cs.manifest" || return 1
+        fi
+        if ! _waf_matches "$npm" "$npm_state/last-applied.sha256" < "$work/npm.manifest"; then
+            _waf_write "$npm" "$npm_state/last-applied.sha256" "$work/npm.manifest" || return 1
         fi
     else
         _waf_restore_originals "$cs" "$state" "${paths[@]}" || return 1
@@ -716,7 +797,7 @@ waf_reconcile() {
 # before waf_reconcile, so Docker's official CAPI/Hub startup settings take effect.
 waf_runtime_compose() {
     python3 - "$1" <<'PYCOMPOSE'
-import datetime, os, pathlib, re, shutil, sys, tempfile
+import datetime, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 path = pathlib.Path(sys.argv[1])
 
@@ -857,6 +938,8 @@ try:
     updated = dict(edits)
     result = []
     for i in range(len(lines)+1):
+        if additions.get(i) and result and not result[-1].endswith(('\n','\r')):
+            result[-1] += newline
         result.extend(additions.get(i, []))
         if i < len(lines) and i not in remove:
             result.append(updated.get(i, lines[i]))
@@ -865,15 +948,21 @@ try:
         # Refuse to race another editor between read and replacement.
         if path.read_bytes() != original:
             raise ValueError('runtime compose changed during migration')
-        descriptor, backup = tempfile.mkstemp(prefix=path.name+'.bak-waf-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'.', dir=path.parent)
-        with os.fdopen(descriptor, 'wb') as stream:
-            stream.write(original)
-        shutil.copystat(path, backup)
         descriptor, temp = tempfile.mkstemp(prefix=path.name+'.waf.', dir=path.parent)
         try:
             with os.fdopen(descriptor, 'wb') as stream:
                 stream.write(content)
             shutil.copystat(path, temp)
+            validation = subprocess.run(['docker', 'compose', '-f', temp, 'config', '--quiet'],
+                                        cwd=path.parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if validation.returncode:
+                raise ValueError('candidate compose validation failed; original preserved')
+            if path.read_bytes() != original:
+                raise ValueError('runtime compose changed during validation')
+            descriptor, backup = tempfile.mkstemp(prefix=path.name+'.bak-waf-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'.', dir=path.parent)
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(original)
+            shutil.copystat(path, backup)
             os.replace(temp, path)
         finally:
             if os.path.exists(temp):

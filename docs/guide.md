@@ -69,6 +69,8 @@ update는 pull 전에 런타임 compose의 대상 서비스 `image:`가 예전 �
 
 판을 올릴 때에는 **시험 서버에서 먼저 변경·검증 → 레포 compose의 태그·다이제스트와 이 문서 예시 갱신 → 운영 update** 순서로 진행합니다. 운영자는 update 전에 `/home/npmplus/docker-compose.yml`·`/home/snappymail/docker-compose.yml`의 `image:`를 레포와 비교하세요. 다른 버전을 직접 지정해 둔 서버를 레포와 맞추려면 먼저 런타임 compose를 별도 백업하고, 대상 서비스의 `image:` 값만 레포 값으로 직접 옮긴 뒤 update를 실행합니다. 설치 경로를 바꾼 서버는 해당 경로를 사용합니다. **현재 실행 중인 판이 레포 고정판보다 새로우면, 이 동기화·update로 낮은 판이 기동될 수 있습니다.** 변경 전 백업과 호환성을 확인하며 자동 버전 판단은 하지 않습니다.
 
+Toolkit도 시험 서버에서 먼저 확인한 뒤 `toolkit/Dockerfile`의 Python 태그·다이제스트와 `toolkit/requirements.txt`의 15개 정확한 판을 함께 갱신합니다(현재 Python `3.12.15-slim-trixie`, 다이제스트 `sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1`, Docker Hub 갱신 2026-10-09). 새 설치는 이 파일들을 복사하며, update는 실제 빌드 폴더의 예전 기본 FROM 줄·범위 지정 4줄 requirements만 각각 백업 후 이전하고 운영자 수정은 경고만 남겨 보존합니다. 경고가 난 서버를 수동으로 맞추려면 `/home/mailcow-toolkit`의 두 파일을 백업하고 FROM 줄과 requirements만 레포 고정값으로 옮긴 뒤 update를 실행하세요. 기반 다이제스트가 바뀌면 기반 레이어가, requirements 내용이 바뀌면 COPY와 pip 설치 레이어가 무효화되어 다음 `docker compose build --pull toolkit-mailcow`에 반영됩니다. 이미 같은 기반 다이제스트라면 해당 기반 캐시를 재사용해도 같은 판입니다.
+
 ### 1.1 Bouncer 키 생성
 
 ```bash

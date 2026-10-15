@@ -61,7 +61,7 @@ function attachment(headers) {
   return /^content-type:\s*multipart\/mixed(?:\s*;|\s*$)/im.test(text.replace(/\r?\n[ \t]+/g, ' '));
 }
 function address(value) { return { name: value?.name ?? '', address: value?.address ?? '' }; }
-function item(message, source) {
+export function item(message, source) {
   const date = new Date(message.internalDate);
   if (!Number.isFinite(date.getTime())) throw unavailable();
   const envelope = message.envelope ?? {};

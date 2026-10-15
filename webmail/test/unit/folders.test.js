@@ -136,8 +136,8 @@ test('rename: failed rollback returns mismatch 500 and logs both safe errors wit
   const logged = f.logs.split('\n').filter(Boolean).map(JSON.parse).find(row => row.code === 'FOLDER_RULES_MISMATCH'); assert.equal(logged.oldPath, 'Projects'); assert.equal(logged.newPath, 'Changed'); assert.equal(logged.rulesError.code, 'RULES_WRITE_FAILED'); assert.ok(logged.rollbackError); assert.ok(!f.logs.includes('synthetic-imap-password'));
 });
 test('delete: rules use checked before DELETE; nonempty and special folders blocked; empty succeeds', async t => {
-  const f = await fixture(t); f.service.folderInUse = async () => true;
-  error(await f.request('DELETE', pathFor('Empty')), 409, 'FOLDER_IN_USE'); assert.ok(!f.client.calls.some(call => call.command === 'DELETE'));
+  const f = await fixture(t); f.service.folderInUse = async () => { throw Object.assign(new AppError(409, 'FOLDER_IN_RULES', '필터에서 쓰는 폴더예요.'), { rules: ['rule0001'] }); };
+  const used = await f.request('DELETE', pathFor('Empty')); error(used, 409, 'FOLDER_IN_RULES'); assert.deepEqual(used.json().error.rules, ['rule0001']); assert.ok(!f.client.calls.some(call => call.command === 'DELETE'));
   f.service.folderInUse = async () => false;
   error(await f.request('DELETE', pathFor('Projects')), 409, 'FOLDER_NOT_EMPTY');
   error(await f.request('DELETE', pathFor('Sent')), 422, 'SPECIAL_FOLDER');

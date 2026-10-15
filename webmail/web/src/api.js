@@ -1,4 +1,4 @@
-import { session } from './state/session.js';
+import { session, sessionReady } from './state/session.js';
 import { toast } from './state/toast.js';
 
 export async function api(path, { method = 'GET', body, ...options } = {}) {
@@ -12,15 +12,12 @@ export async function api(path, { method = 'GET', body, ...options } = {}) {
   if (!response.ok) {
     const error = payload.error;
     if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
-      session.value = null;
-      if (toast.value?.kind !== 'password-changed') {
-        toast.value = error.code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
-      }
+      endSession(error.code);
     }
     throw error;
   }
   if (path === '/api/auth/login' || path === '/api/auth/session') session.value = payload;
-  if (path === '/api/auth/logout') session.value = null;
+  if (path === '/api/auth/logout') { session.value = null; sessionReady.value = false; }
   return payload;
 }
 
@@ -28,5 +25,12 @@ export async function logout() {
   toast.value = null;
   try { await api('/api/auth/logout', { method: 'POST' }); }
   catch (error) { toast.value = { kind: 'error', message: error.message }; }
-  finally { session.value = null; }
+  finally { session.value = null; sessionReady.value = false; }
+}
+
+export function endSession(code) {
+  session.value = null; sessionReady.value = false;
+  if (toast.value?.kind !== 'password-changed') {
+    toast.value = code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
+  }
 }

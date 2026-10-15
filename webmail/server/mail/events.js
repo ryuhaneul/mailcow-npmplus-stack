@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream';
 
-export function createEventService({ imap, sessions, logger, now = Date.now }) {
+export function createEventService({ imap, sessions, logger, listService, now = Date.now }) {
   function open(session) {
     const stream = new PassThrough();
     let stop, timer, busy = false, pending = false, closed = false;
@@ -17,7 +17,10 @@ export function createEventService({ imap, sessions, logger, now = Date.now }) {
     }
     function send(type, data) {
       const value = JSON.stringify(data);
-      if (previous.get(type) !== value) { previous.set(type, value); write(`event: ${type}\ndata: ${value}\n\n`); }
+      if (previous.get(type) !== value) {
+        if (type === 'mailbox') listService?.invalidate(session);
+        previous.set(type, value); write(`event: ${type}\ndata: ${value}\n\n`);
+      }
     }
     async function expired() {
       if (closed) return true;

@@ -42,7 +42,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await app.register(folderRoutes, { service: folderService, listService });
   await app.register(storageRoutes, { service: folderService });
   await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap }) });
-  await app.register(eventRoutes);
+  await app.register(eventRoutes, { listService });
   await app.register(prefsRoutes, { config });
   await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);

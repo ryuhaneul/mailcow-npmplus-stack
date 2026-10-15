@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { setImmediate as nextTurn } from 'node:timers/promises';
+import { createEventService } from '../../server/mail/events.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -57,7 +59,7 @@ class ListImap extends EventEmitter {
   async getMailboxLock(path) { if (!this.mailboxes.includes(path)) throw Object.assign(new Error('synthetic missing mailbox'), { code: 'NotFound' }); this.mailbox = { path, uidValidity: BigInt(this.uidValidity) }; return { release() {} }; }
   async list() { return this.mailboxes.map(path => ({ path, name: path.split('/').at(-1), specialUse: this.specialUses?.get(path) })); }
   async fetchOne(uid) { return this.uids.includes(uid) ? { uid } : false; }
-  async messageFlagsRemove(uid) { this.unflagged.add(uid); return true; }
+  async messageFlagsRemove(range) { for (const uid of range.split(',').map(Number)) this.unflagged.add(uid); return true; }
   async exec(command, attributes, { untagged } = {}) {
     if (command === 'MYRIGHTS') untagged.MYRIGHTS({ attributes: [attributes[0], { value: 'lrswite' }] });
     if (command === 'UID SORT') {
@@ -85,7 +87,7 @@ class ListImap extends EventEmitter {
 function fixture() {
   const client = new ListImap(); let time = 0;
   const imap = { async withMailbox(_session, path, operation) { await client.getMailboxLock(path); return operation(client); } };
-  return { client, session: {}, service: createListService({ imap, now: () => time }), advance(ms) { time += ms; } };
+  return { client, imap, session: {}, service: createListService({ imap, now: () => time }), advance(ms) { time += ms; } };
 }
 test('list: received-time SORT and minimal FETCH, returned order/flags/attachments/date/ref', async () => {
   const f = fixture(); const result = await f.service.messages(f.session, { pageSize: '2' });
@@ -177,6 +179,38 @@ test('list: explicit invalidation refreshes only the given session', async () =>
   await f.service.messages(f.session, {}); await f.service.messages(other, {});
   f.client.uids.pop(); f.service.invalidate(f.session);
   assert.equal((await f.service.messages(f.session, {})).total, 4);
+  assert.equal((await f.service.messages(other, {})).total, 5);
+  assert.equal(f.client.sorts.length, 3);
+});
+
+
+test('SSE mailbox change: watch invalidates only the matching session list cache', async t => {
+  const f = fixture(), other = {};
+  let notify;
+  f.imap.watch = (session, callback) => { assert.equal(session, f.session); notify = callback; return () => {}; };
+  f.client.status = async () => ({ messages: f.client.uids.length, unseen: 2 });
+  f.client.getQuota = async () => ({ storage: { usage: 100, limit: 1000 } });
+  const events = createEventService({ imap: f.imap, listService: f.service, sessions: { expiresAt: () => '2099-01-01T00:00:00Z' } });
+  const stream = events.open(f.session);
+  t.after(() => stream.destroy());
+  let text = '';
+  stream.on('data', chunk => { text += chunk; });
+  await nextTurn();
+  assert.match(text, /event: mailbox\ndata: {"path":"INBOX","unseen":2,"total":5}/);
+  await f.service.messages(f.session, {});
+  await f.service.messages(other, {});
+  assert.equal(f.client.sorts.length, 2);
+  const before = text;
+  notify(); await nextTurn();
+  assert.equal(text, before);
+  await f.service.messages(f.session, {});
+  assert.equal(f.client.sorts.length, 2);
+  f.client.uids.unshift(6);
+  notify(); await nextTurn();
+  assert.match(text, /event: mailbox\ndata: {"path":"INBOX","unseen":2,"total":6}/);
+  const refreshed = await f.service.messages(f.session, {});
+  assert.equal(refreshed.total, 6);
+  assert.equal(decodeRef(refreshed.items[0].ref).uid, 6);
   assert.equal((await f.service.messages(other, {})).total, 5);
   assert.equal(f.client.sorts.length, 3);
 });

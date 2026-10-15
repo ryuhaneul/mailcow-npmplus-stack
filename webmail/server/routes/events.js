@@ -1,7 +1,7 @@
 import { createEventService } from '../mail/events.js';
 
-export default async function eventRoutes(app) {
-  const service = createEventService({ imap: app.imap, sessions: app.sessions, logger: app.log });
+export default async function eventRoutes(app, { listService }) {
+  const service = createEventService({ imap: app.imap, sessions: app.sessions, logger: app.log, listService });
   const streams = new Set();
   app.addHook('preClose', async () => { for (const stream of streams) stream.destroy(); });
   app.get('/api/events', (request, reply) => {

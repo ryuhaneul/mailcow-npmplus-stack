@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { setImmediate as nextTurn } from 'node:timers/promises';
+import { createEventService } from '../../server/mail/events.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -48,19 +50,22 @@ test('list options: K13 allmail search and spam/trash exceptions, input validati
 class ListImap extends EventEmitter {
   constructor(options = {}) {
     super(); this.options = options; this.usable = false; this.enabled = new Set(); this.capabilities = new Map(); this.sorts = []; this.fetches = []; this.rawFetches = 0; this.uidValidity = 321;
-    this.uids = [5, 4, 3, 2, 1]; this.sources = new Map(this.uids.map(uid => [uid, uid % 2 ? 'INBOX' : 'Projects/견적']));
+    this.unflagged = new Set(); this.uids = [5, 4, 3, 2, 1]; this.sources = new Map(this.uids.map(uid => [uid, uid % 2 ? 'INBOX' : 'Projects/견적']));
     this.mailboxes = ['INBOX', 'Junk', 'Trash', 'Projects/견적', 'WebmailVirtual/AllMail'];
   }
   async connect() { this.usable = true; }
   close() { this.usable = false; }
   async logout() { this.close(); }
   async getMailboxLock(path) { if (!this.mailboxes.includes(path)) throw Object.assign(new Error('synthetic missing mailbox'), { code: 'NotFound' }); this.mailbox = { path, uidValidity: BigInt(this.uidValidity) }; return { release() {} }; }
-  async list() { return this.mailboxes.map(path => ({ path, name: path.split('/').at(-1) })); }
+  async list() { return this.mailboxes.map(path => ({ path, name: path.split('/').at(-1), specialUse: this.specialUses?.get(path) })); }
+  async fetchOne(uid) { return this.uids.includes(uid) ? { uid } : false; }
+  async messageFlagsRemove(range) { for (const uid of range.split(',').map(Number)) this.unflagged.add(uid); return true; }
   async exec(command, attributes, { untagged } = {}) {
+    if (command === 'MYRIGHTS') untagged.MYRIGHTS({ attributes: [attributes[0], { value: 'lrswite' }] });
     if (command === 'UID SORT') {
       this.sorts.push(attributes);
       const wire = JSON.stringify(attributes);
-      const filtered = /UNSEEN|FLAGGED|multipart\/mixed/.test(wire) ? this.uids.filter(uid => uid % 2 === 0) : this.uids;
+      const filtered = /UNSEEN|FLAGGED|multipart\/mixed/.test(wire) ? this.uids.filter(uid => uid % 2 === 0 && (!wire.includes('FLAGGED') || !this.unflagged.has(uid))) : this.uids;
       untagged.SORT({ attributes: filtered.map(uid => ({ value: String(uid) })) });
     }
     if (command === 'UID FETCH') {
@@ -82,7 +87,7 @@ class ListImap extends EventEmitter {
 function fixture() {
   const client = new ListImap(); let time = 0;
   const imap = { async withMailbox(_session, path, operation) { await client.getMailboxLock(path); return operation(client); } };
-  return { client, session: {}, service: createListService({ imap, now: () => time }), advance(ms) { time += ms; } };
+  return { client, imap, session: {}, service: createListService({ imap, now: () => time }), advance(ms) { time += ms; } };
 }
 test('list: received-time SORT and minimal FETCH, returned order/flags/attachments/date/ref', async () => {
   const f = fixture(); const result = await f.service.messages(f.session, { pageSize: '2' });
@@ -129,7 +134,83 @@ test('route: authenticated messages endpoint, invalid query 400 and non-login 40
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   assert.equal((await app.inject('/api/messages')).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-imap-password' } }); assert.equal(logged.statusCode, 200);
-  const headers = { cookie: logged.headers['set-cookie'].split(';')[0] };
+  const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://newmail.example.com', 'x-webmail-csrf': logged.json().csrf };
   const listed = await app.inject({ url: '/api/messages?pageSize=2', headers }); assert.equal(listed.statusCode, 200); assert.equal(listed.json().items.length, 2); assert.equal(listed.headers['www-authenticate'], undefined);
   assert.equal((await app.inject({ url: '/api/messages?page=-1', headers })).statusCode, 400);
+  const starred = await app.inject({ url: '/api/messages?quick=starred', headers });
+  assert.equal(starred.json().total, 2);
+  const token = starred.json().items[0].ref;
+  const changed = await app.inject({ method: 'POST', url: '/api/messages/actions', headers, payload: { refs: [token], action: 'unflag' } });
+  assert.equal(changed.statusCode, 200);
+  assert.equal(changed.json().done, 1);
+  const refreshed = await app.inject({ url: '/api/messages?quick=starred', headers });
+  assert.equal(refreshed.json().total, 1);
+  assert.ok(refreshed.json().items.every(item => item.ref !== token));
+});
+
+
+test('list: special-use paths scope searches; ordinary folders search allmail; defaults remain fallback', async () => {
+  const f = fixture();
+  f.client.mailboxes.push('Deleted Items', 'Spam Mail');
+  f.client.specialUses = new Map([['Deleted Items', '\\Trash'], ['Spam Mail', '\\Junk']]);
+  for (const path of ['Deleted Items', 'Spam Mail']) {
+    await f.service.messages(f.session, { view: 'folder', folder: path, q: 'invoice' });
+    assert.equal(f.client.mailbox.path, path);
+  }
+  await f.service.messages(f.session, { view: 'spam', q: 'invoice' });
+  assert.equal(f.client.mailbox.path, 'Spam Mail');
+  await f.service.messages(f.session, { view: 'folder', folder: 'Projects/견적', q: 'invoice' });
+  assert.equal(f.client.mailbox.path, 'WebmailVirtual/AllMail');
+  const folders = await f.client.list();
+  assert.equal(listOptions({ view: 'folder', folder: 'Trash', q: 'invoice' }, folders).mailbox, 'WebmailVirtual/AllMail');
+  f.client.specialUses.clear();
+  for (const path of ['Trash', 'Junk']) {
+    await f.service.messages(f.session, { view: 'folder', folder: path, q: 'fallback' });
+    assert.equal(f.client.mailbox.path, path);
+  }
+  await f.service.messages(f.session, { view: 'folder', folder: 'Deleted Items', q: 'fallback' });
+  assert.equal(f.client.mailbox.path, 'WebmailVirtual/AllMail');
+  await f.service.messages(f.session, { view: 'spam', q: 'fallback' });
+  assert.equal(f.client.mailbox.path, 'Junk');
+});
+
+test('list: explicit invalidation refreshes only the given session', async () => {
+  const f = fixture(), other = {};
+  await f.service.messages(f.session, {}); await f.service.messages(other, {});
+  f.client.uids.pop(); f.service.invalidate(f.session);
+  assert.equal((await f.service.messages(f.session, {})).total, 4);
+  assert.equal((await f.service.messages(other, {})).total, 5);
+  assert.equal(f.client.sorts.length, 3);
+});
+
+
+test('SSE mailbox change: watch invalidates only the matching session list cache', async t => {
+  const f = fixture(), other = {};
+  let notify;
+  f.imap.watch = (session, callback) => { assert.equal(session, f.session); notify = callback; return () => {}; };
+  f.client.status = async () => ({ messages: f.client.uids.length, unseen: 2 });
+  f.client.getQuota = async () => ({ storage: { usage: 100, limit: 1000 } });
+  const events = createEventService({ imap: f.imap, listService: f.service, sessions: { expiresAt: () => '2099-01-01T00:00:00Z' } });
+  const stream = events.open(f.session);
+  t.after(() => stream.destroy());
+  let text = '';
+  stream.on('data', chunk => { text += chunk; });
+  await nextTurn();
+  assert.match(text, /event: mailbox\ndata: {"path":"INBOX","unseen":2,"total":5}/);
+  await f.service.messages(f.session, {});
+  await f.service.messages(other, {});
+  assert.equal(f.client.sorts.length, 2);
+  const before = text;
+  notify(); await nextTurn();
+  assert.equal(text, before);
+  await f.service.messages(f.session, {});
+  assert.equal(f.client.sorts.length, 2);
+  f.client.uids.unshift(6);
+  notify(); await nextTurn();
+  assert.match(text, /event: mailbox\ndata: {"path":"INBOX","unseen":2,"total":6}/);
+  const refreshed = await f.service.messages(f.session, {});
+  assert.equal(refreshed.total, 6);
+  assert.equal(decodeRef(refreshed.items[0].ref).uid, 6);
+  assert.equal((await f.service.messages(other, {})).total, 5);
+  assert.equal(f.client.sorts.length, 3);
 });

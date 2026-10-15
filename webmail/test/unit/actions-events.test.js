@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
+import { get } from 'node:http';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -107,11 +108,12 @@ test('SSE: concurrent notifications coalesce while IMAP refresh is pending',asyn
   const f=eventFixture();let release,count=0;const original=f.client.status.bind(f.client);f.client.status=async(...args)=>{count++;if(count===1) await new Promise(resolve=>{release=resolve;});return original(...args);};
   const stream=f.open();stream.resume();await nextTurn();for(let i=0;i<10;i++) f.event();release();await nextTurn();assert.equal(count,2);stream.destroy();
 });
-test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, monitor cleanup',async t=>{
+test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, monitor cleanup',{timeout:5000},async t=>{
   const clients=[];const tempRoot=await mkdtemp(join(tmpdir(),'webmail-w07-test-'));
   const config={publicHostnames:['newmail.example.com'],trustProxy:['127.0.0.0/8'],logLevel:'silent',sessionIdleMin:480,sessionMaxHours:24,imapHost:'imap.example.com',imapPort:993,mailTlsMode:'verify',mailTlsServername:'mail.example.com'};
   const app=await createApp({config,logger:false,auth:{tempRoot,clientFactory:options=>{const client=new ActionImap(options);clients.push(client);return client;}}});
-  t.after(async()=>{await app.close();await rm(tempRoot,{recursive:true,force:true});});
+  let eventsRequest;
+  t.after(async()=>{eventsRequest?.destroy();await app.close();await rm(tempRoot,{recursive:true,force:true});});
   await app.listen({host:'127.0.0.1',port:0});const base=`http://127.0.0.1:${app.server.address().port}`;
   assert.equal((await fetch(base+'/api/events')).status,403);
   const logged=await fetch(base+'/api/auth/login',{method:'POST',headers:{origin:'https://newmail.example.com','content-type':'application/json'},body:JSON.stringify({email:'user@example.com',password:'synthetic-actions-password'})});assert.equal(logged.status,200);const session=await logged.json();
@@ -119,8 +121,11 @@ test('HTTP routes: actions require Origin/CSRF; SSE headers, mailbox event, moni
   const body=JSON.stringify({refs:[ref()],action:'seen'});
   assert.equal((await fetch(base+'/api/messages/actions',{method:'POST',headers,body})).status,403);
   const action=await fetch(base+'/api/messages/actions',{method:'POST',headers:{...headers,'x-webmail-csrf':session.csrf},body});assert.equal(action.status,200);assert.deepEqual(await action.json(),{done:1,failed:[]});
-  const controller=new AbortController();const events=await fetch(base+'/api/events',{headers:{cookie:headers.cookie},signal:controller.signal});assert.equal(events.status,200);
-  assert.match(events.headers.get('content-type'),/^text\/event-stream/);assert.equal(events.headers.get('cache-control'),'no-store');assert.equal(events.headers.get('x-accel-buffering'),'no');assert.equal(events.headers.get('www-authenticate'),null);assert.equal(events.headers.get('x-content-type-options'),'nosniff');
-  const reader=events.body.getReader();const chunk=await reader.read();assert.match(new TextDecoder().decode(chunk.value),/event: mailbox/);assert.equal(clients.length,2);
-  const closed=once(clients[1],'close');controller.abort();await closed;assert.equal(clients[1].usable,false);assert.equal(clients[0].usable,true);
+  // A fetch abort may open a replacement pooled socket with no HTTP request,
+  // which server.close() must wait to time out. Keep this SSE client unpooled.
+  eventsRequest=get(base+'/api/events',{headers:{cookie:headers.cookie},agent:false});
+  const [events]=await once(eventsRequest,'response');assert.equal(events.statusCode,200);
+  assert.match(events.headers['content-type'],/^text\/event-stream/);assert.equal(events.headers['cache-control'],'no-store');assert.equal(events.headers['x-accel-buffering'],'no');assert.equal(events.headers['www-authenticate'],undefined);assert.equal(events.headers['x-content-type-options'],'nosniff');
+  const [chunk]=await once(events,'data');assert.match(chunk.toString(),/event: mailbox/);assert.equal(clients.length,2);
+  const closed=once(clients[1],'close');eventsRequest.destroy();await closed;assert.equal(clients[1].usable,false);assert.equal(clients[0].usable,true);
 });

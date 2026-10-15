@@ -4,6 +4,7 @@ import { navigate } from '../router.js';
 import { folders } from '../state/folders.js';
 import { config } from '../state/config.js';
 import { toast } from '../state/toast.js';
+import { searchRuleSeed } from '../state/list.js';
 import Icon from './Icon.jsx';
 import { RuleSummary } from './RuleList.jsx';
 import RulePreview from './RulePreview.jsx';
@@ -32,14 +33,16 @@ export default function RuleBuilder({ id, query }) {
       const existing = id ? value.doc.rules.find(rule => rule.id === id) : null;
       setData(value);
       if (id && !existing) {setError({code:'NOT_FOUND',message:'이 규칙을 찾을 수 없어요. 필터 목록에서 다시 선택해 주세요.'}); return;}
-      const rule = existing ? structuredClone(existing) : {id:crypto.randomUUID().replaceAll('-', '').slice(0,8),enabled:true,match:'all',conditions:seededConditions(query),actions:{move:''},stop:false};
+      const seed = !id && searchRuleSeed.value?.conditions?.length ? searchRuleSeed.value : null;
+      const rule = existing ? structuredClone(existing) : {id:crypto.randomUUID().replaceAll('-', '').slice(0,8),enabled:true,match:'all',conditions:seed ? structuredClone(seed.conditions.slice(0, 10)) : seededConditions(query),actions:{move:''},stop:false};
+      if (seed) searchRuleSeed.value = null;
       setDraft(rule); setForwardText(rule.actions.forward?.join(', ') ?? '');
     } catch (e) {if (live.current) setError(e);}
     finally {if (live.current) setBusy(false);}
   }
   useEffect(() => {load();}, []);
   const choices = folders.value.folders.filter(personalFolder);
-  const rule = draft && {...draft,actions:{...draft.actions,...(draft.actions.move === '' ? {move:choices[0]?.path ?? ''} : {}),...(draft.actions.forward ? {forward:forwardStatus(forwardText, data.internalDomains).addresses} : {})}};
+  const rule = draft && {...draft,actions:{...draft.actions,...(draft.actions.forward ? {forward:forwardStatus(forwardText, data.internalDomains).addresses} : {})}};
   const problem = rule ? ruleProblem(rule, folders.value.folders, data.internalDomains, forwardText) : null;
   const serialized = rule && JSON.stringify(rule);
   useLayoutEffect(() => {
@@ -58,7 +61,7 @@ export default function RuleBuilder({ id, query }) {
   }
   function toggleAction(name, checked) {
     const actions = {...draft.actions};
-    if (checked) actions[name] = name === 'move' ? choices[0]?.path ?? '' : name === 'forward' ? [] : true;
+    if (checked) actions[name] = name === 'move' ? '' : name === 'forward' ? [] : true;
     else delete actions[name];
     setDraft({...draft,actions});
   }
@@ -103,7 +106,7 @@ export default function RuleBuilder({ id, query }) {
             {rule.conditions.some(c => c.field === 'attachment') && <p class="rule-note">첨부파일 있음은 메일의 최상위 Content-Type이 multipart/mixed인 경우예요.</p>}
           </div>
           <div class="step"><h2><i aria-hidden="true">2</i>어떻게 할까요</h2><div class="acts-list">
-            <div class={`act${Object.hasOwn(rule.actions,'move') ? ' on' : ''}`}><input id="rule-move" type="checkbox" checked={Object.hasOwn(rule.actions,'move')} disabled={Boolean(rule.actions.trash)} onChange={e => toggleAction('move',e.currentTarget.checked)}/><div><label for="rule-move">폴더로 옮기기</label><small>메일은 폴더 한 곳에만 들어갑니다. 받은편지함에서 빠져 이 폴더로 갑니다</small><div class="ex"><select class="dd" aria-label="옮길 폴더" disabled={!Object.hasOwn(rule.actions,'move')} value={rule.actions.move ?? ''} onChange={e => setDraft({...draft,actions:{...draft.actions,move:e.currentTarget.value}})}>{!choices.length && <option value="">옮길 개인 폴더가 없어요</option>}{rule.actions.move && !choices.some(f => f.path === rule.actions.move) && <option value={rule.actions.move}>폴더 없음: {rule.actions.move}</option>}{choices.map(f => <option value={f.path}>{f.name}</option>)}</select></div></div></div>
+            <div class={`act${Object.hasOwn(rule.actions,'move') ? ' on' : ''}`}><input id="rule-move" type="checkbox" checked={Object.hasOwn(rule.actions,'move')} disabled={Boolean(rule.actions.trash)} onChange={e => toggleAction('move',e.currentTarget.checked)}/><div><label for="rule-move">폴더로 옮기기</label><small>메일은 폴더 한 곳에만 들어갑니다. 받은편지함에서 빠져 이 폴더로 갑니다</small><div class="ex"><select class="dd" aria-label="옮길 폴더" disabled={!Object.hasOwn(rule.actions,'move')} value={rule.actions.move ?? ''} onChange={e => setDraft({...draft,actions:{...draft.actions,move:e.currentTarget.value}})}><option value="">폴더를 고르세요</option>{!choices.length && <option disabled>옮길 개인 폴더가 없어요</option>}{rule.actions.move && !choices.some(f => f.path === rule.actions.move) && <option value={rule.actions.move}>폴더 없음: {rule.actions.move}</option>}{choices.map(f => <option value={f.path}>{f.name}</option>)}</select></div></div></div>
             {[['read','읽음으로 표시'],['star','별표 붙이기'],['trash','삭제 (휴지통으로)'],['forward','사내 주소로 전달']].map(([name,label]) => <div class={`act${rule.actions[name] ? ' on' : ''}`} key={name}><input id={`rule-${name}`} type="checkbox" checked={Boolean(rule.actions[name])} disabled={name === 'trash' && Object.hasOwn(rule.actions,'move')} onChange={e => toggleAction(name,e.currentTarget.checked)}/><div><label for={`rule-${name}`}>{label}</label>
               {name === 'trash' && <small>폴더로 옮기기와 함께 고를 수 없습니다.{days ? ` 휴지통 메일은 ${days}일 뒤 지워집니다` : ''}</small>}
               {name === 'forward' && <><small>회사 안 주소로만 전달할 수 있습니다.{data.internalDomains.length > 0 && ` 예: user@${data.internalDomains[0]}`}<br/>전달은 앞으로 오는 메일에만 해요. 주소는 쉼표로 나누어 최대 3개까지 입력해 주세요.</small><div class="ex"><input class="inp forward-input" aria-label="전달 받을 사내 주소" aria-invalid={Boolean(rule.actions.forward && !forwardStatus(forwardText,data.internalDomains).valid)} aria-describedby={external ? 'forward-lock' : undefined} value={forwardText} placeholder={data.internalDomains.length ? `user@${data.internalDomains[0]}` : '전달 받을 사내 메일 주소'} onInput={e => {setForwardText(e.currentTarget.value);if (!draft.actions.forward) toggleAction('forward',true);}}/></div>{external && <div class="lock" id="forward-lock" role="alert"><Icon name="alert" size="s"/><span>회사 밖 주소로는 자동 전달할 수 없습니다(회사 정책). 받는 쪽이 사내 주소인지 확인해 주세요.</span></div>}</>}

@@ -141,7 +141,7 @@ test('automatic IP limiter uses six distinct synthetic accounts and no spoofed X
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   try {
-    const env = { ...process.env, WEBMAIL_INT: '1', WEBMAIL_INT_GROUP: 'core', WEBMAIL_INT_DOMAIN: 'example.com',
+    const env = { ...process.env, WEBMAIL_INT: '1', WEBMAIL_INT_GROUP: 'core', WEBMAIL_INT_DOMAIN: 'example.com', WEBMAIL_INT_AUTH_INTERVAL_MS: '1',
       WEBMAIL_INT_PASSWORD: credentials.password, WEBMAIL_INT_ORIGIN: 'https://mail.example.com', WEBMAIL_INT_URL: `http://127.0.0.1:${server.address().port}` };
     // This child is an independent test runner, not another worker of this suite.
     delete env.NODE_TEST_CONTEXT;

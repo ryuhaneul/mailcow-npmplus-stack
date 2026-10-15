@@ -264,32 +264,10 @@ integration('sieve', 'W13b HTTP 미리보기·25통 적용·메일당 flagged=1�
   }
 });
 
-integration('account', 'user5 IMAP 로그인·암호 대행 2FA 거부', async t => {
-  const web = await login(t, 'user5');
-  const original = password(), next = `${original}-Int2FA`;
-  let unexpectedlyChanged = false;
-  try {
-    const result = await web.request('POST', '/api/password', { current: original, next, next2: next }, 403);
-    assert.equal(result.error.code, 'MAILCOW_2FA');
-  } catch (error) {
-    unexpectedlyChanged = error?.code === 'ERR_ASSERTION' && error.actual === 200;
-    throw error;
-  } finally {
-    // A misconfigured M02 fixture must not leave user5 with a changed password.
-    if (unexpectedlyChanged) {
-      const restore = await api('user5', next);
-      try {
-        await restore.login();
-        await restore.request('POST', '/api/password', { current: next, next: original, next2: original });
-      } catch {
-        t.diagnostic(`user5 암호 원복 실패 — main 수동 원복 필요 (${email('user5')})`);
-        assert.fail('user5 암호 원복 실패');
-      }
-      // The password transaction invalidated the web session; give its cleanup
-      // a current session without exposing either credential.
-      await web.login();
-    }
-  }
+integration('account', 'user5 2FA 계정은 계정 암호로 웹메일 로그인 403 AUTH_FAILED', async () => {
+  const web = await api('user5');
+  const rejected = await web.request('POST', '/api/auth/login', { email: email('user5'), password: password() }, 403);
+  assert.equal(rejected.error.code, 'AUTH_FAILED');
 });
 
 integration('account', 'METADATA 설정 저장·직접 확인·새 세션 왕복·원복', async t => {
@@ -497,7 +475,10 @@ integration('core', '가상 목록 원본 ref로 읽음·별표·이동·휴지�
   ref = await find(folder); await actions('archive');
   ref = await find(archive); await actions('trash');
   ref = await find('Trash'); await actions('delete-forever');
-  assert.deepEqual(await direct.search({ subject }, { uid: true }), []);
+  // The connection used by find('Trash') still has the pre-expunge selection.
+  const afterDelete = await imap(t);
+  await afterDelete.mailboxOpen('Trash', { readOnly: true });
+  assert.deepEqual(await afterDelete.search({ subject }, { uid: true }), []);
 });
 
 integration('core', '한글 폴더 생성·이름 변경·1,500통 비우기·확인명 거부', async t => {
@@ -551,7 +532,10 @@ integration('core', '같은 출발 IP의 합성 계정 5회 실패→6회째 429
     socket.once('connect', () => { const address = socket.localAddress; socket.destroy(); resolve(address); });
   });
   const nonce = unique().toLowerCase();
+  const interval = Number(process.env.WEBMAIL_INT_AUTH_INTERVAL_MS ?? 17000);
+  assert.ok(Number.isSafeInteger(interval) && interval >= 0 && interval <= 17000, 'AUTH_INTERVAL_MS는 0~17000 정수');
   for (let i = 0; i < 6; i++) {
+    if (i > 0) await new Promise(resolve => setTimeout(resolve, interval));
     const account = `invalid-${nonce}-${i}@${required('WEBMAIL_INT_DOMAIN')}`;
     const body = await web.request('POST', '/api/auth/login', { email: account, password: 'synthetic-invalid-password' }, i < 5 ? 403 : 429);
     assert.equal(body.error.code, i < 5 ? 'AUTH_FAILED' : 'RATE_LIMITED');

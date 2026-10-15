@@ -995,6 +995,12 @@ for h in json.load(sys.stdin):
         dns_ok=false
     fi
 
+    # ACL fields were resolved before any proxy creation (unknown formats fail closed).
+    local access_json=""
+    if [ -n "$access_list_id" ] && [ "$access_list_id" != 0 ]; then
+        access_json="$WEBMAIL_ACCESS_FIELDS"
+    fi
+
     local result host_id cert_id
     local adv_json
     adv_json=$(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
@@ -1013,7 +1019,7 @@ for h in json.load(sys.stdin):
                 \"block_exploits\": false,
                 \"allow_websocket_upgrade\": false,
                 \"http2_support\": ${http2},
-                \"access_list_id\": ${access_list_id},
+                ${access_json}
                 \"advanced_config\": ${adv_json},
                 \"meta\": {\"letsencrypt_email\": \"${NPM_ADMIN_EMAIL}\", \"letsencrypt_agree\": true, \"dns_challenge\": false},
                 \"locations\": []
@@ -1054,7 +1060,7 @@ for h in json.load(sys.stdin):
             \"block_exploits\": false,
             \"allow_websocket_upgrade\": false,
             \"http2_support\": ${http2},
-                \"access_list_id\": ${access_list_id},
+                ${access_json}
             \"advanced_config\": ${adv_json},
             \"locations\": []
         }" 2>/dev/null)
@@ -1097,6 +1103,23 @@ sys.exit(0 if isinstance(item.get("items"),list) and not item["items"] else 1)
     if [ "$WEBMAIL_PROXY_ALLOWED" = false ]; then
         warn "Webmail access list missing, unreadable or contains authentication users; proxy creation skipped"
     fi
+fi
+
+# Resolve restricted-host API fields before any create call; never fall back to public.
+WEBMAIL_ACCESS_FIELDS=""
+if [ "$WEBMAIL_PROXY_ALLOWED" = true ] && [ "$WEBMAIL_ACCESS_ID" != 0 ]; then
+    WEBMAIL_ACCESS_FIELDS=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
+import sys,json
+hosts=json.load(sys.stdin)
+identity=int(sys.argv[1])
+if not isinstance(hosts,list) or identity < 1: sys.exit(1)
+if not hosts or any("npmplus_access_list_ids" in host for host in hosts):
+    fields={"npmplus_access_list_ids":[identity],"npmplus_access_list_type":"custom"}
+elif any("access_list_id" in host for host in hosts):
+    fields={"access_list_id":identity}
+else: sys.exit(1)
+print(json.dumps(fields)[1:-1]+",")
+' "$WEBMAIL_ACCESS_ID") || die "NPM API 형식을 판별할 수 없음"
 fi
 
 # 1. mail.DOMAIN follows the selected webmail service. Both disabled: no proxy.

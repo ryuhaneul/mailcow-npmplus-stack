@@ -96,9 +96,7 @@ services:
       TZ: Asia/Seoul
       INITIAL_ADMIN_EMAIL: "${NPM_ADMIN_EMAIL}"
       INITIAL_ADMIN_PASSWORD: "${NPM_ADMIN_PASSWORD}"
-      CROWDSEC: "true"
-      CROWDSEC_LAPI: "http://crowdsec:8080"
-      CROWDSEC_KEY: "${CROWDSEC_BOUNCER_KEY}"
+      LOGROTATE: "true"
     volumes:
       - npmplus-data:/data
     networks:
@@ -113,8 +111,10 @@ services:
     restart: always
     environment:
       TZ: Asia/Seoul
-      COLLECTIONS: "crowdsecurity/nginx crowdsecurity/http-cve"
+      COLLECTIONS: "crowdsecurity/nginx crowdsecurity/http-cve ZoeyVid/npmplus crowdsecurity/appsec-crs"
       BOUNCER_KEY_npmplus: "${CROWDSEC_BOUNCER_KEY}"
+      DISABLE_SCENARIOS: "crowdsecurity/http-generic-bf crowdsecurity/appsec-native crowdsecurity/crowdsec-appsec-outofband"
+      DISABLE_ONLINE_API: "true"
     volumes:
       - npmplus-data:/npmplus-data:ro    # NPM 로그 읽기 전용
       - crowdsec-data:/var/lib/crowdsec
@@ -122,6 +122,12 @@ services:
     networks:
       - npmplus-net
 
+    healthcheck:
+      test: ["CMD", "cscli", "lapi", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 volumes:
   npmplus-data:
   crowdsec-data:
@@ -140,6 +146,27 @@ networks:
 - **인증서 저장 경로**: `/data/tls/certbot/live/npm-{ID}/` (표준 `/etc/letsencrypt/` 아님). NPMplus가 자동으로 마이그레이션함.
 - **`/etc/letsencrypt` 볼륨 불필요**: 마운트하면 NPMplus가 마이그레이션 후 제거를 요구함.
 - **Mailcow 네트워크 참여 필수**: `mailcow-network`에 연결해야 `nginx-mailcow`, `snappymail`, `toolkit-mailcow` 등 내부 컨테이너에 접근 가능.
+
+### 1.4 CrowdSec 보안 필터
+
+CrowdSec는 NPMplus의 `npmplus` 형식 접근 로그를 수집해 반복 공격 IP를 차단하고, AppSec(CRS PL1, 임계 5)로 요청을 검사합니다. setup·update가 리스너·규칙·프로필·바운서 설정을 적용합니다. CAPI 연결과 외부 결정 수신은 끄며, 로컬 경보에서만 IP 차단 결정을 만듭니다. AppSec 장애 시 요청은 통과합니다(`passthrough`). `LOGROTATE=true`는 접근 로그 생성·순환에 필요합니다. 환경변수만으로 바운서는 켜지지 않으므로 NPMplus `/data/crowdsec/crowdsec.conf`도 스택이 관리합니다. stream 시간 초과를 피하도록 `REQUEST_TIMEOUT=10000`을 사용합니다.
+
+| `.env` 키 | 기본값 | 설명 |
+|---|---|---|
+| `WAF_ENABLE` | `true` | 키가 없어도 켬. `false`면 스택 관리 설정을 원복하고 바운서를 끔 |
+| `WAF_MODE` | `block` | `block`: 공격 요청 403. `detect`: 요청을 통과시키고 경보만 기록(튜닝용) |
+| `WAF_ALLOWLIST` | 빈 값 | 쉼표로 나눈 IP·CIDR. IP 차단 결정만 제외하며 AppSec 요청 403은 유지 |
+
+setup·update는 이 세 키를 `.env`에 쓰거나 변경하지 않습니다. 운영 기본값은 `block`입니다. 기존 설치도 키가 없으면 다음 update부터 켜집니다. 튜닝 전 이를 막거나 필터를 해제하려면 서버 `.env`에 `WAF_ENABLE=false`를 직접 적고 update를 실행하세요. 스택이 관리하던 설정만 원복하고 기존 profiles를 복구합니다. 웹메일이 켜져 있으면 정규화한 웹메일 호스트에만 본문·검색·암호 필드 예외를 적용하며, 다른 호스트와 메서드에는 적용하지 않습니다. NPM 관리 `/api/nginx/`에는 필요한 규칙 두 개만 제외합니다. `appsec-default`와 `generic-rules`를 중복으로 싣지 않으며(중복 rule ID는 기동 실패), 403 반복을 다시 밴으로 키우지 않는 로컬 시나리오를 사용합니다. 설정이 같으면 파일 쓰기와 CrowdSec SIGHUP을 생략합니다. setup은 Phase7에서 설정을 적용하고 Phase10 마지막의 기존 NPMplus 재시작 한 번으로 읽힙니다. 그 사이 실패하면 파일만 적용된 상태일 수 있으며 다음 setup의 마지막 재시작이나 update 재시작에서 반영됩니다. update의 기존 NPMplus 재시작은 DNS 캐시 갱신을 위해 한 번 유지합니다.
+
+시험 VM에서는 합성 데이터로 `WAF_MODE=detect`를 설정하고 update → 정상 동작·공격 재현 → `cscli alerts list`·`cscli alerts inspect ID`로 확인 → 필요한 호스트·경로·필드만 예외 조정 → `WAF_MODE=block`으로 update → 정상 요청 통과와 공격 403을 다시 확인하세요. 예외 변경은 스택의 렌더 원본을 수정해 검토·검증한 뒤 배포합니다. 컨테이너 파일만 직접 수정하면 다음 update가 다시 적용할 수 있습니다. Coraza v1.7.8에서는 예외를 리터럴 필드 키 → 개별 규칙 → 요청 단위 순으로 좁혀 적용합니다. 정규식·`ARGS` 전체·`ARGS_NAMES` 예외는 기대대로 작동하지 않습니다. 본문 검사 한도 10MiB를 넘는 첨부는 업로드 경로에서만 본문 검사를 제외합니다.
+
+block은 스캐너 규칙 913100 외의 일반 AppSec 경보를 취소하므로 무엇이 막았는지 경보에 남지 않을 수 있습니다. **운영에서 detect를 쓰면 경보와 CrowdSec DB에 사용자 입력이 남을 수 있습니다.** block에서 오탐 신고가 오면 필요한 짧은 시간만 detect로 내려 같은 동작을 재현하고, 경보를 확인해 예외를 조정한 다음 block으로 복귀하세요. 종료 후 `docker exec crowdsec cscli alerts delete --all`로 경보를 삭제하세요. 이 명령은 모든 경보를 지우므로 필요한 조사 내용을 먼저 확인합니다. 스택은 경보를 자동 삭제하지 않습니다.
+
+- **IP 밴**: `docker exec crowdsec cscli decisions list --ip 203.0.113.10`으로 확인하고 `docker exec crowdsec cscli decisions delete --ip 203.0.113.10`으로 해제합니다. 반복 오탐이면 로컬 시나리오와 allowlist를 검토합니다.
+- **AppSec 요청 오탐**: 밴을 해제하거나 allowlist에 넣어도 요청 403은 유지됩니다. 해당 규칙과 호스트·메서드·경로·필드를 확인해 좁은 예외를 추가합니다.
+
+NPMplus 호스트 필드 `npmplus_crowdsec_appsec`는 **이름과 반대로 `true`면 AppSec 꺼짐**입니다. 관리·웹메일 호스트에서 이 값이 켜져 있으면 verify가 WARN을 냅니다. verify는 바운서 최근 pull·AppSec 응답·로그 파싱·CAPI 비활성·모드를 확인하고, 비관리 웹메일 호스트에 `--resolve <호스트>:443:127.0.0.1`로 로컬 CRS XSS 요청을 보내 헤어핀 문제를 피합니다. block은 403, detect는 앱 도달과 실제 로그 IP의 결정 0을 확인합니다. 정상 요청도 403이면 판정 불가로 실패하고, 비관리 호스트나 detect의 요청 로그가 없으면 이유를 표시해 SKIP합니다.
 
 ---
 
@@ -444,6 +471,8 @@ Mailcow를 먼저 기동한 후 NPMplus를 올리고, NPM 관리 UI에서 설정
 
 NPM에서 인증 사용자 없이 IP `allow` 항목이 하나 이상 있는 목록을 먼저 만들고, 서버 `.env`에 `ADMIN_ACCESS_LIST=admin-ips`를 적으세요. setup은 관리 호스트 생성 전에, update는 변경을 시작하기 전에 목록을 검증하며 실패하면 중단합니다. 비우면 setup·update의 관리 목록 사전 점검·적용 경로는 NPM 요청을 하지 않고, 새 설치는 공개입니다. update 마지막의 verify는 별도로 읽기 조회를 하며 공개 관리 화면을 WARN으로 알려 줍니다. 같은 목록은 변경하지 않고, 공개 호스트에는 접근 필드만 적용하며, 다른 접근 제한은 경고하고 보존합니다. update는 없는 호스트를 만들지 않습니다.
 
+NPMplus 기본 신뢰 범위에 포함된 사설 IP 클라이언트가 스택에 직접 연결하면 X-Forwarded-For로 허용 IP를 사칭할 수 있습니다. 사내 적용 전 내부 직접 접근 경로를 확인하세요.
+
 관리 IP 밖에서는 mailcow 사용자 화면과 Toolkit도 막힙니다. 웹메일의 암호 변경 대행은 내부 `nginx-mailcow:8443`을 사용하므로 이 제한의 영향을 받지 않습니다. 접근 거절은 403이며 인증 사용자 목록은 거부하므로 기본 인증 창을 추가하지 않습니다.
 
 자기 IP를 빠뜨리면 NPM 관리 화면에도 들어갈 수 없으므로, 적용 전에 허용 IP를 확인하고 [잠김 복구 절차](#관리-화면-접근-제한-뒤-403)를 준비하세요.
@@ -672,7 +701,7 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 - [ ] `curl http://SERVER_IP:8080` → Connection refused (외부 차단)
 - [ ] `curl http://SERVER_IP:8443` → Connection refused (외부 차단)
-- [ ] CrowdSec 로그 수집: `docker exec crowdsec cscli decisions list`
+- [ ] CrowdSec WAF: `scripts/verify.sh`의 바운서·AppSec·로그 파싱·모드별 요청 검사 확인
 - [ ] SSL 인증서 유효성 (웹 + 메일 프로토콜)
 
 ### 인증서

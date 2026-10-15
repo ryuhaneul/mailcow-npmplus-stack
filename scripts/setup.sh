@@ -124,6 +124,10 @@ set -a; source "$ENV_FILE"; set +a
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/webmail-env.sh
 source "$SCRIPT_DIR/lib/webmail-env.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/waf.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 
 
@@ -171,6 +175,8 @@ install_pkg curl
 install_pkg dig bind-utils
 install_pkg openssl
 install_pkg git
+install_pkg python3
+waf_options || die "Invalid WAF options"
 [ "$WEBMAIL_ENABLE" != true ] || install_pkg rsync
 
 # ============================================================
@@ -1203,6 +1209,9 @@ create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" "$ADMIN_AC
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
 create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
+
+# Apply WAF after both services/proxy hosts exist; the final DNS restart reads it.
+waf_reconcile "$NPMPLUS_DIR" || die "WAF reconciliation failed"
 
 # ============================================================
 # Phase 8: SSL Symlinks

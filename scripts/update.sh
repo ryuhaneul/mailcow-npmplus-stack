@@ -78,7 +78,12 @@ set +a
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/webmail-env.sh
 source "$SCRIPT_DIR/lib/webmail-env.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/waf.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+waf_options || die "Invalid WAF options; update stopped before changes"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
@@ -202,6 +207,9 @@ compose_pull() {
     if [ ! -f "$dir/docker-compose.yml" ]; then
         warn "$label: docker-compose.yml missing at $dir — skipping"
         return 0
+    fi
+    if [ "$label" = npmplus ] && [ "$WAF_ENABLE" = true ]; then
+        waf_runtime_compose "$dir/docker-compose.yml" || die "WAF runtime compose preparation failed"
     fi
     pin_runtime_images "$dir" "$label" || die "$label: image pin preparation failed; pull stopped"
     log "$label: docker compose pull"
@@ -442,6 +450,9 @@ compose_up() {
 
 compose_up "$NPMPLUS_DIR" "npmplus"
 [ "$SNAPPYMAIL_ENABLE" != true ] || compose_up "$SNAPPYMAIL_DIR" "snappymail"
+
+# Reconcile before the existing DNS restart; WAF never adds a second restart.
+waf_reconcile "$NPMPLUS_DIR" || die "WAF reconciliation failed"
 
 # Bounce NPMplus once mailcow is fully up so its upstream DNS cache
 # (server nginx-mailcow:8443 resolve;) is warm. Without this restart a

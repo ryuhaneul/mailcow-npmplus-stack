@@ -43,6 +43,8 @@ fi
 if [ -d "$NPMPLUS_DIR" ]; then
     log "Stopping NPMplus + CrowdSec..."
     cd "$NPMPLUS_DIR"
+    docker compose exec -T crowdsec rm -rf /etc/crowdsec/.mailstack-waf 2>/dev/null || true
+    docker compose exec -T npmplus rm -rf /data/crowdsec/.mailstack-waf 2>/dev/null || true
     docker compose down --remove-orphans -v 2>&1 | tail -3 || true
 fi
 

@@ -87,13 +87,13 @@ _waf_webmail_crs_exclusions() {
   - filter: req.Host == "${domain}" && req.URL.Path == "/api/attachments" && req.Method == "POST"
     apply:
       - DisableBodyInspection()
-  - filter: req.Host == "${domain}" && req.URL.Path startsWith "/api/folders/" && req.Method in ["PATCH", "DELETE"]
+  - filter: Is${band}Band == true && req.Host == "${domain}" && req.URL.Path startsWith "/api/folders/" && req.Method in ["PATCH", "DELETE"]
     apply:
       - Remove${band}BandRuleByID(920440)
-  - filter: req.Host == "${domain}" && ((req.URL.Path == "/api/send" && req.Method == "POST") || (req.URL.Path == "/api/drafts" && req.Method == "PUT"))
+  - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.URL.Path == "/api/send" && req.Method == "POST") || (req.URL.Path == "/api/drafts" && req.Method == "PUT"))
     apply:
       - Remove${band}BandRuleByID(930120)
-  - filter: req.Host == "${domain}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing"]))
+  - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing"]))
     apply:
       - Remove${band}BandRuleByTag("attack-xss")
       - Remove${band}BandRuleByTag("attack-sqli")
@@ -137,7 +137,7 @@ YAML
     fi
     cat <<YAML
 pre_eval:
-  - filter: req.Host == "mail-npm.${DOMAIN}" && req.URL.Path startsWith "/api/nginx/"
+  - filter: Is${band}Band == true && req.Host == "mail-npm.${DOMAIN}" && req.URL.Path startsWith "/api/nginx/"
     apply:
       - Remove${band}BandRuleByID(911100)
       - Remove${band}BandRuleByID(930120)
@@ -218,6 +218,17 @@ waf_render_profiles() (
 name: mailstack_detect_appsec
 filters:
   - Alert.Kind == "waf"
+on_success: break
+---
+YAML
+    else
+        cat <<'YAML'
+name: mailstack_block_appsec
+filters:
+  - Alert.Kind == "waf" && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: 4h
 on_success: break
 ---
 YAML

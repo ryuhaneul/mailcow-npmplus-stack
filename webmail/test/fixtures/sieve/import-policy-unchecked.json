@@ -1,0 +1,8 @@
+{
+  "internalDomains": [
+    "example.com"
+  ],
+  "addresses": [
+    "user@example.com"
+  ]
+}

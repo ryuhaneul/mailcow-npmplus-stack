@@ -1,0 +1,45 @@
+require ["fileinto", "imap4flags"];
+
+# This is synthetic example.com test data.
+# RAINLOOP:SIEVE
+/*
+BEGIN:FILTER:synthetic4
+BEGIN:HEADER
+eyJJRCI6InN5bnRoZXRpYzQiLCJFbmFibGVkIjp0cnVlLCJOYW1lIjoi7ZWp7ISxIOq3nOy5mS
+A0IiwiQ29uZGl0aW9ucyI6W3siRmllbGQiOiJSZWNpcGllbnQiLCJUeXBlIjoiQ29udGFpbnMi
+LCJWYWx1ZSI6InRlYW1AZXhhbXBsZS5jb20iLCJWYWx1ZVNlY29uZCI6IiJ9XSwiQ29uZGl0aW
+9uc1R5cGUiOiJBbGwiLCJBY3Rpb25UeXBlIjoiRm9yd2FyZCIsIkFjdGlvblZhbHVlIjoibWVt
+YmVyQGV4YW1wbGUuY29tIiwiQWN0aW9uVmFsdWVTZWNvbmQiOiIiLCJBY3Rpb25WYWx1ZVRoaX
+JkIjoiIiwiQWN0aW9uVmFsdWVGb3VydGgiOiIiLCJLZWVwIjp0cnVlLCJTdG9wIjpmYWxzZSwi
+TWFya0FzUmVhZCI6ZmFsc2V9
+END:HEADER
+*/
+if header :contains ["To", "CC"] "team@example.com" { fileinto "INBOX"; redirect "member@example.com"; }
+/* END:FILTER */
+/*
+BEGIN:FILTER:synthetic5
+BEGIN:HEADER
+eyJJRCI6InN5bnRoZXRpYzUiLCJFbmFibGVkIjp0cnVlLCJOYW1lIjoi7ZWp7ISxIOq3nOy5mS
+A1IiwiQ29uZGl0aW9ucyI6W3siRmllbGQiOiJTdWJqZWN0IiwiVHlwZSI6IkNvbnRhaW5zIiwi
+VmFsdWUiOiJleHRlcm5hbCIsIlZhbHVlU2Vjb25kIjoiIn1dLCJDb25kaXRpb25zVHlwZSI6Ik
+FsbCIsIkFjdGlvblR5cGUiOiJGb3J3YXJkIiwiQWN0aW9uVmFsdWUiOiJtZW1iZXJAb3V0c2lk
+ZS5leGFtcGxlLmNvbSIsIkFjdGlvblZhbHVlU2Vjb25kIjoiIiwiQWN0aW9uVmFsdWVUaGlyZC
+I6IiIsIkFjdGlvblZhbHVlRm91cnRoIjoiIiwiS2VlcCI6dHJ1ZSwiU3RvcCI6ZmFsc2UsIk1h
+cmtBc1JlYWQiOmZhbHNlfQ==
+END:HEADER
+*/
+if header :contains ["Subject"] "external" { fileinto "INBOX"; redirect "member@outside.example.com"; }
+/* END:FILTER */
+/*
+BEGIN:FILTER:synthetic6
+BEGIN:HEADER
+eyJJRCI6InN5bnRoZXRpYzYiLCJFbmFibGVkIjp0cnVlLCJOYW1lIjoi7ZWp7ISxIOq3nOy5mS
+A2IiwiQ29uZGl0aW9ucyI6W3siRmllbGQiOiJTdWJqZWN0IiwiVHlwZSI6IkNvbnRhaW5zIiwi
+VmFsdWUiOiJtZXRhZGF0YSIsIlZhbHVlU2Vjb25kIjoiIn1dLCJDb25kaXRpb25zVHlwZSI6Ik
+FsbCIsIkFjdGlvblR5cGUiOiJNb3ZlVG8iLCJBY3Rpb25WYWx1ZSI6IkFyY2hpdmUiLCJBY3Rp
+b25WYWx1ZVNlY29uZCI6IiIsIkFjdGlvblZhbHVlVGhpcmQiOiIiLCJBY3Rpb25WYWx1ZUZvdX
+J0aCI6IiIsIktlZXAiOmZhbHNlLCJTdG9wIjpmYWxzZSwiTWFya0FzUmVhZCI6ZmFsc2V9
+END:HEADER
+*/
+if header :contains ["Subject"] "DIFFERENT" { fileinto "Archive"; }
+/* END:FILTER */

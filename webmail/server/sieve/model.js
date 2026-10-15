@@ -54,8 +54,9 @@ export function allowedMoveFolder(folder) {
 
 /** Policy context: folders are {path, specialUse?, shared?, virtual?, personal?}.
  * checkPolicy:false is for decoding stored data, whose folders/domains may since have changed.
+ * checkFolders:false skips only existence checks for an explicitly requested offline import.
  */
-export function validateDocument(doc, { internalDomains = [], folders = [], maxRedirects = 100, checkPolicy = true } = {}) {
+export function validateDocument(doc, { internalDomains = [], folders = [], maxRedirects = 100, checkPolicy = true, checkFolders = true } = {}) {
   object(doc, '$', ['v', 'rev', 'rules', 'blocked', 'vacation', 'importedFrom'], ['v', 'rev', 'rules', 'blocked', 'vacation']);
   if (doc.v !== 1) invalid('$.v', 'version');
   if (!Number.isSafeInteger(doc.rev) || doc.rev < 0) invalid('$.rev', 'revision');
@@ -89,7 +90,7 @@ export function validateDocument(doc, { internalDomains = [], folders = [], maxR
     if (Object.hasOwn(actions, 'move')) {
       text(actions.move, `${a}.move`, { min: 1 });
       if (actions.trash) invalid(a, 'move_and_trash');
-      if (checkPolicy && !folders.some(folder => folder.path === actions.move && allowedMoveFolder(folder))) invalid(`${a}.move`, 'folder_not_allowed');
+      if (checkPolicy && (!allowedMoveFolder({ path: actions.move }) || (checkFolders && !folders.some(folder => folder.path === actions.move && allowedMoveFolder(folder))))) invalid(`${a}.move`, 'folder_not_allowed');
     }
     if (Object.hasOwn(actions, 'forward')) {
       list(actions.forward, `${a}.forward`, 1, 3);

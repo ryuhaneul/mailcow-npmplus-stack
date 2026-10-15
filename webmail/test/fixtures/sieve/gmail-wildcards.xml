@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="from" value="a*b"/><apps:property name="label" value="Archive"/><apps:property name="shouldArchive" value="true"/></entry><entry><apps:property name="from" value="prefix*"/><apps:property name="label" value="Archive"/><apps:property name="shouldArchive" value="true"/></entry><entry><apps:property name="subject" value="trusted"/><apps:property name="shouldNeverSpam" value="true"/></entry></feed>

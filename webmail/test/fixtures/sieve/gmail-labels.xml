@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="from" value="promo*"/><apps:property name="label" value="Promotions"/></entry><entry><apps:property name="subject" value="팀 자료"/><apps:property name="label" value="Projects/팀"/></entry></feed>

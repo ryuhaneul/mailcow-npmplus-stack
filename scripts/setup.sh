@@ -273,6 +273,7 @@ fi
 # Generate secrets if empty
 waf_resolve_bouncer_key "$NPMPLUS_DIR" true || die "Bouncer key selection failed"
 [ -z "${CROWDSEC_BOUNCER_KEY:-}" ] && CROWDSEC_BOUNCER_KEY=$(openssl rand -hex 32) && log "Generated CROWDSEC_BOUNCER_KEY"
+export CROWDSEC_BOUNCER_KEY
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32)
 NPM_ADMIN_EMAIL="${NPM_ADMIN_EMAIL:-admin@${DOMAIN}}"
 NPM_ADMIN_PASSWORD="${NPM_ADMIN_PASSWORD:-$(openssl rand -base64 18)}"

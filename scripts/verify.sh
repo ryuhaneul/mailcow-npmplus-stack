@@ -247,8 +247,8 @@ sys.exit(1)'
                 set +x
                 key=$(sed -n "s/^API_KEY=//p" /data/crowdsec/crowdsec.conf)
                 test -n "$key" || exit 1
-                curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-                    -H "X-Crowdsec-Appsec-Api-Key: $key" \
+                printf "X-Crowdsec-Appsec-Api-Key: %s\n" "$key" | \
+                    curl -sS --max-time 5 --header @- -o /dev/null -w "%{http_code}" \
                     -H "X-Crowdsec-Appsec-Host: $1" \
                     -H "X-Crowdsec-Appsec-Ip: 127.0.0.1" \
                     -H "X-Crowdsec-Appsec-Uri: /" \
@@ -261,8 +261,15 @@ sys.exit(1)'
             docker exec "$WAF_CS" cscli metrics show acquisition -o json | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)["acquisition"]
-sys.exit(0 if sum(v.get("parsed",0) for k,v in rows.items() if k.startswith("npmplus:")) > 0 else 1)'
+sys.exit(0 if sum(v.get("parsed",0) for k,v in rows.items() if k.startswith("npmplus:") or k.startswith("file:/npmplus-data/nginx/logs/")) > 0 else 1)'
         }
+        # shellcheck disable=SC2329
+        waf_authentication() {
+            local code
+            code=$(_waf_lapi_code "$WAF_NPM" </dev/null) || return 1
+            [ "$code" = 200 ]
+        }
+        check "WAF AppSec authentication (LAPI accepts running bouncer key)" waf_authentication
         check "WAF bouncer npmplus pull within 5 minutes" waf_bouncer_recent
         check "WAF AppSec endpoint responds" waf_appsec_endpoint
         check "WAF CAPI disabled (effective configuration)" _waf_capi_disabled "$WAF_CS"
@@ -301,6 +308,54 @@ PYWAFHOSTS
         )
         waf_host_flags || true
 
+        # Match only this synthetic probe; never print stored request metadata.
+        # shellcheck disable=SC2329
+        waf_probe_alert() {
+            python3 - "$WAF_CS" "$WAF_PROBE_ID" <<'PYWAFALERT'
+import ipaddress,json,subprocess,sys,time
+container,probe=sys.argv[1:]; deadline=time.monotonic()+30
+
+def cli(*args):
+    remaining=deadline-time.monotonic()
+    if remaining <= 0: raise TimeoutError()
+    result=subprocess.run(['docker','exec',container,'cscli','alerts',*args,'-o','json'],
+                          capture_output=True,text=True,timeout=min(5,remaining),check=True)
+    return json.loads(result.stdout)
+
+def paths(meta,keys):
+    if isinstance(meta,dict): return [meta.get(key,'') for key in keys]
+    if isinstance(meta,list): return [item.get('value','') for item in meta if isinstance(item,dict) and item.get('key') in keys]
+    return []
+
+def matches(alert):
+    if not isinstance(alert,dict) or alert.get('kind') != 'waf': return False
+    uris=paths(alert.get('meta'),{'target_uri'})
+    for event in alert.get('events') or []:
+        if isinstance(event,dict): uris.extend(paths(event.get('meta'),{'uri'}))
+    return any('mailstack_waf_probe='+probe in uri for uri in uris if isinstance(uri,str))
+
+while time.monotonic() < deadline:
+    try:
+        rows=cli('list','--kind','waf','--since','2m','--limit','0')
+        if isinstance(rows,list):
+            for row in rows:
+                if not isinstance(row,dict) or row.get('kind') != 'waf' or not isinstance(row.get('id'),int): continue
+                alert=cli('inspect',str(row['id']))
+                for item in (alert if isinstance(alert,list) else [alert]):
+                    if not matches(item): continue
+                    source=item.get('source') or {}
+                    try:
+                        ip=source.get('ip') or (source.get('value') if source.get('scope') == 'ip' else '')
+                        print(ipaddress.ip_address(ip))
+                    except (AttributeError,TypeError,ValueError): pass
+                    sys.exit(0)
+    except (OSError,ValueError,TypeError,TimeoutError,subprocess.SubprocessError): pass
+    remaining=deadline-time.monotonic()
+    if remaining > 0: time.sleep(min(1,remaining))
+sys.exit(1)
+PYWAFALERT
+        }
+
         # Avoid admin ACLs and scanner User-Agents: the probe must not ban the server.
         WAF_PROBE_HOST=
         if [ "$WEBMAIL_ENABLE" = true ]; then
@@ -328,24 +383,20 @@ PYWAFHOSTS
                 else
                     check "WAF detect: CRS XSS reaches app (HTTP $WAF_ATTACK)" \
                         test "$WAF_ATTACK" -ge 200 -a "$WAF_ATTACK" -lt 500 -a "$WAF_ATTACK" != 403
-                    # NPMplus access format: [time] host[:port] remote_addr ...
-                    WAF_PROBE_IP=$(docker exec "$WAF_NPM" sh -c \
-                        'grep -F -- "$1" /data/nginx/logs/access.log | tail -n 1' sh "mailstack_waf_probe=$WAF_PROBE_ID" | python3 -c '
-import ipaddress,re,sys
-line=sys.stdin.read();match=re.match(r"^\[[^]]+\]\s+\S+\s+(\S+)\s",line)
-if match:
-    try: print(ipaddress.ip_address(match[1]))
-    except ValueError: pass
-') || WAF_PROBE_IP=
-                    if [ -z "$WAF_PROBE_IP" ]; then
-                        echo "  SKIP  WAF detect decisions: probe source IP not found in access log"
+                    if WAF_PROBE_IP=$(waf_probe_alert); then
+                        check "WAF detect: probe kind=waf alert recorded" true
+                        if [ -z "$WAF_PROBE_IP" ]; then
+                            check "결정 0 확인 불가 — probe 경보 출발지 IP 없음" false
+                        else
+                            # shellcheck disable=SC2329
+                            waf_probe_decisions_empty() {
+                                docker exec "$WAF_CS" cscli decisions list --ip "$WAF_PROBE_IP" -o json | \
+                                    python3 -c 'import json,sys; sys.exit(0 if not json.load(sys.stdin) else 1)'
+                            }
+                            check "WAF detect: source $WAF_PROBE_IP decisions = 0" waf_probe_decisions_empty
+                        fi
                     else
-                        # shellcheck disable=SC2329
-                        waf_probe_decisions_empty() {
-                            docker exec "$WAF_CS" cscli decisions list --ip "$WAF_PROBE_IP" -o json | \
-                                python3 -c 'import json,sys; sys.exit(0 if not json.load(sys.stdin) else 1)'
-                        }
-                        check "WAF detect: source $WAF_PROBE_IP decisions = 0" waf_probe_decisions_empty
+                        check "검사 경보 미생성 — AppSec 미동작 가능" false
                     fi
                 fi
             fi

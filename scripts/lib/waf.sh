@@ -575,6 +575,53 @@ PYKEY
     [[ ! "$CROWDSEC_BOUNCER_KEY" =~ [[:cntrl:]] ]] || { waf_error 'invalid bouncer key'; return 1; }
 }
 
+# An explicit key arrives only on stdin; verify uses the running NPMplus config.
+# curl reads headers from stdin too, so no credential appears in process arguments.
+_waf_lapi_code() {
+    docker exec -i "$1" sh -c '
+        set +x
+        key=$(cat)
+        if [ -z "$key" ]; then key=$(sed -n "s/^API_KEY=//p" /data/crowdsec/crowdsec.conf); fi
+        test -n "$key" || exit 1
+        printf "X-Api-Key: %s\n" "$key" | curl -sS --max-time 5 --header @- \
+            -o /dev/null -w "%{http_code}" "http://crowdsec:8080/v1/decisions/stream?startup=true"
+    '
+}
+
+_waf_bouncer_registered() {
+    set +x
+    local cs=$1 npm=$2 code
+    _waf_healthy "$cs" || {
+        waf_error 'CrowdSec 이 healthy 가 아님 — 바운서 등록 확인 전 중단'; return 1;
+    }
+    code=$(printf '%s' "$CROWDSEC_BOUNCER_KEY" | _waf_lapi_code "$npm") || {
+        waf_error 'LAPI authentication check failed'; return 1;
+    }
+    [ "$code" = 200 ] && return 0
+    if [ "$code" != 403 ]; then waf_error "LAPI authentication failed (HTTP $code)"; return 1; fi
+    if ! printf '%s' "$CROWDSEC_BOUNCER_KEY" | docker exec -i "$cs" sh -c '
+        set +x
+        candidate=$(cat)
+        test -n "${BOUNCER_KEY_npmplus:-}" || exit 1
+        candidate_hash=$(printf "%s" "$candidate" | sha256sum)
+        env_hash=$(printf "%s" "$BOUNCER_KEY_npmplus" | sha256sum)
+        test "$candidate_hash" = "$env_hash"
+    '; then
+        waf_error 'LAPI rejected key; CrowdSec env fingerprint mismatch — recreate CrowdSec before retrying'
+        return 1
+    fi
+    # The image entrypoint registers its env key after the stale DB entry is removed.
+    docker exec "$cs" cscli bouncers delete npmplus >/dev/null 2>&1 || {
+        waf_error 'stale npmplus bouncer removal failed'; return 1;
+    }
+    docker restart "$cs" >/dev/null || { waf_error 'CrowdSec restart failed'; return 1; }
+    _waf_healthy "$cs" || return 1
+    code=$(printf '%s' "$CROWDSEC_BOUNCER_KEY" | _waf_lapi_code "$npm") || {
+        waf_error 'LAPI authentication check failed after bouncer registration'; return 1;
+    }
+    [ "$code" = 200 ] || { waf_error "LAPI authentication failed after bouncer registration (HTTP $code)"; return 1; }
+}
+
 # Hash content and explicit absence; credentials never appear in the manifest.
 _waf_current_manifest() {
     local id=$1
@@ -652,6 +699,7 @@ _waf_reconcile() (
     fi
     if [ "$WAF_ENABLE" = true ]; then
         waf_resolve_bouncer_key "$dir" || return 1
+        _waf_bouncer_registered "$cs" "$npm" || return 1
         _waf_capi_disabled "$cs" || return 1
         if [ "$marked" = false ]; then
             docker exec "$cs" cat /etc/crowdsec/profiles.yaml > "$work/profiles.current" || return 1

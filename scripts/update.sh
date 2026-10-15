@@ -84,6 +84,12 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 waf_options || die "Invalid WAF options; update stopped before changes"
+waf_resolve_bouncer_key "$NPMPLUS_DIR" "$([ "$WAF_ENABLE" = false ] && echo true || echo false)" || die "Bouncer key selection failed; update stopped before changes"
+if [ -n "${CROWDSEC_BOUNCER_KEY:-}" ]; then
+    export CROWDSEC_BOUNCER_KEY
+else
+    unset CROWDSEC_BOUNCER_KEY
+fi
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091

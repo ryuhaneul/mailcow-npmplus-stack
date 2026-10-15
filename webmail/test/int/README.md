@@ -23,9 +23,17 @@ W17a seed를 적용하고 모든 구현 레인(특히 W13b)을 병합한 시험 
 저장소 루트에서:
 
 ```sh
+cd webmail && bash bin/check-image-build.sh && cd ..
 docker compose -f webmail/test/int/compose.int.yml build int
 docker compose -f webmail/test/int/compose.int.yml run --rm int --group core
 ```
+
+통합시험 빌드는 `webmail/`을 context로 사용하고 `test/int/Dockerfile.int`를 선택한다.
+같은 디렉터리의 `Dockerfile.int.dockerignore`는 배포용 `.dockerignore`에서 `test` 제외만 뺀 정책이다.
+[Docker 공식 문서](https://docs.docker.com/build/concepts/context/#filename-and-location)에 따라 Dockerfile별 ignore가 context 루트의 ignore보다 우선한다(BuildKit 필요).
+`dockerfile_inline` 대신 이름이 있는 Dockerfile을 선택해 이 연결을 명시했다.
+Docker 없는 검사는 이 저장소의 리터럴 COPY 경로·시험 JS 입력 포함·배포 test 제외와 두 ignore 정책의 차이를 확인하고, 기존 배포 단계 모사 빌드도 실행한다.
+ignore의 부정·이스케이프·문자 클래스 구문이나 COPY 형식을 바꾸면 검사도 검토해야 하며, 실제 Docker 빌드를 대체하지 않는다.
 
 core 마지막 XFF 시험은 실행 컨테이너의 소스 IP를 15분 제한하고 출발 IP와 남은 초를 출력한다. IR2 전에는 **실패 제한 만료(15분) 또는 main 판단의 웹메일 재시작**이 필수다. 새 컨테이너가 같은 IP를 재사용할 수 있다. 아래 R-XFF 수동 게이트까지 마친 뒤 진행한다. IP 제한 시험을 앞당기거나 병렬 실행하지 않는다.
 

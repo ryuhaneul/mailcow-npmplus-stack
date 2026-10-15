@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { logout } from '../api.js';
 import { session } from '../state/session.js';
-import { prefs } from '../state/prefs.js';
+import { updatePrefs } from '../state/prefs.js';
 import Icon from './Icon.jsx';
 import SearchBar from './SearchBar.jsx';
 import OooBadge from './OooBadge.jsx';
@@ -22,7 +22,7 @@ export default function TopBar({ mode, navOpen, toggleNav }) {
     <button class="ib menu-btn" type="button" aria-label="메일함 열기" aria-controls="mail-sidebar" aria-expanded={navOpen} onClick={toggleNav}><Icon name="menu"/></button>
     <SearchBar/>
     <div class="r"><OooBadge/>
-      <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {prefs.value = {...prefs.value, mode:mode === 'dark' ? 'light' : 'dark'};}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
+      <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {updatePrefs({mode:mode === 'dark' ? 'light' : 'dark'});}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
       <a class="ib" href="#settings" aria-label="보기 설정"><Icon name="palette"/></a>
       <a class="ib hide-m" href="#keys" aria-label="단축키 안내"><Icon name="kbd"/></a>
       <div class="account" ref={account}>

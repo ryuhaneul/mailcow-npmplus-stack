@@ -15,8 +15,8 @@ function group(date) {
   const day=new Date(value);day.setHours(0,0,0,0);const gap=Math.round((today-day)/86400000);
   return gap===0?'오늘':gap===1?'어제':value.toLocaleDateString('ko-KR',{month:'long',day:'numeric'});
 }
-export default function MailList() {
-  const current=route.value,value=list.value;
+export default function MailList({currentRoute,reader}) {
+  const current=currentRoute || route.value,value=list.value;
   useEffect(()=>{listLocation.value=current.name+(current.value?'/'+encodeURIComponent(current.value):'')+(current.q?'?q='+encodeURIComponent(current.q):'');void loadMessages(paramsForRoute(current));return cancelListLoad;},[current]);
   const folder=folders.value.folders.find(folder=>folder.path===(current.name==='inbox'?'INBOX':current.value));
   const query=value.params.q,mode=query?'search':current.name;
@@ -31,5 +31,5 @@ export default function MailList() {
     <ListTools/>
     <div class="scroll" aria-busy={value.loading}><ul class="list">{value.loading&&!value.items.length?<li class="grp" role="status">메일을 불러오는 중…</li>:value.error?<li class="grp" role="alert">{value.error.message}</li>:!value.items.length?<li class="grp">이 보기에 맞는 메일이 없습니다</li>:value.items.map((item,index)=><Fragment key={item.ref}>{(index===0||group(value.items[index-1].date)!==group(item.date))&&<li class="grp" role="presentation">{group(item.date)}</li>}<MailRow item={item} mode={mode}/></Fragment>)}</ul></div>
     <div class="foot"><span><span class="kbd">J</span><span class="kbd">K</span> 이동</span><span><span class="kbd">E</span> 보관</span><span><span class="kbd">#</span> 삭제</span><span><span class="kbd">?</span> 단축키 전체</span></div>
-  </div><div class="readcol" aria-hidden="true"/></section>;
+  </div><div class="readcol">{reader}</div></section>;
 }

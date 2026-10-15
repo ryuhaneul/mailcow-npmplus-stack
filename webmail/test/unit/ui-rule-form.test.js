@@ -27,6 +27,7 @@ test('rule validation blocks unsafe conditions, missing folders, empty actions a
   for(const value of ['', '${name}', 'x\n', 'x'.repeat(201)])assert.ok(ruleProblem({...rule,conditions:[{field:'from',op:'has',value}]},[folder],[],''));
   assert.ok(ruleProblem({...rule,conditions:Array(11).fill(rule.conditions[0])},[folder],[],''));
   assert.ok(ruleProblem(rule,[],[],''));
+  assert.match(ruleProblem({...rule,actions:{move:''}},[folder],[],''),/옮길 개인 폴더를 선택/);
   assert.ok(ruleProblem({...rule,actions:{move:'Projects',trash:true}},[folder],[],''));
   assert.ok(ruleProblem({...rule,actions:{}},[folder],[],''));
   assert.ok(ruleProblem({...rule,actions:{forward:['user@external.example.org']}},[folder],['example.com'],'user@external.example.org'));

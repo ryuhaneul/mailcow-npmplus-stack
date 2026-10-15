@@ -1,6 +1,7 @@
 import { api } from '../api.js';
-import { sessionReady } from './session.js';
+import { session, sessionReady } from './session.js';
 import { signal } from '@preact/signals';
+import { toast } from './toast.js';
 import { WM_THEMES } from '../theme/themes.js';
 
 export const prefs = signal({ theme: 'ink', mode: 'system', accent: {}, layout: null });
@@ -16,6 +17,7 @@ export function loadPrefs(config) {
 }
 
 export function applyServerPrefs(value) {
+  clearTimeout(saveTimer); revision++; confirmed = structuredClone(value);
   prefs.value = value;
   try { localStorage.setItem('webmail-prefs', JSON.stringify(value)); } catch {}
 }
@@ -24,4 +26,38 @@ export async function loadSessionPrefs() {
   const value = await api('/api/prefs');
   applyServerPrefs(value);
   sessionReady.value = true;
+}
+
+// Keep rapid appearance changes in one complete document; persist copies only after success.
+let confirmed, saveTimer, saving = false, revision = 0;
+export const prefsSaving = signal(false);
+export function updatePrefs(patch) {
+  if (!confirmed) confirmed = structuredClone(prefs.value);
+  prefs.value = { ...prefs.value, ...patch };
+  revision++;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(savePrefs, 500);
+}
+async function savePrefs() {
+  if (saving) return;
+  const owner = session.value;
+  if (!owner || !sessionReady.value) return;
+  const snapshot = structuredClone(prefs.value), version = revision;
+  saving = true; prefsSaving.value = true;
+  try {
+    await api('/api/prefs', { method: 'PUT', body: snapshot });
+    if (session.value !== owner) return;
+    confirmed = snapshot;
+    try { localStorage.setItem('webmail-prefs', JSON.stringify(snapshot)); } catch {}
+  } catch (error) {
+    if (session.value !== owner) return;
+    clearTimeout(saveTimer); revision = version;
+    prefs.value = structuredClone(confirmed);
+    toast.value = { kind: 'error', message: error.message || '설정을 저장하지 못했어요. 이전 설정으로 되돌렸어요.' };
+  } finally {
+    saving = false; prefsSaving.value = false;
+    if (session.value === owner && revision !== version) {
+      clearTimeout(saveTimer); saveTimer = setTimeout(savePrefs, 500);
+    }
+  }
 }

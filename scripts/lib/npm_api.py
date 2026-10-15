@@ -149,7 +149,8 @@ def admin_main(mode, work, api, name, domain):
         host = matches[0]
         selected.append(host)
         own_locations = [location.get('path', '(unknown)') for location in host.get('locations', [])
-                         if location.get('npmplus_access_list_type') != 'global']
+                         if location.get('npmplus_enabled') is not False
+                         and location.get('npmplus_access_list_type') != 'global']
         if own_locations:
             paths = ', '.join(own_locations)
             if mode == 'verify':

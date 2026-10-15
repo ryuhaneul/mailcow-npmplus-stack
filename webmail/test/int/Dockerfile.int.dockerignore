@@ -1,0 +1,10 @@
+node_modules
+.git
+.env
+.env.*
+*.env
+*.pem
+*.key
+npm-debug.log*
+web/dist
+web/src/dev

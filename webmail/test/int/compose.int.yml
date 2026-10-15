@@ -3,14 +3,7 @@ services:
     image: mailstack-webmail-int:local
     build:
       context: ../..
-      dockerfile_inline: |
-        FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
-        WORKDIR /app
-        COPY package.json package-lock.json ./
-        RUN npm ci --no-audit --no-fund
-        COPY server ./server
-        COPY test ./test
-        USER node
+      dockerfile: test/int/Dockerfile.int
     env_file:
       - /home/rocky/webmail-int.env
     entrypoint: ["node", "test/int/lib/run.js"]

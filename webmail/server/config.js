@@ -3,8 +3,8 @@ import { isAbsolute } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 
-const themes = ['ink', 'seland', 'terra', 'amber', 'olive'];
-const modes = ['system', 'light', 'dark'];
+export const themes = ['ink', 'seland', 'terra', 'amber', 'olive'];
+export const modes = ['system', 'light', 'dark'];
 const levels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
 
 export function loadConfig(env = process.env) {

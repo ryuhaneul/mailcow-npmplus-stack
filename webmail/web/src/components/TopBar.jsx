@@ -1,0 +1,35 @@
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { logout } from '../api.js';
+import { navigate } from '../router.js';
+import { session } from '../state/session.js';
+import { prefs } from '../state/prefs.js';
+import Icon from './Icon.jsx';
+import OooBadge from './OooBadge.jsx';
+export default function TopBar({ mode, navOpen, toggleNav }) {
+  const [accountOpen, setAccountOpen] = useState(false);
+  const account = useRef(null), trigger = useRef(null), exit = useRef(null);
+  useEffect(() => {
+    if (!accountOpen) return;
+    exit.current.focus();
+    const outside = event => { if (!account.current.contains(event.target)) setAccountOpen(false); };
+    const escape = event => { if (event.key === 'Escape') {setAccountOpen(false);trigger.current.focus();} };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
+  }, [accountOpen]);
+  const [query, setQuery] = useState('');
+  const user = session.value.user;
+  return <header class="top">
+    <button class="ib menu-btn" type="button" aria-label="메일함 열기" aria-controls="mail-sidebar" aria-expanded={navOpen} onClick={toggleNav}><Icon name="menu"/></button>
+    <form class="search" role="search" onSubmit={event => {event.preventDefault(); if(query.trim()) navigate(`search/${encodeURIComponent(query.trim())}`);}}><Icon name="search" size="s"/><input placeholder="메일 검색 — 예: 보낸사람:partner 견적" aria-label="메일 검색" enterKeyHint="search" value={query} onInput={event=>setQuery(event.currentTarget.value)}/><span class="kbd">/</span></form>
+    <div class="r"><OooBadge/>
+      <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {prefs.value = {...prefs.value, mode:mode === 'dark' ? 'light' : 'dark'};}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
+      <a class="ib" href="#settings" aria-label="보기 설정"><Icon name="palette"/></a>
+      <a class="ib hide-m" href="#keys" aria-label="단축키 안내"><Icon name="kbd"/></a>
+      <div class="account" ref={account}>
+        <button class="me" ref={trigger} type="button" aria-label="사용자 메뉴" aria-haspopup="menu" aria-expanded={accountOpen} title={user.name} onClick={()=>setAccountOpen(!accountOpen)} onKeyDown={event=>{if(event.key==='ArrowDown'){event.preventDefault();setAccountOpen(true);}}}>{user.name?.slice(-2) || user.email.slice(0,2)}</button>
+        {accountOpen && <div class="pop account-menu" role="menu" aria-label="사용자 메뉴"><h5>{user.email}</h5><button class="opt" ref={exit} type="button" role="menuitem" onClick={logout}>로그아웃</button></div>}
+      </div>
+    </div>
+  </header>;
+}

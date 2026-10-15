@@ -92,3 +92,18 @@ test('standard IMAP names use approved Korean labels while custom folder names a
   assert.equal(folderLabel({path:'고객사',name:'고객사'}),'고객사');
   assert.equal(folderLabel({path:'Archive',name:'보관 문서'}),'보관 문서');
 });
+
+test('SEARCH_SLOW stays in the list and retry preserves the same search parameters', async t => {
+  const paths = [];
+  setup(t, async path => {
+    paths.push(path);
+    return paths.length === 1 ? Response.json({ error: { code: 'SEARCH_SLOW', message: '메일함 검색 색인을 만드는 중이에요. 잠시 뒤 다시 검색해 주세요.' } }, { status: 503 }) : result(rows);
+  });
+  await loadMessages({ view: 'allmail', q: '제목:견적' });
+  assert.equal(list.value.error.code, 'SEARCH_SLOW');
+  assert.equal(list.value.items.length, 0);
+  await loadMessages();
+  assert.equal(paths[0], paths[1]);
+  assert.equal(list.value.error, null);
+  assert.equal(list.value.items.length, 3);
+});

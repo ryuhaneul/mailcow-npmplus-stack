@@ -214,3 +214,68 @@ test('SSE mailbox change: watch invalidates only the matching session list cache
   assert.equal((await f.service.messages(other, {})).total, 5);
   assert.equal(f.client.sorts.length, 3);
 });
+
+for (const query of ['view=allmail&q=invoice', 'view=folder&folder=Trash&q=invoice']) test(`search timeout: ${query} returns SEARCH_SLOW at 50s, reconnects work and preserves SSE monitor`, async t => {
+  const config = { publicHostnames: ['newmail.example.com'], trustProxy: ['127.0.0.0/8'], logLevel: 'silent', sessionIdleMin: 480, sessionMaxHours: 24, imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com', brandName: '메일' };
+  const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-search-timeout-')), clients = [];
+  let started = false;
+  const app = await createApp({ config, logger: false, auth: { tempRoot, clientFactory: options => {
+    const client = new ListImap(options), exec = client.exec.bind(client);
+    clients.push(client);
+    client.close = () => { client.usable = false; client.emit('close'); };
+    client.mailboxOpen = async path => { await client.getMailboxLock(path); return client.mailbox; };
+    client.idle = async () => new Promise(() => {});
+    client.exec = async (...args) => {
+      if (client.slow && args[0] === 'UID SORT') {
+        started = true;
+        return new Promise((_resolve, reject) => client.once('close', () => reject(new Error('synthetic closed command'))));
+      }
+      return exec(...args);
+    };
+    return client;
+  } } });
+  let stop;
+  t.after(async () => { stop?.(); await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
+  const logged = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-search-password' } });
+  assert.equal(logged.statusCode, 200);
+  const headers = { cookie: logged.headers['set-cookie'].split(';')[0] };
+  const session = await app.sessions.get(headers.cookie.split('=')[1]);
+  let notifications = 0;
+  stop = app.imap.watch(session, () => notifications++);
+  for (let i = 0; i < 5; i++) await nextTurn();
+  const monitor = clients[1];
+  assert.equal(monitor.usable, true);
+  clients[0].slow = true;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const pending = app.inject({ url: '/api/messages?' + query, headers }).then(response => { settled = true; return response; });
+  for (let i = 0; i < 5; i++) await nextTurn();
+  assert.equal(started, true);
+  t.mock.timers.tick(49999); await nextTurn(); assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  const response = await pending;
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), { error: { code: 'SEARCH_SLOW', message: '메일함 검색 색인을 만드는 중이에요. 잠시 뒤 다시 검색해 주세요.' } });
+  assert.equal(response.headers['www-authenticate'], undefined);
+  assert.equal(clients[0].usable, false);
+  assert.equal(monitor.usable, true);
+  monitor.emit('exists', { count: 6 }); assert.equal(notifications, 1);
+  const listed = await app.inject({ url: '/api/messages', headers });
+  assert.equal(listed.statusCode, 200); assert.equal(listed.json().total, 5);
+  const searched = await app.inject({ url: '/api/messages?' + query, headers });
+  assert.equal(searched.statusCode, 200); assert.equal(searched.json().total, 5);
+  assert.equal(clients.length, 3); assert.equal(clients[2].usable, true); assert.equal(monitor.usable, true);
+});
+
+test('ordinary list SORT can exceed 50 seconds without SEARCH_SLOW or closing its connection', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(), exec = f.client.exec.bind(f.client);
+  let resume, closed = 0, settled = false;
+  f.client.close = () => { closed++; };
+  f.client.exec = async (...args) => { if (args[0] === 'UID SORT') await new Promise(resolve => { resume = resolve; }); return exec(...args); };
+  const pending = f.service.messages(f.session, {}).then(result => { settled = true; return result; });
+  await nextTurn();
+  t.mock.timers.tick(55000); await nextTurn();
+  assert.equal(settled, false); assert.equal(closed, 0);
+  resume(); assert.equal((await pending).total, 5); assert.equal(closed, 0);
+});

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================
 # Mailcow + NPMplus Stack — Update Script
-# Usage: sudo ./scripts/update.sh [--non-interactive|-y]
+# Usage: sudo ./scripts/update.sh [--non-interactive|-y] [--skip-mailcow-update]
 #
 # Phases:
 #   1: git pull for component repos (stack + toolkit + mailcow + stacks)
@@ -25,9 +25,13 @@ SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-update.log}"
 
 NON_INTERACTIVE=false
-case "${1:-}" in
-    --non-interactive|-y) NON_INTERACTIVE=true ;;
-esac
+SKIP_MAILCOW_UPDATE=false
+for arg in "$@"; do
+    case "$arg" in
+        --non-interactive|-y) NON_INTERACTIVE=true ;;
+        --skip-mailcow-update) SKIP_MAILCOW_UPDATE=true ;;
+    esac
+done
 [ -t 0 ] || NON_INTERACTIVE=true
 
 RED='\033[0;31m'
@@ -208,19 +212,23 @@ compose_pull "$NPMPLUS_DIR" "npmplus"
 # ============================================================
 header "Phase 3: Mailcow official update (./update.sh -f)"
 
-[ -d "$MAILCOW_DIR" ] || die "Mailcow directory not found: $MAILCOW_DIR"
-[ -x "$MAILCOW_DIR/update.sh" ] || die "Mailcow update.sh not found/executable at $MAILCOW_DIR/update.sh"
-
-if ! confirm "Run Mailcow official update (./update.sh -f)? This pulls new images and restarts containers."; then
-    die "Mailcow update aborted by user"
-fi
-
-log "Running Mailcow official update..."
-# -f: force yes, skip interactive prompts inside mailcow update.sh.
-if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
-    log "Mailcow update: done"
+if [ "$SKIP_MAILCOW_UPDATE" = true ]; then
+    log "mailcow 업데이트 건너뜀(사용자 선택)"
 else
-    die "Mailcow official update failed — see $LOGFILE"
+    [ -d "$MAILCOW_DIR" ] || die "Mailcow directory not found: $MAILCOW_DIR"
+    [ -x "$MAILCOW_DIR/update.sh" ] || die "Mailcow update.sh not found/executable at $MAILCOW_DIR/update.sh"
+
+    if ! confirm "Run Mailcow official update (./update.sh -f)? This pulls new images and restarts containers. To skip only Mailcow, use --skip-mailcow-update."; then
+        die "Mailcow update aborted by user"
+    fi
+
+    log "Running Mailcow official update..."
+    # -f: force yes, skip interactive prompts inside mailcow update.sh.
+    if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
+        log "Mailcow update: done"
+    else
+        die "Mailcow official update failed — see $LOGFILE"
+    fi
 fi
 
 # ============================================================

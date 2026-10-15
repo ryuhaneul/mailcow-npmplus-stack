@@ -104,6 +104,10 @@ TOOLKIT_SECRET_KEY=
 - **멱등성(idempotent)**: 중단 후 재실행 안전
 - `--non-interactive` 옵션으로 무인 실행 지원
 
+## 업데이트
+
+일반 업데이트는 `sudo ./scripts/update.sh -y`입니다. mailcow 판을 고정한 서버에서는 `sudo ./scripts/update.sh -y --skip-mailcow-update`로 mailcow 공식 업데이트만 건너뛰고 스택 업데이트를 계속할 수 있습니다. 생략 시 기존처럼 mailcow도 업데이트하며, 대화형 확인에서 아니오를 선택하면 전체 작업이 중단됩니다. 나머지 재빌드·재시작·검증은 수행하므로 무중단 옵션은 아닙니다. 자세한 내용은 [운영 가이드](docs/guide.md#설치업데이트tls)를 참고하세요.
+
 ## 검증
 
 ```bash

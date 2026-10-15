@@ -722,6 +722,8 @@ webmail_prepare "$PWD/.env" /home/mailcow-dockerized /home/webmail
 
 일반 업데이트는 `sudo ./scripts/update.sh -y`입니다. 선택된 서비스만 갱신하고 Dovecot·DB 정책을 다시 적용합니다. 웹메일 환경 파일은 `/home/webmail/webmail.env`(600)이며 관리자 키·DB root 암호는 넣지 않습니다. 이 파일과 스택 `.env`를 출력하거나 저장소에 넣지 마세요.
 
+mailcow 판을 고정해 둔 서버에서는 `sudo ./scripts/update.sh -y --skip-mailcow-update`를 사용하세요. Phase 3의 mailcow 공식 `./update.sh -f` 호출만 건너뛰며, 나머지 스택 소스 갱신·설정 재적용·Toolkit/웹메일 재빌드·서비스 재시작과 Phase 7 검증은 그대로 실행합니다. Phase 1에서도 mailcow 저장소를 git pull하지 않습니다. 이 옵션은 mailcow 릴리스를 유지하는 용도이며 무중단 옵션은 아닙니다. 플래그를 생략하면 기존 동작을 유지합니다. 대화형 Phase 3 확인에서 아니오를 선택하면 기존처럼 전체 작업이 중단되므로, mailcow만 건너뛰려면 이 플래그로 실행하세요.
+
 TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 서버는 `pin`을 선택합니다. 공개 인증서만 실제 IMAP TLS 접속에서 추출하며 개인 키를 읽거나 복사하지 않습니다. 공개 인증서는 `/home/webmail/mail-tls-pin.pem`이고 마운트는 `:ro,z`로 SELinux 공유 문맥을 적용합니다. setup의 Phase 8에서 인증서가 바뀌면 pin을 다시 추출합니다. update도 mailcow 업데이트 뒤 재추출하며 지문이 달라졌을 때 pin 변경에 따른 재기동을 수행합니다. 웹메일 이미지·환경 업데이트 자체에 따른 재기동은 별개입니다.
 
 ### 웹메일 고정 주소와 IP 변경

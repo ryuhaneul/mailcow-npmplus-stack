@@ -11,7 +11,17 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || { echo "[x] .env not found"; exit 1; }
+WEBMAIL_ENABLE=false
+SNAPPYMAIL_ENABLE=true
+MAIL_AUTOEXPUNGE_ENABLE=
 set -a; source "$ENV_FILE"; set +a
+MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/webmail-env.sh
+source "$SCRIPT_DIR/lib/webmail-env.sh"
+webmail_options || exit 1
+
 
 # Auto-detect SERVER_IP if not set in .env
 if [ -z "${SERVER_IP:-}" ]; then
@@ -44,6 +54,21 @@ check_http() {
     [ "$code" = "$expected" ]
 }
 
+# Called indirectly by check.
+# shellcheck disable=SC2329
+webmail_container_running() { [ "$(docker inspect webmail --format '{{.State.Running}}' 2>/dev/null)" = true ]; }
+# Called indirectly by check.
+# shellcheck disable=SC2329
+webmail_container_healthy() { [ "$(docker inspect webmail --format '{{.State.Health.Status}}' 2>/dev/null)" = healthy ]; }
+# Called indirectly by check.
+# shellcheck disable=SC2329
+webmail_logout_unauthenticated() {
+    (cd "$WEBMAIL_DIR" && docker compose exec -T webmail node --input-type=module -e '
+const response = await fetch("http://127.0.0.1:8080/api/auth/logout", {method:"POST"});
+process.exit(response.status === 403 && !response.headers.has("www-authenticate") ? 0 : 1);
+')
+}
+
 check_ssl() {
     local host="$1" port="$2"
     echo | timeout 5 openssl s_client -connect "${host}:${port}" -servername "$host" 2>/dev/null | grep -q "Verify return code: 0"
@@ -60,7 +85,13 @@ echo "[Containers]"
 check "npmplus running"       docker inspect npmplus --format '{{.State.Running}}' 2>/dev/null
 check "npmplus healthy"       sh -c '[ "$(docker inspect npmplus --format "{{.State.Health.Status}}" 2>/dev/null)" = "healthy" ]'
 check "crowdsec running"      docker inspect crowdsec --format '{{.State.Running}}' 2>/dev/null
-check "snappymail running"    docker inspect snappymail --format '{{.State.Running}}' 2>/dev/null
+if [ "$SNAPPYMAIL_ENABLE" = true ]; then
+    check "snappymail running" docker inspect snappymail --format '{{.State.Running}}' 2>/dev/null
+fi
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    check "webmail running" webmail_container_running
+    check "webmail healthy" webmail_container_healthy
+fi
 check "nginx-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q nginx-mailcow'
 check "postfix-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q postfix-mailcow'
 check "dovecot-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q dovecot-mailcow'
@@ -70,16 +101,30 @@ echo ""
 
 # --- Web services ---
 echo "[Web Services]"
-check "mail.${DOMAIN} HTTPS 200"       check_http "https://mail.${DOMAIN}" "200"
+if [ "$SNAPPYMAIL_ENABLE" = true ]; then
+    check "mail.${DOMAIN} HTTPS 200" check_http "https://mail.${DOMAIN}" "200"
+fi
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    IFS=, read -r -a WEBMAIL_CHECK_HOSTS <<< "$WEBMAIL_HOSTNAMES"
+    for webmail_host in "${WEBMAIL_CHECK_HOSTS[@]}"; do
+        if [ -n "${WEBMAIL_ACCESS_LIST:-}" ]; then
+            echo "  SKIP  https://$webmail_host/healthz (access list: $WEBMAIL_ACCESS_LIST)"
+        else
+            check "$webmail_host /healthz HTTPS 200" check_http "https://$webmail_host/healthz" 200
+        fi
+    done
+fi
 check "mailcow.${DOMAIN} HTTPS 200"    check_http "https://mailcow.${DOMAIN}" "200"
 check "mail-npm.${DOMAIN} HTTPS 200"   check_http "https://mail-npm.${DOMAIN}" "200"
-check "HTTP->HTTPS redirect (mail)"    sh -c '[ "$(curl -sk -o /dev/null -w "%{http_code}" "http://mail.${DOMAIN}")" = "301" ]'
+[ "$SNAPPYMAIL_ENABLE" != true ] || check "HTTP->HTTPS redirect (mail)"    sh -c '[ "$(curl -sk -o /dev/null -w "%{http_code}" "http://mail.${DOMAIN}")" = "301" ]'
 
 echo ""
 
 # --- SSL certificates ---
 echo "[SSL Certificates]"
-check "mail.${DOMAIN}:443 valid cert"      check_ssl "mail.${DOMAIN}" 443
+if [ "$SNAPPYMAIL_ENABLE" = true ] || [ "$WEBMAIL_ENABLE" = true ]; then
+    check "mail.${DOMAIN}:443 valid cert"      check_ssl "mail.${DOMAIN}" 443
+fi
 check "mailcow.${DOMAIN}:443 valid cert"   check_ssl "mailcow.${DOMAIN}" 443
 check "mail-npm.${DOMAIN}:443 valid cert"  check_ssl "mail-npm.${DOMAIN}" 443
 
@@ -90,6 +135,26 @@ echo "[Mail Protocols]"
 check "SMTP (465 SSL)" sh -c "echo 'QUIT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:465 -quiet 2>/dev/null | grep -q '220'"
 check "IMAP (993 SSL)" sh -c "echo '1 LOGOUT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:993 -quiet 2>/dev/null | grep -q 'OK'"
 
+echo ""
+
+# --- Server policy and Webmail ---
+if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
+    echo "[Mail]"
+    check "Junk/Trash autoexpunge policy" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" --check
+fi
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    echo "[Webmail]"
+    check "Dovecot Webmail blocks" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" --check
+    check "Webmail DB column grants" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" --check
+    check "Unauthenticated logout: 403, no WWW-Authenticate" webmail_logout_unauthenticated
+    if [ "${WEBMAIL_MAIL_TLS_MODE:-verify}" = pin ]; then
+        if webmail_load_config "$ENV_FILE" "$MAILCOW_DIR"; then
+            check "TLS pin fingerprint matches current mail server" webmail_check_pin "$WEBMAIL_DIR"
+        else
+            check "Webmail pin configuration" false
+        fi
+    fi
+fi
 echo ""
 
 # --- Security ---

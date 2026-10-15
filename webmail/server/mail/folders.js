@@ -199,3 +199,5 @@ export function createFolderService({ imap, rulesService, logger, now = Date.now
   }
   return { folders, create, rename, remove, empty, storage };
 }
+
+export { rights as mailboxRights };

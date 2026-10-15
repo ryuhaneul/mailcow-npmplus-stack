@@ -6,10 +6,11 @@ set -euo pipefail
 # Usage: sudo ./scripts/teardown.sh
 # ============================================================
 
-MAILCOW_DIR="/home/mailcow-dockerized"
-NPMPLUS_DIR="/home/npmplus"
-SNAPPYMAIL_DIR="/home/snappymail"
-TOOLKIT_DIR="/home/mailcow-toolkit"
+MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
+NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
+SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
+TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,6 +26,7 @@ echo "  - Mailcow (all containers + data)"
 echo "  - NPMplus + CrowdSec"
 echo "  - Snappymail"
 echo "  - Toolkit"
+echo "  - Webmail (웹메일)"
 echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
@@ -51,6 +53,13 @@ if [ -d "$SNAPPYMAIL_DIR" ]; then
     docker compose down --remove-orphans -v 2>&1 | tail -3 || true
 fi
 
+# Stop Webmail even when its enable flag has since been turned off.
+if [ -d "$WEBMAIL_DIR" ]; then
+    log "Stopping Webmail..."
+    cd "$WEBMAIL_DIR"
+    docker compose down --remove-orphans -v 2>&1 | tail -3 || true
+fi
+
 # Remove external volume
 docker volume rm npmplus_npmplus-data 2>/dev/null && log "Removed npmplus_npmplus-data volume" || true
 
@@ -60,6 +69,7 @@ rm -rf "$MAILCOW_DIR"
 rm -rf "$NPMPLUS_DIR"
 rm -rf "$SNAPPYMAIL_DIR"
 rm -rf "$TOOLKIT_DIR"
+rm -rf "$WEBMAIL_DIR"
 
 # Remove cron
 rm -f /etc/cron.d/mailcow-cert-reload

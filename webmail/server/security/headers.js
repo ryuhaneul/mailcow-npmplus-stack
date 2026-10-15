@@ -20,7 +20,21 @@ export function installHeaders(app) {
       payload = JSON.stringify(errorBody('AUTH_FAILED', '접근할 수 없어요.'));
       reply.removeHeader('content-length');
     }
-    for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, value);
+    const pdfSandbox = reply.getHeader('content-security-policy') === 'sandbox';
+    let pathname = '';
+    try {
+      const url = new URL(request.url, 'http://localhost');
+      url.pathname = decodeURIComponent(url.pathname);
+      pathname = url.pathname;
+    } catch {}
+    for (const [name, value] of Object.entries(securityHeaders)) {
+      let header = value;
+      if (name === 'content-security-policy') {
+        if (pathname.startsWith('/starflow/')) header = header.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+        if (pdfSandbox) header = `${header}; sandbox`;
+      }
+      reply.header(name, header);
+    }
     return payload;
   });
 }

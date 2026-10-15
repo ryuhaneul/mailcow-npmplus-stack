@@ -1,0 +1,5 @@
+:root{
+  --mono:ui-monospace,"SFMono-Regular","JetBrains Mono","Cascadia Mono",Consolas,"Liberation Mono","Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",monospace;
+  --row:var(--row-h);
+}
+:root[data-density=compact]{--row:var(--row-h-compact)}

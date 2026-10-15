@@ -1,3 +1,4 @@
+import { fakeCompose } from './fake-compose.js';
 import { fakeReader } from './fake-reader.js';
 import { fakeSettings } from './fake-settings.js';
 import { parseSearch } from '../src/search.js';
@@ -5,8 +6,8 @@ import { fakeRules, rulesFixture } from './fake-rules.js';
 import { fakeIdentities, exampleIdentities, examplePrefs } from './fake-identities.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
 export const fakeConfigs = {
-  a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, version: '0.1.0' },
-  b: { brandName: '새빛 우편', orgName: '새빛 연구소', brandMark: '빛', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: null, version: '0.1.0' },
+  a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, contactsEnabled: true, autoexpungeDays: 30, version: '0.1.0' },
+  b: { brandName: '새빛 우편', orgName: '새빛 연구소', brandMark: '빛', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, contactsEnabled: true, autoexpungeDays: null, version: '0.1.0' },
 };
 const rights = { write: true, delete: true, insert: true, seen: true };
 const fixtureFolders = [
@@ -50,7 +51,8 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(state.protectedError && path!=='/api/auth/session')return fail(response,state.protectedError);
     if(['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers['x-webmail-csrf']!==state.csrf)return fail(response,'CSRF');
     if(path==='/api/auth/session')return send(response,200,publicSession());
-    if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
+    if(path==='/api/auth/logout'){state.authenticated=false;state.compose?.attachments.clear();return send(response,204);}
+    if(await fakeCompose(request,response,state,send,recorded))return;
     if(await fakeReader(request,response,state,send))return;
     if(await fakeSettings(request,response,state,send,recorded))return;
     if(path==='/api/prefs'&&request.method==='GET')return send(response,200,state.prefs);

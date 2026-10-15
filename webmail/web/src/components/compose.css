@@ -1,0 +1,32 @@
+.composer .compose-editor-wrap{padding:0;overflow:hidden;display:flex}
+.compose-editor{display:block;width:100%;height:100%;border:0;min-height:0}
+.composer.html .compose-editor-wrap{display:none}
+.composer .compose-alert{margin:0;padding:10px 20px;font-size:13px;color:var(--ink);background:var(--danger-bg);border-bottom:1px solid var(--line);overflow-wrap:anywhere;flex:none;max-height:180px;overflow:auto}
+.composer .compose-result{background:var(--sunken)}
+.compose-alert ul{margin:0;padding-left:18px}
+.compose-grants{padding:0 10px;font-size:12px;color:var(--ink-2);overflow-wrap:anywhere}
+.composer .compose-browse{color:var(--accent-ink);font-weight:700;text-decoration:underline;text-underline-offset:2px}
+.composer .drop{max-height:160px;overflow:auto}
+.composer .drop .att{min-width:0;max-width:100%;white-space:normal}
+.compose-filename{min-width:0;overflow-wrap:anywhere}
+.composer .drop .att .ib{width:22px;height:22px;flex:none}
+.composer .pill>span{overflow:hidden;text-overflow:ellipsis}
+.compose-field-error{grid-column:2/-1;font-size:12px;color:var(--danger)}
+.compose-format-panel>span{display:flex;align-items:center}
+.composer button[disabled]{cursor:default;opacity:.5}
+.composer .code-note.always{display:flex}
+@media(max-width:760px){.composer .fld{grid-template-columns:64px minmax(0,1fr) auto;padding-left:14px}.composer .c-head{padding-left:14px}.composer .c-head .saved{font-size:11px;margin-left:6px}.composer .fld .side-l button{padding:4px}.composer .c-foot{padding-left:14px}.composer .sigsel{max-width:140px;overflow:hidden;text-overflow:ellipsis}.composer .compose-format-panel{grid-template-columns:64px minmax(0,1fr)}.compose-format-panel>span{grid-column:2;justify-self:end}.composer .c-head h2{font-size:14px}}
+
+.composer .fmt select.size{border:0;background:var(--surface);color:var(--ink-2)}
+
+.composer .compose-source-shell{position:relative;padding:0;overflow:hidden}
+.compose-source-pre,.compose-source-input{position:absolute;top:0;left:0;box-sizing:border-box;margin:0;border:0;padding:14px 20px 14px 54px;font-family:var(--mono);font-size:12.5px;font-weight:400;font-style:normal;line-height:1.75;letter-spacing:0;tab-size:2;white-space:pre;word-break:normal;overflow-wrap:normal;font-variant-ligatures:none;text-align:left;direction:ltr}
+.compose-source-pre{width:100%;height:100%;overflow:auto;scrollbar-width:none;pointer-events:none;color:var(--ink);background:var(--sunken)}
+.compose-source-pre::-webkit-scrollbar{display:none}
+.compose-source-line{position:relative;display:block;min-height:1.75em;width:max-content;min-width:100%}
+.compose-source-line::before{content:attr(data-line);position:absolute;left:-40px;width:26px;text-align:right;color:var(--ink-3);user-select:none}
+.compose-source-input{width:100%;height:100%;resize:none;overflow:auto;background:transparent;color:var(--ink);-webkit-text-fill-color:transparent;caret-color:var(--ink);outline-offset:-3px}
+.compose-source-input::selection{background:var(--sel);color:var(--ink);-webkit-text-fill-color:var(--ink)}
+.compose-source-shell.is-composing .compose-source-pre{visibility:hidden}
+.compose-source-shell.is-composing .compose-source-input{-webkit-text-fill-color:var(--ink)}
+@media(forced-colors:active){.compose-source-pre{visibility:hidden}.compose-source-input{background:Canvas;color:CanvasText;-webkit-text-fill-color:CanvasText;caret-color:CanvasText}}

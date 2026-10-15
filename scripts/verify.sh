@@ -57,9 +57,17 @@ check_http() {
 # Called indirectly by check.
 # shellcheck disable=SC2329
 webmail_container_running() { [ "$(docker inspect webmail --format '{{.State.Running}}' 2>/dev/null)" = true ]; }
-# Called indirectly by check.
-# shellcheck disable=SC2329
-webmail_container_healthy() { [ "$(docker inspect webmail --format '{{.State.Health.Status}}' 2>/dev/null)" = healthy ]; }
+check_container_healthy() {
+    local container="$1" state waited=0
+    state=$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
+    # Allow three 30s healthcheck intervals after a restart; retry only starting.
+    while [ "$state" = starting ] && [ "$waited" -lt 90 ]; do
+        sleep 5
+        waited=$((waited + 5))
+        state=$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null) || state=unavailable
+    done
+    check "$container healthy (state=${state:-unavailable}, waited=${waited}s)" test "$state" = healthy
+}
 # Called indirectly by check.
 # shellcheck disable=SC2329
 webmail_logout_unauthenticated() {
@@ -83,19 +91,19 @@ echo ""
 # --- Container status ---
 echo "[Containers]"
 check "npmplus running"       docker inspect npmplus --format '{{.State.Running}}' 2>/dev/null
-check "npmplus healthy"       sh -c '[ "$(docker inspect npmplus --format "{{.State.Health.Status}}" 2>/dev/null)" = "healthy" ]'
+check_container_healthy npmplus
 check "crowdsec running"      docker inspect crowdsec --format '{{.State.Running}}' 2>/dev/null
 if [ "$SNAPPYMAIL_ENABLE" = true ]; then
     check "snappymail running" docker inspect snappymail --format '{{.State.Running}}' 2>/dev/null
 fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
     check "webmail running" webmail_container_running
-    check "webmail healthy" webmail_container_healthy
+    check_container_healthy webmail
 fi
 check "nginx-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q nginx-mailcow'
 check "postfix-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q postfix-mailcow'
 check "dovecot-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q dovecot-mailcow'
-check "unbound-mailcow healthy" sh -c 'docker ps --format "{{.Names}} {{.Status}}" | grep unbound-mailcow | grep -q healthy'
+check_container_healthy unbound-mailcow
 
 echo ""
 

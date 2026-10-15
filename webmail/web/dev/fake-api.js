@@ -1,3 +1,4 @@
+import { fakeRules, rulesFixture } from './fake-rules.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
 export const fakeConfigs = {
   a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, version: '0.1.0' },
@@ -13,7 +14,7 @@ const messages = {
   EMAIL_FORMAT: '메일 주소를 확인해 주세요.', AUTH_FAILED: '메일 주소나 암호가 맞지 않아요.', RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤 다시 시도해 주세요.', MAIL_UNAVAILABLE: '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.', NO_SESSION: '로그인이 필요해요.', SESSION_EXPIRED: '로그인이 만료됐어요. 다시 로그인해 주세요.', CSRF: '요청을 확인할 수 없어요.',
 };
 export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
-  const state = { authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:[] }, vacation: {enabled:true,until:'2026-10-17'} };
+  const state = { rules: rulesFixture(), rulesError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
     response.statusCode=status;response.setHeader('Content-Type','application/json; charset=utf-8');response.setHeader('Cache-Control','no-store');response.end(payload===undefined ? undefined : JSON.stringify(payload));
@@ -39,7 +40,30 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(path==='/api/auth/session')return send(response,200,publicSession());
     if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
     if(path==='/api/folders')return send(response,200,{folders:state.folders,virtualAllMail:'WebmailVirtual/AllMail'});
-    if(path==='/api/storage')return send(response,200,state.storage);
+    if(path==='/api/storage')return send(response,200,new URL(request.url,'http://localhost').searchParams.get('quotaOnly') === '1' ? {...state.storage,folders:[]} : state.storage);
+    const empty = path.match(/^\/api\/folders\/([^/]+)\/empty$/);
+    if(empty && request.method==='POST') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      const body=JSON.parse(raw);
+      const folder=state.storage.folders.find(folder=>folder.path===decodeURIComponent(empty[1]));
+      if(!folder)return send(response,404,{error:{code:'NOT_FOUND',message:'폴더를 찾을 수 없어요.'}});
+      state.requests.at(-1).body={confirmName:body.confirmName};
+      if(body.confirmName!==folder.name)return send(response,422,{error:{code:'CONFIRM_MISMATCH',message:'폴더 이름이 맞지 않아요.'}});
+      const result={deleted:folder.messages,freedBytes:folder.sizeBytes};
+      folder.messages=0;folder.sizeBytes=0;
+      state.storage.quota.usedBytes=Math.max(0,state.storage.quota.usedBytes-result.freedBytes);
+      const ratio=state.storage.quota.usedBytes/state.storage.quota.limitBytes;
+      state.storage.level=ratio>=.95?'crit':ratio>=.8?'warn':'ok';
+      return send(response,200,result);
+    }
+    if(path==='/api/password' && request.method==='POST') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      const body=JSON.parse(raw);
+      const error=!body.current || !body.next || !body.next2 ? [422,'PW_FORMAT','암호를 입력해 주세요.'] : body.next!==body.next2 ? [422,'PW_MISMATCH','새 암호가 서로 같지 않아요.'] : body.next===body.current ? [422,'PW_SAME','현재 암호와 다른 새 암호를 입력해 주세요.'] : body.current!=='example-password' ? [403,'CURRENT_WRONG','현재 암호가 맞지 않아요.'] : null;
+      if(error)return send(response,error[0],{error:{code:error[1],message:error[2]}});
+      state.authenticated=false;return send(response,200,{relogin:true});
+    }
+    if(await fakeRules(request,response,state,send))return;
     if(path==='/api/dev/vacation')return send(response,200,state.vacation);
     send(response,404,{error:{code:'NOT_FOUND',message:'요청한 경로를 찾을 수 없어요.'}});
   }

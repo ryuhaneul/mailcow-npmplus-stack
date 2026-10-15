@@ -35,7 +35,9 @@ docker compose -f webmail/test/int/compose.int.yml run --rm int --group core
 Docker 없는 검사는 이 저장소의 리터럴 COPY 경로·시험 JS 입력 포함·배포 test 제외와 두 ignore 정책의 차이를 확인하고, 기존 배포 단계 모사 빌드도 실행한다.
 ignore의 부정·이스케이프·문자 클래스 구문이나 COPY 형식을 바꾸면 검사도 검토해야 하며, 실제 Docker 빌드를 대체하지 않는다.
 
-core 마지막 XFF 시험은 실행 컨테이너의 소스 IP를 15분 제한하고 출발 IP와 남은 초를 출력한다. IR2 전에는 **실패 제한 만료(15분) 또는 main 판단의 웹메일 재시작**이 필수다. 새 컨테이너가 같은 IP를 재사용할 수 있다. 아래 R-XFF 수동 게이트까지 마친 뒤 진행한다. IP 제한 시험을 앞당기거나 병렬 실행하지 않는다.
+core 마지막 IP 제한 시험은 웹메일에 직접 요청하고, 위조 XFF를 보내지 않는다. 서로 다른 존재하지 않는 합성 주소로 5회 실패한 뒤 6회째 429인지 확인해 계정 제한과 구분한다. 실제 시험 계정에는 로그인 실패를 보내지 않는다. 출발 IP와 남은 초를 출력한다. IR2 전에는 **실패 제한 만료(15분) 또는 main 판단의 웹메일 재시작**이 필수다. 새 컨테이너가 같은 IP를 재사용할 수 있다. IP 제한 시험을 앞당기거나 병렬 실행하지 않는다.
+
+**위조 XFF 무시는 내부망 안에서 자동으로 확인 불가 — 수동 게이트 R-XFF(바깥 주소)로 확인.** 웹메일이 mailcow 내부망 전체를 신뢰하므로 그 망에서 보낸 위조 XFF가 신뢰되는 것은 배포 설계에 맞는다. NPMplus를 거쳐도 시험 컨테이너 주소까지 신뢰 목록에 포함되며, 다른 사설망을 써도 NPMplus가 사설 대역의 XFF를 신뢰한다. 자동 시험의 IP 제한 통과를 위조 차단 통과로 기록하지 않는다.
 
 ```sh
 docker compose -f webmail/test/int/compose.int.yml run --rm int --group mail,sieve,account
@@ -75,3 +77,20 @@ WEBMAIL_INT_GROUP=mail,sieve,account npm run test:int
 ```
 
 `npm run test:int -- --group core`는 Node 기본 테스트 실행기가 임의 인자를 받지 않으므로 사용하지 않는다. 그룹 인자는 위 실행기/compose entrypoint에 전달하거나 `WEBMAIL_INT_GROUP`을 사용한다. 전체 그룹도 한 파일에서 순서대로 실행하며 core의 실패 제한 시험이 마지막이다. VM 실측 없이 로컬 건너뜀 결과를 IR 통과로 기록하지 않는다.
+
+## IR1 시험 수정과 잔여 자료 조회
+
+가상 목록 동작 시험은 HTTP 스팸 이동 뒤 **새로 인증한 IMAP 연결**로 원 폴더의 STATUS MESSAGES=0을 확인한다. 기존 관찰 연결이 그 폴더를 SELECT한 상태에서 받은 값에 의존하지 않는다. [RFC 9051 STATUS](https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.11)도 선택된 폴더 상태 조회에는 STATUS를 쓰지 않도록 한다. IR1의 간헐적 60초 검색 지연은 이 수정으로 해결됐다고 간주하지 않으며 VM 재실행으로 확인한다.
+
+WAF 프로브의 Sieve 값은 앱 검사를 통과하는 한글·따옴표·꺾쇠·세미콜론으로 구성하고, 저장 성공 뒤 원 문서를 복원한다. 필터 상태가 `ok`/`none`이 아니면 저장 행에 `건너뜀(상태: ...)`를 표시하며 미완료 종료 코드 2를 유지한다.
+
+남은 자료는 최신 int 이미지를 빌드한 뒤 아래 명령으로 **목록만** 확인한다(저장소 루트, 같은 VM env/인증서 사용).
+
+```sh
+docker compose -f webmail/test/int/compose.int.yml run --rm --entrypoint node int test/int/list-artifacts.mjs
+docker compose -f webmail/test/int/compose.int.yml run --rm --entrypoint node int test/int/list-artifacts.mjs --users user1,user7 --subject '별도 진단 제목'
+```
+
+기본 대상은 M02 계정 10개다. `Int-<uuid>`/`Int-<uuid>-한글`·`IntExcluded` 폴더와 Drafts의 `Int-<uuid>`, `합성 WAF` 접두 제목 및 정확히 `plain`/`full`/`noscript`인 제목을 후보로 출력한다. `--subject`는 추가 정확한 제목이며 여러 번 지정할 수 있다. 이름으로 찾은 **후보**이므로 삭제 여부는 main이 판단한다. 명령은 삭제·플래그 변경을 하지 않으며 Drafts는 EXAMINE, 본문 없이 UID/제목만 조회한다. 앱 임시 첨부 파일은 IMAP 목록 대상이 아니다.
+
+출력은 계정·종류·경로·메일 수 또는 UIDVALIDITY/UID/제목의 JSON Lines와 계정별 합계다. 일치 항목이 없어도 합계 0을 출력한다. 조회 실패는 `LIST_FAILED` 행과 종료 코드 1로 표시하고, 암호·쿠키·메일 본문·연결 오류 원문은 출력하지 않는다.

@@ -724,6 +724,14 @@ webmail_prepare "$PWD/.env" /home/mailcow-dockerized /home/webmail
 
 TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 서버는 `pin`을 선택합니다. 공개 인증서만 실제 IMAP TLS 접속에서 추출하며 개인 키를 읽거나 복사하지 않습니다. 공개 인증서는 `/home/webmail/mail-tls-pin.pem`이고 마운트는 `:ro,z`로 SELinux 공유 문맥을 적용합니다. setup의 Phase 8에서 인증서가 바뀌면 pin을 다시 추출합니다. update도 mailcow 업데이트 뒤 재추출하며 지문이 달라졌을 때 pin 변경에 따른 재기동을 수행합니다. 웹메일 이미지·환경 업데이트 자체에 따른 재기동은 별개입니다.
 
+### 웹메일 고정 주소와 IP 변경
+
+웹메일을 켤 때에는 운영자가 `WEBMAIL_IPV4`를 지정하는 것을 **권장**합니다. 해당 mailcow 네트워크 안에서 사용 중이지 않고 다른 서비스에 예약되지 않은 주소를 골라 서버 `.env`에 직접 적고, 위 설치·업데이트 절차로 신뢰 블록과 웹메일 환경을 반영하세요. 이 구성은 mailcow 실패 차단(fail2ban)이 실제 사용자 IP를 보도록 하며, 재생성 때 같은 내부 주소를 유지해 앞단 프록시의 옛 주소 캐시 문제도 예방합니다. 처음 프록시 호스트를 만들 때부터 고정 주소를 사용하면 이후 같은 주소로 재생성할 때 IP 변경에 따른 캐시 문제가 생기지 않습니다. setup·update는 이 선택값을 자동 생성하거나 덮어쓰지 않습니다.
+
+이미 운영 중인 웹메일을 수동 `docker compose up -d`로 재생성하면서 주소가 바뀌면 최대 10분 동안 502가 날 수 있습니다(이번 시험에서는 4~8분). 고정 판 NPMplus는 [공유 upstream과 resolve](https://github.com/ZoeyVid/NPMplus/blob/2026-07-24-r1/backend/templates/_upstream.conf)를 사용하고 [resolver에 valid 상한을 지정하지 않으며](https://github.com/ZoeyVid/NPMplus/blob/2026-07-24-r1/rootfs/usr/local/nginx/conf/nginx.conf#L39), Docker DNS의 [기본 TTL은 600초](https://github.com/moby/moby/blob/v28.5.1/libnetwork/resolver.go#L57)입니다. 단순 nginx reload도 이전 주소·유효기간을 이어받을 수 있어 즉시 캐시를 비우는 방법으로 보장되지 않습니다.
+
+전체 `update.sh`는 Phase6에서 **기존 동작인 NPMplus 재시작 1회**로 캐시를 초기화하므로 정상 완료하면 위 TTL 대기를 피합니다. update는 고정 주소를 지정하지 않은 웹메일의 재생성 전후 주소가 달라졌을 때만 감지 경고를 남깁니다. 경고가 떴거나 수동 재생성 뒤 502가 계속되면, 운영자는 전체 update의 Phase6 재시작 성공 여부를 확인하고 필요하면 다른 프록시의 영향도 확인한 뒤 `docker restart npmplus`를 직접 실행하세요. NPMplus 재시작은 모든 앞단 프록시에 영향을 주며 소요 시간은 환경에 따라 다릅니다. 이번 변경은 자동 IP 선택·프록시 설정 변경·추가 재시작을 하지 않습니다.
+
 ### 검증·되돌리기
 
 `sudo ./scripts/verify.sh`는 선택 서비스의 컨테이너 상태, 주소별 `/healthz`, Dovecot·DB 계정, 비로그인 logout의 403 및 WWW-Authenticate 부재를 확인합니다. 접근 목록이 있는 주소의 외부 HTTP 검사는 건너뜀으로 표시합니다. pin 모드는 저장한 인증서와 현재 메일 서버의 SHA-256 지문도 비교합니다.

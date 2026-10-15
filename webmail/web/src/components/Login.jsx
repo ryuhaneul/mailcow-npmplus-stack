@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { loadSessionPrefs } from '../state/prefs.js';
 import { api } from '../api.js';
 import { navigate } from '../router.js';
 import { toast } from '../state/toast.js';
@@ -15,7 +16,7 @@ export default function Login() {
     setBusy(true); setError('');
     try {
       await api('/api/auth/login', { method: 'POST', body: { email, password } });
-      setPassword(''); toast.value = null; navigate('inbox');
+      setPassword(''); await loadSessionPrefs(); toast.value = null; navigate('inbox');
     } catch (failure) { setError(failure.message); setPassword(''); }
     finally { setBusy(false); }
   }

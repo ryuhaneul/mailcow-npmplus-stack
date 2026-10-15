@@ -226,14 +226,15 @@ else
         # shellcheck disable=SC2329
         waf_bouncer_recent() {
             docker exec "$WAF_CS" cscli bouncers list -o json | python3 -c '
-import datetime,json,sys
+import datetime,json,re,sys
 rows=json.load(sys.stdin)
 if isinstance(rows,dict): rows=rows.get("bouncers",rows.get("data",[]))
 now=datetime.datetime.now(datetime.timezone.utc)
 for row in rows:
     if row.get("name") != "npmplus": continue
     try:
-        stamp=datetime.datetime.fromisoformat(str(row.get("last_pull", "")).replace("Z", "+00:00"))
+        value=re.sub(r"(\.\d{6})\d+",r"\1",str(row.get("last_pull", "")))
+        stamp=datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
         if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=datetime.timezone.utc)
         sys.exit(0 if 0 <= (now-stamp).total_seconds() <= 300 else 1)
     except ValueError: pass
@@ -248,10 +249,11 @@ sys.exit(1)'
                 key=$(sed -n "s/^API_KEY=//p" /data/crowdsec/crowdsec.conf)
                 test -n "$key" || exit 1
                 printf "X-Crowdsec-Appsec-Api-Key: %s\n" "$key" | \
-                    curl -sS --max-time 5 --header @- -o /dev/null -w "%{http_code}" \
+                    curl -sS --max-time 5 --header @- -A "mailstack-verify/1" -o /dev/null -w "%{http_code}" \
                     -H "X-Crowdsec-Appsec-Host: $1" \
                     -H "X-Crowdsec-Appsec-Ip: 127.0.0.1" \
                     -H "X-Crowdsec-Appsec-Uri: /" \
+                    -H "X-Crowdsec-Appsec-User-Agent: mailstack-verify/1" \
                     -H "X-Crowdsec-Appsec-Verb: GET" http://crowdsec:7422/
             ' sh "mail.${DOMAIN}") || return 1
             [[ $code = 200 || $code = 403 ]]

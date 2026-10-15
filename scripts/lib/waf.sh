@@ -601,6 +601,11 @@ _waf_lapi_code() {
     '
 }
 
+_waf_log() {
+    printf '[waf] %s\n' "$1" >&2
+    if [ -n "${LOGFILE:-}" ]; then printf '[waf] %s\n' "$1" >> "$LOGFILE"; fi
+}
+
 _waf_bouncer_registered() {
     set +x
     local cs=$1 npm=$2 code
@@ -623,16 +628,20 @@ _waf_bouncer_registered() {
         waf_error 'LAPI rejected key; CrowdSec env fingerprint mismatch — recreate CrowdSec before retrying'
         return 1
     fi
+    _waf_log 'CrowdSec 바운서 등록이 현재 키와 달라 다시 등록합니다 (HEAD 403)'
     # The image entrypoint registers its env key after the stale DB entry is removed.
     docker exec "$cs" cscli bouncers delete npmplus >/dev/null 2>&1 || {
         waf_error 'stale npmplus bouncer removal failed'; return 1;
     }
+    _waf_log '예전 npmplus 바운서 등록 삭제됨'
     docker restart "$cs" >/dev/null || { waf_error 'CrowdSec restart failed'; return 1; }
+    _waf_log 'CrowdSec 재시작됨; healthy 확인 대기'
     _waf_healthy "$cs" || return 1
     code=$(printf '%s' "$CROWDSEC_BOUNCER_KEY" | _waf_lapi_code "$npm") || {
         waf_error 'LAPI authentication check failed after bouncer registration'; return 1;
     }
     [ "$code" = 200 ] || { waf_error "LAPI authentication failed after bouncer registration (HTTP $code)"; return 1; }
+    _waf_log '다시 등록됨, 인증 확인 200'
 }
 
 # Hash content and explicit absence; credentials never appear in the manifest.

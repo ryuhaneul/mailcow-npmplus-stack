@@ -7,6 +7,7 @@ import { encodeRef } from '../mail/ref.js';
 import { asciiLower } from './model.js';
 
 const sessions = new WeakMap();
+export function invalidateInboxHeaders(session) { sessions.delete(session); }
 const ttl = 5 * 60_000;
 const limit = 20_000;
 const batchSize = 1000;

@@ -12,4 +12,6 @@ export default async function rulesRoutes(app, { service }) {
   app.post('/api/rules/reactivate', handler(service.reactivate));
   app.post('/api/rules/restore', handler(service.restore));
   app.post('/api/rules/import', handler(service.importRules));
+  app.post('/api/rules/preview', handler(service.preview));
+  app.post('/api/rules/apply-existing', handler(service.applyExisting));
 }

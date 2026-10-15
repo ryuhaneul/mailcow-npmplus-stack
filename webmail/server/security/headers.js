@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { safeStatus, errorBody } from '../errors.js';
 
 export const securityHeaders = Object.freeze({
@@ -21,5 +22,17 @@ export function installHeaders(app) {
     }
     for (const [name, value] of Object.entries(securityHeaders)) reply.header(name, value);
     return payload;
+  });
+}
+
+// Fastify가 신뢰 경계까지 계산한 체인만 읽는다. 원본 XFF는 파싱하지 않는다.
+export function installClientIp(app) {
+  app.addHook('onRequest', async request => {
+    let ip;
+    for (const address of request.ips) {
+      if (!isIP(address)) break;
+      ip = address;
+    }
+    Object.defineProperty(request, 'ip', { value: ip, enumerable: true, configurable: true });
   });
 }

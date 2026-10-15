@@ -6,14 +6,17 @@ import { resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import { logOptions } from './log.js';
 import { installErrors, errorBody } from './errors.js';
-import { installHeaders } from './security/headers.js';
+import { installHeaders, installClientIp } from './security/headers.js';
 import healthRoutes from './routes/health.js';
+import { installAuth } from './routes/auth.js';
 import configRoutes from './routes/config.js';
 
-export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel) } = {}) {
+export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
+  installClientIp(app);
+  await installAuth(app, { ...auth, config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });
   const root = resolve(staticDir);

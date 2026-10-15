@@ -1,10 +1,26 @@
 import { route, navigate } from './router.js';
 import { list, cursor, listLocation, isListRoute, runAction } from './state/list.js';
 import { toggleSelection, selection } from './state/selection.js';
-// Each screen registers its shortcuts when that screen is implemented.
+const scopes = new Map();
+// Example: registerShortcuts('read', { r: reply, a: replyAll, f: forward }).
+// Compose may register 'Ctrl+Enter' and 'Ctrl+Shift+H', including inside inputs.
+export function registerShortcuts(scope, handlers) {
+  scopes.set(scope, handlers);
+  return () => { if (scopes.get(scope) === handlers) scopes.delete(scope); };
+}
+function registeredShortcut(event, editing) {
+  const key = event.ctrlKey && event.key === 'Enter' ? 'Ctrl+Enter' : event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'h' ? 'Ctrl+Shift+H' : event.key.toLowerCase();
+  if (editing && !(route.value.name === 'compose' && ['Ctrl+Enter','Ctrl+Shift+H'].includes(key))) return false;
+  if ((event.ctrlKey || event.metaKey || event.altKey) && !['Ctrl+Enter','Ctrl+Shift+H'].includes(key)) return false;
+  const handler = scopes.get(route.value.name)?.[key];
+  if (!handler) return false;
+  event.preventDefault(); handler(event); return true;
+}
 export function initShortcuts(handle) {
   const onKey = event => {
-    if (event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
+    if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
+    const editing = Boolean(event.target.closest('input,textarea,select,[contenteditable]'));
+    if (registeredShortcut(event, editing) || editing) return;
     handle?.(event);
   };
   document.addEventListener('keydown', onKey);
@@ -18,6 +34,8 @@ export function initMailboxShortcuts() {
     const key=event.key.toLowerCase();
     if(go){go=false;if(key==='i'){event.preventDefault();navigate('inbox');return;}if(key==='s'){event.preventDefault();navigate('settings');return;}}
     if(key==='g'){go=true;return;}
+    if(key==='?'){event.preventDefault();navigate('keys');return;}
+    if(key==='c'){event.preventDefault();navigate('compose');return;}
     if(key==='/'){event.preventDefault();document.getElementById('mail-search')?.focus();return;}
     if(key==='u'&&route.value.name==='read'){event.preventDefault();navigate(listLocation.value);return;}
     if(!isListRoute(route.value))return;

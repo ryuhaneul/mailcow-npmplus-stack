@@ -13,9 +13,11 @@ export function parseRoute(hash = '') {
   return Object.hasOwn(titles, name) ? { name, value, title: titles[name], ...(query === undefined ? {} : { query }), ...(q ? { q } : {}) } : { name: 'inbox', value: '', title: titles.inbox };
 }
 export const route = signal(parseRoute());
-export function navigate(path) { location.hash = path; route.value = parseRoute(location.hash); }
+export const keysOpen = signal(false);
+function updateRoute() { const next = parseRoute(location.hash); keysOpen.value = next.name === 'keys'; if (!keysOpen.value) route.value = next; }
+export function navigate(path) { location.hash = path; updateRoute(); }
 export function initRouter() {
-  const update = () => { route.value = parseRoute(location.hash); };
+  const update = updateRoute;
   update(); window.addEventListener('hashchange', update);
   return () => window.removeEventListener('hashchange', update);
 }

@@ -920,6 +920,23 @@ except: pass
 # Generate self-signed cert, upload to NPM + place files in volume, return cert_id
 upload_selfsigned_cert() {
     local domain="$1"
+    local reusable
+    reusable=$(curl -fsk --max-time 30 -b "$COOKIE_JAR" "${NPM_API}/nginx/certificates" | python3 -c '
+import sys,json
+items=json.load(sys.stdin)
+if not isinstance(items,list): sys.exit(1)
+matches=[item for item in items if item.get("provider")=="other" and item.get("nice_name")==sys.argv[1]+" (self-signed)"]
+if len(matches)>1: sys.exit(1)
+identity=matches[0].get("id") if matches else 0
+if not isinstance(identity,int) or identity<0 or (matches and identity==0): sys.exit(1)
+print(identity)
+' "$domain") || { err "  $domain: self-signed certificate lookup failed or is ambiguous; recovery stopped"; return 1; }
+    if [ "$reusable" != 0 ]; then
+        log "  $domain: reusing self-signed certificate $reusable"
+        echo "$reusable"
+        return 0
+    fi
+    log "  $domain: uploading a new self-signed certificate"
     local tmpdir
     tmpdir=$(mktemp -d)
 
@@ -928,7 +945,7 @@ upload_selfsigned_cert() {
         -subj "/CN=${domain}" 2>/dev/null
 
     local result
-    result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/certificates" \
+    result=$(curl -sk --max-time 30 -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/certificates" \
         -F "nice_name=${domain} (self-signed)" \
         -F "provider=other" \
         -F "certificate=@${tmpdir}/cert.pem" \
@@ -995,13 +1012,19 @@ for h in json.load(sys.stdin):
         dns_ok=false
     fi
 
-    local result host_id cert_id
+    # ACL fields were resolved before any proxy creation (unknown formats fail closed).
+    local access_json=""
+    if [ -n "$access_list_id" ] && [ "$access_list_id" != 0 ]; then
+        access_json="$WEBMAIL_ACCESS_FIELDS"
+    fi
+
+    local result host_id=0 cert_id
     local adv_json
     adv_json=$(echo "$advanced" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
 
     if [ "$dns_ok" = "true" ]; then
         # DNS exists → try Let's Encrypt
-        result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
+        result=$(curl -sk --max-time 120 -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
             -H "Content-Type: application/json" \
             -d "{
                 \"domain_names\": [\"${domain}\"],
@@ -1013,28 +1036,49 @@ for h in json.load(sys.stdin):
                 \"block_exploits\": false,
                 \"allow_websocket_upgrade\": false,
                 \"http2_support\": ${http2},
-                \"access_list_id\": ${access_list_id},
+                ${access_json}
                 \"advanced_config\": ${adv_json},
                 \"meta\": {\"letsencrypt_email\": \"${NPM_ADMIN_EMAIL}\", \"letsencrypt_agree\": true, \"dns_challenge\": false},
                 \"locations\": []
-            }" 2>/dev/null)
+            }" 2>/dev/null) || result=""
 
         host_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','FAIL'))" 2>/dev/null || echo "FAIL")
         cert_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('certificate_id','FAIL'))" 2>/dev/null || echo "FAIL")
 
-        if [ "$host_id" != "FAIL" ]; then
+        if [ "$host_id" != "FAIL" ] && [[ "$cert_id" =~ ^[1-9][0-9]*$ ]]; then
             log "  $domain → ${scheme}://${host}:${port} (host=$host_id, cert=$cert_id, LE)"
             echo "$cert_id"
             return 0
         fi
 
         warn "  $domain: Let's Encrypt failed, falling back to self-signed"
+        # ACME may fail after inserting the host, or complete after our timeout.
+        local remaining
+        remaining=$(curl -fsk --max-time 30 -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
+import sys,json
+items=json.load(sys.stdin)
+if not isinstance(items,list): sys.exit(1)
+matches=[item for item in items if sys.argv[1] in item.get("domain_names",[])]
+if len(matches)>1: sys.exit(1)
+if not matches: print("0 0"); sys.exit(0)
+item=matches[0]
+if (item.get("forward_host"),item.get("forward_port"),item.get("forward_scheme")) != (sys.argv[2],int(sys.argv[3]),sys.argv[4]): sys.exit(1)
+identity,certificate=item.get("id"),item.get("certificate_id")
+if not isinstance(identity,int) or identity<1 or not isinstance(certificate,int) or certificate<0: sys.exit(1)
+print(identity,certificate)
+' "$domain" "$host" "$port" "$scheme") || { err "  $domain: could not identify the host after ACME failure; recovery stopped"; return 1; }
+        read -r host_id cert_id <<< "$remaining"
+        if [ "$cert_id" -gt 0 ]; then
+            log "  $domain: certificate $cert_id already attached; no recovery needed"
+            echo "$cert_id"
+            return 0
+        fi
     fi
 
     # DNS missing or LE failed → self-signed cert
     warn "  $domain: no DNS — using self-signed certificate"
     local ss_cert_id
-    ss_cert_id=$(upload_selfsigned_cert "$domain")
+    ss_cert_id=$(upload_selfsigned_cert "$domain") || return 1
 
     if [ "$ss_cert_id" = "FAIL" ]; then
         err "  $domain: self-signed cert upload failed"
@@ -1042,7 +1086,19 @@ for h in json.load(sys.stdin):
         return 1
     fi
 
-    result=$(curl -sk -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
+    if [ "$host_id" -gt 0 ]; then
+        result=$(curl -fsk --max-time 30 -b "$COOKIE_JAR" -X PUT "${NPM_API}/nginx/proxy-hosts/${host_id}" \
+            -H "Content-Type: application/json" -d "{\"certificate_id\":${ss_cert_id}}" 2>/dev/null) || return 1
+        if ! echo "$result" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("certificate_id")==int(sys.argv[1]) else 1)' "$ss_cert_id"; then
+            err "  $domain: certificate attachment failed"
+            return 1
+        fi
+        log "  $domain: recovered host $host_id with self-signed certificate $ss_cert_id"
+        echo "$ss_cert_id"
+        return 0
+    fi
+
+    result=$(curl -sk --max-time 30 -b "$COOKIE_JAR" -X POST "${NPM_API}/nginx/proxy-hosts" \
         -H "Content-Type: application/json" \
         -d "{
             \"domain_names\": [\"${domain}\"],
@@ -1054,7 +1110,7 @@ for h in json.load(sys.stdin):
             \"block_exploits\": false,
             \"allow_websocket_upgrade\": false,
             \"http2_support\": ${http2},
-                \"access_list_id\": ${access_list_id},
+                ${access_json}
             \"advanced_config\": ${adv_json},
             \"locations\": []
         }" 2>/dev/null)
@@ -1097,6 +1153,23 @@ sys.exit(0 if isinstance(item.get("items"),list) and not item["items"] else 1)
     if [ "$WEBMAIL_PROXY_ALLOWED" = false ]; then
         warn "Webmail access list missing, unreadable or contains authentication users; proxy creation skipped"
     fi
+fi
+
+# Resolve restricted-host API fields before any create call; never fall back to public.
+WEBMAIL_ACCESS_FIELDS=""
+if [ "$WEBMAIL_PROXY_ALLOWED" = true ] && [ "$WEBMAIL_ACCESS_ID" != 0 ]; then
+    WEBMAIL_ACCESS_FIELDS=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
+import sys,json
+hosts=json.load(sys.stdin)
+identity=int(sys.argv[1])
+if not isinstance(hosts,list) or identity < 1: sys.exit(1)
+if not hosts or any("npmplus_access_list_ids" in host for host in hosts):
+    fields={"npmplus_access_list_ids":[identity],"npmplus_access_list_type":"custom"}
+elif any("access_list_id" in host for host in hosts):
+    fields={"access_list_id":identity}
+else: sys.exit(1)
+print(json.dumps(fields)[1:-1]+",")
+' "$WEBMAIL_ACCESS_ID") || die "NPM API 형식을 판별할 수 없음"
 fi
 
 # 1. mail.DOMAIN follows the selected webmail service. Both disabled: no proxy.

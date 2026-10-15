@@ -1,6 +1,6 @@
 services:
   npmplus:
-    image: zoeyvid/npmplus:latest
+    image: zoeyvid/npmplus:2026-07-24-r1@sha256:f7f6ca26082036ee6387a7da336267fe61f16b1eb8087dd964237238b59479ef
     container_name: npmplus
     restart: always
     # NPMplus 는 fancyindex header/footer 를 전역 설정으로 열어두는데,
@@ -31,7 +31,7 @@ services:
       - crowdsec
 
   crowdsec:
-    image: crowdsecurity/crowdsec:latest
+    image: crowdsecurity/crowdsec:v1.7.8@sha256:2f527c9bb8b367120eb08b82890aa912ce96bfa1ada93dda0721700e4b4e0dde
     container_name: crowdsec
     restart: always
     environment:

@@ -40,12 +40,12 @@ os.umask(0o077)
 def fail(message):
     raise RuntimeError(message)
 
-def request(method, path, payload=None, body=None, content_type=None):
+def request(method, path, payload=None, body=None, content_type=None, timeout=30):
     data = body if body is not None else (json.dumps(payload).encode() if payload is not None else None)
     headers = {'Content-Type': content_type or 'application/json'}
     req = urllib.request.Request(api + path, data=data, headers=headers, method=method)
     try:
-        with opener.open(req, timeout=30) as response:
+        with opener.open(req, timeout=timeout) as response:
             raw = response.read()
         return json.loads(raw) if raw.strip() else None
     except (urllib.error.URLError, ValueError, TimeoutError) as error:
@@ -117,6 +117,16 @@ def select_access():
     return identity
 
 def upload_selfsigned(name):
+    certificates = request('GET', '/nginx/certificates')
+    if not isinstance(certificates, list): fail('invalid certificate-list response; recovery stopped')
+    matches = [item for item in certificates if item.get('provider') == 'other' and item.get('nice_name') == f'{name} (self-signed)']
+    if len(matches) > 1: fail(f'{name}: multiple matching self-signed certificates; recovery stopped')
+    if matches:
+        identity = matches[0].get('id')
+        if not isinstance(identity, int) or identity < 1: fail('invalid reusable certificate ID')
+        print(f'[webmail-cutover] {name}: reusing self-signed certificate {identity}', file=sys.stderr)
+        return identity
+    print(f'[webmail-cutover] {name}: uploading a new self-signed certificate', file=sys.stderr)
     cert, key = work / 'cert.pem', work / 'key.pem'
     subprocess.run(['openssl', 'req', '-x509', '-nodes', '-newkey', 'rsa:2048', '-days', '3650',
                     '-keyout', str(key), '-out', str(cert), '-subj', f'/CN={name}'], check=True,
@@ -146,23 +156,53 @@ def add(names):
     names = list(dict.fromkeys(valid_name(name) for name in names))
     access = select_access()
     if access is None: return
-    current = hosts()
+    try:
+        current = hosts()
+    except RuntimeError:
+        if access: fail('NPM API 형식을 판별할 수 없음')
+        raise
+    access_fields = {}
+    if access:
+        if not current or any('npmplus_access_list_ids' in item for item in current):
+            access_fields = dict(npmplus_access_list_ids=[access], npmplus_access_list_type='custom')
+        elif any('access_list_id' in item for item in current):
+            access_fields = dict(access_list_id=access)
+        else:
+            fail('NPM API 형식을 판별할 수 없음')
     for name in names:
         existing = next((item for item in current if name in item.get('domain_names', [])), None)
         if existing:
             print(f'[webmail-cutover] {name}: existing target {existing.get("forward_host", "unknown")}; skipped')
             continue
-        payload = dict(domain_names=[name], **target_patch(), access_list_id=access,
+        payload = dict(domain_names=[name], **target_patch(), **access_fields,
                        certificate_id='new', locations=[],
                        meta=dict(letsencrypt_email=os.environ['NPM_ADMIN_EMAIL'], letsencrypt_agree=True, dns_challenge=False))
         try:
-            result = request('POST', '/nginx/proxy-hosts', payload)
-            if not isinstance(result, dict) or not isinstance(result.get('id'), int): fail('creation returned no ID')
+            result = request('POST', '/nginx/proxy-hosts', payload, timeout=120)
+            if not isinstance(result, dict) or not isinstance(result.get('id'), int) or not isinstance(result.get('certificate_id'), int) or result['certificate_id'] < 1:
+                fail('creation returned no host/certificate ID')
         except RuntimeError:
-            print(f'[webmail-cutover] {name}: ACME failed; using a self-signed certificate', file=sys.stderr)
-            payload['certificate_id'] = upload_selfsigned(name)
-            payload.pop('meta', None)
-            result = request('POST', '/nginx/proxy-hosts', payload)
+            # NPMplus inserts the host before ACME. Recover that row instead of
+            # POSTing the same name twice, including after a client-side timeout.
+            remaining = [item for item in hosts() if name in item.get('domain_names', [])]
+            if len(remaining) > 1: fail(f'{name}: ambiguous host after ACME failure; recovery stopped')
+            existing = remaining[0] if remaining else None
+            if existing:
+                if any(existing.get(key) != payload[key] for key in ('forward_host', 'forward_port', 'forward_scheme')):
+                    fail(f'{name}: host target changed during ACME; recovery stopped')
+                if isinstance(existing.get('certificate_id'), int) and existing['certificate_id'] > 0:
+                    print(f'[webmail-cutover] {name}: certificate already attached; no recovery needed')
+                    current.append(existing)
+                    continue
+            print(f'[webmail-cutover] {name}: ACME failed; recovering with a self-signed certificate', file=sys.stderr)
+            certificate_id = upload_selfsigned(name)
+            if existing:
+                result = request('PUT', f'/nginx/proxy-hosts/{existing["id"]}', dict(certificate_id=certificate_id))
+                if not isinstance(result, dict) or result.get('certificate_id') != certificate_id: fail('certificate attachment failed')
+            else:
+                payload['certificate_id'] = certificate_id
+                payload.pop('meta', None)
+                result = request('POST', '/nginx/proxy-hosts', payload)
             if not isinstance(result, dict) or not isinstance(result.get('id'), int): fail('creation returned no ID')
         current.append(result)
         print(f'[webmail-cutover] added {name} -> webmail:8080')

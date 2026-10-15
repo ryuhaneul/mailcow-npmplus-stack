@@ -61,6 +61,16 @@ mail-npm.DOMAIN     A    SERVER_IP
 
 ## 1. NPMplus + CrowdSec
 
+### 외부 이미지 버전 고정·변경
+
+스택 외부 이미지는 태그와 다이제스트를 함께 고정합니다. 현재 고정판은 NPMplus `2026-07-24-r1`, CrowdSec `v1.7.8`, SnappyMail `v2.38.2`이며, 정확한 다이제스트는 아래 예시와 레포의 `npmplus/docker-compose.yml`·`snappymail/docker-compose.yml`에 있습니다. `docker compose pull`은 이 다이제스트의 이미지만 받으므로 유지합니다.
+
+update는 pull 전에 런타임 compose의 대상 서비스 `image:`가 예전 기본 이미지의 `:latest` 또는 태그 없는 값일 때만 백업 후 레포 고정값으로 바꿉니다. 백업은 같은 폴더의 `docker-compose.yml.bak-<날짜시각>.<고유값>`이며 경로와 변경 내용을 로그에 남깁니다. 다른 설정·주석·들여쓰기는 보존합니다. 운영자가 다른 특정 태그나 다이제스트를 지정했다면 **“레포 고정값과 다름 — 그대로 둠, 맞추려면 docs 절차”** 경고만 남기고 그 값을 유지합니다.
+
+판을 올릴 때에는 **시험 서버에서 먼저 변경·검증 → 레포 compose의 태그·다이제스트와 이 문서 예시 갱신 → 운영 update** 순서로 진행합니다. 운영자는 update 전에 `/home/npmplus/docker-compose.yml`·`/home/snappymail/docker-compose.yml`의 `image:`를 레포와 비교하세요. 다른 버전을 직접 지정해 둔 서버를 레포와 맞추려면 먼저 런타임 compose를 별도 백업하고, 대상 서비스의 `image:` 값만 레포 값으로 직접 옮긴 뒤 update를 실행합니다. 설치 경로를 바꾼 서버는 해당 경로를 사용합니다. **현재 실행 중인 판이 레포 고정판보다 새로우면, 이 동기화·update로 낮은 판이 기동될 수 있습니다.** 변경 전 백업과 호환성을 확인하며 자동 버전 판단은 하지 않습니다.
+
+Toolkit도 시험 서버에서 먼저 확인한 뒤 `toolkit/Dockerfile`의 Python 태그·다이제스트와 `toolkit/requirements.txt`의 15개 정확한 판을 함께 갱신합니다(현재 Python `3.12.15-slim-trixie`, 다이제스트 `sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1`, Docker Hub 갱신 2026-10-09). 새 설치는 이 파일들을 복사하며, update는 실제 빌드 폴더의 예전 기본 FROM 줄·범위 지정 4줄 requirements만 각각 백업 후 이전하고 운영자 수정은 경고만 남겨 보존합니다. 경고가 난 서버를 수동으로 맞추려면 `/home/mailcow-toolkit`의 두 파일을 백업하고 FROM 줄과 requirements만 레포 고정값으로 옮긴 뒤 update를 실행하세요. 기반 다이제스트가 바뀌면 기반 레이어가, requirements 내용이 바뀌면 COPY와 pip 설치 레이어가 무효화되어 다음 `docker compose build --pull toolkit-mailcow`에 반영됩니다. 이미 같은 기반 다이제스트라면 해당 기반 캐시를 재사용해도 같은 판입니다.
+
 ### 1.1 Bouncer 키 생성
 
 ```bash
@@ -75,7 +85,7 @@ rm /home/npmplus/.env.key
 # /home/npmplus/docker-compose.yml
 services:
   npmplus:
-    image: zoeyvid/npmplus:latest
+    image: zoeyvid/npmplus:2026-07-24-r1@sha256:f7f6ca26082036ee6387a7da336267fe61f16b1eb8087dd964237238b59479ef
     container_name: npmplus
     restart: always
     ports:
@@ -98,7 +108,7 @@ services:
       - crowdsec
 
   crowdsec:
-    image: crowdsecurity/crowdsec:latest
+    image: crowdsecurity/crowdsec:v1.7.8@sha256:2f527c9bb8b367120eb08b82890aa912ce96bfa1ada93dda0721700e4b4e0dde
     container_name: crowdsec
     restart: always
     environment:
@@ -234,7 +244,7 @@ ln -s /npm-data/tls/certbot/live/npm-{CERT_ID}/privkey.pem key.pem
 # /home/snappymail/docker-compose.yml
 services:
   snappymail:
-    image: djmaze/snappymail:latest
+    image: djmaze/snappymail:v2.38.2@sha256:5e3d990438809a8a49f8ac5758db03e858e6e9fc0e369e1f9e474f7664079905
     container_name: snappymail
     restart: always
     command:
@@ -719,6 +729,8 @@ TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 �
 `sudo ./scripts/verify.sh`는 선택 서비스의 컨테이너 상태, 주소별 `/healthz`, Dovecot·DB 계정, 비로그인 logout의 403 및 WWW-Authenticate 부재를 확인합니다. 접근 목록이 있는 주소의 외부 HTTP 검사는 건너뜀으로 표시합니다. pin 모드는 저장한 인증서와 현재 메일 서버의 SHA-256 지문도 비교합니다.
 
 Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 있으므로 근무 시간 밖에 사용자 공지 후 실행합니다. 되돌리기는 프록시 추가 주소 제거 → 웹메일 `docker compose down` → `.env`에서 `WEBMAIL_ENABLE=false` → `apply-dovecot-webmail.sh --revert -y` → `apply-webmail-dbuser.sh --revert` 순서입니다. 색인은 남기며 사용자 설정·메일 데이터는 지우지 않습니다. `teardown.sh`는 별도의 전체 제거 명령으로 확인 후 웹메일까지 제거합니다.
+
+2026-09a의 `Global setting mail_plugins won't change ...` 경고는 기본 conf의 IMAP·LMTP 설정(183·188행) 뒤에 `extra.conf`가 포함되어 발생합니다([Dovecot 2.3.21.1 config-parser.c 902~916](https://github.com/dovecot/core/blob/2.3.21.1/src/config/config-parser.c#L902)); 전역 가상 네임스페이스를 프로토콜 필터 없는 도구에서도 열 수 있도록 전역 virtual을 유지하고 IMAP·LMTP에도 명시적으로 추가하므로, 각 프로토콜에 virtual이 한 번씩 있는 현재 설정에서는 무해합니다.
 
 ### 스내피에서 웹메일로 바꾸기
 

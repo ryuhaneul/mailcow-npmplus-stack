@@ -24,6 +24,7 @@ class FolderImap extends EventEmitter {
   async list(options) { this.listCount++; assert.deepEqual(options.statusQuery, { messages: true, unseen: true }); return this.rows.map(row => ({ ...row, status: { messages: this.stats.get(row.path).messages, unseen: 1 } })); }
   async exec(command, args, options = {}) {
     this.calls.push({ command, args });
+    if (command === 'UID SORT') options.untagged.SORT({ attributes: Array.from({ length: this.stats.get(this.mailbox.path).messages }, (_, i) => ({ value: String(i + 1) })) });
     if (command === 'MYRIGHTS') options.untagged.MYRIGHTS({ attributes: [args[0], { value: this.acl.get(decodePath(this, args[0].value)) ?? 'lrswipkxte' }] });
     if (command === 'STATUS') {
       this.statusCount++;
@@ -37,6 +38,9 @@ class FolderImap extends EventEmitter {
       const stat = this.stats.get(path); stat.messages -= removed.length; stat.size = Math.max(0, stat.size - removed.length * 100);
     }
     return { next() {} };
+  }
+  async *fetch(range) {
+    for (const uid of range.split(',').map(Number)) yield { uid, envelope: {}, flags: new Set(), internalDate: new Date('2026-10-15T00:00:00Z'), size: 100 };
   }
   async mailboxCreate(path) { this.calls.push({ command: 'CREATE', path }); this.rows.push({ path, name: path.split('/').at(-1), flags: new Set() }); this.stats.set(path, { messages: 0, size: 0 }); return { path }; }
   async mailboxRename(path, newPath) {
@@ -170,4 +174,26 @@ test('storage cache: create invalidates list and all mutation routes require CSR
   const calls = f.client.statusCount; await f.request('POST', '/api/folders', { name: 'New' }); await f.request('GET', '/api/storage'); assert.ok(f.client.statusCount > calls);
   const headers = { ...f.headers }; delete headers['x-webmail-csrf'];
   error(await f.app.inject({ method: 'POST', url: '/api/folders', headers, payload: { name: 'Blocked' } }), 403, 'CSRF');
+});
+
+
+test('folder rename: success invalidates list cache, rejected rename keeps snapshot', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('GET', '/api/messages')).json().total, 2);
+  error(await f.request('PATCH', pathFor('Projects'), { name: 'Trash' }), 409, 'EXISTS');
+  await f.request('GET', '/api/messages');
+  assert.equal(f.client.calls.filter(call => call.command === 'UID SORT').length, 1);
+  assert.equal((await f.request('PATCH', pathFor('Projects'), { name: 'Renamed' })).statusCode, 200);
+  assert.equal((await f.request('GET', '/api/messages')).json().total, 2);
+  assert.equal(f.client.calls.filter(call => call.command === 'UID SORT').length, 2);
+});
+
+test('folder empty: next list query immediately reflects empty total', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('GET', '/api/messages')).json().total, 2);
+  const result = await f.request('POST', pathFor('INBOX') + '/empty', { confirmName: 'INBOX' });
+  assert.equal(result.statusCode, 200); assert.equal(result.json().deleted, 2);
+  const refreshed = await f.request('GET', '/api/messages');
+  assert.equal(refreshed.statusCode, 200);
+  assert.equal(refreshed.json().total, 0); assert.deepEqual(refreshed.json().items, []);
 });

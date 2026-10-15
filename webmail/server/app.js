@@ -20,6 +20,9 @@ import { createReadService } from './mail/read.js';
 import { createListService } from './mail/list.js';
 import { createFolderService } from './mail/folders.js';
 import installDirectory from './routes/directory.js';
+import composeRoutes from './routes/compose.js';
+import { createComposeService } from './mail/compose.js';
+import { createSmtpService } from './mail/smtp.js';
 import rulesRoutes from './routes/rules.js';
 import { createRulesService } from './sieve/service.js';
 
@@ -30,6 +33,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   installClientIp(app);
   await installAuth(app, { ...auth, config });
   await installDirectory(app, { config });
+  await app.register(composeRoutes, { config, service: createComposeService({ config, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot }) });
   const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });

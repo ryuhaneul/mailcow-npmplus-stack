@@ -241,3 +241,38 @@ test('registered routes preserve auth 403, return contracts, disable caching and
   assert.equal(contacts.statusCode, 200); assert.equal(contacts.json().items[0].kind, 'person'); assert.equal(contacts.headers['cache-control'], 'no-store');
   const invalid = await app.inject({ method: 'GET', url: '/api/contacts?q=', headers: { cookie } }); assert.equal(invalid.statusCode, 400);
 });
+
+test('sender SQL NOT IN ignores trailing spaces and case in the complete goto value', async () => {
+  const data = tables();
+  data.alias_domain = [{ alias_domain: 'alias.example.com', target_domain: 'target.example.com', active: 0 }];
+  data.alias = [alias('delegated@alias.example.com', 'USER@EXAMPLE.COM   ', 0)];
+  data.sender_acl = [acl('delegated@target.example.com')];
+  await denied(fixture(data).service, 'delegated@alias.example.com');
+});
+
+test('contacts restrict people and teams to own and explicitly configured domains, but not recent recipients', async () => {
+  const data = tables();
+  data.mailbox.push({ username: 'person@other.example.com', name: 'Other', domain: 'other.example.com', active: 1 });
+  data.domain.push({ domain: 'other.example.com', active: 1 });
+  data.alias = [alias('team@example.com'), alias('team@other.example.com'), alias('@other.example.com')];
+  const options = { recentRecipients: async () => [{ name: 'Recent', address: 'recent@outside.example.com' }] };
+  const own = fixture(data, options).service;
+  assert.deepEqual((await own.contacts(session(), { q: 'example.com' })).items.map(item => item.address),
+    ['recent@outside.example.com', 'user@example.com', 'team@example.com']);
+  const extended = fixture(data, { ...options, config: { internalDomains: ['OTHER.example.com'] } }).service;
+  assert.deepEqual((await extended.contacts(session(), { q: 'example.com' })).items.map(item => item.address),
+    ['recent@outside.example.com', 'user@example.com', 'person@other.example.com', 'team@example.com', 'team@other.example.com']);
+});
+
+test('disabled contacts return an empty list before query validation with no DB or IMAP calls', async () => {
+  let imapCalls = 0;
+  const { service, calls } = fixture(tables(), {
+    config: { internalDomains: [], contactsEnabled: false },
+    imap: { withMailbox: async () => { imapCalls++; throw new Error('unexpected IMAP lookup'); } },
+    recentRecipients: undefined,
+  });
+  assert.deepEqual(await service.contacts(session(), { q: 'example.com' }), { items: [] });
+  assert.deepEqual(await service.contacts(session(), {}), { items: [] });
+  assert.equal(calls.length, 0);
+  assert.equal(imapCalls, 0);
+});

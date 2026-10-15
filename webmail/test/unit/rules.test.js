@@ -87,6 +87,25 @@ const actions = {
   import: ['POST', '/api/rules/import', () => ({ confirm: true, sourceName: 'legacy', sourceSha256: hash(legacy) })],
 };
 const allowed = { save: ['ok', 'none'], reactivate: ['inactive_other'], data: ['modified_externally'], prev: ['damaged'], import: ['import_pending'] };
+for (const previous of ['absent', 'valid', 'damaged']) {
+  test(`rules GET exposes previous availability (${previous}) and directory domains`, async t => {
+    const f = await fixture(t);
+    if (previous !== 'absent') f.server.scripts.set(prev, previous === 'valid' ? f.previous : '# damaged');
+    const internalDomains = ['example.com', 'example.net'];
+    f.app.directory.internalDomains = async () => internalDomains;
+    const response = await f.request('GET', '/api/rules'); status(response, 200);
+    assert.equal(response.json().prevAvailable, previous === 'valid');
+    assert.deepEqual(response.json().internalDomains, internalDomains);
+    assert.deepEqual(mutating(f.server.commands), []);
+  });
+}
+test('rules GET screen fields require a session', async t => {
+  const f = await fixture(t);
+  const response = await f.request('GET', '/api/rules', undefined, {});
+  status(response, 403, 'NO_SESSION');
+  assert.equal(response.json().internalDomains, undefined);
+  assert.deepEqual(f.server.commands, []);
+});
 for (const state of ['ok', 'none', 'import_pending', 'import_blocked', 'inactive_other', 'modified_externally', 'damaged']) {
   test(`rules GET ${state} is read-only and preserves active script`, async t => {
     const f = await fixture(t, state); const active = f.server.activeName;

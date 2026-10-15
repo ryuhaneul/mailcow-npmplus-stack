@@ -63,6 +63,7 @@ webmail_load_config() {
     WEBMAIL_ENABLE=false
     SNAPPYMAIL_ENABLE=true
     MAIL_AUTOEXPUNGE_ENABLE=
+    WEBMAIL_CONTACTS_ENABLE=true
     # shellcheck disable=SC1090
     source "$WEBMAIL_STACK_ENV" || return 1
     [ -n "${DOMAIN:-}" ] || { webmail_error "DOMAIN is required"; return 1; }
@@ -159,6 +160,7 @@ webmail_generate_env() (
         webmail_env_line BRAND_MARK "$WEBMAIL_BRAND_MARK" &&
         webmail_env_line DEFAULT_THEME "$WEBMAIL_DEFAULT_THEME" &&
         webmail_env_line DEFAULT_MODE "$WEBMAIL_DEFAULT_MODE" &&
+        webmail_env_line CONTACTS_ENABLE "${WEBMAIL_CONTACTS_ENABLE-true}" &&
         webmail_env_line INTERNAL_DOMAINS "$WEBMAIL_INTERNAL_DOMAINS" &&
         webmail_env_line ATTACH_MAX_MB "$WEBMAIL_ATTACH_MAX_MB" &&
         webmail_env_line SESSION_IDLE_MIN "$WEBMAIL_SESSION_IDLE_MIN" &&

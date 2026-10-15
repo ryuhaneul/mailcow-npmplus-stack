@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { createActionService } from '../../server/mail/actions.js';
+import { loadInboxHeaders } from '../../server/sieve/match.js';
 import { AppError } from '../../server/errors.js';
 import { decodeRef, assertUidValidity } from '../../server/mail/ref.js';
 
@@ -34,7 +35,10 @@ async function fixture(t, count = 2, mailActions) {
       assert.equal(options.uid, true);
       if (!query.headers && !query.internalDate) commands.push(['FETCH', range]);
       const uids = new Set(range.split(',').map(Number));
-      for (const row of client.rows) if (uids.has(row.uid)) yield query.headers ? row : { uid: row.uid, internalDate: row.internalDate };
+      for (const row of client.rows) if (uids.has(row.uid)) {
+        yield query.headers ? row : { uid: row.uid, internalDate: row.internalDate };
+        if (query.headers) await client.afterHeader?.();
+      }
     },
     async messageFlagsAdd(range, flags, options) {
       assert.equal(options.uid, true); commands.push(['STORE', range, ...flags]);
@@ -55,14 +59,14 @@ async function fixture(t, count = 2, mailActions) {
   const created = app.sessions.create({ email: 'user@example.com', name: '합성 사용자', password: Buffer.from('synthetic'), connection: { logout: async () => {} }, ip: '198.51.100.9' });
   const headers = { cookie: `webmail_sid=${created.token}`, origin: 'https://newmail.example.com', 'x-webmail-csrf': created.session.csrf };
   const request = (action, value = rule(), customHeaders = headers) => app.inject({ method: 'POST', url: `/api/rules/${action}`, payload: { rule: value }, headers: customHeaders });
-  return { app, client, commands, request, headers };
+  return { app, client, commands, request, headers, session: created.session };
 }
 function ok(response) { assert.equal(response.statusCode, 200, response.body); assert.equal(response.headers['cache-control'], 'no-store'); return response.json(); }
 function rejected(response, status, code) { assert.equal(response.statusCode, status, response.body); assert.equal(response.json().error.code, code); assert.equal(response.headers['www-authenticate'], undefined); }
 
 test('rules preview returns newest 20 of all matches, ignores enabled/stop and caches headers', async t => {
   const f = await fixture(t, 25), first = ok(await f.request('preview'));
-  assert.deepEqual(Object.keys(first), ['count', 'items', 'scanned', 'limited']);
+  assert.deepEqual(Object.keys(first), ['count', 'items', 'scanned', 'limited', 'partial']);
   assert.equal(first.count, 25); assert.equal(first.scanned, 25); assert.equal(first.limited, false); assert.equal(first.items.length, 20);
   assert.deepEqual(first.items.map(row => decodeRef(row.ref).uid), Array.from({ length: 20 }, (_, i) => 25 - i));
   const other = rule(); other.conditions[0].value = '없는 제목';
@@ -100,13 +104,14 @@ test('rules apply-existing reloads Inbox so repeat adds zero moves and later pre
   assert.equal(f.commands.filter(row => row[0] === 'MOVE').length, 1);
 });
 
-test('rules apply-existing refreshes a preview snapshot before choosing targets', async t => {
+test('rules apply-existing excludes vanished snapshot UIDs and leaves newly arrived mail for the next preview', async t => {
   const f = await fixture(t);
   assert.equal(ok(await f.request('preview')).count, 2);
   f.client.rows = [message(3)];
   const result = ok(await f.request('apply-existing'));
-  assert.equal(result.matched, 1); assert.equal(result.moved, 1); assert.deepEqual(result.failed, []);
-  assert.deepEqual(f.commands.filter(row => row[0] === 'MOVE'), [['MOVE', '3', 'Projects']]);
+  assert.equal(result.matched, 0); assert.equal(result.moved, 0); assert.deepEqual(result.failed, []);
+  assert.deepEqual(f.commands.filter(row => row[0] === 'MOVE'), []);
+  assert.equal(ok(await f.request('preview')).count, 1);
 });
 
 test('rules apply-existing ignores external forwarding but validates all addresses and other actions', async t => {
@@ -170,7 +175,7 @@ test('rules apply-existing: 2500 matches use three runs per action and bounded U
   assert.deepEqual(result, { matched: 2500, moved: 2500, trashed: 0, flagged: 2500, failed: [] });
   assert.deepEqual(runs.map(body => [body.action, body.refs.length]), ['seen', 'flag', 'move'].flatMap(action => [1000, 1000, 500].map(count => [action, count])));
   const counts = Object.fromEntries(['MYRIGHTS', 'FETCH', 'STORE', 'MOVE'].map(command => [command, f.commands.filter(row => row[0] === command).length]));
-  assert.deepEqual(counts, { MYRIGHTS: 12, FETCH: 9, STORE: 6, MOVE: 3 });
+  assert.deepEqual(counts, { MYRIGHTS: 12, FETCH: 12, STORE: 6, MOVE: 3 });
   assert.ok(f.commands.filter(row => ['FETCH', 'STORE', 'MOVE'].includes(row[0])).every(row => row[1].split(',').length <= 1000));
   const moves = counts.MOVE;
   assert.equal(ok(await f.request('apply-existing', rule({ read: true, star: true, move: 'Projects' }))).moved, 0);
@@ -214,4 +219,52 @@ test('rules apply-existing: session failure is rethrown rather than converted in
   const f = await fixture(t, 2, { async run() { throw new AppError(403, 'SESSION_EXPIRED', '합성 만료'); } });
   rejected(await f.request('apply-existing', rule({ read: true })), 403, 'SESSION_EXPIRED');
   assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
+});
+
+
+test('rules slow preview returns within 4s, shares one producer, polls complete and refuses early apply', async t => {
+  const f = await fixture(t, 2);
+  const gate = Promise.withResolvers();
+  let headers = 0;
+  f.client.afterHeader = async () => { if (++headers === 1) await gate.promise; };
+  const started = performance.now();
+  const first = ok(await f.request('preview'));
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 4000, `first partial ${elapsed}ms`);
+  assert.equal(first.partial, true); assert.equal(first.scanned, 1); assert.equal(first.count, 1);
+  assert.equal(ok(await f.request('preview')).scanned, 1);
+  const changed = rule(); changed.conditions[0].value = '없는 제목';
+  const recalc = performance.now();
+  assert.equal(ok(await f.request('preview', changed)).count, 0);
+  assert.ok(performance.now() - recalc < 200);
+  rejected(await f.request('apply-existing'), 409, 'PREVIEW_NOT_READY');
+  assert.equal(f.commands.filter(row => row[0] === 'UID SORT').length, 1);
+  assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
+  gate.resolve();
+  await loadInboxHeaders(f.app.imap, f.session, { now: () => Date.UTC(2026, 9, 15) });
+  const complete = ok(await f.request('preview'));
+  assert.equal(complete.partial, false); assert.equal(complete.count, 2); assert.equal(complete.scanned, 2);
+  assert.equal(ok(await f.request('apply-existing')).moved, 2);
+  t.diagnostic(`first partial ${Math.round(elapsed)}ms; one SORT; final count ${complete.count}`);
+});
+
+test('rules scan logout immediately cancels the producer and clears cached headers', async t => {
+  const f = await fixture(t, 2);
+  const gate = Promise.withResolvers();
+  const began = Promise.withResolvers();
+  let closed = 0;
+  f.client.close = () => { closed++; gate.resolve(); };
+  f.client.afterHeader = async () => { began.resolve(); await gate.promise; };
+  const loading = loadInboxHeaders(f.app.imap, f.session, { now: () => Date.UTC(2026, 9, 15) });
+  const rejectedLoading = assert.rejects(loading, { code: 'SESSION_EXPIRED' });
+  await began.promise;
+  const partial = await loadInboxHeaders(f.app.imap, f.session, { budgetMs: 0 });
+  assert.equal(partial.scanned, 1);
+  const started = performance.now();
+  const logout = await f.app.inject({ method: 'POST', url: '/api/auth/logout', headers: f.headers });
+  assert.equal(logout.statusCode, 204);
+  assert.ok(performance.now() - started < 200);
+  assert.equal(closed, 1); assert.equal(partial.items.length, 0); assert.equal(partial.scanned, 0);
+  await rejectedLoading;
+  rejected(await f.request('preview'), 403, 'SESSION_EXPIRED');
 });

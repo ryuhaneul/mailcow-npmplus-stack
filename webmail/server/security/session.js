@@ -26,6 +26,7 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
     const token = randomBytes(32).toString('base64url');
     const session = {
       id: sessionHash(token), email, name, password, connection, ip,
+      scanAbort: new AbortController(),
       csrf: randomBytes(32).toString('base64url'), createdAt: now(), lastSeen: now(),
     };
     sessions.set(session.id, session);
@@ -33,6 +34,7 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
   }
   async function destroy(session, code = 'LOGOUT') {
     if (!sessions.delete(session.id)) return;
+    session.scanAbort.abort();
     // 연결 종료나 첨부 정리가 실패해도 암호는 즉시 폐기한다.
     session.password.fill(0);
     const connection = session.connection;

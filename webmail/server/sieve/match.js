@@ -7,10 +7,16 @@ import { encodeRef } from '../mail/ref.js';
 import { asciiLower } from './model.js';
 
 const sessions = new WeakMap();
-export function invalidateInboxHeaders(session) { sessions.delete(session); }
+export function invalidateInboxHeaders(session) {
+  const entry = sessions.get(session);
+  if (!entry) return;
+  sessions.delete(session);
+  entry.controller.abort();
+  session.scanAbort?.signal.removeEventListener('abort', entry.stop);
+}
 const ttl = 5 * 60_000;
 const limit = 20_000;
-const batchSize = 1000;
+const batchSize = 2000;
 const fields = ['from', 'to', 'cc', 'subject', 'content-type'];
 const unavailable = () => new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
 const atom = value => ({ type: 'ATOM', value });
@@ -26,13 +32,16 @@ function decodedHeaders(headers) {
     ? libmime.decodeHeaders(headers.toString('utf8')) : headers;
   const result = Object.fromEntries(fields.map(field => [field, []]));
   result.addresses = { from: [], to: [], cc: [] };
+  result.envelope = { from: [], to: [], cc: [] };
   for (const [key, values] of Object.entries(raw ?? {})) {
     const field = asciiLower(key);
     if (!fields.includes(field)) continue;
     for (const value of Array.isArray(values) ? values : [values]) {
       result[field].push(decodeWords(value));
       if (Object.hasOwn(result.addresses, field)) {
-        result.addresses[field].push(...addressparser(value, { flatten: true }).filter(item => item.address).map(item => item.address));
+        const people = addressparser(value, { flatten: true }).filter(item => item.address);
+        result.addresses[field].push(...people.map(item => item.address));
+        result.envelope[field].push(...people.map(item => ({ ...item, name: decodeWords(item.name) })));
       }
     }
   }
@@ -82,60 +91,125 @@ async function sortedCandidates(client, boundary) {
   return uids;
 }
 
-/** Snapshot: {items:[{uid,ref,date,headers,item}], scanned, limited}.
- * headers contains decoded string arrays plus address-only arrays in addresses.
- * item is the existing mail list row. All FETCHes use UIDs and BODY.PEEK via
- * imapflow; the pool owns INBOX locking, command deadlines and authentication.
- */
-export async function loadInboxHeaders(imap, session, { now = Date.now } = {}) {
-  return imap.withMailbox(session, 'INBOX', async client => {
+// One producer per session. Each command gets its own pool deadline/lock, so
+// a cold mailbox taking over 60s in total does not lose all accumulated work.
+function startScan(imap, session, now) {
+  const entry = { controller: new AbortController(), value: { items: [], scanned: 0, limited: false, partial: true }, at: now() };
+  entry.stop = () => invalidateInboxHeaders(session);
+  sessions.set(session, entry);
+  session.scanAbort?.signal.addEventListener('abort', entry.stop, { once: true });
+  const check = () => {
+    if (entry.controller.signal.aborted || session.scanAbort?.signal.aborted) throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
+  };
+  entry.controller.signal.addEventListener('abort', () => {
+    entry.client?.close();
+    entry.value.items.length = 0;
+    entry.value.scanned = 0;
+  }, { once: true });
+  const command = operation => imap.withMailbox(session, 'INBOX', async client => {
+    check();
     const validity = Number(client.mailbox.uidValidity);
-    const cached = sessions.get(session);
-    if (cached && now() - cached.at < ttl && cached.validity === validity) return cached.value;
-    sessions.delete(session);
-    const boundary = yearBefore(now());
-    const candidates = await sortedCandidates(client, boundary);
-    const eligible = [];
-    // SINCE is only a day-granularity prefilter. INTERNALDATE decides the exact
-    // inclusive UTC boundary; one extra eligible UID detects truncation.
-    for (let start = 0; start < candidates.length && eligible.length <= limit; start += batchSize) {
-      const batch = candidates.slice(start, start + batchSize);
-      const dates = new Map();
-      for await (const row of client.fetch(batch.join(','), { uid: true, internalDate: true }, { uid: true })) {
-        const time = new Date(row.internalDate).getTime();
-        if (!Number.isFinite(time)) throw unavailable();
-        dates.set(row.uid, time);
+    if (entry.validity !== undefined && entry.validity !== validity) throw new AppError(409, 'STALE_REF', '메일함이 바뀌었어요. 다시 확인해 주세요.');
+    entry.validity = validity;
+    entry.client = client;
+    try { return await operation(client); }
+    finally { entry.client = null; }
+  });
+  entry.done = (async () => {
+    try {
+      const boundary = yearBefore(now());
+      const candidates = await command(client => sortedCandidates(client, boundary));
+      const eligible = [];
+      for (let start = 0; start < candidates.length && eligible.length <= limit; start += batchSize) {
+        const batch = candidates.slice(start, start + batchSize);
+        const dates = await command(async client => {
+          const result = new Map();
+          for await (const row of client.fetch(batch.join(','), { uid: true, internalDate: true }, { uid: true })) {
+            check();
+            const time = new Date(row.internalDate).getTime();
+            if (!Number.isFinite(time)) throw unavailable();
+            result.set(row.uid, time);
+          }
+          return result;
+        });
+        for (const uid of batch) {
+          if (dates.has(uid) && dates.get(uid) >= boundary) eligible.push(uid);
+          if (eligible.length > limit) break;
+        }
       }
-      for (const uid of batch) {
-        if (dates.has(uid) && dates.get(uid) >= boundary) eligible.push(uid);
-        if (eligible.length > limit) break;
-      }
-    }
-    const selected = eligible.slice(0, limit);
-    const fetched = new Map();
-    for (let start = 0; start < selected.length; start += batchSize) {
-      const batch = selected.slice(start, start + batchSize);
-      for await (const row of client.fetch(batch.join(','), {
-        uid: true, internalDate: true, envelope: true, flags: true, size: true, headers: fields,
-      }, { uid: true })) {
-        const ref = encodeRef('INBOX', validity, row.uid);
-        fetched.set(row.uid, {
-          uid: row.uid, ref, date: new Date(row.internalDate).toISOString(),
-          headers: decodedHeaders(row.headers), item: listItem(row, { path: 'INBOX', ref }),
+      entry.value.limited = eligible.length > limit;
+      const selected = eligible.slice(0, limit);
+      for (let start = 0; start < selected.length; start += batchSize) {
+        const batch = selected.slice(start, start + batchSize);
+        await command(async client => {
+          for await (const row of client.fetch(batch.join(','), {
+            uid: true, internalDate: true, flags: true, size: true, headers: fields,
+          }, { uid: true })) {
+            check();
+            const headers = decodedHeaders(row.headers);
+            // ENVELOPE repeats From/To/Subject already present in HEADER.FIELDS.
+            // Derive the list row from those same decoded headers instead.
+            const envelope = { ...headers.envelope, subject: headers.subject[0] ?? '' };
+            const ref = encodeRef('INBOX', entry.validity, row.uid);
+            entry.value.items.push({ uid: row.uid, ref, date: new Date(row.internalDate).toISOString(), headers,
+              item: listItem({ ...row, envelope }, { path: 'INBOX', ref }) });
+            entry.value.scanned++;
+          }
         });
       }
+      check();
+      entry.value.items.sort((a, b) => Date.parse(b.date) - Date.parse(a.date) || b.uid - a.uid);
+      entry.value.partial = false;
+      entry.at = now();
+      return entry.value;
+    } catch (error) {
+      if (sessions.get(session) === entry) invalidateInboxHeaders(session);
+      throw error;
     }
-    // A message can disappear between the two FETCH passes.
-    const items = selected.filter(uid => fetched.has(uid)).map(uid => fetched.get(uid));
-    const value = { items, scanned: items.length, limited: eligible.length > limit };
-    sessions.set(session, { at: now(), validity, value });
-    return value;
-  });
+  })();
+  // The initiating HTTP request may already have returned a partial result.
+  // Keep the failure observed; a later request can start a fresh scan.
+  entry.done.catch(() => {});
+  return entry;
+}
+
+/** budgetMs bounds HTTP waiting, not the session's producer. Default callers
+ * wait for completion; previews use 3500ms and apply uses 0ms. */
+export async function loadInboxHeaders(imap, session, { now = Date.now, budgetMs = Infinity } = {}) {
+  let entry = sessions.get(session);
+  if (entry && !entry.value.partial && now() - entry.at >= ttl) { invalidateInboxHeaders(session); entry = null; }
+  if (entry?.value.partial) return budgetMs === Infinity ? entry.done : entry.value;
+  // Apply checks current UIDVALIDITY and existence under its own mailbox lock.
+  if (entry && budgetMs === 0) return entry.value;
+  let result;
+  if (entry) {
+    const cached = entry;
+    result = imap.withMailbox(session, 'INBOX', client => {
+      if (sessions.get(session) !== cached) {
+        entry = sessions.get(session) ?? startScan(imap, session, now);
+        return entry.value.partial ? null : entry.value;
+      }
+      if (Number(client.mailbox.uidValidity) === cached.validity) return cached.value;
+      invalidateInboxHeaders(session);
+      entry = startScan(imap, session, now);
+      return null;
+    }).then(value => value ?? entry.done);
+  } else {
+    entry = startScan(imap, session, now);
+    result = entry.done;
+  }
+  if (budgetMs === Infinity) return result;
+  let timer;
+  try {
+    return await Promise.race([result, new Promise(resolve => {
+      timer = setTimeout(() => resolve({ ...entry.value, partial: true }), Math.max(0, budgetMs));
+    })]);
+  } finally { clearTimeout(timer); }
 }
 
 /** Recalculate entirely in memory when the rule changes. */
 export function preview(rule, headers) {
   const found = headers.items.filter(record => matches(rule, record.headers));
   found.sort((a, b) => Date.parse(b.date) - Date.parse(a.date) || b.uid - a.uid);
-  return { count: found.length, items: found.slice(0, 20).map(record => record.item), scanned: headers.scanned, limited: headers.limited };
+  return { count: found.length, items: found.slice(0, 20).map(record => record.item), scanned: headers.scanned, limited: headers.limited, partial: headers.partial ?? false };
 }

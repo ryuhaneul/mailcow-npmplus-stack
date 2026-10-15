@@ -156,7 +156,7 @@ test('headers: calendar leap day clamps to Feb 28 and includes exact boundary', 
   assert.deepEqual((await f.load()).items.map(row => row.uid), [1]);
 });
 
-test('headers: cap 20,000 newest eligible, metadata only for extra candidate; exactly cap is not limited', async () => {
+test('headers: cap 20,000 newest eligible, metadata only for extra candidate; exactly cap is not limited', async t => {
   const rows = Array.from({ length: 20_001 }, (_, i) => message(i + 1, new Date(Date.UTC(2026, 9, 1) + i * 1000)));
   const f = fixture(rows);
   const result = await f.load();
@@ -165,6 +165,13 @@ test('headers: cap 20,000 newest eligible, metadata only for extra candidate; ex
   const headerFetches = f.client.fetches.filter(call => call.query.headers);
   assert.equal(headerFetches.flatMap(call => call.range.split(',')).length, 20_000);
   assert.equal(headerFetches.some(call => call.range.split(',').includes('1')), false);
+  assert.equal(headerFetches.length, 10);
+  assert.ok(headerFetches.every(call => !call.query.envelope && call.range.split(',').length <= 2000));
+  const began = performance.now();
+  assert.equal(preview(rule(condition('subject', 'has', '견적')), result).count, 20_000);
+  const recalculationMs = performance.now() - began;
+  assert.ok(recalculationMs < 200, `20k recalculation ${recalculationMs}ms`);
+  t.diagnostic(`20k cached recalculation ${Math.round(recalculationMs)}ms; 10 header FETCH, no ENVELOPE`);
   assert.equal((await fixture(rows.slice(1)).load()).limited, false);
 });
 
@@ -178,11 +185,11 @@ test('headers: cache at 299999ms, expires at 300000ms, sessions and UIDVALIDITY 
   f.advance(1); assert.equal((await f.load()).scanned, 2); assert.equal(f.client.commands.length, 3);
   f.client.mailbox.uidValidity = 124n;
   assert.equal(decodeRef((await f.load()).items[0].ref).uidValidity, 124);
-  assert.equal(f.client.commands.length, 4); assert.equal(f.locks(), 5);
+  assert.equal(f.client.commands.length, 4); assert.equal(f.locks(), 14);
 });
 
 test('headers: empty or expired inbox needs no header FETCH; failed loads retry; expunges skipped', async () => {
-  const empty = fixture([]); assert.deepEqual(await empty.load(), { items: [], scanned: 0, limited: false });
+  const empty = fixture([]); assert.deepEqual(await empty.load(), { items: [], scanned: 0, limited: false, partial: false });
   assert.equal(empty.client.fetches.length, 0);
   const old = fixture([message(1, '2020-01-01T00:00:00Z')]);
   assert.equal((await old.load()).scanned, 0);
@@ -203,7 +210,7 @@ test('preview counts full snapshot, returns latest 20 list rows and recomputes w
   assert.equal(decodeRef(result.items[0].ref).uid, 25); assert.equal(decodeRef(result.items.at(-1).ref).uid, 6);
   assert.equal(preview(rule(condition('subject', 'has', '견적')), snapshot).count, 13);
   assert.equal(preview(rule(condition('subject', 'has', '회의')), snapshot).count, 12);
-  assert.deepEqual(preview(rule(condition('subject', 'has', '없음')), snapshot), { count: 0, items: [], scanned: 25, limited: false });
+  assert.deepEqual(preview(rule(condition('subject', 'has', '없음')), snapshot), { count: 0, items: [], scanned: 25, limited: false, partial: false });
   assert.equal(f.client.fetches.length, calls);
   assert.equal(preview(rule(condition('subject', 'has', '견적')), { ...snapshot, limited: true }).limited, true);
   assert.deepEqual(snapshot.items.map(record => record.uid), Array.from({ length: 25 }, (_, i) => 25 - i));

@@ -5,7 +5,7 @@ import { storage } from '../state/storage.js';
 import { toast } from '../state/toast.js';
 import { isListRoute, connectMailboxEvents, resetMailbox } from '../state/list.js';
 import { initMailboxShortcuts } from '../shortcuts.js';
-import MailList from './MailList.jsx';
+import MailView from './MailView.jsx';
 import { route } from '../router.js';
 import { api } from '../api.js';
 import { initStars } from '../theme/stars.js';
@@ -62,7 +62,7 @@ export default function Shell() {
       <main class="main">
         <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
         <MobileQuota/>
-        <div class="stage">{isListRoute(current)?<MailList/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
+        <div class="stage">{(isListRoute(current)||current.name==='read')?<MailView/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
       </main>
     </div>
     {toast.value && <div class="toast open" role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}

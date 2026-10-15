@@ -748,3 +748,11 @@ body[data-r=filters] [data-v=filters],body[data-r=rule] [data-v=rule],body[data-
 .list-menu .opt{grid-template-columns:minmax(0,1fr)}
 .tools button[disabled]{cursor:default;opacity:.45}
 .search .ib{width:28px;height:28px}
+
+/* Read API body stays isolated in its sandboxed document. */
+.message-frame{display:block;width:100%;border:0;min-width:0}
+.reader-tools{position:relative}
+.reader .who{overflow-wrap:anywhere}
+.reader h1{overflow-wrap:anywhere}
+.files .file>div{flex:1}
+.files .file .ib+.ib{margin-left:0}

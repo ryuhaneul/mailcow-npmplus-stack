@@ -69,6 +69,8 @@ sudo ./scripts/setup.sh
 
 ### .env 설정
 
+외부 이미지는 NPMplus `2026-07-24-r1`, CrowdSec `v1.7.8`, SnappyMail `v2.38.2`의 태그·다이제스트로 고정합니다. 판 변경과 기존 서버 동기화는 [이미지 버전 절차](docs/guide.md#외부-이미지-버전-고정변경)를 따르세요. 다른 특정 버전을 직접 지정한 서버는 update가 그 값을 유지합니다.
+
 ```bash
 # === 필수 ===
 DOMAIN=example.com          # 메일 도메인

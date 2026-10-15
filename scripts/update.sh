@@ -293,6 +293,54 @@ if [ -d "$PROJECT_DIR/toolkit/app" ] && [ -d "$TOOLKIT_DIR" ]; then
     rsync -a --delete "$PROJECT_DIR/toolkit/app/" "$TOOLKIT_DIR/app/" 2>&1 | tee -a "$LOGFILE" | tail -3
 fi
 
+sync_toolkit_build_pins() {
+    # Migrate only the former defaults; keep operator changes and Dockerfile bytes.
+    python3 - "$PROJECT_DIR/toolkit" "$TOOLKIT_DIR" <<'PY' | tee -a "$LOGFILE"
+import datetime, os, pathlib, re, shutil, sys, tempfile
+
+source, target = map(pathlib.Path, sys.argv[1:])
+legacy_requirements = ['flask==3.1.*', 'gunicorn==23.*', 'requests==2.32.*', 'pyyaml==6.*']
+def normalized(data):
+    return [re.sub(rb'[ \t]+', b'', line).decode('utf-8') for line in data.splitlines() if line.strip()]
+
+try:
+    for name in ('Dockerfile', 'requirements.txt'):
+        path = target / name
+        original, desired = path.read_bytes(), (source / name).read_bytes()
+        if name == 'Dockerfile':
+            lines = original.splitlines(keepends=True)
+            indexes = [index for index, line in enumerate(lines) if line.lstrip().upper().startswith(b'FROM ')]
+            pinned = desired.splitlines()[0]
+            if len(indexes) != 1:
+                print('[toolkit-pin] WARN: Dockerfile: custom FROM layout; preserving it, follow docs to synchronize')
+                continue
+            index = indexes[0]
+            current = lines[index].rstrip(b'\r\n')
+            if current == pinned: continue
+            if current != b'FROM python:3.12-slim':
+                print('[toolkit-pin] WARN: Dockerfile: operator base image differs; preserving it, follow docs to synchronize')
+                continue
+            lines[index] = pinned + lines[index][len(current):]
+            updated = b''.join(lines)
+        else:
+            if normalized(original) == normalized(desired): continue
+            if normalized(original) != legacy_requirements:
+                print('[toolkit-pin] WARN: requirements.txt: operator requirements differ; preserving them, follow docs to synchronize')
+                continue
+            updated = desired
+        prefix = name + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '.'
+        descriptor, backup = tempfile.mkstemp(prefix=prefix, dir=target)
+        with os.fdopen(descriptor, 'wb') as stream: stream.write(original)
+        shutil.copystat(path, backup)
+        print(f'[toolkit-pin] backup: {backup}', flush=True)
+        path.write_bytes(updated)
+        print(f'[toolkit-pin] {name}: migrated former stack default to repository pin')
+except (OSError, UnicodeError) as error:
+    print(f'[toolkit-pin] ERROR: {error}; inspect build inputs before retrying', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Existing installs: add the /data mount (team distribution backups) to the
 # installed override if it is missing. Idempotent; the override is otherwise kept.
 if [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
@@ -302,6 +350,7 @@ if [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
 fi
 
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
+    sync_toolkit_build_pins || die "Toolkit build pin preparation failed; build stopped"
     log "Building toolkit-mailcow (--pull)..."
     if (cd "$MAILCOW_DIR" && docker compose build --pull toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -10); then
         log "Bringing toolkit-mailcow up..."

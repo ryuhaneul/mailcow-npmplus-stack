@@ -4,6 +4,9 @@ import { parseSearchQuery } from './search-query.js';
 import { encodeRef, originalRefs } from './ref.js';
 
 const allmail = 'WebmailVirtual/AllMail';
+// Leave 10 seconds before the measured 60-second proxy limit.
+const searchTimeout = 50000;
+const slowSearch = () => new AppError(503, 'SEARCH_SLOW', '메일함 검색 색인을 만드는 중이에요. 잠시 뒤 다시 검색해 주세요.');
 const atom = value => ({ type: 'ATOM', value });
 const invalid = () => new AppError(400, 'LIST_QUERY_INVALID', '메일 목록 조회 조건을 확인해 주세요.');
 const unavailable = () => new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
@@ -33,17 +36,27 @@ export function listOptions(query = {}, folders = []) {
   if (quick === 'attach') imap.push({ header: { 'Content-Type': 'multipart/mixed' } });
   return { mailbox, page, pageSize, filters, imap };
 }
-async function sortUids(client, conditions) {
+async function sortUids(client, conditions, searching = false) {
   const search = conditions.flatMap(condition => {
     const compiled = searchCompiler(client, condition);
     return compiled[0]?.value === 'CHARSET' ? compiled.slice(2) : compiled;
   });
   if (!search.length) search.push(atom('ALL'));
   const uids = [];
-  const response = await client.exec('UID SORT', [[atom('REVERSE'), atom('ARRIVAL')], atom('UTF-8'), ...search], {
+  const request = client.exec('UID SORT', [[atom('REVERSE'), atom('ARRIVAL')], atom('UTF-8'), ...search], {
     untagged: { SORT: row => { for (const token of row.attributes ?? []) uids.push(Number(token.value)); } },
   });
-  response.next();
+  let timer;
+  try {
+    const response = await (searching ? Promise.race([request, new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(slowSearch());
+        // Drop this command connection; Dovecot's separate indexer can keep indexing.
+        client.close();
+      }, searchTimeout);
+    })]) : request);
+    response.next();
+  } finally { clearTimeout(timer); }
   if (uids.some(uid => !Number.isInteger(uid) || uid < 1 || uid > 0xffffffff)) throw unavailable();
   return uids;
 }
@@ -96,7 +109,7 @@ export function createListService({ imap, now = Date.now }) {
         const validity = Number(client.mailbox.uidValidity);
         if (!result || now() - result.at >= 60000 || result.validity !== validity) {
           const filters = await resolveFilters(client, options.filters);
-          let uids = await sortUids(client, options.imap);
+          let uids = await sortUids(client, options.imap, Boolean(query.q?.trim()));
           const originals = new Map();
           if (filters.length && mailbox === allmail) {
             for (let start = 0; start < uids.length; start += 1000) {

@@ -22,7 +22,7 @@ export function adminTasks(plan) {
     instruction: '검토 후 main이 실행. GET 결과와 목표를 비교하여 동일하면 건너뜀. 기존 권한·별칭을 삭제하지 않음. API 키는 환경변수로만 전달. edit/mailbox는 기존 sender_acl을 합집합으로 병합하여 제출.',
     requests: [
       { check: { method: 'GET', path: `/api/v1/get/mailbox/${user2.email}` }, method: 'POST', path: '/api/v1/edit/mailbox', body: { items: [user2.email], attr: { sender_acl: user2.senderAcl } }, policy: '기존 sender_acl + 목표 주소의 합집합. 같으면 POST 생략.' },
-      ...user3.aliases.map(address => ({ check: { method: 'GET', path: '/api/v1/get/alias/all' }, method: 'POST', path: '/api/v1/add/alias', body: { address, goto: user3.email, active: '1', visible: '1' }, policy: '같은 주소·goto이면 생략. 주소가 존재하고 goto가 다르면 중단하여 main 판단.' })),
+      ...user3.aliases.map(address => ({ check: { method: 'GET', path: '/api/v1/get/alias/all' }, method: 'POST', path: '/api/v1/add/alias', body: { address, goto: user3.email, active: '1', sogo_visible: '1' }, policy: '같은 주소·goto이면 생략. 주소가 존재하고 goto가 다르면 중단하여 main 판단.' })),
     ],
     manual: [
       { target: plan.users[3].email, desired: plan.users[3].share, check: `Toolkit 공유 목록과 doveadm acl get -u ${plan.users[0].email} INBOX에서 수신자의 l·r 권한만 확인.`, skip: '목표 공유가 있고 읽기 전용이면 건너뜀. 다른 권한은 main 판단 후 조정.' },

@@ -273,7 +273,8 @@ fi
 # Generate secrets if empty
 waf_resolve_bouncer_key "$NPMPLUS_DIR" true || die "Bouncer key selection failed"
 [ -z "${CROWDSEC_BOUNCER_KEY:-}" ] && CROWDSEC_BOUNCER_KEY=$(openssl rand -hex 32) && log "Generated CROWDSEC_BOUNCER_KEY"
-export CROWDSEC_BOUNCER_KEY
+WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
+export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32)
 NPM_ADMIN_EMAIL="${NPM_ADMIN_EMAIL:-admin@${DOMAIN}}"
 NPM_ADMIN_PASSWORD="${NPM_ADMIN_PASSWORD:-$(openssl rand -base64 18)}"
@@ -680,14 +681,14 @@ header "Phase 5: NPMplus + CrowdSec"
 mkdir -p "$NPMPLUS_DIR"
 cp "$PROJECT_DIR/npmplus/docker-compose.yml" "$NPMPLUS_DIR/docker-compose.yml"
 cat > "$NPMPLUS_DIR/.env" <<NPMENV
-CROWDSEC_BOUNCER_KEY=${CROWDSEC_BOUNCER_KEY}
+CROWDSEC_BOUNCER_KEY=${WAF_BOUNCER_KEY_RESOLVED}
 NPM_ADMIN_EMAIL=${NPM_ADMIN_EMAIL}
 NPM_ADMIN_PASSWORD=${NPM_ADMIN_PASSWORD}
 NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
-docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
+_waf_npmplus_compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
 
 log "Waiting for NPMplus health check..."
 for i in $(seq 1 60); do

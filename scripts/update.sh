@@ -85,11 +85,8 @@ source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 waf_options || die "Invalid WAF options; update stopped before changes"
 waf_resolve_bouncer_key "$NPMPLUS_DIR" "$([ "$WAF_ENABLE" = false ] && echo true || echo false)" || die "Bouncer key selection failed; update stopped before changes"
-if [ -n "${CROWDSEC_BOUNCER_KEY:-}" ]; then
-    export CROWDSEC_BOUNCER_KEY
-else
-    unset CROWDSEC_BOUNCER_KEY
-fi
+WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
+export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
@@ -219,7 +216,9 @@ compose_pull() {
     fi
     pin_runtime_images "$dir" "$label" || die "$label: image pin preparation failed; pull stopped"
     log "$label: docker compose pull"
-    (cd "$dir" && docker compose pull 2>&1 | tee -a "$LOGFILE" | tail -5) \
+    (cd "$dir" && {
+        if [ "$label" = npmplus ]; then _waf_npmplus_compose pull; else docker compose pull; fi
+    } 2>&1 | tee -a "$LOGFILE" | tail -5) \
         || warn "$label: docker compose pull had issues (non-fatal)"
 }
 
@@ -450,7 +449,9 @@ compose_up() {
         return 0
     fi
     log "$label: docker compose up -d"
-    (cd "$dir" && docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5) \
+    (cd "$dir" && {
+        if [ "$label" = npmplus ]; then _waf_npmplus_compose up -d; else docker compose up -d; fi
+    } 2>&1 | tee -a "$LOGFILE" | tail -5) \
         || warn "$label: docker compose up -d had issues"
 }
 

@@ -575,6 +575,19 @@ PYKEY
     [[ ! "$CROWDSEC_BOUNCER_KEY" =~ [[:cntrl:]] ]] || { waf_error 'invalid bouncer key'; return 1; }
 }
 
+# Keep the selected key independent of later stack .env reloads. Only this compose
+# process receives it; the saved value must never be exported to child processes.
+_waf_npmplus_compose() {
+    set +x
+    local CROWDSEC_BOUNCER_KEY
+    if [ -n "${WAF_BOUNCER_KEY_RESOLVED:-}" ]; then
+        export CROWDSEC_BOUNCER_KEY="$WAF_BOUNCER_KEY_RESOLVED"
+        docker compose "$@"
+    else
+        env -u CROWDSEC_BOUNCER_KEY docker compose "$@"
+    fi
+}
+
 # An explicit key arrives only on stdin; verify uses the running NPMplus config.
 # curl reads headers from stdin too, so no credential appears in process arguments.
 _waf_lapi_code() {
@@ -583,8 +596,8 @@ _waf_lapi_code() {
         key=$(cat)
         if [ -z "$key" ]; then key=$(sed -n "s/^API_KEY=//p" /data/crowdsec/crowdsec.conf); fi
         test -n "$key" || exit 1
-        printf "X-Api-Key: %s\n" "$key" | curl -sS --max-time 5 --header @- \
-            -o /dev/null -w "%{http_code}" "http://crowdsec:8080/v1/decisions/stream?startup=true"
+        printf "X-Api-Key: %s\n" "$key" | curl -sS --head --max-time 5 --header @- \
+            -o /dev/null -w "%{http_code}" "http://crowdsec:8080/v1/decisions/stream"
     '
 }
 

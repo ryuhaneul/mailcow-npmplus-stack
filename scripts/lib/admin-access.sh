@@ -25,8 +25,8 @@ admin_access() (
     trap 'exit 143' TERM
     umask 077
     NPM_LOGIN_EMAIL="$NPM_ADMIN_EMAIL" NPM_LOGIN_SECRET="$NPM_ADMIN_PASSWORD" \
-        python3 -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_LOGIN_EMAIL"],"secret":os.environ["NPM_LOGIN_SECRET"]}))' > "$work/login.json" || return 1
+        python3 -B -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_LOGIN_EMAIL"],"secret":os.environ["NPM_LOGIN_SECRET"]}))' > "$work/login.json" || return 1
     chmod 600 "$work/login.json" || return 1
     export -n NPM_ADMIN_PASSWORD
-    python3 "$SCRIPT_DIR/lib/npm_api.py" "$mode" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "${ADMIN_ACCESS_LIST:-}" "$DOMAIN"
+    python3 -B "$SCRIPT_DIR/lib/npm_api.py" "$mode" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "${ADMIN_ACCESS_LIST:-}" "$DOMAIN"
 )

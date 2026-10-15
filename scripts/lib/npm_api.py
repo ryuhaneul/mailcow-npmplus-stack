@@ -1,9 +1,11 @@
 """Existing cookie-based NPM transport and proxy ACL field selection."""
 import datetime
 import http.cookiejar
+import http.client
 import json
 import os
 import pathlib
+import signal
 import ssl
 import sys
 import time
@@ -28,12 +30,18 @@ class NpmApi:
             with self.opener.open(req, timeout=timeout) as response:
                 raw = response.read()
             return json.loads(raw) if raw.strip() else None
-        except (urllib.error.URLError, ValueError, TimeoutError, ConnectionError) as error:
+        except (urllib.error.URLError, http.client.HTTPException, ValueError, TimeoutError, ConnectionError) as error:
             raise RuntimeError(f'NPM {method} {path} failed') from error
 
     def login(self, payload_file, retry_seconds=0):
         started = time.monotonic()
         deadline = started + retry_seconds
+        def expired(signum, frame):
+            raise RuntimeError(f'NPM login failed after {retry_seconds}s')
+
+        if retry_seconds:
+            previous_handler = signal.signal(signal.SIGALRM, expired)
+            signal.setitimer(signal.ITIMER_REAL, retry_seconds)
         try:
             while True:
                 remaining = deadline - time.monotonic()
@@ -60,6 +68,9 @@ class NpmApi:
                     if time.monotonic() >= deadline:
                         raise RuntimeError(f'NPM login failed after {time.monotonic() - started:.0f}s') from error
         finally:
+            if retry_seconds:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
             payload_file.unlink(missing_ok=True)
 
     def hosts(self):
@@ -137,6 +148,18 @@ def admin_main(mode, work, api, name, domain):
             continue
         host = matches[0]
         selected.append(host)
+        own_locations = [location.get('path', '(unknown)') for location in host.get('locations', [])
+                         if location.get('npmplus_access_list_type') != 'global']
+        if own_locations:
+            paths = ', '.join(own_locations)
+            if mode == 'verify':
+                level = 'FAIL' if name else 'WARN'
+                label = hostname if name else f'관리 화면 공개 또는 부분 제한: {hostname}'
+                print(f'{level} {label}: Custom Location {paths} 가 자체 접근 설정 — NPM 화면에서 확인 필요')
+                failed = failed or bool(name)
+            else:
+                print(f'WARN {hostname} 의 Custom Location {paths} 가 자체 접근 설정 — 사람 설정이라 변경 안 함, NPM 화면에서 확인 필요')
+            continue
         state = access_state(host, identity)
         if mode == 'verify':
             if name:
@@ -174,7 +197,7 @@ if __name__ == '__main__':
             sys.exit(0)
         _, _, work, api, name, domain = sys.argv
         sys.exit(admin_main(mode, pathlib.Path(work), api, name, domain))
-    except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+    except (RuntimeError, http.client.HTTPException, OSError, ValueError, KeyError, TypeError) as error:
         message = str(error) if isinstance(error, RuntimeError) else 'operation failed; check NPM configuration'
         if mode == 'verify':
             print(('FAIL' if sys.argv[4] else 'SKIP') + ' admin access check: ' + message)

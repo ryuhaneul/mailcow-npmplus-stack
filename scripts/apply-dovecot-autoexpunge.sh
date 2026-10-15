@@ -111,11 +111,11 @@ finish_change() {
     PENDING=0
     log "$MODE complete"
 }
-# MAIL_AUTOEXPUNGE_ENABLE defaults to true; false selects revert.
+# MAIL_AUTOEXPUNGE_ENABLE defaults to false; false selects revert.
 # MAIL_AUTOEXPUNGE_DAYS defaults to 30 and must be an integer from 1 to 365.
 # Policy applies to every mail client, only to inbox/Junk and inbox/Trash.
 restore_aux() { :; }
-ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-true}"
+ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
 DAYS="${MAIL_AUTOEXPUNGE_DAYS:-30}"
 case "$ENABLE" in true|false) ;; *) die "MAIL_AUTOEXPUNGE_ENABLE must be true or false" ;; esac
 [[ "$DAYS" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$DAYS))" -ge 1 ] && [ "$((10#$DAYS))" -le 365 ] \

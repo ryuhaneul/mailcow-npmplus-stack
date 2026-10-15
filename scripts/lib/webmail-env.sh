@@ -1,5 +1,5 @@
 #!/bin/bash
-# Source this library from setup/update. Public API:
+# Source this library from setup/update/verify. Public API:
 #   webmail_load_config <stack .env> <MAILCOW_DIR>
 #   webmail_ensure_db_password
 #   webmail_generate_env <WEBMAIL_DIR>
@@ -9,6 +9,42 @@
 # with quoted values and literal dollars escaped for Compose interpolation.
 
 webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
+
+# Options can be loaded before mailcow exists (fresh setup Phase 0).
+webmail_options() {
+    WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-false}"
+    SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}"
+    MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
+    WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
+    [[ "$WEBMAIL_ATTACH_MAX_MB" =~ ^[0-9]+$ ]] || { webmail_error "invalid attachment size"; return 1; }
+    local flag host joined="" label
+    local -a hosts labels
+    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE"; do
+        case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
+    done
+    WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
+    IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
+    if [ "$WEBMAIL_ENABLE" = true ] && [ "$SNAPPYMAIL_ENABLE" = false ]; then hosts+=("mail.${DOMAIN}"); fi
+    for host in "${hosts[@]}"; do
+        host="${host#"${host%%[![:space:]]*}"}"
+        host="${host%"${host##*[![:space:]]}"}"
+        host=${host,,}
+        [ "${#host}" -le 253 ] && [ -n "$host" ] || { webmail_error "invalid WEBMAIL_HOSTNAMES"; return 1; }
+        IFS=. read -r -a labels <<< "$host"
+        [[ "$host" != *. ]] || { webmail_error "invalid webmail hostname"; return 1; }
+        for label in "${labels[@]}"; do
+            [[ "$label" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { webmail_error "invalid webmail hostname"; return 1; }
+        done
+        if [ "$WEBMAIL_ENABLE" = true ]; then
+            case "$host" in
+                "mailcow.${DOMAIN}"|"mail-npm.${DOMAIN}") webmail_error "webmail hostname conflicts with a stack service: $host"; return 1 ;;
+                "mail.${DOMAIN}") [ "$SNAPPYMAIL_ENABLE" = false ] || { webmail_error "webmail hostname conflicts with SnappyMail: $host"; return 1; } ;;
+            esac
+        fi
+        case ",$joined," in *",$host,"*) ;; *) joined+="${joined:+,}$host" ;; esac
+    done
+    WEBMAIL_HOSTNAMES="$joined"
+}
 
 webmail_mailcow_value() {
     local value
@@ -24,6 +60,9 @@ webmail_load_config() {
     MAILCOW_DIR="$2"
     [ -f "$WEBMAIL_STACK_ENV" ] || { webmail_error "stack .env not found"; return 1; }
     [ -f "$MAILCOW_DIR/mailcow.conf" ] || { webmail_error "mailcow.conf not found"; return 1; }
+    WEBMAIL_ENABLE=false
+    SNAPPYMAIL_ENABLE=true
+    MAIL_AUTOEXPUNGE_ENABLE=
     # shellcheck disable=SC1090
     source "$WEBMAIL_STACK_ENV" || return 1
     [ -n "${DOMAIN:-}" ] || { webmail_error "DOMAIN is required"; return 1; }
@@ -39,7 +78,7 @@ webmail_load_config() {
         [ "$((10#$octet))" -le 255 ] || { webmail_error "invalid IPV4_NETWORK octet"; return 1; }
     done
     [[ "$WEBMAIL_TLS_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { webmail_error "MAILCOW_HOSTNAME is required and must be a hostname"; return 1; }
-    WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
+    webmail_options || return 1
     WEBMAIL_BRAND_NAME="${WEBMAIL_BRAND_NAME:-메일}"
     WEBMAIL_ORG_NAME="${WEBMAIL_ORG_NAME:-}"
     WEBMAIL_BRAND_MARK="${WEBMAIL_BRAND_MARK:-}"
@@ -52,7 +91,7 @@ webmail_load_config() {
     WEBMAIL_MAIL_TLS_MODE="${WEBMAIL_MAIL_TLS_MODE:-verify}"
     WEBMAIL_DB_PASSWORD="${WEBMAIL_DB_PASSWORD:-}"
     WEBMAIL_IPV4="${WEBMAIL_IPV4:-}"
-    MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-true}"
+    MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
     MAIL_AUTOEXPUNGE_DAYS="${MAIL_AUTOEXPUNGE_DAYS:-30}"
     case "$WEBMAIL_MAIL_TLS_MODE" in verify|pin) ;; *) webmail_error "MAIL_TLS_MODE must be verify or pin"; return 1 ;; esac
     case "$MAIL_AUTOEXPUNGE_ENABLE" in true|false) ;; *) webmail_error "MAIL_AUTOEXPUNGE_ENABLE must be true or false"; return 1 ;; esac
@@ -206,4 +245,36 @@ webmail_extract_tls_pin() (
 webmail_prepare() {
     webmail_load_config "$1" "$2" && webmail_ensure_db_password &&
         webmail_extract_tls_pin "$3" && webmail_generate_env "$3"
+}
+
+# Compare normalized public certificate fingerprints, not PEM formatting.
+webmail_pin_fingerprint() {
+    openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null
+}
+
+webmail_live_pin_fingerprint() (
+    set -o pipefail
+    cd "$MAILCOW_DIR" || exit 1
+    timeout 30s docker compose exec -T dovecot-mailcow openssl s_client \
+        -connect 127.0.0.1:993 -servername "$WEBMAIL_TLS_NAME" -showcerts < /dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null
+)
+
+webmail_check_pin() {
+    local stored live
+    stored=$(webmail_pin_fingerprint "$1/mail-tls-pin.pem") || return 1
+    live=$(webmail_live_pin_fingerprint) || return 1
+    [ "$stored" = "$live" ]
+}
+
+webmail_refresh_pin() {
+    [ "$WEBMAIL_MAIL_TLS_MODE" = pin ] || return 0
+    local previous="" current
+    previous=$(webmail_pin_fingerprint "$1/mail-tls-pin.pem") || true
+    webmail_extract_tls_pin "$1" || return 1
+    current=$(webmail_pin_fingerprint "$1/mail-tls-pin.pem") || return 1
+    if [ "$previous" != "$current" ]; then
+        echo '[webmail] TLS certificate changed; restarting Webmail (all users must log in again).'
+        (cd "$1" && docker compose up -d --force-recreate webmail) || return 1
+    fi
 }

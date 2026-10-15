@@ -653,3 +653,87 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 - [ ] Mailcow SSL 심볼릭 resolve 확인: `docker exec nginx-mailcow ls -la /npm-data/tls/certbot/live/`
 - [ ] `openssl s_client -connect mail.DOMAIN:993` → 유효한 인증서
 - [ ] `openssl s_client -connect mail.DOMAIN:465` → 유효한 인증서
+
+
+## 10. 웹메일
+
+메일스택 웹메일은 `/home/webmail`에 설치되는 별도 컨테이너입니다. 개인 메일 자격으로 IMAP·SMTP·ManageSieve를 사용하며, 주소록·보낼 주소·사내 도메인은 열 단위 SELECT만 허용한 `webmail_ro` 계정으로 읽습니다. 세션은 메모리에 있으므로 웹메일 재시작·업데이트 후에는 사용자 전원이 다시 로그인해야 합니다.
+
+### 선택값과 주소
+
+| WEBMAIL_ENABLE | SNAPPYMAIL_ENABLE | 설치·업데이트 대상 | mail.DOMAIN 연결 |
+|---|---|---|---|
+| false | true | SnappyMail(기존 기본값) | snappymail:8888 |
+| true | true | 둘 다 | snappymail:8888 |
+| true | false | 웹메일 | webmail:8080 |
+| false | false | 둘 다 생략 | 새 프록시 생성 안 함 |
+
+`.env.example`의 새 설정값을 스택 `.env`에 넣습니다. 레포 기본값은 `WEBMAIL_ENABLE=false`, `SNAPPYMAIL_ENABLE=true`, `MAIL_AUTOEXPUNGE_ENABLE=false`이며 대체 후에도 유지합니다. 선택값 키가 없는 기존 서버에서는 새 기능을 실행하지 않습니다. setup·update는 선택값을 쓰거나 바꾸지 않으며, 켜진 기능에 필요한 비밀값이 비어 있을 때만 생성하고 기존 비밀값은 보존합니다. update에서 SnappyMail을 끄더라도 기존 컨테이너·데이터는 보존하며 제거 절차를 안내합니다.
+
+| 설정 | 기본값·뜻 |
+|---|---|
+| `WEBMAIL_HOSTNAMES` | 빈 값이면 `newmail.${DOMAIN}`. 쉼표 목록의 첫 주소가 대표 주소 |
+| `WEBMAIL_ACCESS_LIST` | 빈 값이면 공개. NPM 접근 목록 이름. IP 항목만 허용하며 인증 사용자가 든 목록·없는 목록이면 프록시 생성을 건너뜀 |
+| `WEBMAIL_BRAND_NAME`, `WEBMAIL_ORG_NAME`, `WEBMAIL_BRAND_MARK` | `메일`, 빈 값, 빈 값. 로고 글자는 1~2글자 |
+| `WEBMAIL_DEFAULT_THEME`, `WEBMAIL_DEFAULT_MODE` | `ink`, `system`. 테마 ink/seland/terra/amber/olive, 모드 system/light/dark |
+| `WEBMAIL_INTERNAL_DOMAINS` | 빈 값이면 활성 메일 도메인·별칭 도메인 자동 조회 |
+| `WEBMAIL_ALLMAIL_EXCLUDE` | 전체편지함에서 더 뺄 폴더 이름의 쉼표 목록 |
+| `WEBMAIL_ATTACH_MAX_MB` | `25`. 프록시 본문 한도는 이 값 + 5MiB |
+| `WEBMAIL_SESSION_IDLE_MIN`, `WEBMAIL_SESSION_MAX_HOURS` | `480`분 유휴, `24`시간 최대 세션 |
+| `WEBMAIL_IPV4` | 선택적 고정 IP. mailcow 내부망의 사용하지 않는 주소 지정 |
+| `WEBMAIL_TRUSTED_PROXIES` | 추가 신뢰 프록시 IP/CIDR 쉼표 목록. mailcow 내부 대역은 항상 포함 |
+| `WEBMAIL_MAIL_TLS_MODE` | `verify` 또는 `pin`. 검증을 끄는 모드는 없음 |
+| `WEBMAIL_DB_PASSWORD` | 비면 32자 무작위 생성 후 스택 `.env`에 저장. 출력·로그 금지 |
+
+웹메일만 켜면 `mail.${DOMAIN}`을 생성 환경의 로그인 허용 주소에도 자동 추가하고 중복을 제거합니다. SnappyMail이 켜져 있을 때 `mail.${DOMAIN}`, 그리고 항상 `mailcow.${DOMAIN}`·`mail-npm.${DOMAIN}`은 명시 웹메일 주소로 사용할 수 없습니다. `DOMAIN` 자체는 사용할 수 있습니다. 기존 프록시 호스트는 덮어쓰지 않으며 다른 대상으로 연결돼 있으면 경고 후 건너뜁니다. 변경은 별도 주소 전환 절차로 진행합니다.
+
+### 설치·업데이트·TLS
+
+새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. Phase 6은 선택적으로 SnappyMail을 설치하며, Phase 6b는 웹메일 환경·DB 계정·Dovecot 블록과 이미지를 준비하고 Phase 6c는 해당 서버에서 명시적으로 켰을 때만 독립적인 자동 삭제 정책을 적용합니다. 웹메일 주소의 DNS A 레코드도 서버를 가리켜야 합니다. 프록시 인증서는 Let's Encrypt를 시도하고 실패하거나 DNS가 없으면 자체서명을 사용합니다.
+
+기존 서버에 웹메일만 추가할 때에는 먼저 `.env`에 `WEBMAIL_ENABLE=true`와 사용할 주소·TLS 모드를 설정합니다. 전체 mailcow 업데이트를 실행하는 `update.sh` 대신, 사용자 공지·백업 후 다음 순서로 개별 적용합니다. 스택 루트에서 root로 실행하며 `.env`, Dovecot `extra.conf`, NPM 프록시 JSON을 먼저 백업하세요.
+
+```bash
+source scripts/lib/webmail-env.sh
+webmail_load_config "$PWD/.env" /home/mailcow-dockerized
+webmail_ensure_db_password
+bash scripts/apply-webmail-dbuser.sh apply
+bash scripts/apply-dovecot-webmail.sh apply -y
+# 자동 삭제를 켜기로 했다면 실행(모든 메일 프로그램에 적용)
+bash scripts/apply-dovecot-autoexpunge.sh apply -y
+mkdir -p /home/webmail
+rsync -a --delete --exclude=node_modules --exclude=webmail.env \
+  --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml webmail/ /home/webmail/
+webmail_prepare "$PWD/.env" /home/mailcow-dockerized /home/webmail
+(cd /home/webmail && docker compose build && docker compose up -d)
+```
+
+추가 주소 프록시는 `webmail-cutover.sh add-host` 제공 후 그 절차로 생성합니다. 해당 전환 스크립트는 별도 단계 산출물이며, 준비 전에는 이 명령을 실행하지 않습니다. 시험 주소의 upstream은 `http://webmail:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, `client_max_body_size`는 첨부 한도 + 5m입니다.
+
+일반 업데이트는 `sudo ./scripts/update.sh -y`입니다. 선택된 서비스만 갱신하고 Dovecot·DB 정책을 다시 적용합니다. 웹메일 환경 파일은 `/home/webmail/webmail.env`(600)이며 관리자 키·DB root 암호는 넣지 않습니다. 이 파일과 스택 `.env`를 출력하거나 저장소에 넣지 마세요.
+
+TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 서버는 `pin`을 선택합니다. 공개 인증서만 실제 IMAP TLS 접속에서 추출하며 개인 키를 읽거나 복사하지 않습니다. 공개 인증서는 `/home/webmail/mail-tls-pin.pem`이고 마운트는 `:ro,z`로 SELinux 공유 문맥을 적용합니다. setup의 Phase 8에서 인증서가 바뀌면 pin을 다시 추출합니다. update도 mailcow 업데이트 뒤 재추출하며 지문이 달라졌을 때 pin 변경에 따른 재기동을 수행합니다. 웹메일 이미지·환경 업데이트 자체에 따른 재기동은 별개입니다.
+
+### 검증·되돌리기
+
+`sudo ./scripts/verify.sh`는 선택 서비스의 컨테이너 상태, 주소별 `/healthz`, Dovecot·DB 계정, 비로그인 logout의 403 및 WWW-Authenticate 부재를 확인합니다. 접근 목록이 있는 주소의 외부 HTTP 검사는 건너뜀으로 표시합니다. pin 모드는 저장한 인증서와 현재 메일 서버의 SHA-256 지문도 비교합니다.
+
+Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 있으므로 근무 시간 밖에 사용자 공지 후 실행합니다. 되돌리기는 프록시 추가 주소 제거 → 웹메일 `docker compose down` → `.env`에서 `WEBMAIL_ENABLE=false` → `apply-dovecot-webmail.sh --revert -y` → `apply-webmail-dbuser.sh --revert` 순서입니다. 색인은 남기며 사용자 설정·메일 데이터는 지우지 않습니다. `teardown.sh`는 별도의 전체 제거 명령으로 확인 후 웹메일까지 제거합니다.
+
+### 스내피에서 웹메일로 바꾸기
+
+아래 주소 전환·제거 도구는 별도 단계에서 제공하며, 배포 전에는 실행하지 않습니다. 각 단계는 운영자 승인과 공지 후 진행합니다.
+
+1. 시범 문제 해결·전체 사용자 필터 이관·시험 서버 리허설 완료를 확인합니다. 전환 시각·주소·필터 메뉴 변경·첫 로그인 안내를 공지합니다. 사용자별 기존 필터 원본은 지우지 않습니다.
+2. `snappymail-remove.sh backup`으로 데이터 볼륨·compose 파일·NPM 프록시 JSON을 백업하고 파일 크기가 0이면 중단합니다.
+3. `webmail-cutover.sh status`로 대상을 확인하고 `switch`로 SnappyMail을 향하는 주소들을 `webmail:8080`으로 바꿉니다. 기존 접근 목록을 유지하고 변경 전 JSON을 보관합니다.
+4. 전환 주소를 `WEBMAIL_HOSTNAMES`에 추가합니다. 대표는 `webmail.${DOMAIN}`, 기존 시험 주소는 유지합니다. `webmail.env` 재생성과 `up -d` 후 주소별 healthz·로그인·보내기·verify를 확인합니다.
+5. 운영자가 정한 관찰 기간(권장 1주)에는 SnappyMail을 `docker compose stop`만 합니다. 문제 시 `webmail-cutover.sh revert`와 SnappyMail `start`로 되돌립니다.
+6. 관찰 후 `snappymail-remove.sh remove`로 컨테이너를 내리되 볼륨은 보존하고 `SNAPPYMAIL_ENABLE=false`로 바꿉니다. 볼륨·설치 폴더 삭제는 별도 확인 후 진행합니다. 컨테이너 제거 뒤 원복은 선택값을 true로 바꾸고 `up -d` → `revert` 순서입니다. 볼륨까지 삭제했다면 `restore <백업 tar>`가 먼저입니다.
+7. 최종 대체 완료 후에도 레포 기본값은 변경하지 않습니다. 전환할 서버의 `.env`에서만 웹메일 true·SnappyMail false를 선택합니다. 사용자 필터 원복은 기존 스크립트를 `doveadm sieve activate -u <주소> <원래 이름>`으로 다시 활성화합니다.
+
+## 11. 스팸·휴지통 자동 삭제
+
+`MAIL_AUTOEXPUNGE_ENABLE=false`, `MAIL_AUTOEXPUNGE_DAYS=30`이 기본값입니다. 새 기능은 기본 꺼짐이며 선택값 키가 없는 서버에서는 관련 단계를 건너뜁니다. 웹메일 설치 여부와 무관하게 Dovecot의 실제 `Junk`·`Trash` 폴더에 적용되어 Outlook·휴대폰 등 **모든 메일 프로그램**에 영향을 줍니다. 1~365일만 허용하며 이미 삭제된 메일은 복원되지 않습니다.
+
+**기존 서버는 update만으로 자동 삭제가 켜지지 않습니다.** 적용하려면 사용자에게 시각과 일수를 공지한 뒤 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 명시하세요. 보존 기간 축소 전에도 공지해야 합니다. 끄려면 `.env`에서 `MAIL_AUTOEXPUNGE_ENABLE=false`로 바꾸고 `bash scripts/apply-dovecot-autoexpunge.sh --revert -y`를 실행합니다. 이미 삭제된 메일은 돌아오지 않습니다. `apply-dovecot-autoexpunge.sh --check`로 켜진 정책을 확인할 수 있습니다.

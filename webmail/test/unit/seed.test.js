@@ -23,7 +23,7 @@ test('M02 roles cover all eight users and both team mailboxes', () => {
   assert.equal(admin.requests.length, 3);
   assert.deepEqual(admin.requests[0].body, { items: [plan.users[1].email], attr: { sender_acl: plan.users[1].senderAcl } });
   assert.deepEqual(admin.requests.slice(1).map(request => request.body), plan.users[2].aliases.map(address => ({
-    address, goto: plan.users[2].email, active: '1', sogo_visible: '1',
+    address, goto: plan.users[2].email, active: '1', sogo_visible: '1', sender_allowed: '1',
   })));
   assert.deepEqual(admin.manual[0].desired, plan.users[3].share);
   assert.ok(admin.requests.every(request => request.check && request.policy));

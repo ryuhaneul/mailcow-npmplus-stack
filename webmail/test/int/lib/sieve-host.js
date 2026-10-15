@@ -4,8 +4,20 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { matches } from '../../../server/sieve/match.js';
 import { sieveCorpus, deliveryCases } from './sieve-corpus.js';
+
+export function sieveFileEntries(config, skipped = () => {}) {
+  return [...config.matchAll(/^[\t ]*sieve_(before|after)(\d*)[\t ]*=[\t ]*(\S[^\r\n]*)$/gm)].flatMap(row => {
+    const entry = { side: row[1], order: Number(row[2] || 0), path: row[3].trimEnd() };
+    if (entry.path.startsWith('/')) return [entry];
+    // Report the storage type, never a dict/mysql descriptor containing credentials.
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(entry.path)?.[1] || '기타';
+    skipped(`sieve_${row[1]}${row[2]}: 파일 아님 — 건너뜀 (${scheme}:)`);
+    return [];
+  });
+}
 
 function main() {
   if (process.env.WEBMAIL_INT !== '1') {
@@ -21,8 +33,7 @@ function main() {
   const exec = args => docker(['exec', '-T', 'dovecot-mailcow', ...args]);
   // Discover every configured numbered before/after, including directory scripts.
   const config = exec(['doveconf', '-n']);
-  const entries = [...config.matchAll(/^\s*sieve_(before|after)(\d*)\s*=\s*(\S.*?)\s*$/gm)]
-    .map(row => ({ side: row[1], order: Number(row[2] || 0), path: row[3] }));
+  const entries = sieveFileEntries(config, line => process.stdout.write(`${line}\n`));
   const global = side => entries.filter(row => row.side === side).sort((a, b) => a.order - b.order).flatMap(row => {
     assert.ok(row.path.startsWith('/') && !/[\r\n]/.test(row.path), '전역 Sieve 파일 경로 확인 필요');
     const paths = exec(['sh', '-c', 'if [ -d "$1" ]; then find -L "$1" -maxdepth 1 -type f -name "*.sieve" | sort; else test -f "$1" && printf "%s\\n" "$1"; fi', 'sh', row.path]);
@@ -85,8 +96,10 @@ function main() {
   }
   process.stdout.write('T-SIEVE 1200쌍 불일치 0, R-COPY 10건, 부재중 기간 안/밖·스팸 3건 통과\n');
 }
-try { main(); } catch {
-  // Never print child process stderr, Dovecot configuration, environment or credentials.
-  process.stderr.write('T-SIEVE 실패: 명령/전역 스크립트/판정 확인 필요. 원문·환경·암호 출력 생략.\n');
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try { main(); } catch {
+    // Never print child process stderr, Dovecot configuration, environment or credentials.
+    process.stderr.write('T-SIEVE 실패: 명령/전역 스크립트/판정 확인 필요. 원문·환경·암호 출력 생략.\n');
+    process.exitCode = 1;
+  }
 }

@@ -5,6 +5,33 @@ import { validateDocument, canonicalJSON, MAX_SCRIPT_BYTES } from '../../server/
 import { conditionTest, generateScript, hashBody, MAGIC } from '../../server/sieve/generate.js';
 import { parseScript } from '../../server/sieve/parse.js';
 import { classifyState } from '../../server/sieve/state.js';
+import { sieveFileEntries } from '../int/lib/sieve-host.js';
+
+test('T-SIEVE doveconf discovery keeps absolute files and skips dict/mysql without exposing descriptors', () => {
+  const skipped = [];
+  const config = `dict {
+  sieve_before = mysql:/etc/dovecot/synthetic-secret-marker.conf
+  sieve_after = mysql:/etc/dovecot/synthetic-secret-marker.conf
+}
+plugin {
+  sieve_before = /var/vmail/sieve/global_sieve_before.sieve
+  sieve_before2 = dict:proxy::sieve_before;name=before
+  sieve_after = dict:proxy::sieve_after;name=after
+  sieve_after2 = /var/vmail/sieve/global_sieve_after.sieve
+}
+`;
+  assert.deepEqual(sieveFileEntries(config, line => skipped.push(line)), [
+    { side: 'before', order: 0, path: '/var/vmail/sieve/global_sieve_before.sieve' },
+    { side: 'after', order: 2, path: '/var/vmail/sieve/global_sieve_after.sieve' },
+  ]);
+  assert.deepEqual(skipped, [
+    'sieve_before: 파일 아님 — 건너뜀 (mysql:)',
+    'sieve_after: 파일 아님 — 건너뜀 (mysql:)',
+    'sieve_before2: 파일 아님 — 건너뜀 (dict:)',
+    'sieve_after: 파일 아님 — 건너뜀 (dict:)',
+  ]);
+  assert.equal(skipped.join('\n').includes('synthetic-secret-marker'), false);
+});
 
 const fixtures = JSON.parse(await readFile(new URL('../fixtures/sieve/roundtrip.json', import.meta.url), 'utf8'));
 const context = { internalDomains: ['example.com', 'alias.example.com'], folders: [{ path: 'Projects/팀' }, { path: 'Archive' }], addresses: ['user@example.com', 'alias@alias.example.com'], trashPath: 'Trash' };

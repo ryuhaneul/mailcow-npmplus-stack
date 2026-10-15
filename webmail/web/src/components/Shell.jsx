@@ -1,30 +1,42 @@
 import { useEffect, useState, useRef } from 'preact/hooks';
 import { prefs } from '../state/prefs.js';
+import { folders } from '../state/folders.js';
+import { storage } from '../state/storage.js';
+import { toast } from '../state/toast.js';
+import { route } from '../router.js';
+import { api } from '../api.js';
 import { initStars } from '../theme/stars.js';
-import Brand from './Brand.jsx';
+import Sidebar from './Sidebar.jsx';
+import TopBar from './TopBar.jsx';
+import MobileQuota from './MobileQuota.jsx';
+import { vacation } from './OooBadge.jsx';
 
-function Icon({ name }) {
-  const paths = {
-    menu: <path d="M4 7h16M4 12h16M4 17h16" />,
-    sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></>,
-    moon: <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />,
-  };
-  return <svg class="i" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
-}
-
-function Starflow() {
+export function Starflow() {
   const frame = useRef(null);
   useEffect(() => initStars(frame.current), []);
   return <iframe ref={frame} id="starflow-background" src="/starflow/index.html" tabIndex={-1} aria-hidden="true" title="장식용 별 배경" />;
 }
-
-export default function Shell() {
+export function useMode() {
   const [mode, setMode] = useState(document.documentElement.dataset.mode);
-  const [navOpen, setNavOpen] = useState(false);
   useEffect(() => {
     const update = () => setMode(document.documentElement.dataset.mode);
     document.addEventListener('webmail:apply', update);
     return () => document.removeEventListener('webmail:apply', update);
+  }, []);
+  return mode;
+}
+export default function Shell() {
+  const mode = useMode();
+  const [navOpen, setNavOpen] = useState(false);
+  const current = route.value;
+  const onError = error => { if (['NO_SESSION','SESSION_EXPIRED'].includes(error.code)) return; toast.value = { kind: 'error', message: error.message }; };
+  useEffect(() => {
+    let active = true;
+    folders.value = { folders: [], virtualAllMail: null }; storage.value = null; vacation.value = null;
+    Promise.all([api('/api/folders'),api('/api/storage?quotaOnly=1')]).then(([f,s]) => { if (active) {folders.value=f;storage.value=s;} }).catch(error => {if(active) onError(error);});
+    // Vacation has no production endpoint yet; only the development fixture provides it.
+    if (import.meta.env.DEV && import.meta.env.VITE_WEBMAIL_FAKE_API === '1') api('/api/dev/vacation').then(value => {if(active) vacation.value=value;}).catch(error => {if(active) onError(error);});
+    return () => {active=false;};
   }, []);
   useEffect(() => {
     document.body.classList.toggle('nav-open', navOpen);
@@ -32,18 +44,19 @@ export default function Shell() {
     document.addEventListener('keydown', close);
     return () => { document.body.classList.remove('nav-open'); document.removeEventListener('keydown', close); };
   }, [navOpen]);
+  useEffect(() => {setNavOpen(false);document.body.dataset.r=current.name;},[current]);
+  const folder = current.name === 'f' ? folders.value.folders.find(value=>value.path===current.value) : null;
   return <>
     {prefs.value.theme === 'seland' && mode === 'dark' && <Starflow/>}
     <div class="app">
-      <aside class="side" id="mail-sidebar" aria-label="메일함"><Brand/><nav class="nav" aria-label="폴더" /></aside>
+      <aside class="side" id="mail-sidebar" aria-label="메일함"><Sidebar/></aside>
       <div class="scrim-nav" onClick={() => setNavOpen(false)} aria-hidden="true" />
       <main class="main">
-        <header class="top">
-          <button class="ib menu-btn" type="button" aria-label="메일함 열기" aria-controls="mail-sidebar" aria-expanded={navOpen} onClick={() => setNavOpen(!navOpen)}><Icon name="menu"/></button>
-          <div class="r"><button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => { prefs.value = { ...prefs.value, mode: mode === 'dark' ? 'light' : 'dark' }; }}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button></div>
-        </header>
-        <div class="stage"><div class="head"><div><div class="eyebrow">MAIL</div><h1>메일</h1></div></div></div>
+        <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
+        <MobileQuota/>
+        <div class="stage"><section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section></div>
       </main>
     </div>
+    {toast.value && <div class="toast open" role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
   </>;
 }

@@ -721,3 +721,23 @@ table.ft{width:100%;border-collapse:collapse;font-size:13.5px}
 
 body[data-r=filters] [data-v=filters],body[data-r=rule] [data-v=rule],body[data-r=storage] [data-v=storage],body[data-r=password] [data-v=password],body[data-r=settings] [data-v=settings]{display:flex}
 
+
+/* F02: K19 login card, using the approved theme tokens. */
+.login-screen{height:100%;overflow:auto;display:grid;place-items:center;padding:24px}
+.login-card{width:min(380px,100%);padding:32px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-main);box-shadow:var(--sheet)}
+.login-card .brand{padding:0;margin:0 0 28px}
+.login-card h1{margin:0 0 24px;font-size:var(--fs-h1);font-weight:var(--fw-h1);letter-spacing:-.025em}
+.login-card .field{display:flex;flex-direction:column;gap:8px;margin-top:18px}
+.login-card label{font-size:14px;font-weight:var(--fw-strong)}
+.login-card .inp{width:100%;min-height:44px;font-size:16px}
+.login-error{color:var(--danger);font-size:13.5px;line-height:1.6;min-height:22px;margin:14px 0}
+.login-submit{width:100%;min-height:44px;font-size:14px}
+.login-submit[disabled]{cursor:wait}
+.placeholder-view{flex:1;min-height:0;overflow:auto}
+
+/* Approved F02 account controls, reusing .pop/.opt/.nv from the mockup. */
+.account{position:relative;flex:none}
+.account-menu{left:auto;right:0;top:calc(100% + 6px);width:260px;max-width:calc(100vw - 24px)}
+.account-menu .opt{grid-template-columns:minmax(0,1fr)}
+.mobile-logout{display:none}
+@media(max-width:760px){.account{display:none}.mobile-logout{display:flex;flex:none;min-height:44px}}

@@ -708,7 +708,7 @@ webmail_prepare "$PWD/.env" /home/mailcow-dockerized /home/webmail
 (cd /home/webmail && docker compose build && docker compose up -d)
 ```
 
-추가 주소 프록시는 `webmail-cutover.sh add-host` 제공 후 그 절차로 생성합니다. 해당 전환 스크립트는 별도 단계 산출물이며, 준비 전에는 이 명령을 실행하지 않습니다. 시험 주소의 upstream은 `http://webmail:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, `client_max_body_size`는 첨부 한도 + 5m입니다.
+추가 주소 프록시는 `bash scripts/webmail-cutover.sh add-host`로 생성합니다. 선택한 주소만 추가하려면 뒤에 호스트 이름을 지정합니다. 기존 호스트는 변경하지 않으며, 접근 목록이 없거나 인증 사용자를 포함하면 공개로 생성하지 않고 건너뜁니다. 시험 주소의 upstream은 `http://webmail:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, `client_max_body_size`는 첨부 한도 + 5m입니다.
 
 일반 업데이트는 `sudo ./scripts/update.sh -y`입니다. 선택된 서비스만 갱신하고 Dovecot·DB 정책을 다시 적용합니다. 웹메일 환경 파일은 `/home/webmail/webmail.env`(600)이며 관리자 키·DB root 암호는 넣지 않습니다. 이 파일과 스택 `.env`를 출력하거나 저장소에 넣지 마세요.
 
@@ -722,15 +722,47 @@ Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 �
 
 ### 스내피에서 웹메일로 바꾸기
 
-아래 주소 전환·제거 도구는 별도 단계에서 제공하며, 배포 전에는 실행하지 않습니다. 각 단계는 운영자 승인과 공지 후 진행합니다.
+아래 도구는 관리자가 직접 실행하며 setup·update는 자동으로 호출하지 않습니다. 각 단계는 운영자 승인과 공지 후 진행합니다. 두 도구는 `.env`를 수정하지 않고 운영자에게 변경할 선택값만 안내합니다.
 
 1. 시범 문제 해결·전체 사용자 필터 이관·시험 서버 리허설 완료를 확인합니다. 전환 시각·주소·필터 메뉴 변경·첫 로그인 안내를 공지합니다. 사용자별 기존 필터 원본은 지우지 않습니다.
-2. `snappymail-remove.sh backup`으로 데이터 볼륨·compose 파일·NPM 프록시 JSON을 백업하고 파일 크기가 0이면 중단합니다.
+2. 전환 전 `WEBMAIL_HOSTNAMES` 값을 운영 기록에 남깁니다. `snappymail-remove.sh backup`으로 데이터 볼륨·compose 파일·NPM 프록시 JSON을 백업하고 파일 크기가 0이면 중단합니다.
 3. `webmail-cutover.sh status`로 대상을 확인하고 `switch`로 SnappyMail을 향하는 주소들을 `webmail:8080`으로 바꿉니다. 기존 접근 목록을 유지하고 변경 전 JSON을 보관합니다.
-4. 전환 주소를 `WEBMAIL_HOSTNAMES`에 추가합니다. 대표는 `webmail.${DOMAIN}`, 기존 시험 주소는 유지합니다. `webmail.env` 재생성과 `up -d` 후 주소별 healthz·로그인·보내기·verify를 확인합니다.
-5. 운영자가 정한 관찰 기간(권장 1주)에는 SnappyMail을 `docker compose stop`만 합니다. 문제 시 `webmail-cutover.sh revert`와 SnappyMail `start`로 되돌립니다.
-6. 관찰 후 `snappymail-remove.sh remove`로 컨테이너를 내리되 볼륨은 보존하고 `SNAPPYMAIL_ENABLE=false`로 바꿉니다. 볼륨·설치 폴더 삭제는 별도 확인 후 진행합니다. 컨테이너 제거 뒤 원복은 선택값을 true로 바꾸고 `up -d` → `revert` 순서입니다. 볼륨까지 삭제했다면 `restore <백업 tar>`가 먼저입니다.
+4. 운영자가 먼저 해당 서버 `.env`에서 `SNAPPYMAIL_ENABLE=false`로 바꾼 다음 전환 주소를 `WEBMAIL_HOSTNAMES`에 추가합니다. 대표는 `webmail.${DOMAIN}`, 기존 시험 주소는 유지합니다. 이 순서는 환경 검증과 Origin 허용 주소를 일치시키며 컨테이너·데이터를 삭제하지 않습니다. `webmail.env` 재생성과 `up -d` 후 주소별 healthz·로그인·보내기·verify를 확인합니다.
+5. 운영자가 정한 관찰 기간(권장 1주)에는 `bash scripts/snappymail-remove.sh stop`으로 컨테이너만 정지합니다. 컨테이너·볼륨·폴더는 보존합니다. 문제 시 `webmail-cutover.sh revert` → 운영자가 `WEBMAIL_HOSTNAMES`를 전환 전 목록으로 원복하고 `SNAPPYMAIL_ENABLE=true` 선택 → `snappymail-remove.sh start`로 되돌립니다.
+6. 관찰 후 `snappymail-remove.sh remove`로 컨테이너를 내립니다. 기본적으로 볼륨·폴더를 보존하고 앞서 운영자가 선택한 `SNAPPYMAIL_ENABLE=false`도 그대로 둡니다. 볼륨·설치 폴더 삭제는 별도 확인 후 진행합니다. 컨테이너 제거 뒤 원복은 선택값을 true로 바꾸고 `up -d` → `revert` 순서입니다. 볼륨까지 삭제했다면 `restore <백업 tar>`가 먼저입니다.
 7. 최종 대체 완료 후에도 레포 기본값은 변경하지 않습니다. 전환할 서버의 `.env`에서만 웹메일 true·SnappyMail false를 선택합니다. 사용자 필터 원복은 기존 스크립트를 `doveadm sieve activate -u <주소> <원래 이름>`으로 다시 활성화합니다.
+
+### 수동 도구 사용법과 백업
+
+백업 위치 기본값은 `/root/webmail-backup-YYYYMMDD`입니다. 한 번의 전환 작업에서는 두 도구에 같은 `WEBMAIL_BACKUP_DIR`를 사용하세요. 다른 날 원복할 때에도 해당 백업 경로를 지정합니다. 기존 백업 파일은 덮어쓰지 않으므로 새 작업에는 새 디렉터리를 선택합니다. 백업 디렉터리 전체를 함께 보관하세요.
+
+```bash
+export WEBMAIL_BACKUP_DIR=/root/webmail-backup-20261015
+bash scripts/snappymail-remove.sh backup
+bash scripts/webmail-cutover.sh status
+bash scripts/webmail-cutover.sh switch
+# 여기서 운영자가 .env의 SNAPPYMAIL_ENABLE=false 및 주소 목록을 수정
+# 웹메일 환경 재생성·up -d와 주소별 검증 후 관찰 시작
+bash scripts/snappymail-remove.sh stop
+# 관찰을 마친 뒤 컨테이너만 제거(볼륨·폴더 보존)
+bash scripts/snappymail-remove.sh remove
+```
+
+| 도구·명령 | 동작 |
+|---|---|
+| `webmail-cutover.sh status [--json]` | 현재 주소·대상·접근 목록 표시. JSON 옵션은 백업용 전체 응답 |
+| `add-host [주소]` | 주소가 없으면 설정된 웹메일 주소들을 생성. 기존 대상은 건너뜀 |
+| `remove-host <주소>` | 웹메일을 향하는 프록시 호스트만 삭제. 삭제 전 JSON 보관 |
+| `switch` | 정확히 `snappymail`을 향하는 호스트만 변경. 원본 전체 JSON을 `webmail-cutover-before.json`에 먼저 저장 |
+| `revert [백업 JSON]` | 백업의 전환 대상만 원복. 바꾼 필드만 PUT하며 포트·원래 고급 설정을 복원 |
+| `snappymail-remove.sh backup` | 실제 데이터 볼륨 이름을 찾아 압축 파일·compose·NPM JSON·복구 메타데이터를 저장하고 검증 |
+| `stop` / `start` | 관찰을 위한 정지 / 보존된 볼륨으로 기동 |
+| `remove` | 완전한 백업이 없으면 거부. 기본값은 컨테이너만 제거 |
+| `restore <압축 파일>` | 삭제된 볼륨을 만들고 데이터를 풀어 compose 프로젝트를 기동. 기존 볼륨은 덮어쓰지 않음 |
+
+볼륨 삭제가 별도로 승인됐을 때만 `remove --delete-volume`을 사용합니다. 설치 폴더 삭제는 `--delete-install-dir`로 따로 선택하며 두 옵션을 함께 사용할 수도 있습니다. 백업이 설치 폴더 안에 있으면 폴더 삭제를 거부합니다. 데이터가 남아 있는 컨테이너 제거 단계에서는 `start`로 원복하고, 볼륨까지 삭제한 뒤에는 백업 압축 파일을 `restore`한 뒤 주소를 `revert`합니다. 설치 폴더만 지웠다면 보관한 compose 파일을 먼저 원래 위치에 복원하세요. 사용자 필터는 별도로 원래 Sieve 스크립트를 활성화합니다.
+
+백업·쿠키·관리자 암호 임시 파일은 비공개 권한으로 다룹니다. NPM 암호를 명령 인자나 로그에 남기지 않습니다. NPM PUT에는 변경할 필드만 보내며 접근 목록·인증서는 전환 중 그대로 보존합니다. 여러 호스트 중 일부 전환이 실패해도 최초 백업을 유지하므로 원인을 확인한 뒤 `revert`할 수 있습니다. 전환 후 다른 관리자가 대상·주소를 바꾼 경우에는 원복을 거부하고 수동 검토를 요구합니다.
 
 ## 11. 스팸·휴지통 자동 삭제
 

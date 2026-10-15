@@ -741,3 +741,10 @@ body[data-r=filters] [data-v=filters],body[data-r=rule] [data-v=rule],body[data-
 .account-menu .opt{grid-template-columns:minmax(0,1fr)}
 .mobile-logout{display:none}
 @media(max-width:760px){.account{display:none}.mobile-logout{display:flex;flex:none;min-height:44px}}
+
+/* F03 route rendering uses the original list and popover styles. */
+.sbar .note{flex-basis:100%;font-size:12.5px;color:var(--ink-3)}
+.list-menu{width:260px;max-height:320px;overflow:auto}
+.list-menu .opt{grid-template-columns:minmax(0,1fr)}
+.tools button[disabled]{cursor:default;opacity:.45}
+.search .ib{width:28px;height:28px}

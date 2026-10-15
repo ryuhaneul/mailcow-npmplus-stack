@@ -37,3 +37,21 @@ cert_reload_install() {
         log "Cert reload cron: already installed (daily 04:00)"
     fi
 }
+
+# Read-only comparison: 0=equal, 1=different, 2=unavailable.
+cert_reload_certificate_matches() {
+    local mailcow_dir="$1" port="$2" hostname expected actual
+    hostname=$(
+        # shellcheck disable=SC1090,SC1091
+        source "$mailcow_dir/mailcow.conf" 2>/dev/null && printf '%s' "${MAILCOW_HOSTNAME:-}"
+    ) || hostname=""
+    expected=$(openssl x509 -in "$mailcow_dir/data/assets/ssl/cert.pem" -noout -enddate 2>/dev/null) || expected=""
+    actual=""
+    if [ -n "$hostname" ]; then
+        actual=$(timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$hostname" </dev/null 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null) || actual=""
+    fi
+    if [ -z "$expected" ] || [ -z "$actual" ]; then
+        return 2
+    fi
+    [ "$actual" = "$expected" ] || return 1
+}

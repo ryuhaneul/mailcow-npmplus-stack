@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import tls from 'node:tls';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -25,12 +25,12 @@ before(async () => {
 });
 after(async () => { await rm(certDir, { recursive: true, force: true }); });
 
-async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = false } = {}) {
+async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = false, greeting = true } = {}) {
   const sockets = new Set();
   const commands = [];
   const server = tls.createServer({ cert, key: privateKey }, socket => {
     sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket));
-    socket.write('* OK synthetic example.com IMAP\r\n');
+    if (greeting) socket.write('* OK synthetic example.com IMAP\r\n');
     let input = Buffer.alloc(0);
     let literal = null;
     socket.on('data', chunk => {
@@ -222,6 +222,7 @@ test('pool: work connection reused and mailbox locks serialize concurrent operat
   assert.equal(f.clients[0].options.clientInfo['x-originating-ip'], f.session.ip);
   assert.equal(f.clients[0].options.tls.rejectUnauthorized, true);
   assert.equal(f.clients[0].options.connectionTimeout, 10000);
+  assert.equal(f.clients[0].options.greetingTimeout, 10000);
   assert.equal(f.clients[0].options.socketTimeout, 60000);
 });
 test('pool: one reconnect shared by concurrent requests after disconnect', async t => {
@@ -277,12 +278,13 @@ test('pool: command timeout closes connection at 60 seconds', async t => {
   await flush(); t.mock.timers.tick(60000); await rejected;
   assert.equal(f.clients[0].usable, false);
 });
-test('pool: connection timeout closes pending connection at 10 seconds', async t => {
+test('pool: session setup timeout closes unanswered authentication at 40 seconds', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let client;
   const pool = poolFor({}, { clientFactory: options => { client = new FakeImap(options); client.connect = () => new Promise(() => {}); return client; } });
   const pending = assert.rejects(pool.verifyLogin(credentials()), { statusCode: 503 });
-  await flush(); t.mock.timers.tick(10000); await pending; assert.equal(client.isClosed, true);
+  await flush(); t.mock.timers.tick(39999); await flush(); assert.equal(client.isClosed, false);
+  t.mock.timers.tick(1); await pending; assert.equal(client.isClosed, true);
 });
 
 
@@ -339,4 +341,57 @@ test('app: default verifier performs real TLS IMAP login and reconnect rejection
   assert.equal(rejected.statusCode, 403); assert.equal(rejected.json().error.code, 'SESSION_EXPIRED');
   assert.ok(session.password.every(byte => byte === 0));
   assert.equal((await app.inject({ url: '/api/auth/session', headers: { cookie } })).statusCode, 403);
+});
+
+
+for (const delay of [12000, 17000]) test(`login: authentication rejected after ${delay}ms is 403 AUTH_FAILED`, async t => {
+  const clients = [], tempRoot = await mkdtemp(join(tmpdir(), 'webmail-auth-delay-'));
+  const app = await createApp({ config: { ...config, publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24 }, logger: false, auth: { tempRoot, clientFactory: options => {
+    const client = new FakeImap(options); clients.push(client);
+    client.connect = () => new Promise((_resolve, reject) => setTimeout(() => reject(Object.assign(new Error('synthetic delayed auth rejection'), { authenticationFailed: true })), delay));
+    return client;
+  } } });
+  t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const pending = app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-delayed-password' } }).then(response => { settled = true; return response; });
+  await flush();
+  t.mock.timers.tick(delay - 1); await flush(); assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  const response = await pending;
+  assert.equal(response.statusCode, 403);
+  assert.equal(response.json().error.code, 'AUTH_FAILED');
+  assert.equal(response.headers['www-authenticate'], undefined);
+  assert.equal(clients[0].isClosed, true);
+  assert.equal(clients[0].options.auth.pass, '');
+  assert.equal(clients[0].options.connectionTimeout, 10000);
+  assert.equal(clients[0].options.greetingTimeout, 10000);
+});
+
+test('pool: native TLS greeting timeout remains 10 seconds', async t => {
+  const server = await serverFixture(t, { greeting: false });
+  const connected = once(server.server, 'secureConnection');
+  const clients = [];
+  const pool = poolFor({ imapPort: server.port, mailTlsMode: 'pin', mailTlsPinFile: join(certDir, 'one.pem') }, { clientFactory: options => { const client = new ImapFlow(options); clients.push(client); return client; } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = false;
+  const operation = pool.verifyLogin(credentials()).finally(() => { settled = true; });
+  const rejected = assert.rejects(operation, { code: 'GREETING_TIMEOUT' });
+  await connected; await flush();
+  t.mock.timers.tick(9999); await flush(); assert.equal(settled, false);
+  t.mock.timers.tick(1); await rejected;
+  assert.equal(clients[0].usable, false);
+});
+
+test('login: refused connection remains 503 MAIL_UNAVAILABLE', async t => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-auth-refused-'));
+  const app = await createApp({ config: { ...config, publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24 }, logger: false, auth: { tempRoot, clientFactory: options => {
+    const client = new FakeImap(options);
+    client.connect = async () => { throw Object.assign(new Error('synthetic refused connection'), { code: 'ECONNREFUSED' }); };
+    return client;
+  } } });
+  t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
+  const response = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-connect-password' } });
+  assert.equal(response.statusCode, 503); assert.equal(response.json().error.code, 'MAIL_UNAVAILABLE');
+  assert.equal(response.headers['www-authenticate'], undefined);
 });

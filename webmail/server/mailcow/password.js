@@ -124,7 +124,7 @@ export function createPasswordService({ config, sessions, rateLimiter, logger, p
       if (Object.keys(credentials).length !== 3 || !credentials.current.length || !credentials.next.length || !credentials.next2.length) throw new AppError(422, 'PW_FORMAT', '암호를 입력해 주세요.');
       if (!same(credentials.next, credentials.next2)) throw new AppError(422, 'PW_MISMATCH', '새 암호가 서로 같지 않아요.');
       if (same(credentials.current, credentials.next)) throw new AppError(422, 'PW_SAME', '현재 암호와 다른 새 암호를 입력해 주세요.');
-      if (!same(credentials.current, session.password)) throw new AppError(403, 'CURRENT_WRONG', '현재 암호가 맞지 않아요.');
+      if (!same(credentials.current, session.password)) throw failure(config, 403, 'CURRENT_WRONG', '현재 암호가 맞지 않아요.');
       await proxy.change(session.email, credentials);
       await sessions.destroyAllFor(session.email);
       logger.info({ code: 'PASSWORD_CHANGED', email: session.email, ip: session.ip }, '암호를 바꾸고 모든 웹메일 로그인을 종료했습니다.');

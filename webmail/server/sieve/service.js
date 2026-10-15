@@ -6,6 +6,8 @@ import { generateScript } from './generate.js';
 import { parseScript } from './parse.js';
 import { classifyState } from './state.js';
 import { importScript, rulesDocument } from './import.js';
+import { invalidateInboxHeaders, loadInboxHeaders, matches, preview as previewMatches } from './match.js';
+import { createActionService } from '../mail/actions.js';
 
 const previousName = `${SCRIPT_NAME}.prev`;
 const stateError = () => new AppError(409, 'RULES_STATE', '현재 필터 상태에서는 이 작업을 할 수 없어요.');
@@ -20,7 +22,7 @@ function object(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))) invalid('$', 'request');
 }
 
-export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now }) {
+export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now, mailActions = createActionService({ imap }) }) {
   const locks = new Map();
   function serial(session, operation) {
     const key = session.email.toLowerCase();
@@ -80,9 +82,11 @@ export function createRulesService({ config, imap, directory, connect = connectM
     return serial(session, () => withClient(session, async client => operation(client, await read(client, policy), policy)));
   }
   async function get(session) {
-    return perform(session, null, async (_client, current) => {
+    return perform(session, null, async (client, current, policy) => {
       const { state, rev, doc, activeName, missingFolders, importReport } = current;
-      return { state, rev, doc, activeName, activeScript: activeName, missingFolders, ...(importReport ? { importReport } : {}) };
+      const prevAvailable = current.scripts.some(script => script.name === previousName)
+        && parseScript(await client.getScript(previousName)).state === 'ok';
+      return { state, rev, doc, activeName, activeScript: activeName, missingFolders, prevAvailable, internalDomains: policy.internalDomains, ...(importReport ? { importReport } : {}) };
     });
   }
   async function save(session, body) {
@@ -154,5 +158,58 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (changed) { doc.rev++; await write(client, current, doc, policy); }
     });
   }
-  return { get, save, reactivate, restore, importRules, getState, renameFolderRefs, folderInUse };
+  async function validateRule(session, body, ignoreExternalForward = false) {
+    object(body, ['rule']);
+    const doc = rulesDocument([body.rule]);
+    // Validate every address before selectively ignoring the forwarding policy.
+    // A first external recipient must not hide a malformed later recipient.
+    validateDocument(doc, { checkPolicy: false });
+    const policy = await context(session);
+    try { validateDocument(doc, policy); }
+    catch (error) { if (!ignoreExternalForward || error.code !== 'FORWARD_EXTERNAL') throw error; }
+    return body.rule;
+  }
+  async function previewRule(session, body) {
+    const rule = await validateRule(session, body);
+    return previewMatches(rule, await loadInboxHeaders(imap, session, { now }));
+  }
+  async function applyExisting(session, body) {
+    const rule = await validateRule(session, body, true);
+    invalidateInboxHeaders(session);
+    try {
+      const snapshot = await loadInboxHeaders(imap, session, { now });
+      const found = snapshot.items.filter(record => matches(rule, record.headers));
+      const result = { matched: found.length, moved: 0, trashed: 0, flagged: 0, failed: [] };
+      const actions = [];
+      if (rule.actions.read) actions.push(['seen', 'flagged']);
+      if (rule.actions.star) actions.push(['flag', 'flagged']);
+      if (rule.actions.trash) actions.push(['trash', 'trashed']);
+      else if (rule.actions.move) actions.push(['move', 'moved']);
+      // Forwarding is deliberately absent for mail already received.
+      let pending = found.map(record => record.ref);
+      const flagged = new Set();
+      for (const [action, counter] of actions) {
+        const next = [];
+        for (let start = 0; start < pending.length; start += 1000) {
+          const refs = pending.slice(start, start + 1000);
+          try {
+            const outcome = await mailActions.run(session, { refs, action, ...(action === 'move' ? { target: rule.actions.move } : {}) });
+            result.failed.push(...outcome.failed);
+            const rejected = new Set(outcome.failed.map(item => item.ref));
+            const succeeded = refs.filter(ref => !rejected.has(ref));
+            next.push(...succeeded);
+            if (counter === 'flagged') for (const ref of succeeded) flagged.add(ref);
+            else result[counter] += outcome.done;
+          } catch (error) {
+            if (['SESSION_EXPIRED', 'NO_SESSION'].includes(error.code)) throw error;
+            result.failed.push(...refs.map(ref => ({ ref, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' })));
+          }
+        }
+        pending = next;
+      }
+      result.flagged = flagged.size;
+      return result;
+    } finally { invalidateInboxHeaders(session); }
+  }
+  return { get, save, reactivate, restore, importRules, getState, renameFolderRefs, folderInUse, preview: previewRule, applyExisting };
 }

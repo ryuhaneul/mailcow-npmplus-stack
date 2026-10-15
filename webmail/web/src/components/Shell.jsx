@@ -1,15 +1,22 @@
-import { useEffect, useState, useRef } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useState, useRef } from 'preact/hooks';
 import { prefs } from '../state/prefs.js';
 import { folders } from '../state/folders.js';
 import { storage } from '../state/storage.js';
 import { toast } from '../state/toast.js';
+import { isListRoute, connectMailboxEvents, resetMailbox } from '../state/list.js';
+import { initMailboxShortcuts } from '../shortcuts.js';
+import MailList from './MailList.jsx';
 import { route } from '../router.js';
 import { api } from '../api.js';
 import { initStars } from '../theme/stars.js';
+import FiltersPage from './FiltersPage.jsx';
+import RuleBuilder from './RuleBuilder.jsx';
 import Sidebar from './Sidebar.jsx';
 import TopBar from './TopBar.jsx';
 import MobileQuota from './MobileQuota.jsx';
 import { vacation } from './OooBadge.jsx';
+import StoragePage from '../pages/StoragePage.jsx';
+import PasswordPage from '../pages/PasswordPage.jsx';
 
 export function Starflow() {
   const frame = useRef(null);
@@ -27,16 +34,16 @@ export function useMode() {
 }
 export default function Shell() {
   const mode = useMode();
+  useLayoutEffect(()=>{resetMailbox();return resetMailbox;},[]);
   const [navOpen, setNavOpen] = useState(false);
   const current = route.value;
   const onError = error => { if (['NO_SESSION','SESSION_EXPIRED'].includes(error.code)) return; toast.value = { kind: 'error', message: error.message }; };
   useEffect(() => {
-    let active = true;
+    let active = true, stopEvents;
     folders.value = { folders: [], virtualAllMail: null }; storage.value = null; vacation.value = null;
-    Promise.all([api('/api/folders'),api('/api/storage?quotaOnly=1')]).then(([f,s]) => { if (active) {folders.value=f;storage.value=s;} }).catch(error => {if(active) onError(error);});
-    // Vacation has no production endpoint yet; only the development fixture provides it.
-    if (import.meta.env.DEV && import.meta.env.VITE_WEBMAIL_FAKE_API === '1') api('/api/dev/vacation').then(value => {if(active) vacation.value=value;}).catch(error => {if(active) onError(error);});
-    return () => {active=false;};
+    Promise.all([api('/api/folders'),api('/api/storage?quotaOnly=1')]).then(([f,s]) => { if (active) {folders.value=f;storage.value=s;stopEvents=connectMailboxEvents();} }).catch(error => {if(active) onError(error);});
+    api('/api/rules').then(value => {if(active) vacation.value=value.doc?.vacation ?? null;}).catch(error => {if(active) onError(error);});
+    return () => {active=false;stopEvents?.();};
   }, []);
   useEffect(() => {
     document.body.classList.toggle('nav-open', navOpen);
@@ -44,6 +51,7 @@ export default function Shell() {
     document.addEventListener('keydown', close);
     return () => { document.body.classList.remove('nav-open'); document.removeEventListener('keydown', close); };
   }, [navOpen]);
+  useEffect(initMailboxShortcuts, []);
   useEffect(() => {setNavOpen(false);document.body.dataset.r=current.name;},[current]);
   const folder = current.name === 'f' ? folders.value.folders.find(value=>value.path===current.value) : null;
   return <>
@@ -54,9 +62,9 @@ export default function Shell() {
       <main class="main">
         <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
         <MobileQuota/>
-        <div class="stage"><section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section></div>
+        <div class="stage">{isListRoute(current)?<MailList/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
       </main>
     </div>
-    {toast.value && <div class="toast open" role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
+    {toast.value && <div class={`toast open${toast.value.kind === 'rule-apply-result' ? ' rule-result' : ''}`} role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
   </>;
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseSearch } from '../../web/src/search.js';
 import { parseSearchQuery } from '../../server/mail/search-query.js';
 import { parseRoute, route } from '../../web/src/router.js';
-import { list, cursor, acting, loadMessages, cancelListLoad, runAction, connectMailboxEvents } from '../../web/src/state/list.js';
+import { list, cursor, acting, loadMessages, cancelListLoad, runAction, connectMailboxEvents, deleteMessages, deleteConfirmation, settleDeleteConfirmation, resetMailbox } from '../../web/src/state/list.js';
 import { selection } from '../../web/src/state/selection.js';
 import { folders } from '../../web/src/state/folders.js';
 import { storage } from '../../web/src/state/storage.js';
@@ -106,4 +106,39 @@ test('SEARCH_SLOW stays in the list and retry preserves the same search paramete
   assert.equal(paths[0], paths[1]);
   assert.equal(list.value.error, null);
   assert.equal(list.value.items.length, 3);
+});
+
+test('permanent deletion in Trash and Junk requires confirmation and waits for success', async t=>{
+  let release,body,calls=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  setup(t,async(path,options)=>{
+    if(path==='/api/messages/actions'){calls++;body=JSON.parse(options.body);await gate;return Response.json({done:2,failed:[]});}
+    return result([]);
+  });
+  for(const folder of ['Trash','Junk']){
+    list.value={...list.value,items:structuredClone(rows),total:3};
+    const refs=rows.slice(0,2).map(row=>row.ref),before=calls;
+    const pending=deleteMessages(refs,folder);
+    assert.equal(calls,before);assert.deepEqual(deleteConfirmation.value.refs,refs);
+    settleDeleteConfirmation(true);await Promise.resolve();
+    assert.deepEqual(body,{refs,action:'delete-forever'});assert.equal(list.value.items.length,3);
+    release();await pending;assert.equal(list.value.items.length,0);
+  }
+});
+test('cancel and session teardown dismiss permanent deletion without requests',async t=>{
+  let calls=0;setup(t,async()=>{calls++;return result([]);});
+  const cancelled=deleteMessages(['ref1'],'Trash');settleDeleteConfirmation();await cancelled;
+  assert.equal(calls,0);assert.equal(deleteConfirmation.value,null);
+  const expired=deleteMessages(['ref1'],'Junk');resetMailbox();await expired;
+  assert.equal(calls,0);assert.equal(deleteConfirmation.value,null);
+});
+test('Inbox deletion remains trash and permanent-delete rejection retains messages with notification',async t=>{
+  let body;setup(t,async(path,options)=>{
+    body=JSON.parse(options.body);
+    return Response.json({error:{code:'DELETE_NOT_ALLOWED',message:'영구 삭제는 휴지통이나 스팸함에서만 할 수 있어요.'}},{status:422});
+  });
+  await deleteMessages(['ref1'],'INBOX');assert.deepEqual(body,{refs:['ref1'],action:'trash'});assert.equal(deleteConfirmation.value,null);
+  toast.value=null;const pending=deleteMessages(['ref1'],'Trash');settleDeleteConfirmation(true);await pending;
+  assert.deepEqual(body,{refs:['ref1'],action:'delete-forever'});assert.equal(list.value.items.length,3);
+  assert.equal(toast.value.message,'영구 삭제는 휴지통이나 스팸함에서만 할 수 있어요.');
 });

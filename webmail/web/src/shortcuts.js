@@ -1,5 +1,5 @@
 import { route, navigate } from './router.js';
-import { list, cursor, listLocation, isListRoute, runAction } from './state/list.js';
+import { list, cursor, listLocation, isListRoute, runAction, deleteMessages, listDeleteFolder } from './state/list.js';
 import { toggleSelection, selection } from './state/selection.js';
 const scopes = new Map();
 // Example: registerShortcuts('read', { r: reply, a: replyAll, f: forward }).
@@ -47,6 +47,6 @@ export function initMailboxShortcuts() {
     if(key==='enter'&&!event.target.closest('button,a,[role=checkbox]')&&item){event.preventDefault();navigate(`read/${encodeURIComponent(item.ref)}`);}
     else if(key==='x'&&item){event.preventDefault();toggleSelection(item.ref);}
     else if(key==='s'&&item){event.preventDefault();void runAction(item.flagged?'unflag':'flag',[item.ref]);}
-    else if(['e','#','!'].includes(key)&&item){event.preventDefault();void runAction(key==='e'?'archive':key==='#'?'trash':list.value.params.view==='spam'?'notspam':'spam',selection.value.size?[...selection.value]:[item.ref]);}
+    else if(['e','#','!'].includes(key)&&item){event.preventDefault();const refs=selection.value.size?[...selection.value]:[item.ref];void (key==='#'?deleteMessages(refs,listDeleteFolder()):runAction(key==='e'?'archive':list.value.params.view==='spam'?'notspam':'spam',refs));}
   });
 }

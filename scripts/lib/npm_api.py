@@ -36,8 +36,9 @@ class NpmApi:
     def login(self, payload_file, retry_seconds=0):
         started = time.monotonic()
         deadline = started + retry_seconds
+        last_error_type = 'TimeoutError'
         def expired(signum, frame):
-            raise RuntimeError(f'NPM login failed after {retry_seconds}s')
+            raise RuntimeError(f'NPM login failed after {retry_seconds}s ({last_error_type})')
 
         if retry_seconds:
             previous_handler = signal.signal(signal.SIGALRM, expired)
@@ -50,23 +51,30 @@ class NpmApi:
                                  timeout=min(30, remaining) if retry_seconds else 30)
                     self.jar.save(ignore_discard=True, ignore_expires=True)
                     return
-                except RuntimeError as error:
-                    cause = error.__cause__
+                except (RuntimeError, ssl.SSLError) as error:
+                    # The absolute-deadline handler already supplies a safe diagnostic.
+                    if isinstance(error, RuntimeError) and error.__cause__ is None:
+                        raise
+                    cause = error.__cause__ or error
+                    reason = cause
                     if isinstance(cause, urllib.error.HTTPError):
                         retryable = cause.code in (502, 503, 504)
                     else:
-                        reason = cause.reason if isinstance(cause, urllib.error.URLError) else cause
-                        retryable = isinstance(reason, (ConnectionRefusedError, ConnectionResetError, TimeoutError))
+                        if isinstance(cause, urllib.error.URLError) and isinstance(cause.reason, BaseException):
+                            reason = cause.reason
+                        retryable = isinstance(reason, (ConnectionRefusedError, ConnectionResetError, TimeoutError,
+                                                        ssl.SSLError, http.client.RemoteDisconnected, ConnectionAbortedError))
+                    last_error_type = type(reason).__name__
                     if not retry_seconds or not retryable:
-                        raise
+                        raise RuntimeError(f'NPM POST /tokens failed ({last_error_type})') from error
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeError(f'NPM login failed after {time.monotonic() - started:.0f}s') from error
+                        raise RuntimeError(f'NPM login failed after {time.monotonic() - started:.0f}s ({last_error_type})') from error
                     print(f'NPM login unavailable; retrying (elapsed {time.monotonic() - started:.0f}s, limit {retry_seconds}s)',
                           file=sys.stderr)
                     time.sleep(min(5, remaining))
                     if time.monotonic() >= deadline:
-                        raise RuntimeError(f'NPM login failed after {time.monotonic() - started:.0f}s') from error
+                        raise RuntimeError(f'NPM login failed after {time.monotonic() - started:.0f}s ({last_error_type})') from error
         finally:
             if retry_seconds:
                 signal.setitimer(signal.ITIMER_REAL, 0)

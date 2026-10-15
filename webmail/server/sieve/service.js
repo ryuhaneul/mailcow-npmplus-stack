@@ -22,8 +22,7 @@ function object(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))) invalid('$', 'request');
 }
 
-export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now }) {
-  const mailActions = createActionService({ imap });
+export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now, mailActions = createActionService({ imap }) }) {
   const locks = new Map();
   function serial(session, operation) {
     const key = session.email.toLowerCase();
@@ -187,21 +186,28 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (rule.actions.trash) actions.push(['trash', 'trashed']);
       else if (rule.actions.move) actions.push(['move', 'moved']);
       // Forwarding is deliberately absent for mail already received.
-      for (const record of found) {
-        let flagged = false;
-        for (const [action, counter] of actions) {
+      let pending = found.map(record => record.ref);
+      const flagged = new Set();
+      for (const [action, counter] of actions) {
+        const next = [];
+        for (let start = 0; start < pending.length; start += 1000) {
+          const refs = pending.slice(start, start + 1000);
           try {
-            const outcome = await mailActions.run(session, { refs: [record.ref], action, ...(action === 'move' ? { target: rule.actions.move } : {}) });
-            if (outcome.failed.length) { result.failed.push(...outcome.failed); break; }
-            if (counter !== 'flagged' || !flagged) result[counter]++;
-            if (counter === 'flagged') flagged = true;
+            const outcome = await mailActions.run(session, { refs, action, ...(action === 'move' ? { target: rule.actions.move } : {}) });
+            result.failed.push(...outcome.failed);
+            const rejected = new Set(outcome.failed.map(item => item.ref));
+            const succeeded = refs.filter(ref => !rejected.has(ref));
+            next.push(...succeeded);
+            if (counter === 'flagged') for (const ref of succeeded) flagged.add(ref);
+            else result[counter] += outcome.done;
           } catch (error) {
             if (['SESSION_EXPIRED', 'NO_SESSION'].includes(error.code)) throw error;
-            result.failed.push({ ref: record.ref, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' });
-            break;
+            result.failed.push(...refs.map(ref => ({ ref, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' })));
           }
         }
+        pending = next;
       }
+      result.flagged = flagged.size;
       return result;
     } finally { invalidateInboxHeaders(session); }
   }

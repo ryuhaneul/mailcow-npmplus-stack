@@ -1,0 +1,33 @@
+services:
+  int:
+    image: mailstack-webmail-int:local
+    build:
+      context: ../..
+      dockerfile_inline: |
+        FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+        WORKDIR /app
+        COPY package.json package-lock.json ./
+        RUN npm ci --no-audit --no-fund
+        COPY server ./server
+        COPY test ./test
+        USER node
+    env_file:
+      - /home/rocky/webmail-int.env
+    entrypoint: ["node", "test/int/lib/run.js"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    volumes:
+      - type: bind
+        source: /home/rocky/webmail-int-ca.pem
+        target: /run/webmail-int-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+    networks:
+      - mailcow-network
+networks:
+  mailcow-network:
+    external: true
+    name: ${WEBMAIL_INT_NETWORK:-mailcowdockerized_mailcow-network}

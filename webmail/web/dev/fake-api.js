@@ -1,3 +1,4 @@
+import { fakeReader } from './fake-reader.js';
 import { fakeSettings } from './fake-settings.js';
 import { parseSearch } from '../src/search.js';
 import { fakeRules, rulesFixture } from './fake-rules.js';
@@ -50,6 +51,7 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers['x-webmail-csrf']!==state.csrf)return fail(response,'CSRF');
     if(path==='/api/auth/session')return send(response,200,publicSession());
     if(path==='/api/auth/logout'){state.authenticated=false;return send(response,204);}
+    if(await fakeReader(request,response,state,send))return;
     if(await fakeSettings(request,response,state,send,recorded))return;
     if(path==='/api/prefs'&&request.method==='GET')return send(response,200,state.prefs);
     if(path==='/api/events'){

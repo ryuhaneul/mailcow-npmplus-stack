@@ -5,7 +5,7 @@ import { storage } from '../state/storage.js';
 import { toast } from '../state/toast.js';
 import { isListRoute, connectMailboxEvents, resetMailbox } from '../state/list.js';
 import { initMailboxShortcuts } from '../shortcuts.js';
-import MailList from './MailList.jsx';
+import MailView from './MailView.jsx';
 import { route, navigate, keysOpen } from '../router.js';
 import { api } from '../api.js';
 import { initStars } from '../theme/stars.js';
@@ -65,7 +65,7 @@ export default function Shell() {
       <main class="main">
         <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
         <MobileQuota/>
-        <div class="stage">{isListRoute(current)?<MailList/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
+        <div class="stage">{(isListRoute(current)||current.name==='read')?<MailView/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
       </main>
     </div>
     {keysOpen.value && <KeysDialog onClose={()=>navigate(current.name+(current.value?'/'+encodeURIComponent(current.value):'')+(current.q?'?q='+encodeURIComponent(current.q):''))}/>}

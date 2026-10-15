@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import { applyServerPrefs } from '../state/prefs.js';
-import { list, cursor, listLocation, notify, runAction } from '../state/list.js';
+import { list, cursor, listLocation, notify, runAction, deleteMessages } from '../state/list.js';
 import { navigate } from '../router.js';
 import { initShortcuts } from '../shortcuts.js';
 import { startCompose } from '../state/compose.js';
@@ -39,7 +39,7 @@ export default function Reader({messageRef}) {
     if(next)navigate(`read/${encodeURIComponent(next.ref)}`);
   }
   async function action(value,target) {
-    const result=await runAction(value,[messageRef],target);
+    const result=await (value==='trash'?deleteMessages([messageRef],message.folder):runAction(value,[messageRef],target));
     if(!active.current||!result||result.failed.length||!result.done)return;
     if(['archive','trash','spam','notspam','move'].includes(value))navigate(listLocation.value);
     else setMessage(current=>({...current,...(value==='unseen'?{seen:false}:{flagged:value==='flag'})}));

@@ -12,6 +12,22 @@ export const cursor = signal(null);
 export const acting = signal(false);
 export const listLocation = signal('inbox');
 export const searchRuleSeed = signal(null);
+export const deleteConfirmation = signal(null);
+export function isPermanentDelete(folder) {return ['Trash','Junk'].includes(folder);}
+export function listDeleteFolder() {return list.value.params.view==='spam'?'Junk':list.value.params.folder;}
+export function settleDeleteConfirmation(confirmed=false) {
+  const pending=deleteConfirmation.value;
+  deleteConfirmation.value=null;
+  pending?.resolve(confirmed);
+}
+export async function deleteMessages(refs, folder) {
+  if(acting.value || deleteConfirmation.value || !refs.length)return;
+  refs=[...refs];
+  if(!isPermanentDelete(folder))return runAction('trash',refs);
+  const generation=mailboxGeneration;
+  const confirmed=await new Promise(resolve=>{deleteConfirmation.value={refs,resolve};});
+  if(confirmed && generation===mailboxGeneration)return runAction('delete-forever',refs);
+}
 let requestId = 0, controller, mailboxGeneration = 0;
 export function isListRoute(value) {return ['inbox','allmail','f','spam','search'].includes(value.name);}
 export function paramsForRoute(value) {return {...defaults,view:value.name==='f'?'folder':value.name==='search'?'allmail':value.name,folder:value.name==='f'?value.value:'',q:value.name==='search'?value.value:(value.q||'')};}
@@ -76,6 +92,6 @@ export function connectMailboxEvents() {
 }
 
 export function resetMailbox() {
-  cancelListLoad();mailboxGeneration++;searchRuleSeed.value=null;listLocation.value='inbox';acting.value=false;selection.value=new Set();cursor.value=null;
+  settleDeleteConfirmation();cancelListLoad();mailboxGeneration++;searchRuleSeed.value=null;listLocation.value='inbox';acting.value=false;selection.value=new Set();cursor.value=null;
   list.value={params:{...defaults},items:[],total:0,loading:false,error:null};
 }

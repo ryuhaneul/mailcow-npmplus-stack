@@ -3,7 +3,7 @@ import { prefs } from '../state/prefs.js';
 import { folders } from '../state/folders.js';
 import { storage } from '../state/storage.js';
 import { toast } from '../state/toast.js';
-import { isListRoute, connectMailboxEvents, resetMailbox } from '../state/list.js';
+import { isListRoute, connectMailboxEvents, resetMailbox, deleteConfirmation } from '../state/list.js';
 import { initMailboxShortcuts } from '../shortcuts.js';
 import MailView from './MailView.jsx';
 import Composer from './Composer.jsx';
@@ -17,6 +17,7 @@ import TopBar from './TopBar.jsx';
 import MobileQuota from './MobileQuota.jsx';
 import { vacation } from './OooBadge.jsx';
 import StoragePage from '../pages/StoragePage.jsx';
+import { DeleteMessagesDialog } from '../pages/EmptyFolderDialog.jsx';
 import PasswordPage from '../pages/PasswordPage.jsx';
 import SettingsPage from '../pages/SettingsPage.jsx';
 import KeysDialog from './KeysDialog.jsx';
@@ -71,6 +72,7 @@ export default function Shell() {
       </main>
     </div>
     {keysOpen.value && <KeysDialog onClose={()=>navigate(current.name+(current.value?'/'+encodeURIComponent(current.value):'')+(current.q?'?q='+encodeURIComponent(current.q):''))}/>}
+    {deleteConfirmation.value && <DeleteMessagesDialog/>}
     {folderDialog.value && <FolderDialog folder={folderDialog.value.folder}/>}
     {toast.value && <div class={`toast open${toast.value.kind === 'rule-apply-result' ? ' rule-result' : ''}`} role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
   </>;

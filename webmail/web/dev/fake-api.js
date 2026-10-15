@@ -1,4 +1,5 @@
 import { parseSearch } from '../src/search.js';
+import { fakeRules, rulesFixture } from './fake-rules.js';
 // Development and capture fixtures only. Never imported by the browser entry point.
 export const fakeConfigs = {
   a: { brandName: '예시 메일', orgName: '예시 회사', brandMark: '예', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, version: '0.1.0' },
@@ -21,7 +22,7 @@ const messages = {
 };
 export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
   const streams=new Set();
-  const state = { mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], prefs:{theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode,accent:{},layout:null,folderColors:{},imageAllow:[],signatures:{},defaultFrom:null}, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:[] }, vacation: {enabled:true,until:'2026-10-17'} };
+  const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], prefs:{theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode,accent:{},layout:null,folderColors:{},imageAllow:[],signatures:{},defaultFrom:null}, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
   function emit(type,value){for(const response of streams)response.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);}
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
@@ -86,7 +87,30 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
       send(response,200,{done,failed});emit('mailbox',{path:'INBOX',unseen:state.mail.filter(item=>item.folder==='INBOX'&&!item.seen).length,total:state.mail.filter(item=>item.folder==='INBOX').length});return;
     }
     if(path==='/api/folders')return send(response,200,{folders:state.folders.map(folder=>({...folder,color:state.prefs.folderColors[folder.path]??folder.color,total:state.mail.filter(item=>item.folder===folder.path).length,unseen:state.mail.filter(item=>item.folder===folder.path&&!item.seen).length})),virtualAllMail:'WebmailVirtual/AllMail'});
-    if(path==='/api/storage')return send(response,200,state.storage);
+    if(path==='/api/storage')return send(response,200,new URL(request.url,'http://localhost').searchParams.get('quotaOnly') === '1' ? {...state.storage,folders:[]} : state.storage);
+    const empty = path.match(/^\/api\/folders\/([^/]+)\/empty$/);
+    if(empty && request.method==='POST') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      const body=JSON.parse(raw);
+      const folder=state.storage.folders.find(folder=>folder.path===decodeURIComponent(empty[1]));
+      if(!folder)return send(response,404,{error:{code:'NOT_FOUND',message:'폴더를 찾을 수 없어요.'}});
+      state.requests.at(-1).body={confirmName:body.confirmName};
+      if(body.confirmName!==folder.name)return send(response,422,{error:{code:'CONFIRM_MISMATCH',message:'폴더 이름이 맞지 않아요.'}});
+      const result={deleted:folder.messages,freedBytes:folder.sizeBytes};
+      folder.messages=0;folder.sizeBytes=0;
+      state.storage.quota.usedBytes=Math.max(0,state.storage.quota.usedBytes-result.freedBytes);
+      const ratio=state.storage.quota.usedBytes/state.storage.quota.limitBytes;
+      state.storage.level=ratio>=.95?'crit':ratio>=.8?'warn':'ok';
+      return send(response,200,result);
+    }
+    if(path==='/api/password' && request.method==='POST') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      const body=JSON.parse(raw);
+      const error=!body.current || !body.next || !body.next2 ? [422,'PW_FORMAT','암호를 입력해 주세요.'] : body.next!==body.next2 ? [422,'PW_MISMATCH','새 암호가 서로 같지 않아요.'] : body.next===body.current ? [422,'PW_SAME','현재 암호와 다른 새 암호를 입력해 주세요.'] : body.current!=='example-password' ? [403,'CURRENT_WRONG','현재 암호가 맞지 않아요.'] : null;
+      if(error)return send(response,error[0],{error:{code:error[1],message:error[2]}});
+      state.authenticated=false;return send(response,200,{relogin:true});
+    }
+    if(await fakeRules(request,response,state,send))return;
     if(path==='/api/dev/vacation')return send(response,200,state.vacation);
     send(response,404,{error:{code:'NOT_FOUND',message:'요청한 경로를 찾을 수 없어요.'}});
   }

@@ -1,3 +1,5 @@
+import { api } from '../api.js';
+import { sessionReady } from './session.js';
 import { signal } from '@preact/signals';
 import { WM_THEMES } from '../theme/themes.js';
 
@@ -16,4 +18,10 @@ export function loadPrefs(config) {
 export function applyServerPrefs(value) {
   prefs.value = value;
   try { localStorage.setItem('webmail-prefs', JSON.stringify(value)); } catch {}
+}
+
+export async function loadSessionPrefs() {
+  const value = await api('/api/prefs');
+  applyServerPrefs(value);
+  sessionReady.value = true;
 }

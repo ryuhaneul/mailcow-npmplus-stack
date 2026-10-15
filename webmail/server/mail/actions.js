@@ -1,5 +1,5 @@
 import { AppError } from '../errors.js';
-import { decodeRef } from './ref.js';
+import { decodeRef, assertUidValidity } from './ref.js';
 import { mailboxRights } from './folders.js';
 
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -17,22 +17,40 @@ function validate(body) {
 export function createActionService({ imap }) {
   async function run(session, body) {
     const refs = validate(body); const failed = []; let done = 0;
-    for (const { token, ref } of refs) {
+    const groups = new Map();
+    for (const item of refs) {
+      if (!groups.has(item.ref.path)) groups.set(item.ref.path, []);
+      groups.get(item.ref.path).push(item);
+    }
+    for (const [path, group] of groups) {
+      let remaining = group;
       try {
-        await imap.withRef(session, token, async client => {
-          if (ref.path === 'Shared' || ref.path.startsWith('Shared/')) throw readonly();
-          const rights = await mailboxRights(client, ref.path);
+        await imap.withMailbox(session, path, async client => {
+          remaining = group.filter(item => {
+            try { assertUidValidity(client, item.ref); return true; }
+            catch (error) { failed.push({ ref: item.token, code: error.code }); return false; }
+          });
+          if (!remaining.length) return;
+          if (path === 'Shared' || path.startsWith('Shared/')) throw readonly();
+          const rights = await mailboxRights(client, path);
           const { action } = body;
           const flag = action === 'seen' || action === 'unseen';
           if (!(flag ? rights.seen : ['flag', 'unflag'].includes(action) ? rights.write : rights.delete)) throw readonly();
-          if (!await client.fetchOne(ref.uid, { uid: true }, { uid: true })) throw new AppError(404, 'MESSAGE_NOT_FOUND', '메일을 찾을 수 없어요.');
+          const existing = new Set();
+          for await (const row of client.fetch(remaining.map(item => item.ref.uid).join(','), { uid: true }, { uid: true })) existing.add(row.uid);
+          remaining = remaining.filter(item => {
+            if (existing.has(item.ref.uid)) return true;
+            failed.push({ ref: item.token, code: 'MESSAGE_NOT_FOUND' }); return false;
+          });
+          if (!remaining.length) return;
+          const set = remaining.map(item => item.ref.uid).join(',');
           let result;
           if (['seen', 'unseen', 'flag', 'unflag'].includes(action)) {
             const method = ['seen', 'flag'].includes(action) ? 'messageFlagsAdd' : 'messageFlagsRemove';
-            result = await client[method](ref.uid, [flag ? '\\Seen' : '\\Flagged'], { uid: true });
+            result = await client[method](set, [flag ? '\\Seen' : '\\Flagged'], { uid: true });
           } else if (action === 'delete-forever') {
-            if (!await client.messageFlagsAdd(ref.uid, ['\\Deleted'], { uid: true })) throw new AppError(502, 'MAIL_REJECTED', '메일 서버가 요청을 처리하지 못했어요.');
-            const response = await client.exec('UID EXPUNGE', [{ type: 'SEQUENCE', value: String(ref.uid) }]);
+            if (!await client.messageFlagsAdd(set, ['\\Deleted'], { uid: true })) throw new AppError(502, 'MAIL_REJECTED', '메일 서버가 요청을 처리하지 못했어요.');
+            const response = await client.exec('UID EXPUNGE', [{ type: 'SEQUENCE', value: set }]);
             response.next(); result = true;
           } else {
             let target = { move: body.target, trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[action];
@@ -44,16 +62,16 @@ export function createActionService({ imap }) {
                 if (!folders.some(folder => folder.path === target) && !await client.mailboxCreate(target)) throw new AppError(502, 'MAIL_REJECTED', '보관함을 만들지 못했어요.');
               }
             }
-            if (target === ref.path) return;
+            if (target === path) { done += remaining.length; return; }
             if (!(await mailboxRights(client, target)).insert) throw readonly();
-            result = await client.messageMove(ref.uid, target, { uid: true });
+            result = await client.messageMove(set, target, { uid: true });
           }
           if (!result) throw new AppError(502, 'MAIL_REJECTED', '메일 서버가 요청을 처리하지 못했어요.');
+          done += remaining.length;
         });
-        done++;
       } catch (error) {
         if (['SESSION_EXPIRED', 'NO_SESSION'].includes(error.code)) throw error;
-        failed.push({ ref: token, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' });
+        failed.push(...remaining.map(item => ({ ref: item.token, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' })));
       }
     }
     if (failed.length === refs.length && failed.every(item => item.code === 'FOLDER_READONLY')) throw readonly();

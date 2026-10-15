@@ -1,0 +1,19 @@
+{
+  "internalDomains": [
+    "example.com"
+  ],
+  "folders": [
+    {
+      "path": "Archive"
+    },
+    {
+      "path": "Promotions"
+    },
+    {
+      "path": "Projects/팀"
+    }
+  ],
+  "addresses": [
+    "user@example.com"
+  ]
+}

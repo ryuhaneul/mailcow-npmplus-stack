@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "rev": 0,
+  "rules": [
+    {
+      "id": "rule0001",
+      "enabled": true,
+      "match": "all",
+      "conditions": [
+        {
+          "field": "subject",
+          "op": "has",
+          "value": "회의"
+        }
+      ],
+      "actions": {
+        "move": "Archive",
+        "forward": [
+          "member@example.com"
+        ]
+      },
+      "stop": false
+    }
+  ],
+  "blocked": [],
+  "vacation": {
+    "enabled": false,
+    "start": null,
+    "end": null,
+    "subject": "",
+    "body": ""
+  }
+}

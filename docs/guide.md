@@ -811,9 +811,9 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. 기존 서버는 사용자 공지·설정/데이터 백업 후 `sudo ./scripts/update.sh -y --skip-mailcow-update`로 스택만 전환할 수 있습니다. 웹메일 주소의 DNS A 레코드는 서버를 가리켜야 합니다.
 
-두 명령은 ① Docker 판·다른 Docker 망/호스트 경로와의 겹침 검사 및 앱 설정 생성 → ② 앱 프로젝트 전환 → ③ NPMplus 전용 망 연결 → ④ Dovecot·DB·Postfix 신뢰 변경 → ⑤ verify 순서로 처리합니다. 옛 mailcow 망에 붙은 앱만 처음 한 번 `compose down` 후 올라옵니다(볼륨 보존). 이미 전용 망 구조이면 내리지 않으며, 같은 생성 파일은 다시 쓰지 않습니다. 실패한 단계에서 중단하고 바뀐 단계와 재시도 안내를 출력합니다.
+두 명령은 ① Docker 판·다른 Docker 망/호스트 경로와의 겹침 검사 및 앱 설정 생성 → ② 앱 프로젝트 전환 → ③ NPMplus 전용 망 연결 → ④ Dovecot·DB·Postfix 신뢰 변경 → ⑤ verify 순서로 처리합니다. 옛 mailcow 망에 붙은 앱만 처음 한 번 `compose down` 후 올라옵니다(볼륨 보존). 이미 전용 망 구조이면 내리지 않으며, 같은 생성 파일은 다시 쓰지 않습니다. 1~4단계 실패 시 중단하고 바뀐 단계와 재시도 안내를 출력하며, 5단계 verify 실패는 경고합니다.
 
-처음 전환할 때 웹메일·SnappyMail 재로그인이 필요하고, NPMplus 재생성과 Postfix 재시작으로 웹·SMTP가 각각 몇 초 끊길 수 있습니다. 반복 실행에서는 변경이 없는 앱·중계·NPMplus를 재생성하지 않고 Postfix 재시작·Dovecot reload·DB 쓰기도 하지 않습니다. 다만 기존 NPMplus DNS 캐시 초기화 재시작과 Toolkit의 php/nginx 재시작은 계속 실행됩니다. 프로그램·이미지·인증서가 실제로 바뀌면 해당 서비스는 다시 뜹니다.
+처음 전환할 때 웹메일·SnappyMail 재로그인이 필요하고, NPMplus 재생성과 Postfix 재시작으로 웹·SMTP가 각각 몇 초 끊길 수 있습니다. 반복 실행에서는 변경이 없는 앱·중계·NPMplus를 재생성하지 않고 Postfix 재시작·Dovecot reload도 하지 않습니다. 웹메일 DB 계정의 암호·권한은 매번 다시 맞춥니다(값이 같으면 결과는 그대로). 다만 기존 NPMplus DNS 캐시 초기화 재시작과 Toolkit의 php/nginx 재시작은 계속 실행됩니다. 프로그램·이미지·인증서가 실제로 바뀌면 해당 서비스는 다시 뜹니다.
 
 SnappyMail 런타임 compose가 옛 레포 구조이면 원본을 `docker-compose.yml.bak.<날짜>.*`로 백업하고 중계 구조로 바꿉니다. 운영자가 고정한 SnappyMail 이미지 값은 유지합니다. 다른 구조를 직접 편집한 파일이면 차이의 줄 범위를 출력하고 중단하므로 레포 구조에 맞춘 뒤 다시 실행합니다.
 
@@ -857,7 +857,7 @@ fi
 rm -f /home/webmail/haproxy.cfg /home/webmail/docker-compose.override.yml
 ```
 
-DB 원복 명령은 현재 웹메일 중계 호스트와 옛 mailcow 서브넷 호스트의 `webmail_ro` 계정을 모두 제거하며 옛 계정을 다시 만들지 않습니다. Postfix 제외는 SnappyMail을 위해 남깁니다. 전체 데이터를 지우는 `teardown.sh`는 별도 확인 후 실행합니다.
+DB 원복 명령은 호스트와 상관없이 `webmail_ro` 계정을 모두 제거하며 옛 계정을 다시 만들지 않습니다. Postfix 제외는 SnappyMail을 위해 남깁니다. 전체 데이터를 지우는 `teardown.sh`는 별도 확인 후 실행합니다.
 
 #### 망 분리 전체 되돌리기
 

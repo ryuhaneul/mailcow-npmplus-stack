@@ -5,7 +5,7 @@ import { parseSearchQuery } from '../../server/mail/search-query.js';
 import { parseRoute, route } from '../../web/src/router.js';
 import { list, cursor, acting, loadMessages, cancelListLoad, runAction, connectMailboxEvents, deleteMessages, deleteConfirmation, settleDeleteConfirmation, resetMailbox } from '../../web/src/state/list.js';
 import { selection } from '../../web/src/state/selection.js';
-import { folders } from '../../web/src/state/folders.js';
+import { folders, folderColor } from '../../web/src/state/folders.js';
 import { storage } from '../../web/src/state/storage.js';
 import { session, sessionReady } from '../../web/src/state/session.js';
 import { toast } from '../../web/src/state/toast.js';
@@ -141,4 +141,33 @@ test('Inbox deletion remains trash and permanent-delete rejection retains messag
   toast.value=null;const pending=deleteMessages(['ref1'],'Trash');settleDeleteConfirmation(true);await pending;
   assert.deepEqual(body,{refs:['ref1'],action:'delete-forever'});assert.equal(list.value.items.length,3);
   assert.equal(toast.value.message,'영구 삭제는 휴지통이나 스팸함에서만 할 수 있어요.');
+});
+
+
+test('personal folder colors are path-stable across additions, deletions and ordering without saving preferences', t => {
+  const previousPrefs=prefs.value,previousFolders=folders.value;
+  t.after(()=>{prefs.value=previousPrefs;folders.value=previousFolders;});
+  prefs.value={...prefs.value,folderColors:{}};
+  const rows=['거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰'].map(path=>({path,color:null}));
+  const expected=rows.map(folderColor);
+  assert.deepEqual(expected,[6,6,3,3,4,2]);
+  assert.ok(expected.every(color=>color>=1&&color<=7));
+  assert.ok(new Set(expected).size>1);
+  folders.value={folders:[...rows,{path:'새 폴더'}]};
+  assert.deepEqual(rows.map(folderColor),expected);
+  folders.value={folders:rows.slice(1).reverse()};
+  assert.deepEqual(rows.map(folderColor),expected);
+  assert.deepEqual(prefs.value.folderColors,{});
+});
+test('folder color gives preferences including gray priority over server color and automatic color',t=>{
+  const previous=prefs.value;t.after(()=>{prefs.value=previous;});
+  prefs.value={...prefs.value,folderColors:{Projects:0}};
+  assert.equal(folderColor({path:'Projects',color:3}),0);
+  prefs.value={...prefs.value,folderColors:{}};
+  assert.equal(folderColor({path:'Projects',color:3}),3);
+  assert.equal(folderColor({path:'Projects',color:0}),0);
+  assert.equal(folderColor({path:'Projects',color:null}),folderColor({path:'Projects'}));
+  assert.equal(folderColor({path:'INBOX',specialUse:'\\Inbox'}),null);
+  assert.equal(folderColor({path:'Shared/team@example.com',shared:true}),null);
+  assert.equal(folderColor(undefined),null);
 });

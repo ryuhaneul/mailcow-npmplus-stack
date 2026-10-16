@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import Icon from './Icon.jsx';
+import SettingsTabs from './SettingsTabs.jsx';
 import RuleList from './RuleList.jsx';
 import RulesBanner from './RulesBanner.jsx';
 import ImportReview from './ImportReview.jsx';
@@ -45,6 +46,7 @@ export default function FiltersPage() {
   const reloadNeeded = ['RULES_CONFLICT', 'RULES_STATE', 'IMPORT_SOURCE_CHANGED'].includes(error?.code);
   return <section class="view filters-view" aria-labelledby="filters-title" aria-busy={busy}>
     <div class="set-head"><div class="crumb"><a href="#settings">설정</a><span aria-hidden="true">›</span>메일 처리</div><h1 id="filters-title">필터와 규칙</h1>
+      <SettingsTabs/>
       <nav class="tabs" aria-label="메일 처리 설정">{[['','필터·규칙'],['vacation','부재중 자동응답'],['signature','서명'],['from','보낸 사람 주소'],['blocked','차단한 주소']].map(([key,label]) => <a key={key} href={key ? `#filters/${key}` : '#filters'} aria-current={tab === key ? 'page' : undefined}>{label}</a>)}</nav>
     </div>
     <div class="scroll"><div class="set-body">

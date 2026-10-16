@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { session } from '../state/session.js';
 import { toast } from '../state/toast.js';
 import Icon from '../components/Icon.jsx';
+import SettingsTabs from '../components/SettingsTabs.jsx';
 import './account.css';
 
 const labels = ['10자 이상', '영문 대문자와 소문자', '숫자', '기호(예: - _ ! @)', '지금 암호와 다름', '이름·아이디가 들어 있지 않음'];
@@ -42,7 +43,7 @@ export default function PasswordPage() {
   const fallback = failure?.fallbackUrl && /^https:\/\//i.test(failure.fallbackUrl) ? failure.fallbackUrl : null;
   const errorText = failure?.code === 'CURRENT_WRONG' ? '현재 암호가 맞지 않아요. 2단계 인증 계정에서 앱 암호로 로그인했다면 암호는 mailcow 사용자 화면에서 바꿔 주세요.' : failure?.code === 'MAILCOW_2FA' ? 'mailcow 화면에서 2단계 인증을 쓰고 있어 여기서는 바꿀 수 없어요.' : ['MAILCOW_UNAVAILABLE','MAILCOW_UNEXPECTED'].includes(failure?.code) ? '지금은 암호를 바꿀 수 없어요. 잠시 뒤 다시 하거나' : failure?.message || '암호를 바꾸지 못했어요. 잠시 뒤 다시 시도해 주세요.';
   return <section class="view account-view" aria-labelledby="page-title" data-page="password">
-    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>계정</div><h1 id="page-title">암호 변경</h1><div class="account-head-space"/></div>
+    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>계정</div><h1 id="page-title">암호 변경</h1><SettingsTabs/></div>
     <div class="scroll"><div class="set-body"><form class="pw" ref={form} autoComplete="off" onSubmit={submit} onInput={inspect} aria-busy={busy}>
       {failure && <div class="alert crit" role="alert"><div>{errorText} {fallback && <a href={fallback} target="_blank" rel="noopener noreferrer">mailcow 사용자 화면에서 바꾸기</a>}</div></div>}
       {['지금 암호','새 암호','새 암호 한 번 더'].map((label,index)=><div class="f" key={label}>

@@ -5,6 +5,7 @@ import { folders } from '../state/folders.js';
 import { toast } from '../state/toast.js';
 import { formatBytes, quotaView } from '../format.js';
 import Icon from '../components/Icon.jsx';
+import SettingsTabs from '../components/SettingsTabs.jsx';
 import EmptyFolderDialog from './EmptyFolderDialog.jsx';
 import './account.css';
 
@@ -33,7 +34,7 @@ export default function StoragePage() {
   const color = (folder, index) => metadata(folder.path)?.color ?? index % 8;
   const total = data?.quota.limitBytes > 0 ? Math.max(data.quota.limitBytes, data.quota.usedBytes) : data?.quota.usedBytes || 1;
   return <section class="view account-view" aria-labelledby="page-title" data-page="storage" data-storage-level={q?.level}>
-    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>계정</div><h1 id="page-title">저장 공간</h1><div class="account-head-space"/></div>
+    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>계정</div><h1 id="page-title">저장 공간</h1><SettingsTabs/></div>
     <div class="scroll"><div class="set-body">
       {error && <div class="alert crit" role="alert"><span>{error}</span><button class="btn sm" onClick={load} disabled={loading}>다시 시도</button></div>}
       {loading && !data && <p role="status">저장 공간을 불러오는 중…</p>}

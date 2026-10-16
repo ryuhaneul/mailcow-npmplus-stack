@@ -6,6 +6,7 @@ import { config } from '../state/config.js';
 import { toast } from '../state/toast.js';
 import { searchRuleSeed } from '../state/list.js';
 import Icon from './Icon.jsx';
+import SettingsTabs from './SettingsTabs.jsx';
 import { RuleSummary } from './RuleList.jsx';
 import RulePreview from './RulePreview.jsx';
 import { forwardStatus, personalFolder, ruleProblem, seededConditions } from './rule-form.js';
@@ -95,7 +96,7 @@ export default function RuleBuilder({ id, query }) {
   const external = forwardText && forwardStatus(forwardText, data?.internalDomains ?? []).external;
   const days = config.value?.autoexpungeDays;
   return <section class="view rule-builder-view" aria-labelledby="rule-title" aria-busy={busy}>
-    <div class="set-head"><div class="crumb"><a href="#filters">필터와 규칙</a><Icon name="right" size="xs"/>{id ? '규칙 수정' : '새 규칙'}</div><h1 id="rule-title">{id ? '규칙 수정' : '규칙 만들기'}</h1><div class="rule-head-space"/></div>
+    <div class="set-head"><div class="crumb"><a href="#filters">필터와 규칙</a><Icon name="right" size="xs"/>{id ? '규칙 수정' : '새 규칙'}</div><h1 id="rule-title">{id ? '규칙 수정' : '규칙 만들기'}</h1><SettingsTabs/></div>
     <div class="scroll"><div class="set-body">
       {error && <div class="banner rule-error" role="alert"><div>{error.code === 'RULES_CONFLICT' ? '필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.' : error.code === 'FORWARD_EXTERNAL' ? '회사 밖 주소로는 자동 전달할 수 없습니다(회사 정책). 받는 쪽이 사내 주소인지 확인해 주세요.' : error.code === 'RULES_INVALID' ? `규칙을 확인해 주세요. ${error.path ?? ''} ${error.reason ?? ''}` : error.message}</div><button class="btn" type="button" disabled={busy} onClick={load}>다시 불러오기</button><a class="btn" href="#filters">필터 목록</a></div>}
       {!draft && !error && <p role="status">규칙을 불러오는 중이에요.</p>}

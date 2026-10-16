@@ -23,7 +23,7 @@ export default function TopBar({ mode, navOpen, toggleNav }) {
     <SearchBar/>
     <div class="r"><OooBadge/>
       <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {updatePrefs({mode:mode === 'dark' ? 'light' : 'dark'});}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
-      <a class="ib" href="#settings" aria-label="보기 설정"><Icon name="palette"/></a>
+      <a class="ib" href="#settings" title="설정" aria-label="설정"><Icon name="settings"/></a>
       <div class="account" ref={account}>
         <button class="me" ref={trigger} type="button" aria-label="사용자 메뉴" aria-haspopup="menu" aria-expanded={accountOpen} title={user.name} onClick={()=>setAccountOpen(!accountOpen)} onKeyDown={event=>{if(event.key==='ArrowDown'){event.preventDefault();setAccountOpen(true);}}}>{user.name?.slice(-2) || user.email.slice(0,2)}</button>
         {accountOpen && <div class="pop account-menu" role="menu" aria-label="사용자 메뉴"><h5>{user.email}</h5><button class="opt" ref={exit} type="button" role="menuitem" onClick={logout}>로그아웃</button></div>}

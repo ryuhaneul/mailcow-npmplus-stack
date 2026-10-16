@@ -4,6 +4,7 @@ import { WM_THEMES as themes, WM_THEME_ORDER as order } from '../theme/themes.js
 import { WM_C } from '../theme/contrast.js';
 import { derive } from '../theme/apply.js';
 import Icon from '../components/Icon.jsx';
+import SettingsTabs from '../components/SettingsTabs.jsx';
 import './settings.css';
 
 const layouts = {
@@ -44,7 +45,7 @@ export default function SettingsPage() {
     event.preventDefault();const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(['ArrowLeft','ArrowUp'].includes(event.key)?-1:1)+buttons.length)%buttons.length;buttons[next].focus();buttons[next].click();
   }
   return <section class="view settings-view" aria-labelledby="page-title" onKeyDown={radioKeys}>
-    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>화면</div><h1 id="page-title">보기 설정</h1><nav class="tabs" aria-label="설정"><a href="#settings" aria-current="page">보기</a><a href="#filters">필터·규칙</a><a href="#storage">저장 공간</a><a href="#password">암호</a></nav></div>
+    <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>화면</div><h1 id="page-title">보기 설정</h1><SettingsTabs/></div>
     <div class="scroll"><div class="set-body"><div class="vs"><div>
       <section><h2>테마</h2><p>색·글꼴·모서리·간격이 함께 바뀝니다. 고르면 바로 화면 전체에 반영돼요.</p><div class="tcards" role="radiogroup" aria-label="테마">{order.map(key=>{const t=themes[key],v=t[mode],accent=state.accent[key],a=typeof accent==='string'?accent:t.swatches[typeof accent==='number'?accent:0][mode==='dark'?2:1],side=/^#/.test(v['--side-bg'])?v['--side-bg']:v['--side-bg']==='transparent'?v['--canvas']:v['--surface'];return <button class="tcard" type="button" role="radio" aria-checked={key===state.theme} tabIndex={key===state.theme?0:-1} onClick={()=>updatePrefs({theme:key})}><span class="thumb" aria-hidden="true" style={{'--t-canvas':v['--canvas'],'--t-side':side,'--t-surface':v['--surface'],'--t-line':v['--line-2'],'--t-ink':v['--ink'],'--t-accent':a,'--t-r':`${Math.min(parseInt(t.shape['--r-main'])/2,6)}px`,'--t-gap':parseInt(t.shape['--app-gap'])?'4px':'0px','--t-pad':key==='seland'?'5px':key==='ink'?'4px 4px 4px 0':'0px'}}><span class="ts"><i/><i/><i/><i/></span><span class="tm"><i/><i class="a"/><i/><i/></span></span><b><Icon name="check" size="xs"/>{t.name}</b><small>{t.desc}</small></button>;})}</div></section>
       <section><h2>밝기</h2><p>‘기기 설정 따름’이면 컴퓨터·휴대폰의 다크 모드를 따라갑니다.</p><div class="seg settings-modes" role="radiogroup" aria-label="밝기">{[['light','라이트'],['dark','다크'],['system','기기 설정 따름']].map(([value,label])=><button type="button" role="radio" aria-checked={state.mode===value} aria-pressed={state.mode===value} tabIndex={state.mode===value?0:-1} onClick={()=>updatePrefs({mode:value})}>{label}</button>)}</div></section>

@@ -68,6 +68,7 @@ test('teams: multiple prefilters are visible read-only and forwarding-only mailb
 test('teams: add creates only a copy redirect before move/stop and preserves all unrelated bytes', async t => {
   const f = await fixture(t); const row = await item(f); const response = await change(f, row.etag);
   assert.deepEqual(response.members, [first, second, next]);
+  assert.match(response.auditId, /^[a-f0-9]{32}$/);
   const inserted = `  redirect :copy "${next}";\r\n`;
   const expected = script.replace('redirect "archive@example.com";', inserted + 'redirect "archive@example.com";');
   assert.equal(f.rows[0].script_data, expected);

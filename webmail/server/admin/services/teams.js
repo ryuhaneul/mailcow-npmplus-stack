@@ -118,10 +118,10 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       let edited;
       try { edited = (add ? addMember : removeMember)(filter.script_data, member); } catch (error) { refused(error); }
       const response = source => ({ mailbox: team, members: state(source).members, etag: etag({ id: filter.id, source }) });
-      if (!edited.changed) return { ...response(filter.script_data), unchanged: true };
+      if (!edited.changed) return { ...response(filter.script_data), unchanged: true, auditId: null };
       return audit.run({ actor, ip, action: add ? 'team.member.add' : 'team.member.remove', target: team, kind: 'config', revertible: true,
-        before: state(filter.script_data), after: state(edited.script), ...hashFields(filter.script_data, edited.script) }, async () => {
-        await save(session, team, filter, edited.script); return response(edited.script);
+        before: state(filter.script_data), after: state(edited.script), ...hashFields(filter.script_data, edited.script) }, async intent => {
+        await save(session, team, filter, edited.script); return { ...response(edited.script), auditId: intent.id };
       }, { prepare: ({ id }) => backups.write(id, filter.script_data, edited.script) });
     });
   }

@@ -10,6 +10,7 @@ import Loading from './components/Loading.jsx';
 import Login from './pages/Login.jsx';
 import Totp from './pages/Totp.jsx';
 import Home from './pages/Home.jsx';
+import Flow from './flows/Flow.jsx';
 import Overview from './pages/Overview.jsx';
 import { homeTasks } from './pages/status.js';
 export default function AdminApp({ theme }) {
@@ -31,6 +32,6 @@ export default function AdminApp({ theme }) {
   if (error) return <LoadError error={error} retry={load}/>;
   if (session?.step === 'totp') return <Totp session={session} busy={busy} error={authFailure.value} submit={body => submit('/api/admin/auth/totp', body)} cancel={() => { adminSession.value = null; authFailure.value = null; navigateAdmin('login'); }}/>;
   if (!session || adminRoute.value.name === 'login') return <Login busy={busy} error={authFailure.value} seconds={seconds} submit={body => submit('/api/admin/auth/login', body)}/>;
-  const name = adminRoute.value.name, title = name === 'logs' ? '로그·큐' : name === 'home' ? '어떤 작업을 하시겠어요?' : adminNav.find(row => row[0] === name)?.[1] ?? homeTasks.find(task => task[1] === adminRoute.value.parts[0])?.[3] ?? '관리 작업';
-  return <><AdminIcons/><AdminShell theme={theme} title={title} header={!['home', 'overview'].includes(name)}>{name === 'home' ? <Home/> : name === 'overview' ? <Overview/> : <div data-admin-page={name}/>}</AdminShell></>;
+  const name = adminRoute.value.name, title = name === 'flow' && adminRoute.value.parts[0] === 'csv' ? 'CSV 일괄 만들기' : name === 'logs' ? '로그·큐' : name === 'home' ? '어떤 작업을 하시겠어요?' : adminNav.find(row => row[0] === name)?.[1] ?? homeTasks.find(task => task[1] === adminRoute.value.parts[0])?.[3] ?? '관리 작업';
+  return <><AdminIcons/><AdminShell theme={theme} title={title} header={!['home', 'overview', ...(name === 'flow' && ['join','csv'].includes(adminRoute.value.parts[0]) ? ['flow'] : [])].includes(name)}>{name === 'flow' && ['join','csv'].includes(adminRoute.value.parts[0]) ? <Flow key={adminRoute.value.parts[0]} flow={adminRoute.value.parts[0]}/> : name === 'home' ? <Home/> : name === 'overview' ? <Overview/> : <div data-admin-page={name}/>}</AdminShell></>;
 }

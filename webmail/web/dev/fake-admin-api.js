@@ -1,3 +1,4 @@
+import { parseCsv } from '../../server/admin/services/batch.js';
 export function createFakeAdminApi() {
   const state = { session: { step: 'done', user: { username: '합성관리자' }, csrf: 'synthetic-admin-csrf', expiresAt: '2099-01-01T00:00:00Z' }, features: { cleanup: true, relay: true }, failure: null, auth: { mode: 'password', loginError: null, totpError: null }, requests: [] };
   state.status = {
@@ -10,6 +11,16 @@ export function createFakeAdminApi() {
   state.queue = { items: [{ id: 'SYNTHETIC1', state: 'deferred', sender: 'sender@example.com', recipients: ['person@example.com'], arrivedAt: '2026-10-16T00:00:00Z', size: 2048, waitingSeconds: 240, reason: '451 synthetic temporary response' }] };
   state.compat = { n: 1000, range: { dovecot: { newest: '1792108800', oldest: '1792105200', count: 87 }, postfix: { newest: '1792108800', oldest: '1792105200', count: 126 } }, plainPop3: { status: 'known', count: 2, accounts: [{ account: 'legacy@example.com', lastSeen: '1792108800' }], basis: 'pop3-login: Login 중 secured/TLS 표시 없는 계정 (조회한 로그 범위 안)' }, smtp25: { status: 'unknown', count: null, accounts: [], basis: '합성 로그에서 포트 판정 불가' } };
   state.history = [0, 1, 2].map((index) => ({ id: String(index).padStart(32, '0'), ts: `2026-10-16T0${3 - index}:00:00Z`, actor: '합성관리자', summary: ['운영팀 구성원 변경', '웹메일 로고 변경', '개인 메일 정리'][index], canRevert: index !== 2 }));
+  state.flow = { joinMode: 'ok', failedLine: null, partialLine: null, authLostAtBatch: 0, batches: [] };
+  function inspectCsv(kind, text) {
+    const records = parseCsv(text), header = records.shift().fields, seen = new Set();
+    const items = records.map(record => {
+      const value = Object.fromEntries(header.map((key, index) => [key, record.fields[index] ?? ''])), email = value.email ?? value.address ?? '';
+      const valid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && !seen.has(email); seen.add(email);
+      return { line: record.line, email: value.email, address: value.address, name: value.name ?? '', type: value.type ?? '개인', team: value.team ?? '', teamAddress: value.team === '기획팀' ? 'team@example.com' : null, quotaGb: Number(value.quota_gb), targets: (value.targets ?? '').split(';'), valid, error: valid ? '' : '주소 또는 중복을 확인해 주세요.' };
+    });
+    return { kind, rows: items, normal: items.filter(row => row.valid).length, errors: items.filter(row => !row.valid).length };
+  }
   async function middleware(request, response, next) {
     const url = new URL(request.url, 'http://localhost'); if (!url.pathname.startsWith('/api/admin/')) return next();
     state.requests.push({ path: url.pathname, method: request.method, csrf: request.headers['x-mailadmin-csrf'] }); response.setHeader('content-type', 'application/json');
@@ -28,6 +39,25 @@ export function createFakeAdminApi() {
     }
     if (state.failure || !state.session) { response.statusCode = 403; response.end(JSON.stringify({ error: state.failure ?? { code: 'NO_SESSION', message: '로그인이 필요해요.' } })); return; }
     if (url.pathname === '/api/admin/auth/session') return response.end(JSON.stringify({ ...state.session, features: state.features }));
+    if (url.pathname === '/api/admin/teams') return response.end(JSON.stringify({ items: [{ mailbox: 'team@example.com', editable: true }], mailboxes: [{ address: 'team@example.com', name: '기획팀' }], total: 1, pageSize: 50 }));
+    if (url.pathname === '/api/admin/mailboxes' && request.method === 'POST') {
+      let raw = ''; for await (const part of request) raw += part; const body = JSON.parse(raw), steps = [{ stage: 'mailbox', status: 'ok' }];
+      if (body.team) steps.push({ stage: 'team', status: state.flow.joinMode === 'partial' ? 'failed' : 'ok', ...(state.flow.joinMode === 'partial' ? { code: 'SYNTHETIC_TEAM_FAILED' } : {}) });
+      const partial = steps.some(step => step.status === 'failed');
+      if (!partial && body.alias) steps.push({ stage: 'alias', status: 'ok' });
+      if (!partial && body.addSendForTeam) steps.push({ stage: 'permissions', status: 'ok' });
+      return response.end(JSON.stringify({ address: `${body.local}@${body.domain}`, result: partial ? 'partial' : 'ok', steps, password: body.password }));
+    }
+    if (url.pathname.startsWith('/api/admin/batch/') && request.method === 'POST') {
+      let raw = ''; for await (const part of request) raw += part; const body = JSON.parse(raw), kind = url.pathname.split('/').at(-1);
+      let parsed; try { parsed = inspectCsv(kind, body.csv); } catch { return fail({ status: 422, code: 'CSV_SYNTAX', message: 'CSV 형식을 확인해 주세요.' }); }
+      if (body.action === 'parse') return response.end(JSON.stringify(parsed));
+      state.flow.batches.push({ kind, action: body.action, lines: body.lines });
+      if (state.flow.authLostAtBatch === state.flow.batches.length) { state.session = null; return fail({ code: 'MAILCOW_SESSION_LOST', message: '합성 로그인 종료' }); }
+      if (body.lines.some(line => !parsed.rows.find(row => row.line === line)?.valid)) return fail({ status: 422, code: 'INVALID_INPUT', message: '오류 줄은 실행하지 않았어요.' });
+      const results = body.lines.map(line => { const row = parsed.rows.find(item => item.line === line), partial = line === state.flow.partialLine, failed = line === state.flow.failedLine && body.action !== 'retry'; return { line, email: row.email, address: row.address, result: partial ? 'partial' : failed ? 'failed' : 'ok', steps: partial ? [{ stage: 'mailbox', status: 'ok' }, { stage: 'team', status: 'failed' }] : [{ stage: 'mailbox', status: failed ? 'failed' : 'ok' }], ...(partial ? { recovery: ['메일함은 만들어졌고 팀 배정만 실패 — 계정 화면이나 팀 화면에서 마저 하기'] } : {}), ...(!failed && kind === 'mailboxes' ? { password: 'Batch-Initial-Aa1234!' } : {}) }; });
+      return response.end(JSON.stringify({ results, result: results.some(row => row.result !== 'ok') ? 'partial' : 'ok' }));
+    }
     if (url.pathname === '/api/admin/status') return response.end(JSON.stringify(state.status));
     if (url.pathname === '/api/admin/queue') return response.end(JSON.stringify(state.queue));
     if (url.pathname === '/api/admin/compat-usage') return response.end(JSON.stringify(state.compat));

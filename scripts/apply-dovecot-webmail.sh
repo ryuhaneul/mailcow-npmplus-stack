@@ -124,11 +124,17 @@ finish_change() {
     PENDING=0
     log "$MODE complete"
 }
-# WEBMAIL_ALLMAIL_EXCLUDE: comma-separated mailbox patterns; WEBMAIL_IPV4: optional IPv4.
+# WEBMAIL_ALLMAIL_EXCLUDE: comma-separated mailbox patterns; relay address from edge config.
 # Revert removes webmail_virtual definitions, leaving user indexes untouched.
 VIRTUAL_DIR="$CONF_DIR/webmail_virtual"
 DEFINITION="$VIRTUAL_DIR/AllMail/dovecot-virtual"
-WEBMAIL_IPV4="${WEBMAIL_IPV4:-}"
+# shellcheck source=lib/webmail-env.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/webmail-env.sh"
+# Used by edge_load_config in the sourced library.
+# shellcheck disable=SC2034
+WEBMAIL_STACK_ENV="$PROJECT_DIR/.env"
+if [ "$MODE" != revert ]; then edge_load_config || die "invalid edge configuration"; fi
 WEBMAIL_ALLMAIL_EXCLUDE="${WEBMAIL_ALLMAIL_EXCLUDE:-}"
 restore_aux() {
     rm -rf "$VIRTUAL_DIR"
@@ -139,18 +145,11 @@ if [ -d "$VIRTUAL_DIR" ]; then cp -a "$VIRTUAL_DIR" "$WORK/virtual-original"; fi
 : > "$WORK/trusted"
 : > "$WORK/definition"
 if [ "$MODE" != revert ]; then
-    if [ -n "$WEBMAIL_IPV4" ]; then
-        [[ "$WEBMAIL_IPV4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "WEBMAIL_IPV4 must be an IPv4 address"
-        IFS=. read -r -a octets <<< "$WEBMAIL_IPV4"
-        for octet in "${octets[@]}"; do
-            [ "$((10#$octet))" -le 255 ] || die "WEBMAIL_IPV4 octet exceeds 255"
-        done
-        cat > "$WORK/trusted" <<EOF
+    cat > "$WORK/trusted" <<EOF
 # BEGIN mailstack-webmail trusted (apply-dovecot-webmail.sh)
-login_trusted_networks = \$login_trusted_networks $WEBMAIL_IPV4/32
+login_trusted_networks = \$login_trusted_networks $WEBMAIL_RELAY_IPV4/32
 # END mailstack-webmail trusted
 EOF
-    fi
     # 2026-09a: POP3/Sieve inherit global plugins; only IMAP/LMTP override them.
     cat > "$WORK/virtual" <<'EOF'
 # BEGIN mailstack-webmail virtual (apply-dovecot-webmail.sh)

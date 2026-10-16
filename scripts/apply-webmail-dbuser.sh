@@ -3,7 +3,7 @@
 # Env: MAILCOW_DIR (default /home/mailcow-dockerized),
 #      WEBMAIL_ENV_FILE (default stack .env).
 # Root authentication is passed through MYSQL_PWD, never through command arguments.
-# Applies only column SELECT grants; --revert drops the managed subnet account.
+# Applies only column SELECT grants; --revert restores the legacy subnet account.
 set +x
 set -euo pipefail
 usage() { echo "Usage: $0 [apply|--check|--revert]"; }
@@ -30,8 +30,15 @@ webmail_load_config "${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}" "${MAIL
 command -v docker >/dev/null 2>&1 || die "docker not found"
 DBROOT=$(webmail_mailcow_value DBROOT)
 [ -n "$DBROOT" ] || die "DBROOT is missing from mailcow.conf"
-ACCOUNT="'webmail_ro'@'$WEBMAIL_NETWORK.%'"
-TARGET="webmail_ro@$WEBMAIL_NETWORK.%"
+ACCOUNT="'webmail_ro'@'$WEBMAIL_RELAY_IPV4'"
+TARGET="webmail_ro@$WEBMAIL_RELAY_IPV4"
+OLD_HOST="$WEBMAIL_NETWORK.%"
+DROP_HOST="$OLD_HOST"
+if [ "$MODE" = --revert ]; then
+    ACCOUNT="'webmail_ro'@'$OLD_HOST'"
+    TARGET="webmail_ro@$OLD_HOST"
+    DROP_HOST="$WEBMAIL_RELAY_IPV4"
+fi
 mysql_root() {
     (cd "$MAILCOW_DIR" && MYSQL_PWD="$DBROOT" docker compose exec -T -e MYSQL_PWD mysql-mailcow \
         mysql --user=root --batch --raw --skip-column-names) 2>/dev/null
@@ -79,16 +86,21 @@ verify_grants() {
         'sender_acl:logged_in_as,send_as' | LC_ALL=C sort)
     [ "$actual" = "$expected" ]
 }
+account_absent() {
+    local count
+    count=$(printf "SELECT COUNT(*) FROM mysql.user WHERE User = 'webmail_ro' AND Host = '%s';\n" "$DROP_HOST" | mysql_root) || return 1
+    [ "$count" = 0 ]
+}
 case "$MODE" in
     --check)
-        verify_grants || die "account is missing or column grants differ"
-        log "verified: column-level SELECT only on the five directory tables"
+        if ! verify_grants || ! account_absent; then die "relay account grants differ or legacy account remains"; fi
+        log "verified: relay account only, column-level SELECT on the five directory tables"
         ;;
-    --revert)
-        printf 'DROP USER IF EXISTS %s;\n' "$ACCOUNT" | mysql_root >/dev/null || die "could not drop account"
-        log "subnet account removed"
-        ;;
-    apply)
+    apply|--revert)
+        if verify_grants && account_absent; then
+            log "already $MODE; no changes"
+            exit 0
+        fi
         webmail_ensure_db_password || die "could not persist DB password"
         # NO_BACKSLASH_ESCAPES makes doubled quotes sufficient for an arbitrary
         # existing password, including backslashes. printf is a shell builtin.
@@ -108,6 +120,8 @@ case "$MODE" in
         } | mysql_root >/dev/null || die "could not apply column grants; check may be used after recovery"
         unset PASSWORD_SQL
         verify_grants || die "column grant verification failed"
+        printf "DROP USER IF EXISTS 'webmail_ro'@'%s';\n" "$DROP_HOST" | mysql_root >/dev/null || die "could not remove previous account"
+        account_absent || die "previous account still exists"
         log "applied and verified: column-level SELECT only on the five directory tables"
         ;;
 esac

@@ -8,6 +8,10 @@
 # Secrets are never printed. Generated env files are Compose env_file syntax,
 # with quoted values and literal dollars escaped for Compose interpolation.
 
+# shellcheck source=./edge.sh
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/edge.sh"
+
 webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 
 # Options can be loaded before mailcow exists (fresh setup Phase 0).
@@ -64,7 +68,7 @@ webmail_load_config() {
     SNAPPYMAIL_ENABLE=true
     MAIL_AUTOEXPUNGE_ENABLE=
     WEBMAIL_CONTACTS_ENABLE=true
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1090,SC1091
     source "$WEBMAIL_STACK_ENV" || return 1
     [ -n "${DOMAIN:-}" ] || { webmail_error "DOMAIN is required"; return 1; }
     WEBMAIL_DB_NAME=$(webmail_mailcow_value DBNAME)
@@ -79,6 +83,7 @@ webmail_load_config() {
         [ "$((10#$octet))" -le 255 ] || { webmail_error "invalid IPV4_NETWORK octet"; return 1; }
     done
     [[ "$WEBMAIL_TLS_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { webmail_error "MAILCOW_HOSTNAME is required and must be a hostname"; return 1; }
+    edge_load_config || return 1
     webmail_options || return 1
     WEBMAIL_BRAND_NAME="${WEBMAIL_BRAND_NAME:-메일}"
     WEBMAIL_ORG_NAME="${WEBMAIL_ORG_NAME:-}"

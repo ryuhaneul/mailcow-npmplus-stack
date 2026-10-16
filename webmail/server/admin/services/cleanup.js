@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AppError } from '../../errors.js';
+import { isMailboxAddress } from '../doveadm.js';
 import { groupMailboxAddresses } from './shares.js';
 import { kstTimestamp } from '../audit.js';
 
@@ -23,7 +24,7 @@ export function createCleanupService({ mailcow, doveadm, quota, audit, lock, now
     sweep();
     const before = data?.before;
     if (typeof before !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(before) || !Number.isFinite(Date.parse(`${before}T00:00:00Z`)) || new Date(`${before}T00:00:00Z`).toISOString().slice(0, 10) !== before || before > kstTimestamp(now()).slice(0, 10)) throw new AppError(422, 'DATE_REQUIRED', '기준일을 올바르게 입력해 주세요.');
-    if (!data || typeof data.mailbox !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(data.mailbox) || !Object.hasOwn(folders, data.folder) || Object.keys(data).some(key => !['mailbox', 'folder', 'before', 'confirmTeam'].includes(key)) || (data.confirmTeam !== undefined && typeof data.confirmTeam !== 'boolean')) throw invalid();
+    if (!data || !isMailboxAddress(data.mailbox) || !Object.hasOwn(folders, data.folder) || Object.keys(data).some(key => !['mailbox', 'folder', 'before', 'confirmTeam'].includes(key)) || (data.confirmTeam !== undefined && typeof data.confirmTeam !== 'boolean')) throw invalid();
     const mailbox = data.mailbox.toLowerCase();
     await teamCheck(session, mailbox, data.confirmTeam);
     return lock.run(mailbox, async () => {

@@ -19,7 +19,7 @@ const ctx = { session, actor: 'admin', ip: '192.0.2.24' };
 const input = { mailbox, folder: 'inbox', before: '2026-10-01' };
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'webmail-b02-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const state = { count: 3, used: '11', team: false, mode: '', remaining: 0, now: Date.parse('2026-10-17T00:00:00Z') }, requests = [], logs = [];
+  const state = { count: 3, used: '11', team: false, mode: '', remaining: 0, now: Date.parse('2026-10-17T00:00:00Z') }, requests = [], mailcowRequests = [], logs = [];
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     assert.equal(req.method, 'POST'); assert.equal(req.url, '/doveadm/v1');
@@ -39,14 +39,15 @@ async function fixture(t) {
   const config = { doveadmUrl: `http://127.0.0.1:${server.address().port}`, doveadmKey: secret };
   const doveadm = createDoveadm({ config }), audit = createAudit({ dir, logger: { info: row => logs.push(row) } }), lock = createResourceLock();
   const mailcow = { async call(_session, _method, path) {
+    mailcowRequests.push({ method: _method, path });
     if (state.authLost) throw new MailcowAuthLost();
     if (path.endsWith('/status/version')) return { version: '2026-09a' };
-    if (path.endsWith('/filters/all')) return state.team ? [{ username: mailbox, active: '1', filter_type: 'prefilter', script_data: 'redirect :copy "member@example.com";' }] : [];
+    if (path.endsWith('/filters/all')) return state.team ? [{ username: mailbox, active: '1', filter_type: 'prefilter', script_data: state.teamScript ?? 'redirect :copy "member@example.com";' }] : [];
     throw new Error('unexpected mailcow path');
   }, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
   const quota = createQuotaService({ doveadm, audit, lock });
   const cleanup = createCleanupService({ doveadm, mailcow, quota, audit, lock, now: () => state.now });
-  return { state, requests, config, doveadm, audit, logs, quota, cleanup, mailcow, dir };
+  return { state, requests, mailcowRequests, config, doveadm, audit, logs, quota, cleanup, mailcow, dir };
 }
 const count = (f, data = input, context = ctx) => f.cleanup.count({ ...context, data });
 const run = (f, token, context = ctx, confirmAddress = mailbox) => f.cleanup.run({ ...context, data: { token, confirmAddress } });
@@ -54,11 +55,31 @@ const expunges = f => f.requests.filter(row => row.command === 'expunge');
 for (const before of [undefined, '', '2026/10/01', '2026-02-30', '2026-13-01', '2027-01-01']) test(`cleanup date ${before}: 422 and no doveadm`, async t => {
   const f = await fixture(t); await assert.rejects(count(f, { ...input, before }), { statusCode: 422, code: 'DATE_REQUIRED' }); assert.equal(f.requests.length, 0);
 });
-test('cleanup: team confirmation required and preserved through execution', async t => {
-  const f = await fixture(t); f.state.team = true;
-  await assert.rejects(count(f), { statusCode: 422, code: 'TEAM_CONFIRM_REQUIRED' }); assert.equal(f.requests.length, 0);
-  const preview = await count(f, { ...input, confirmTeam: true }); assert.equal((await run(f, preview.token)).remaining, 0);
+for (const command of ['redirect', 'REDIRECT']) test(`cleanup: ${command} team confirmation required and preserved through execution`, async t => {
+  const f = await fixture(t); f.state.team = true; f.state.teamScript = `${command} :copy "member@example.com";`;
+  await assert.rejects(count(f), { statusCode: 422, code: 'TEAM_CONFIRM_REQUIRED' }); assert.equal(f.requests.length, 0); assert.equal(expunges(f).length, 0);
+  const preview = await count(f, { ...input, confirmTeam: true }); assert.equal((await run(f, preview.token)).remaining, 0); assert.equal(expunges(f).length, 1);
 });
+for (const invalidMailbox of ['*@example.com', 'user?@example.com', '*']) {
+  test(`cleanup: mailbox ${invalidMailbox} rejected before upstream calls`, async t => {
+    const f = await fixture(t);
+    await assert.rejects(count(f, { ...input, mailbox: invalidMailbox, folder: 'all' }), { statusCode: 422, code: 'INVALID_INPUT', message: '메일함과 정리 조건을 확인해 주세요.' });
+    assert.equal(f.mailcowRequests.length, 0); assert.equal(f.requests.length, 0);
+  });
+  test(`quota: mailbox ${invalidMailbox} rejected before upstream calls`, async t => {
+    const f = await fixture(t);
+    await assert.rejects(f.quota.recheck({ ...ctx, data: { mailbox: invalidMailbox } }), { statusCode: 422, code: 'INVALID_INPUT', message: '메일함 주소를 확인해 주세요.' });
+    assert.equal(f.mailcowRequests.length, 0); assert.equal(f.requests.length, 0);
+  });
+  test(`doveadm: user ${invalidMailbox} rejected for all commands before HTTP`, async t => {
+    const f = await fixture(t);
+    for (const command of ['search', 'expunge', 'quotaGet', 'quotaRecalc', 'mailboxList']) {
+      const args = { user: invalidMailbox, ...(['search', 'expunge'].includes(command) ? { query: ['mailbox', '*', 'before', '2026-10-01'] } : {}) };
+      await assert.rejects(f.doveadm.call(command, args), { statusCode: 422, code: 'INVALID_INPUT', message: '메일함과 검색 조건을 확인해 주세요.' });
+    }
+    assert.equal(f.requests.length, 0);
+  });
+}
 test('cleanup: count changed rejects without expunge or audit intent', async t => {
   const f = await fixture(t), preview = await count(f); f.state.count++;
   await assert.rejects(run(f, preview.token), { statusCode: 409, code: 'COUNT_CHANGED' }); assert.equal(expunges(f).length, 0); assert.equal((await f.audit.read()).rows.length, 0);

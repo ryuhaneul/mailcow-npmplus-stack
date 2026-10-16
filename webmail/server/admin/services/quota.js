@@ -1,4 +1,5 @@
 import { AppError } from '../../errors.js';
+import { isMailboxAddress } from '../doveadm.js';
 
 export function quotaUsage(rows) {
   const storage = rows.find(row => row?.type === 'STORAGE');
@@ -9,7 +10,7 @@ export function quotaUsage(rows) {
 export function createQuotaService({ doveadm, audit, lock }) {
   const usage = async mailbox => quotaUsage(await doveadm.call('quotaGet', { user: mailbox }));
   async function recheck({ actor, ip, data }) {
-    if (!data || typeof data.mailbox !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(data.mailbox) || Object.keys(data).some(key => key !== 'mailbox')) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
+    if (!data || !isMailboxAddress(data.mailbox) || Object.keys(data).some(key => key !== 'mailbox')) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
     const mailbox = data.mailbox.toLowerCase();
     return lock.run(mailbox, async () => {
       const before = await usage(mailbox);

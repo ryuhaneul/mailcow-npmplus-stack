@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { syncBoolean,syncOptions,syncOptionRows } from '../../web/src/admin/pages/sync-options.js';
+test('sync string flags become JSON booleans',()=>{for(const value of[true,1,'1'])assert.equal(syncBoolean(value),true);for(const value of[false,0,'0',null,undefined,'false'])assert.equal(syncBoolean(value),false);});
+test('sync editable options are projected without log or source credential fields',()=>{const options=syncOptions({maxage:'0',mins_interval:'20',delete1:'0',delete2:'1',delete2duplicates:'1',custom_params:'--useuid',log:'***',password1:'synthetic'});assert.deepEqual(options,{maxage:0,mins_interval:20,delete2duplicates:true,delete1:false,delete2:true,custom_params:'--useuid'});});
+test('sync options before/after comparison covers every selected job',()=>{const jobs=[{user2:'a@example.com',maxage:0,mins_interval:20},{user2:'b@example.com',maxage:30,mins_interval:40}];const rows=syncOptionRows(jobs,syncOptions(jobs[0]));assert.equal(rows.length,12);assert.equal(rows[6][1],'30');assert.equal(rows[6][2],'0');assert.ok(rows.every(row=>row.length===3));});
+test('sync raw custom arguments remain visible in comparison',()=>{const row={user2:'a@example.com',maxage:0,mins_interval:20,custom_params:'--showpasswords'};assert.deepEqual(syncOptionRows([row],{...syncOptions(row),custom_params:''}).at(-1).slice(1),['--showpasswords','없음']);});

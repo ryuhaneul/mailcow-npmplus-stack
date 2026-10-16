@@ -51,6 +51,12 @@ from pathlib import Path
 import re, sys
 source, dest, mode, web4, snappy4, web6, snappy6, network6, network4 = sys.argv[1:]
 data = Path(source).read_bytes()
+def reject_backslashes(value):
+    numbers = [str(i) for i, line in enumerate(value.split(b'\n'), 1) if b'\\' in line]
+    if numbers:
+        sys.exit('extra.cf 에 백슬래시가 있어 mailcow 재시작 때 내용이 바뀌거나 잘릴 수 있음 — 그 줄을 정리한 뒤 다시 실행 (줄: ' + ', '.join(numbers) + ')')
+
+reject_backslashes(data)
 original = data
 # mailcow rewrites the generated hostname and strips trailing LF on startup.
 # Keep all other bytes significant, including operator whitespace/backslashes.
@@ -114,6 +120,7 @@ if mode != 'revert':
             address, length = network6.split('/')
             defaults += f', [{address}]/{length}'
         data = data + begin + b'mynetworks = ' + prefix + defaults.encode() + b'\n' + end
+reject_backslashes(data)
 if not move_to_end and comparable(original) == comparable(data):
     data = original
 Path(dest).write_bytes(data)

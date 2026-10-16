@@ -20,6 +20,8 @@ import { createAliasesService } from './services/aliases.js';
 import aliasesRoutes from './routes/aliases.js';
 import { createDomainsService } from './services/domains.js';
 import domainsRoutes from './routes/domains.js';
+import { createSendersService } from './services/senders.js';
+import sendersRoutes from './routes/senders.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -62,6 +64,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const domains = createDomainsService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('domains', domains);
   await app.register(domainsRoutes, { service: domains });
+  const senders = createSendersService({ mailcow: app.mailcow, audit, lock: adminLock, history });
+  app.decorate('senders', senders);
+  await app.register(sendersRoutes, { service: senders });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

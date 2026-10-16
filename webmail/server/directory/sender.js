@@ -8,6 +8,10 @@ const parts = address => { const at = address.lastIndexOf('@'); return { local: 
 export function senderAddress(value) {
   return typeof value === 'string' && /^[^\s<>@\x00-\x1f\x7f]+@[^\s<>@\x00-\x1f\x7f]+$/.test(value) ? lower(value) : null;
 }
+function senderName(value) {
+  const name = typeof value === 'string' ? value.trim() : '';
+  return senderAddress(name) ? '' : name;
+}
 function enabledDomain(data, domain) {
   return data.domain.some(row => sqlValue(row.domain) === domain && one(row.active))
     || data.alias_domain.some(row => sqlValue(row.alias_domain) === domain && one(row.active));
@@ -43,7 +47,7 @@ export function senderKind(data, actorValue, fromValue) {
 
 export function senderIdentities(data, session) {
   const actor = lower(session.email);
-  const ownName = data.mailbox.find(row => sqlValue(row.username) === actor)?.name || session.name || actor;
+  const ownName = senderName(data.mailbox.find(row => sqlValue(row.username) === actor)?.name) || senderName(session.name);
   const grants = data.sender_acl.filter(row => sqlValue(row.logged_in_as) === actor);
   const candidates = new Set([actor]);
   for (const row of data.alias) if (!row.address.startsWith('@') && recipients(row).includes(actor)) candidates.add(sqlValue(row.address));
@@ -65,7 +69,7 @@ export function senderIdentities(data, session) {
   }
   const identities = [...candidates].flatMap(address => {
     const kind = senderKind(data, actor, address);
-    return kind ? [{ address, name: data.mailbox.find(row => sqlValue(row.username) === address)?.name || ownName, kind }] : [];
+    return kind ? [{ address, name: senderName(data.mailbox.find(row => sqlValue(row.username) === address)?.name) || ownName, kind }] : [];
   });
   identities.sort((a, b) => (a.kind === 'self' ? -1 : b.kind === 'self' ? 1 : a.address.localeCompare(b.address, 'en')));
   const preferred = senderAddress(session.prefs?.defaultFrom);

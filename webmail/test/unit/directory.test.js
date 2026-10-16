@@ -35,6 +35,29 @@ test('sender case 1: self is listed first; unauthorized addresses return 403', a
   for (const bad of ['user@example.com\r\nBcc: hidden@example.com', 'Name <user@example.com>', '', null]) await denied(service, bad);
 });
 
+for (const [label, name, sessionName, expected] of [
+  ['real mailbox name', '사용자', 'user@example.com', '사용자'],
+  ['empty name', '', 'user@example.com', ''],
+  ['whitespace name', '   ', 'user@example.com', ''],
+  ['address as name', 'user@example.com', 'user@example.com', ''],
+  ['other address as name', ' Other@EXAMPLE.COM ', 'user@example.com', ''],
+  ['real session fallback', '', '사용자', '사용자'],
+]) test(`sender names: ${label}`, async () => {
+  const data = tables(); data.mailbox[0].name = name;
+  data.alias = [alias('team@example.com')]; data.sender_acl = [acl('delegated@example.com')];
+  const result = await fixture(data).service.identities({ email: 'user@example.com', name: sessionName });
+  assert.equal(result.identities.length, 3);
+  assert.deepEqual(result.identities.map(item => item.name), [expected, expected, expected]);
+});
+for (const ownName of ['사용자', '']) test(`sender names: alias and ACL prefer their own real mailbox names, login name=${ownName}`, async () => {
+  const data = tables(); data.mailbox[0].name = ownName;
+  data.alias = [alias('team@example.com')]; data.sender_acl = [acl('delegated@example.com')];
+  data.mailbox.push({ username: 'team@example.com', name: '팀 이름' }, { username: 'delegated@example.com', name: 'delegated@example.com' });
+  const result = await fixture(data).service.identities({ email: 'user@example.com', name: 'user@example.com' });
+  assert.equal(result.identities.find(item => item.address === 'team@example.com').name, '팀 이름');
+  assert.equal(result.identities.find(item => item.address === 'delegated@example.com').name, ownName);
+});
+
 test('sender case 2: active sender_allowed aliases use the complete comma-separated goto membership', async () => {
   const data = tables();
   data.alias = [alias('team@example.com', 'other@example.com,user@example.com'), alias('unrelated@example.com', 'other@example.com'), alias('partial@example.com', 'otheruser@example.com')];

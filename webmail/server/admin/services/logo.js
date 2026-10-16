@@ -68,7 +68,23 @@ export function createLogoService({ dir, audit, lock, history, logger, now = Dat
     for (const entry of await io.readdir(dir, { withFileTypes: true })) if (entry.isFile() && brandFilePattern.test(entry.name) && !keep.has(entry.name)) await io.unlink(join(dir, entry.name));
   }
   async function commit(current, previous, cleanup = true) {
-    await io.mkdir(dir, { recursive: true }); await replace('previous', previous); await replace('current', current);
+    await io.mkdir(dir, { recursive: true });
+    const previousPath = join(dir, 'previous.json');
+    let savedPrevious;
+    try { savedPrevious = await io.readFile(previousPath); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await replace('previous', previous);
+    try { await replace('current', current); }
+    catch (error) {
+      try {
+        if (savedPrevious === undefined) await io.unlink(previousPath);
+        else { await io.writeFile(`${previousPath}.tmp`, savedPrevious, { mode: 0o644 }); await io.rename(`${previousPath}.tmp`, previousPath); }
+      } catch {
+        logger?.warn({ code: 'LOGO_PREVIOUS_RESTORE_FAILED' }, '로고 저장 실패 후 이전 로고 정보를 복원하지 못했습니다.');
+        throw new AppError(502, 'WRITE_VERIFY_FAILED', '로고 저장에 실패했고 이전 로고 정보도 복원하지 못했어요. 관리자에게 문의해 주세요.');
+      }
+      throw error;
+    }
     if ((await readBrandState(dir))?.version !== current?.version || (await readBrandState(dir, 'previous'))?.version !== previous?.version) throw failed();
     if (cleanup) try { await clean(current, previous); } catch { logger?.warn({ code: 'LOGO_CLEANUP_FAILED' }, '로고 파일 정리를 다음 저장 때 다시 시도합니다.'); return true; }
     return false;

@@ -33,7 +33,7 @@ test('logo first save file layout/metadata, null undo then redo, preview consume
 test('logo dark separate/same/keep/remove and fallback', async t => { const f = await fixture(t), dark = await preview(f, jpg, 'image/jpeg', 'dark'), first = await put(f, (await preview(f, png, 'image/png')).id, dark.id); assert.match(first.current.dark.file, /^dark-[a-f0-9]{16}\.jpg$/); assert.deepEqual((await f.service.file('dark')).data, jpg); const kept = await save(f, 'next'); assert.deepEqual(kept.current.dark, first.current.dark); const same = await save(f, 'same', 'same'); assert.deepEqual(same.current.light, same.current.dark); const removed = await save(f, 'remove', 'remove'); assert.equal(removed.current.dark, null); assert.deepEqual(await f.service.file('dark'), await f.service.file('light')); await undo(f, removed.auditId); assert.equal((await readBrandState(f.dir)).version, same.current.version); });
 test('logo identical content unchanged, consumed IDs and file variants checked', async t => { const f = await fixture(t), first = await save(f, 'same'), id = (await preview(f, svg('same'))).id; assert.equal((await put(f, id)).unchanged, true); assert.equal((await f.service.get()).current.version, first.current.version); await assert.rejects(put(f, id), { statusCode: 404 }); await assert.rejects(put(f, (await preview(f, jpg, 'image/jpeg', 'dark')).id), { statusCode: 422 }); });
 test('logo etag required409, mismatch keeps preview usable; concurrent sameetag one applies', async t => { const f = await fixture(t), a = (await preview(f, svg('a'))).id, b = (await preview(f, svg('b'))).id, tag = (await f.service.get()).etag; await assert.rejects(f.service.put({ ...ctx, data: { lightPreviewId: a } }), { statusCode: 409 }); const result = await Promise.allSettled([put(f, a, undefined, tag), put(f, b, undefined, tag)]); assert.equal(result.filter(row => row.status === 'fulfilled').length, 1); assert.equal(result.find(row => row.status === 'rejected').reason.code, 'CHANGED_ELSEWHERE'); assert.ok((await f.service.file(b, ctx.owner)).data); });
-test('logo atomic rename failure preserves public current; failed preview consumed; previous-first order', async t => { const f = await fixture(t), first = await save(f, 'old'), names = []; f.hooks.rename = (_from, to) => { names.push(to.split('/').at(-1)); if (to.endsWith('/current.json')) throw new Error('synthetic-current-rename-failure'); }; const id = (await preview(f, svg('new'))).id; await assert.rejects(put(f, id), /synthetic-current-rename-failure/); assert.deepEqual(names, ['previous.json', 'current.json']); assert.equal((await readBrandState(f.dir)).version, first.current.version); assert.equal((await readBrandState(f.dir, 'previous')).version, first.current.version); await assert.rejects(f.service.file(id, ctx.owner), { statusCode: 404 }); const records = await f.history.list(); assert.equal(records.items[0].result, 'failed'); });
+test('logo atomic rename failure preserves public current; failed preview consumed; previous-first order', async t => { const f = await fixture(t), first = await save(f, 'old'), names = []; f.hooks.rename = (_from, to) => { names.push(to.split('/').at(-1)); if (to.endsWith('/current.json')) throw new Error('synthetic-current-rename-failure'); }; const id = (await preview(f, svg('new'))).id; await assert.rejects(put(f, id), /synthetic-current-rename-failure/); assert.deepEqual(names, ['previous.json', 'current.json', 'previous.json']); assert.equal((await readBrandState(f.dir)).version, first.current.version); assert.equal(await readBrandState(f.dir, 'previous'), null); await assert.rejects(f.service.file(id, ctx.owner), { statusCode: 404 }); const records = await f.history.list(); assert.equal(records.items[0].result, 'failed'); });
 test('logo previous rename failure leaves current/previous unchanged', async t => { const f = await fixture(t); await save(f, 'one'); await save(f, 'two'); const current = await readBrandState(f.dir), previous = await readBrandState(f.dir, 'previous'); f.hooks.rename = (_from, to) => { if (to.endsWith('/previous.json')) throw new Error('synthetic-previous-failure'); }; await assert.rejects(save(f, 'three'), /synthetic-previous-failure/); assert.deepEqual(await readBrandState(f.dir), current); assert.deepEqual(await readBrandState(f.dir, 'previous'), previous); });
 test('logo cleanup retains current/previous assets and unknown filenames, only managed names removed', async t => { const f = await fixture(t), first = await save(f, 'one'); await fs.writeFile(join(f.dir, 'custom.svg'), 'keep'); await fs.writeFile(join(f.dir, 'light-not-managed.svg'), 'keep'); await save(f, 'two'); const third = await save(f, 'three'), names = await fs.readdir(f.dir); assert.ok(!names.includes(first.current.light.file)); assert.ok(names.includes(third.current.light.file)); assert.ok(names.includes('custom.svg')); assert.ok(names.includes('light-not-managed.svg')); });
 test('logo undo refuses changed current or missing old previous', async t => { const f = await fixture(t), first = await save(f, 'one'); await save(f, 'two'); await assert.rejects(undo(f, first.auditId), { statusCode: 409, code: 'CHANGED_ELSEWHERE' }); const third = await save(f, 'three'); await fs.writeFile(join(f.dir, 'previous.json'), 'null'); await assert.rejects(undo(f, third.auditId), { statusCode: 409, code: 'NOT_REVERTIBLE' }); });
@@ -50,4 +50,40 @@ test('logo cleanup failure remains HTTP200 with pending flag, applied current, w
   const id = (await preview(f, svg('three'))).id, app = Fastify({ logger: false }); app.addHook('preHandler', async request => { request.session = { id: ctx.owner, username: ctx.actor }; }); await app.register(logoRoutes, { service: f.service }); t.after(() => app.close());
   const result = await app.inject({ method: 'PUT', url: '/api/admin/logo', payload: { etag: (await f.service.get()).etag, lightPreviewId: id } }); assert.equal(result.statusCode, 200, result.body); assert.equal(result.json().detail.cleanupPending, true); assert.equal((await readBrandState(f.dir)).version, result.json().current.version); assert.ok((await fs.readdir(f.dir)).includes(first.current.light.file)); assert.deepEqual(f.logs.find(row => row.code === 'LOGO_CLEANUP_FAILED'), { code: 'LOGO_CLEANUP_FAILED' });
   f.hooks.unlink = undefined; await save(f, 'four'); assert.ok(!(await fs.readdir(f.dir)).includes(first.current.light.file)); assert.ok(!JSON.stringify(f.logs).includes('synthetic-unlink-private-path'));
+});
+
+
+test('logo failed third save restores exact previous manifest bytes and keeps second change revertible', async t => {
+  const f = await fixture(t), first = await save(f, 'one'), second = await save(f, 'two');
+  const path = join(f.dir, 'previous.json'), original = Buffer.from('  ' + await fs.readFile(path, 'utf8') + '\n');
+  await fs.writeFile(path, original);
+  f.hooks.rename = (_from, to) => { if (to.endsWith('/current.json')) throw new Error('SyntheticCurrentRenameFailure'); };
+  await assert.rejects(save(f, 'three'), /SyntheticCurrentRenameFailure/);
+  assert.deepEqual(await fs.readFile(path), original);
+  const after = await f.service.get(); assert.equal(after.current.version, second.current.version); assert.equal(after.previous.version, first.current.version);
+  f.hooks.rename = undefined; await undo(f, second.auditId);
+  assert.equal((await f.service.get()).current.version, first.current.version);
+});
+
+test('logo failed initial current save restores absent previous manifest', async t => {
+  const f = await fixture(t);
+  f.hooks.rename = (_from, to) => { if (to.endsWith('/current.json')) throw new Error('SyntheticCurrentRenameFailure'); };
+  await assert.rejects(save(f, 'one'), /SyntheticCurrentRenameFailure/);
+  await assert.rejects(fs.readFile(join(f.dir, 'previous.json')), { code: 'ENOENT' });
+  assert.equal((await f.service.get()).current, null);
+});
+
+test('logo previous restoration failure returns safe HTTP warning and logs only a warning code', async t => {
+  const f = await fixture(t); await save(f, 'one'); await save(f, 'two'); let previousRenames = 0;
+  f.hooks.rename = (_from, to) => {
+    if (to.endsWith('/current.json') || (to.endsWith('/previous.json') && ++previousRenames === 2)) throw new Error('SyntheticPrivateRestoreFailure');
+  };
+  const id = (await preview(f, svg('three'))).id, app = Fastify({ logger: false });
+  const { installErrors } = await import('../../server/errors.js'); installErrors(app);
+  app.addHook('preHandler', async request => { request.session = { id: ctx.owner, username: ctx.actor }; });
+  await app.register(logoRoutes, { service: f.service }); t.after(() => app.close());
+  const response = await app.inject({ method: 'PUT', url: '/api/admin/logo', payload: { etag: (await f.service.get()).etag, lightPreviewId: id } });
+  assert.equal(response.statusCode, 502); assert.equal(response.json().error.code, 'WRITE_VERIFY_FAILED'); assert.match(response.json().error.message, /이전 로고 정보도 복원하지 못했어요/);
+  assert.deepEqual(f.logs.find(row => row.code === 'LOGO_PREVIOUS_RESTORE_FAILED'), { code: 'LOGO_PREVIOUS_RESTORE_FAILED' });
+  assert.ok(!JSON.stringify(f.logs).includes('SyntheticPrivateRestoreFailure')); assert.ok(!response.body.includes('SyntheticPrivateRestoreFailure'));
 });

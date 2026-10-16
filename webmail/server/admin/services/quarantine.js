@@ -2,7 +2,6 @@ import { AppError } from '../../errors.js';
 
 const invalid = () => new AppError(422, 'INVALID_INPUT', '격리함 동작과 실행 확인을 살펴봐 주세요.');
 const missing = () => new AppError(404, 'NOT_FOUND', '격리된 메일을 찾을 수 없어요.');
-const short = value => Array.from(String(value ?? '')).slice(0, 200).join('');
 export function createQuarantineService({ mailcow, audit, lock }) {
   async function list(session) {
     const value = await mailcow.call(session, 'GET', '/api/v1/get/quarantine/all');
@@ -16,7 +15,7 @@ export function createQuarantineService({ mailcow, audit, lock }) {
     if (!(remove ? ['delete'] : ['release', 'learnham', 'learnspam']).includes(action)) throw invalid();
     return lock.run(`quarantine:${id}`, async () => {
       const row = (await list(session)).items.find(row => row.id === String(id)); if (!row) throw missing();
-      const before = { id: row.id, title: short(row.subject), sender: row.sender, recipient: row.recipient, action };
+      const before = { id: row.id, qid: row.qid, action };
       return audit.run({ actor, ip, action: `quarantine.${action}`, target: `quarantine:${id}`, kind: 'irreversible', revertible: false, before, after: { id: row.id, action } }, async intent => {
         if (!(await list(session)).items.some(item => item.id === row.id)) throw missing();
         if (remove) await mailcow.call(session, 'POST', '/api/v1/delete/qitem', [row.id]);

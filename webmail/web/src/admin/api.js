@@ -1,6 +1,6 @@
-import { adminSession, authFailure, acceptSession } from './state/session.js';
+import { adminSession, authFailure, acceptSession, returnTo } from './state/session.js';
 import { navigateAdmin } from './router.js';
-export function createAdminApi({ fetchImpl = globalThis.fetch, getCsrf = () => adminSession.value?.csrf, onSession = acceptSession, onForbidden = error => { adminSession.value = null; authFailure.value = error; navigateAdmin('login'); } } = {}) {
+export function createAdminApi({ fetchImpl = globalThis.fetch, getCsrf = () => adminSession.value?.csrf, onSession = acceptSession, onForbidden = error => { if (location.hash !== '#login' && (adminSession.value?.step === 'done' || ['NO_SESSION', 'SESSION_EXPIRED', 'MAILCOW_SESSION_LOST'].includes(error.code))) returnTo.value = location.hash.slice(1) || 'home'; adminSession.value = null; authFailure.value = error; navigateAdmin('login'); } } = {}) {
   return async function request(path, { method = 'GET', body, signal } = {}) {
     if (typeof path !== 'string' || !path.startsWith('/api/admin/') || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) throw new Error('관리 API 경로를 확인해 주세요.');
     const changing = method !== 'GET', headers = changing ? { 'Content-Type': 'application/json', 'X-Mailadmin-CSRF': getCsrf() ?? '' } : {};

@@ -40,6 +40,8 @@ import { createF2bService } from './services/f2b.js';
 import securityRoutes from './routes/security.js';
 import { createStatusService } from './services/status.js';
 import statusRoutes from './routes/status.js';
+import { createLogsService } from './services/logs.js';
+import logsRoutes from './routes/logs.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -112,6 +114,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const status = createStatusService({ mailcow: app.mailcow, config, tlsExpiry });
   app.decorate('status', status);
   await app.register(statusRoutes, { service: status });
+  const logs = createLogsService({ mailcow: app.mailcow, config });
+  app.decorate('logs', logs);
+  await app.register(logsRoutes, { service: logs });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

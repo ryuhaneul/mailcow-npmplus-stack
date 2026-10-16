@@ -1,0 +1,10 @@
+.cleanup-editor .field{margin:15px 0}
+.cleanup-editor input:not([type=checkbox]),.cleanup-editor select{width:100%;min-width:0;padding:8px 10px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink)}
+.cleanup-editor .checkline input{width:15px;height:15px;flex:none;accent-color:var(--accent)}
+.cleanup-editor :disabled,.cleanup-quota :disabled{opacity:.55;cursor:default}
+.cleanup-editor h2:focus{outline-offset:4px}
+.cleanup-field-error{color:var(--danger);font-size:13px}
+.cleanup-quota{border-top:1px solid var(--line);margin-top:24px;padding-top:24px}
+.cleanup-quota .table-wrap{margin-top:16px}
+.cleanup-detail .ac-diff{font-size:13px}
+@media(max-width:700px){.cleanup-editor .form-grid{grid-template-columns:minmax(0,1fr)}.cleanup-editor .footer-actions,.cleanup-quota .section-title{flex-wrap:wrap}}

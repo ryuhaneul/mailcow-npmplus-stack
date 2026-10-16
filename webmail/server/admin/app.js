@@ -125,12 +125,12 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();
-  if (hasStatic) await app.register(fastifyStatic, { root, wildcard: false, index: ['index.html'] });
+  if (hasStatic) await app.register(fastifyStatic, { root, wildcard: false, index: ['admin.html'] });
   app.setNotFoundHandler((request, reply) => {
     const pathname = request.url.split('?')[0];
     const isApi = pathname === '/api' || pathname.startsWith('/api/');
-    if (hasStatic && !isApi && ['GET', 'HEAD'].includes(request.method) && existsSync(resolve(root, 'index.html'))) {
-      return reply.sendFile('index.html');
+    if (hasStatic && !isApi && ['GET', 'HEAD'].includes(request.method) && existsSync(resolve(root, 'admin.html'))) {
+      return reply.sendFile('admin.html');
     }
     return reply.code(404).send(errorBody('NOT_FOUND', '요청한 경로를 찾을 수 없어요.'));
   });

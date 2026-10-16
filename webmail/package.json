@@ -13,7 +13,8 @@
     "test": "node --test test/unit/*.test.js",
     "test:int": "node --test test/int/*.test.js",
     "e2e": "playwright test test/e2e",
-    "check": "bash bin/check-npm-rules.sh && bash bin/check-generic.sh"
+    "check": "bash bin/check-npm-rules.sh && bash bin/check-generic.sh",
+    "build:admin": "vite build web --config web/vite.admin.config.js"
   },
   "dependencies": {
     "fastify": "5.12.7",

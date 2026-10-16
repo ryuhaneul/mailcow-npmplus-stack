@@ -91,19 +91,23 @@ test('admin routes: JSON API 404, public endpoints absent and no-store', async t
   }
 });
 
-test('admin static: own directory, SPA fallback, JSON API exclusion', async t => {
+test('admin static: admin.html root and SPA fallback, JSON API exclusion', async t => {
   const staticDir = await mkdtemp(join(tmpdir(), 'webmail-a01-static-'));
   t.after(() => rm(staticDir, { recursive: true, force: true }));
   const html = '<!doctype html><title>example.com admin</title>';
-  await writeFile(join(staticDir, 'index.html'), html);
+  await writeFile(join(staticDir, 'admin.html'), html);
+  await writeFile(join(staticDir, 'index.html'), '<title>wrong public entry</title>');
   const app = await fixture(t, { staticDir });
-  for (const url of ['/', '/accounts/deep']) {
+  for (const url of ['/', '/accounts', '/accounts/deep']) {
     const response = await app.inject(url);
     assert.equal(response.statusCode, 200);
     assert.equal(response.body, html);
     assert.equal(response.headers['content-security-policy'], csp);
   }
-  assert.equal((await app.inject('/api/admin/missing')).statusCode, 404);
+  const missingApi = await app.inject('/api/admin/missing');
+  assert.equal(missingApi.statusCode, 404);
+  assert.match(missingApi.headers['content-type'], /application\/json/);
+  assert.equal(missingApi.json().error.code, 'NOT_FOUND');
   assert.equal((await app.inject({ method: 'POST', url: '/missing' })).statusCode, 404);
 });
 

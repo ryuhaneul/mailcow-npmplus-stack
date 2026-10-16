@@ -1,0 +1,23 @@
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../../public/fonts/JetBrainsMono.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Pretendard";
+  src: url("../../public/fonts/PretendardVariable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 45 920;
+  font-display: swap;
+}
+
+
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--canvas);color:var(--ink)}body{font-family:var(--font);font-size:var(--fs-body);line-height:1.6;letter-spacing:-.003em;word-break:keep-all;overflow-wrap:anywhere}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;background:none;border:0}a{color:inherit}svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}:focus-visible{outline:2px solid var(--focus);outline-offset:3px}[hidden]{display:none!important}h1,h2,h3,p{margin:0}h1{font-size:22px;letter-spacing:-.035em;line-height:1.4}h2{font-size:18px;letter-spacing:-.02em}h3{font-size:14px;font-weight:650}small,.muted{color:var(--ink-3)}small{font-size:12px}.num{font-variant-numeric:tabular-nums}.proof{display:flex;align-items:center;gap:12px;padding:9px 22px;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink-2)}.proof strong{color:var(--ink);font-weight:650}.proof .right{margin-left:auto}.app{display:grid;grid-template-columns:222px minmax(0,1fr);gap:0;padding:8px 8px 8px 0;min-height:calc(100vh - 43px)}.side{padding:14px 10px 12px 14px;display:flex;flex-direction:column;min-width:0}.brand{display:flex;gap:10px;align-items:center;padding:2px 6px 20px}.mark{display:grid;place-items:center;background:var(--accent);color:var(--on-accent);width:30px;height:30px;border-radius:8px;flex:none;font-weight:700}.brand b{font-size:15px;letter-spacing:-.02em}.brand small{display:block;font-size:11.5px}.nav-heading{font-size:11.5px;font-weight:700;color:var(--ink-3);padding:17px 8px 5px;letter-spacing:.02em}.nv{display:flex;gap:10px;align-items:center;width:100%;height:35px;padding:0 9px;border-radius:8px;color:var(--ink-2);font-size:13.5px;text-align:left}.nv .count{margin-left:auto;color:var(--ink-3);font-size:12px}.nv:hover{background:var(--hover)}.nv[aria-current=page]{background:var(--surface);box-shadow:var(--sheet);color:var(--ink);font-weight:600}.side-foot{margin-top:auto;border-top:1px solid var(--line);padding:18px 8px 0}.side-foot p{font-size:12px;color:var(--ink-3);margin-top:5px}.main{background:var(--surface);border-radius:14px;box-shadow:var(--sheet);min-width:0;overflow:hidden}.top{height:58px;display:flex;align-items:center;gap:10px;padding:0 22px;border-bottom:1px solid var(--line);font-size:12.5px;color:var(--ink-3)}.top .host{color:var(--ink-2)}.top .right{margin-left:auto;display:flex;gap:6px;align-items:center}.avatar{width:28px;height:28px;display:grid;place-items:center;background:var(--sunken);border:1px solid var(--line);border-radius:50%;font-size:11px;color:var(--ink)}.ib{width:34px;height:34px;display:grid;place-items:center;border-radius:8px;color:var(--ink-2)}.ib:hover{background:var(--hover)}.menu{display:none}
+#admin-root{min-height:100vh}.app{min-height:100vh}.main{min-height:calc(100vh - 16px)}.page-head{padding:25px 28px 21px;border-bottom:1px solid var(--line)}.state{padding:28px;color:var(--ink-2)}.state p{margin-bottom:12px}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:0 13px;border-radius:8px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);font-size:13px}.chip{display:inline-flex;align-items:center;padding:2px 7px;border-radius:6px;font-size:11.5px}.chip.ok{color:var(--ok);background:var(--sunken)}.login-slot{padding:28px}.skip{position:absolute;left:-9999px}.skip:focus{left:12px;top:12px;z-index:5;background:var(--surface);padding:10px}.shade{display:none}
+@media(max-width:900px){.app{grid-template-columns:minmax(0,1fr);padding:8px}.side{position:fixed;left:0;top:0;bottom:0;width:222px;background:var(--canvas);z-index:4;overflow:auto;transform:translateX(-100%)}.side.open{transform:translateX(0)}.shade.open{display:block;position:fixed;inset:0;background:var(--scrim);z-index:3}.menu{display:grid}.top{padding:0 14px;gap:8px}.admin-name{display:none}.page-head{padding:23px 20px}.main{min-height:calc(100vh - 16px)}}
+
+.nv { text-decoration: none; }
+
+.admin-icon-defs { display: none; }

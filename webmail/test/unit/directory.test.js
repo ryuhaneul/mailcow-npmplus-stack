@@ -28,6 +28,31 @@ function fixture(data = tables(), options = {}) {
 async function permitted(service, from) { await service.assertFrom(session(), from); }
 async function denied(service, from) { await assert.rejects(service.assertFrom(session(), from), { statusCode: 403, code: 'FROM_NOT_ALLOWED' }); }
 
+for (const [label, name, expected] of [
+  ['trimmed mailbox name', '  데모 1  ', '데모 1'],
+  ['empty mailbox name', '', 'user@example.com'],
+  ['whitespace mailbox name', '  \t ', 'user@example.com'],
+  ['null mailbox name', null, 'user@example.com'],
+]) test(`login mailbox name: ${label}`, async () => {
+  const data = tables(); data.mailbox[0].name = name;
+  const { service } = fixture(data);
+  assert.equal(await service.mailboxName('user@example.com'), expected);
+  assert.equal(await service.mailboxName('missing@example.com'), 'missing@example.com');
+});
+
+test('login mailbox names share the existing ten-minute directory snapshot', async () => {
+  let time = 0; const data = tables(); data.mailbox[0].name = '처음 이름';
+  const { service, calls } = fixture(data, { now: () => time });
+  await Promise.all([service.mailboxName('user@example.com'), service.identities(session())]);
+  assert.equal(calls.length, 5);
+  data.mailbox[0].name = '바뀐 이름'; time = 599999;
+  assert.equal(await service.mailboxName('user@example.com'), '처음 이름');
+  assert.equal(calls.length, 5);
+  time = 600000;
+  assert.equal(await service.mailboxName('user@example.com'), '바뀐 이름');
+  assert.equal(calls.length, 10);
+});
+
 test('sender case 1: self is listed first; unauthorized addresses return 403', async () => {
   const { service } = fixture();
   assert.deepEqual(await service.identities(session()), { identities: [{ address: 'user@example.com', name: '사용자', kind: 'self' }], anyAtDomains: [], anyAddress: false, defaultFrom: 'user@example.com' });

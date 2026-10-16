@@ -73,13 +73,17 @@ async function authRoutes(app, { config, verifyLogin, sessions, rateLimiter }) {
       request.log.warn({ code, email, ip: request.ip }, '로그인에 실패했습니다.');
       throw new AppError(rejected ? 403 : 503, code, rejected ? '메일 주소나 암호가 맞지 않아요.' : '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
     }
+    let name = email;
+    try { name = await app.directory.mailboxName(email); } catch {
+      request.log.warn({ code: 'DIRECTORY_UNAVAILABLE' }, '로그인 이름을 조회할 수 없어 메일 주소를 표시합니다.');
+    }
     const previous = request.cookies[cookieName];
     if (previous) {
       try { await sessions.destroy(await sessions.get(previous)); } catch (error) {
         if (!(error instanceof AppError)) throw error;
       }
     }
-    const { token, session } = sessions.create({ email, name: verified.name ?? email, password, connection: verified.connection, ip: request.ip });
+    const { token, session } = sessions.create({ email, name, password, connection: verified.connection, ip: request.ip });
     reply.setCookie(cookieName, token, cookieOptions(config));
     request.log.info({ code: 'LOGIN_OK', email, ip: request.ip }, '로그인했습니다.');
     return publicSession(session);

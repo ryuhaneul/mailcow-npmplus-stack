@@ -41,6 +41,7 @@ async function fixture(t) {
   let client;
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-prefs-test-'));
   const app = await createApp({ config, logger: false, auth: { tempRoot, clientFactory: options => (client = new PrefsImap(options)) } });
+  app.directory.mailboxName = async email => email;
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-password' } });
   assert.equal(login.statusCode, 200);

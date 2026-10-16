@@ -51,6 +51,11 @@ export function createDirectoryService({ config, db, imap, now = Date.now, recen
     }
     return entry.pending;
   }
+  async function mailboxName(email) {
+    const rows = await data();
+    const name = rows.mailbox.find(row => lower(row.username).replace(/ +$/, '') === lower(email))?.name;
+    return (typeof name === 'string' ? name.trim() : '') || email;
+  }
   async function identities(session) { return senderIdentities(await data(), session); }
   async function assertFrom(session, from) {
     if (!senderKind(await data(), session.email, from)) throw new AppError(403, 'FROM_NOT_ALLOWED', '이 주소로는 메일을 보낼 수 없어요.');
@@ -79,5 +84,5 @@ export function createDirectoryService({ config, db, imap, now = Date.now, recen
     }
     return { items: [...unique.values()].filter(item => lower(item.name).includes(q) || item.address.includes(q)).slice(0, limit) };
   }
-  return { identities, assertFrom, internalDomains, contacts, close: () => db.end() };
+  return { mailboxName, identities, assertFrom, internalDomains, contacts, close: () => db.end() };
 }

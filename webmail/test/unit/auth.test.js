@@ -40,6 +40,7 @@ async function fixture(t, { verifyLogin, overrides = {}, auth = {} } = {}) {
       }, ...auth,
     },
   });
+  app.directory.mailboxName = async () => '예제 사용자';
   t.after(async () => {
     await app.close();
     if (process.env.WEBMAIL_TEST_LOG) await appendFile(process.env.WEBMAIL_TEST_LOG, logs);
@@ -112,6 +113,22 @@ test('login: normalized email, password Buffer, random cookie attributes and pub
   const second = await login(f.app);
   assert.notEqual(credentials(second).cookie, credentials(response).cookie);
   assert.notEqual(second.json().csrf, response.json().csrf);
+});
+
+for (const [label, mailboxName, expected] of [
+  ['directory name', async () => '데모 1', '데모 1'],
+  ['empty directory name', async email => email, 'user@example.com'],
+  ['directory unavailable', async () => { throw Object.assign(new Error('synthetic-private-db-password'), { statusCode: 503 }); }, 'user@example.com'],
+]) test(`login: ${label} preserves a successful session`, async t => {
+  const f = await fixture(t);
+  f.app.directory.mailboxName = mailboxName;
+  const response = await login(f.app);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json().user, { email: 'user@example.com', name: expected });
+  const current = await f.app.inject({ url: '/api/auth/session', headers: credentials(response) });
+  assert.equal(current.statusCode, 200);
+  assert.deepEqual(current.json().user, response.json().user);
+  assert.ok(!f.logs.includes('synthetic-private-db-password'));
 });
 
 test('login: address without @ rejected before verifier', async t => {

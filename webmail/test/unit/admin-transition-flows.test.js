@@ -39,3 +39,12 @@ test('conversion partial result distinguishes failed stage from all stages not e
   assert.deepEqual(transitionResults('toMailbox', plan, result).map(row => [row.stage, row.status]), [['alias', 'ok'], ['mailbox', 'failed'], ['copy', 'not_run'], ['senders', 'not_run'], ['grant', 'not_run']]);
   assert.equal(conversionRows(plan)[2][2], 'team@example.com에 :copy 복사');
 });
+
+test('sync passwords retain quoted and unquoted whitespace, quotes, commas and newlines', () => {
+ const rows = readSyncCsv('source,password,target,host\n old@example.com ,"  synthetic,""key""\n line  "  , new@example.com , imap.example.com \nother@example.com,  synthetic  ,new@example.com,');
+ assert.deepEqual(rows[0],{source:'old@example.com',password:'  synthetic,"key"\n line  ',target:'new@example.com',host:'imap.example.com'});
+ assert.equal(rows[1].password,'  synthetic  ');
+ assert.equal(readSyncCsv('old@example.com,"  synthetic\r\nsecret  ",new@example.com\r\n')[0].password,'  synthetic\r\nsecret  ');
+ assert.deepEqual(readSyncCsv(writeSyncCsv(rows)),rows);
+ assert.equal(readSyncCsv('old@example.com,"   ",new@example.com')[0].password,'   ');
+});

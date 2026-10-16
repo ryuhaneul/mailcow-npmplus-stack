@@ -31,6 +31,16 @@
 # Exit: 0 = ok (--check: applied), non-zero = failure (--check: not applied)
 # ============================================================
 set -euo pipefail
+usage() { echo "Usage: $0 [apply|--check|--revert]"; }
+for arg in "$@"; do
+    case "$arg" in
+        apply|--check|--revert) ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+
 
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 CONF_DIR="$MAILCOW_DIR/data/conf/dovecot"
@@ -56,6 +66,11 @@ case "${1:-apply}" in
     *) die "usage: $0 [apply|--revert|--check]" ;;
 esac
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/dovecot-ready.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/dovecot-ready.sh"
 [ -f "$DOVECOT_CONF" ] || die "dovecot.conf not found: $DOVECOT_CONF"
 [ -f "$MAILCOW_DIR/mailcow.conf" ] || die "mailcow.conf not found: $MAILCOW_DIR/mailcow.conf"
 
@@ -117,6 +132,7 @@ verify_live() {
 restart_dovecot() {
     log "restarting dovecot-mailcow..."
     (cd "$MAILCOW_DIR" && docker compose restart dovecot-mailcow)
+    dovecot_wait_master "$MAILCOW_DIR" || die "Dovecot이 60초 안에 응답하지 않음; use --revert to roll back"
 }
 
 backup_file() {
@@ -225,6 +241,7 @@ verify_cache() {
 
 reload_dovecot() {
     log "re-applying dovecot configuration without a container restart (doveadm reload; active IMAP/POP sessions reconnect)..."
+    dovecot_wait_master "$MAILCOW_DIR" || die "Dovecot이 60초 안에 응답하지 않음; use --revert to roll back"
     (cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveadm reload)
 }
 

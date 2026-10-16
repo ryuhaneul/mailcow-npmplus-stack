@@ -6,6 +6,16 @@
 # Applies only column SELECT grants; --revert drops the managed subnet account.
 set +x
 set -euo pipefail
+usage() { echo "Usage: $0 [apply|--check|--revert]"; }
+for arg in "$@"; do
+    case "$arg" in
+        apply|--check|--revert) ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/webmail-env.sh

@@ -4,6 +4,21 @@
 # Env: WEBMAIL_ENV_FILE, NPM_API, WEBMAIL_BACKUP_DIR (default /root/webmail-backup-YYYYMMDD).
 set +x
 set -euo pipefail
+# Parse before reading configuration or creating temporary files.
+python3 -B - "$@" <<'ARGS'
+import argparse
+parser = argparse.ArgumentParser(description='Explicit Webmail proxy cutover; never edits .env')
+parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'switch', 'revert'])
+parser.add_argument('target', nargs='?')
+parser.add_argument('--json', action='store_true', help='status: full proxy JSON for backup')
+args = parser.parse_args()
+if args.json and args.command != 'status': parser.error('--json is only valid with status')
+if args.target and args.command in ('status', 'switch'): parser.error('unexpected argument')
+if args.command == 'remove-host' and not args.target: parser.error('remove-host requires a hostname')
+ARGS
+for arg in "$@"; do
+    case "$arg" in -h|--help) exit 0 ;; esac
+done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}"
 [ -f "$ENV_FILE" ] || { echo '[webmail-cutover] .env not found' >&2; exit 1; }

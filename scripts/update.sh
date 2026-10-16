@@ -24,12 +24,16 @@ NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
 SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-update.log}"
 
+usage() { echo "Usage: $0 [--non-interactive|-y] [--skip-mailcow-update]"; }
+
 NON_INTERACTIVE=false
 SKIP_MAILCOW_UPDATE=false
 for arg in "$@"; do
     case "$arg" in
         --non-interactive|-y) NON_INTERACTIVE=true ;;
         --skip-mailcow-update) SKIP_MAILCOW_UPDATE=true ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
 [ -t 0 ] || NON_INTERACTIVE=true

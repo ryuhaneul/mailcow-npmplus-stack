@@ -48,8 +48,9 @@ export function createHistoryService({ audit, lock }) {
     if (confirm !== true) throw new AppError(422, 'INVALID_INPUT', '되돌리기를 확인해 주세요.');
     const record = await detail(id);
     if (!record.canRevert) throw notRevertible();
-    return lock.run(record.target, async () => {
-      const adapter = adapters.get(record.action);
+    const adapter = adapters.get(record.action);
+    const runLocked = adapter.runLocked ?? ((target, operation) => lock.run(target, operation));
+    return runLocked(record.target, async () => {
       const current = await adapter.read({ session, target: record.target, record });
       if (!isDeepStrictEqual(current, record.after)) throw changed();
       return audit.run({ actor, ip, action: record.action, target: record.target, kind: 'config', revertible: true,

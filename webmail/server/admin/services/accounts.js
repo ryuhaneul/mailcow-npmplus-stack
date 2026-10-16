@@ -1,3 +1,4 @@
+import { sieveDisabledWarning } from '../messages.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import { AppError } from '../../errors.js';
@@ -14,7 +15,7 @@ const normalize = value => typeof value === 'string' ? value.trim().toLowerCase(
 const invalid = () => new AppError(422, 'INVALID_INPUT', '계정 입력값을 확인해 주세요.');
 const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 계정 설정이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
 const safeCode = error => error instanceof AppError && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'INTERNAL_ERROR';
-const sieveWarning = () => ({ code: 'SIEVE_DISABLED', message: 'Sieve를 끄면 필터를 저장할 수 없어요.' });
+const sieveWarning = () => ({ ...sieveDisabledWarning });
 const targets = value => (Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/)).map(normalize).filter(Boolean);
 function address(value) {
   const result = normalize(value);

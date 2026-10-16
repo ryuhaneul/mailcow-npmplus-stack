@@ -4,13 +4,14 @@ import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { loadAdminConfig } from './config.js';
+import { installAdminAuth } from './routes/auth.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel) } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
@@ -21,6 +22,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
     if (pathname === '/api' || pathname.startsWith('/api/')) reply.header('cache-control', 'no-store');
     return payload;
   });
+  await installAdminAuth(app, { ...auth, config });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

@@ -84,8 +84,8 @@ test('admin routes: JSON API 404, public endpoints absent and no-store', async t
   const app = await fixture(t);
   for (const path of ['/api/admin/auth/session', '/api/auth/session', '/api/messages', '/api', '/missing']) {
     const response = await app.inject(path);
-    assert.equal(response.statusCode, 404);
-    assert.equal(response.json().error.code, 'NOT_FOUND');
+    assert.equal(response.statusCode, path === '/api/admin/auth/session' ? 403 : 404);
+    assert.equal(response.json().error.code, path === '/api/admin/auth/session' ? 'NO_SESSION' : 'NOT_FOUND');
     if (path.startsWith('/api')) assert.equal(response.headers['cache-control'], 'no-store');
   }
 });

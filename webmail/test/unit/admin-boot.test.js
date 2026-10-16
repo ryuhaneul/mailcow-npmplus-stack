@@ -12,6 +12,7 @@ import { AppError } from '../../server/errors.js';
 const env = {
   ADMIN_MODE: 'true', ADMIN_HOSTNAME: 'mailadmin.example.com', ADMIN_SESSION_IDLE_MIN: '60', ADMIN_SESSION_MAX_HOURS: '8',
   MAILCOW_UI_URL: 'https://nginx-mailcow:8443', MAILCOW_UI_SERVERNAME: 'mailcow.example.com',
+  IMAP_HOST: 'dovecot-mailcow', SMTP_HOST: 'postfix-mailcow', MAIL_TLS_SERVERNAME: 'mail.example.com',
   MAIL_TLS_MODE: 'verify', MAIL_TLS_PIN_FILE: '', DOMAIN: 'example.com', TRUST_PROXY: '192.0.2.0/24',
   DOCKERAPI_URL: 'https://dockerapi:443', DOVEADM_URL: '', DOVEADM_KEY: '', RELAY_FILES: '',
   MAILCOW_IPV4_NETWORK: '192.0.2', MAILCOW_IPV6_NETWORK: '2001:db8::/64', AUTOEXPUNGE_DAYS: '30',
@@ -123,6 +124,7 @@ test('public routes: no registered admin paths and admin session is JSON 404', a
 test('admin config: fixed paths, hostname, URL and network formats rejected', () => {
   for (const [key, values] of Object.entries({
     ADMIN_MODE: ['false', 'TRUE'], DOMAIN: ['https://example.com', '-example.com'],
+    IMAP_HOST: ['https://dovecot', 'dovecot:993'], SMTP_HOST: ['postfix:465', '-postfix'], MAIL_TLS_SERVERNAME: ['mail.example.com:993', 'mail example.com'],
     MAILCOW_UI_SERVERNAME: ['example.com:443'], MAILCOW_UI_URL: ['https://example.com/path', 'https://user:synthetic@example.com'],
     DOCKERAPI_URL: ['https://example.com:443'], RELAY_FILES: ['/tmp/extra.cf,/tmp/options.inc'],
     LOGO_DIR: ['/tmp/brand'], AUDIT_DIR: ['/tmp/audit'], LOG_LEVEL: ['invalid'],
@@ -160,4 +162,9 @@ test('admin config: optional read-only rspamd map directory defaults and absolut
   assert.equal(loadAdminConfig(env).rspamdMapDir, '/rspamd_custom_maps');
   assert.equal(loadAdminConfig({ ...env, ADMIN_RSPAMD_MAP_DIR: '/synthetic/maps' }).rspamdMapDir, '/synthetic/maps');
   for (const value of ['', 'relative/maps', '/bad\0path']) assert.throws(() => loadAdminConfig({ ...env, ADMIN_RSPAMD_MAP_DIR: value }), /ADMIN_RSPAMD_MAP_DIR/);
+});
+
+test('admin config: existing mail connection environment names are retained for status TLS SNI', () => {
+  const result = loadAdminConfig({ ...env, IMAP_HOST: 'Dovecot-Mailcow', SMTP_HOST: 'Postfix-Mailcow', MAIL_TLS_SERVERNAME: 'Mail.Example.Com' });
+  assert.equal(result.imapHost, 'dovecot-mailcow'); assert.equal(result.smtpHost, 'postfix-mailcow'); assert.equal(result.mailTlsServername, 'mail.example.com');
 });

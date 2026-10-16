@@ -38,13 +38,15 @@ import { createRspamdMapsService } from './services/rspamd-maps.js';
 import rspamdMapsRoutes from './routes/rspamd-maps.js';
 import { createF2bService } from './services/f2b.js';
 import securityRoutes from './routes/security.js';
+import { createStatusService } from './services/status.js';
+import statusRoutes from './routes/status.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
@@ -107,6 +109,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const f2b = createF2bService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('f2b', f2b);
   await app.register(securityRoutes, { service: f2b });
+  const status = createStatusService({ mailcow: app.mailcow, config, tlsExpiry });
+  app.decorate('status', status);
+  await app.register(statusRoutes, { service: status });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

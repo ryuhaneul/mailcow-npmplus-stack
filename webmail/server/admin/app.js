@@ -9,13 +9,16 @@ import { createAudit } from './audit.js';
 import { createResourceLock } from './lock.js';
 import { createHistoryService } from './services/history.js';
 import historyRoutes from './routes/history.js';
+import { createDockerApi } from './dockerapi.js';
+import { createSharesService } from './services/shares.js';
+import sharesRoutes from './routes/shares.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {} } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
@@ -34,6 +37,11 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('adminLock', adminLock);
   app.decorate('adminHistory', history);
   await app.register(historyRoutes, { service: history });
+  dockerapi ??= createDockerApi({ config });
+  app.decorate('dockerapi', dockerapi);
+  const shares = createSharesService({ mailcow: app.mailcow, dockerapi, audit, lock: adminLock, history });
+  app.decorate('shares', shares);
+  await app.register(sharesRoutes, { service: shares });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

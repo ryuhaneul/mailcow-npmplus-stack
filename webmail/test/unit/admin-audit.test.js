@@ -144,7 +144,7 @@ test('admin history: revert is a newly paired change linked by revertOf, with ve
   const f = await fixture(t); const original = await seed(f); let value = entry.after;
   const session = { username: 'other-admin' };
   f.history.register(entry.action, { label: '구성원을 바꿨어요', read: async args => { assert.equal(args.session, session); return value; },
-    write: async args => { assert.equal(args.session, session); assert.equal(args.target, entry.target); value = args.value; } });
+    write: async args => { assert.equal(args.session, session); assert.equal(args.target, entry.target); assert.deepEqual(args.expected, entry.after); value = args.value; } });
   const reverted = await f.history.revert(original.id, { confirm: true, actor: 'other-admin', ip: '203.0.113.7', session });
   assert.notEqual(reverted.id, original.id); assert.deepEqual(value, entry.before);
   const record = await f.history.detail(reverted.id);

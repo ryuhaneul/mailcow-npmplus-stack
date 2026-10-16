@@ -57,6 +57,7 @@ export default function SettingsPage() {
   </section>;
 }
 
+const layoutIcons={pane:{none:'layout-list',right:'layout-right'},density:{normal:'layout-normal',compact:'layout-compact'},compose:{float:'layout-float',drawer:'layout-drawer',full:'layout-full'}};
 export function LayoutPicker() {
   const [open,setOpen]=useState(false),root=useRef(null),trigger=useRef(null),popup=useRef(null);
   const state=prefs.value,layout=state.layout||themes[state.theme].layout;
@@ -70,7 +71,8 @@ export function LayoutPicker() {
     return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
   },[open]);
   return <div class="layout-control" ref={root}>
-    <button class="ib" type="button" ref={trigger} aria-label="보기 배치" title="보기 배치" aria-expanded={open} aria-haspopup="dialog" onClick={()=>setOpen(!open)}><Icon name="layout"/></button>
+    <div class="layout-buttons" role="group" aria-label="보기 배치">{Object.entries(layouts).map(([kind,rows])=>{const category=kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창';return <div class="layout-segment" role="group" aria-label={category} key={kind}>{rows.map(([value,label])=><button class="ib" type="button" key={value} title={`${category}: ${label}`} aria-label={`${category}: ${label}`} aria-pressed={layout[kind]===value} onClick={()=>updatePrefs({layout:{...(prefs.value.layout||themes[prefs.value.theme].layout),[kind]:value}})}><Icon name={layoutIcons[kind][value]}/></button>)}</div>;})}</div>
+    <button class="ib layout-mobile" type="button" ref={trigger} aria-label="보기 배치" title="보기 배치" aria-expanded={open} aria-haspopup="dialog" onClick={()=>setOpen(!open)}><Icon name="layout"/></button>
     {open&&<section class="pop layout-menu" ref={popup} role="dialog" aria-label="보기 배치"><h5>보기 배치</h5>{Object.entries(layouts).map(([kind,rows])=><label key={kind}>{kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'}<select class="inp" aria-label={kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'} value={layout[kind]} onChange={event=>updatePrefs({layout:{...(prefs.value.layout||themes[prefs.value.theme].layout),[kind]:event.currentTarget.value}})}>{rows.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>)}</section>}
   </div>;
 }

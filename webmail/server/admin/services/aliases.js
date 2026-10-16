@@ -28,17 +28,16 @@ function address(value, allowCatchAll = false) {
 function graph(rows, domainMap, activeOnly, mailboxes) {
   const selected = rows.filter(row => !activeOnly || String(row.active) === '1');
   const nodes = new Set(selected.map(row => normalize(row.address)));
-  const canonical = (target, visited = new Set()) => {
-    // Postfix virtual(5), TABLE SEARCH ORDER: exact address, mailbox, alias-domain rewrite, then @domain (https://www.postfix.org/virtual.5.html).
+  const next = target => {
+    // mailcow main.cf:127-130; postfix.sh:233-251; functions.mailbox.inc.php:3445: exact alias, active 1/2 mailbox, alias-domain mailbox, original-domain catch-all.
     if (nodes.has(target)) return target;
-    if (mailboxes?.has(target) || visited.has(target)) return null;
-    visited.add(target);
-    const [local, domain] = target.split('@'), primary = domainMap.get(domain);
-    if (primary) return canonical(`${local}@${primary}`, visited);
     // Legacy validation callers without mailbox facts retain exact-address checks only.
-    return mailboxes && nodes.has(`@${domain}`) ? `@${domain}` : null;
+    if (!mailboxes || mailboxes.has(target)) return null;
+    const [local, domain] = target.split('@'), primary = domainMap.get(domain);
+    if (primary && mailboxes.has(`${local}@${primary}`)) return null;
+    return nodes.has(`@${domain}`) ? `@${domain}` : null;
   };
-  return new Map(selected.map(row => [normalize(row.address), unique(split(row.goto).map(target => canonical(target)).filter(target => nodes.has(target)))]));
+  return new Map(selected.map(row => [normalize(row.address), unique(split(row.goto).map(next).filter(target => nodes.has(target)))]));
 }
 function cycles(edges) {
   let sequence = 0;
@@ -90,7 +89,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     const [primary, aliases, boxes] = await Promise.all([rows(session, 'domain/all'), rows(session, 'alias-domain/all'), rows(session, 'mailbox/all')]);
     const active = new Set(primary.filter(row => String(row.active) === '1' && typeof (row.domain_name ?? row.domain) === 'string').map(row => normalize(row.domain_name ?? row.domain)));
     const map = new Map(aliases.filter(row => String(row.active) === '1' && active.has(normalize(row.target_domain))).map(row => [normalize(row.alias_domain), normalize(row.target_domain)]));
-    return { active: new Set([...active, ...map.keys()]), map, mailboxes: new Set(boxes.map(row => normalize(row.username))) };
+    return { active: new Set([...active, ...map.keys()]), map, mailboxes: new Set(boxes.filter(row => ['1', '2'].includes(String(row.active))).map(row => normalize(row.username))) };
   }
   const senderAcl = row => unique(split(row.sender_acl));
   const storedAcl = (mailbox, acl, aliases) => {

@@ -5,13 +5,14 @@ const rejected = () => new AppError(502, 'DOCKERAPI_REJECTED', 'dockerapi가 요
 const unavailable = () => new AppError(503, 'DOCKERAPI_UNAVAILABLE', 'dockerapi에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
 const mailbox = value => typeof value === 'string' && /^[^\s@]+@[^\s@]+$/.test(value);
 const tasks = Object.freeze({
+  sieve_list: owner => ({ cmd: 'sieve', task: 'list', username: owner }),
   get_acl: owner => ({ cmd: 'doveadm', task: 'get_acl', id: owner }),
   set_acl: (owner, grantee) => ({ cmd: 'doveadm', task: 'set_acl', user: owner, mailbox: 'INBOX', id: grantee, rights: ['lookup', 'read'] }),
   delete_acl: (owner, grantee) => ({ cmd: 'doveadm', task: 'delete_acl', user: owner, mailbox: 'INBOX', id: grantee }),
 });
 
 export function createDockerApi({ config, ca }) {
-  async function request(method, path, body) {
+  async function request(method, path, body, format = 'json') {
     const base = new URL(config.dockerapiUrl);
     if (base.protocol !== 'https:') throw rejected();
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
@@ -31,12 +32,16 @@ export function createDockerApi({ config, ca }) {
             else chunks.push(chunk);
           });
           response.once('error', reject);
-          response.once('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+          response.once('end', () => resolve({ status: response.statusCode, contentType: response.headers['content-type'], body: Buffer.concat(chunks).toString('utf8') }));
         });
         req.once('error', reject);
         req.end(payload ?? undefined);
       });
       if (response.status !== 200) throw rejected();
+      if (format === 'text') {
+        if (!/^text\/plain(?:;|$)/i.test(response.contentType ?? '')) throw rejected();
+        return response.body;
+      }
       try { return JSON.parse(response.body); } catch { throw rejected(); }
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -59,9 +64,14 @@ export function createDockerApi({ config, ca }) {
   }
   async function call(task, owner, grantee) {
     if (!Object.hasOwn(tasks, task)) throw new AppError(422, 'DOCKERAPI_TASK_NOT_ALLOWED', '허용되지 않은 dockerapi 작업이에요.');
-    if (!mailbox(owner) || (task !== 'get_acl' && (!mailbox(grantee) || owner === grantee))) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
+    if (!mailbox(owner) || (!['get_acl', 'sieve_list'].includes(task) && (!mailbox(grantee) || owner === grantee))) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
     const container = await dovecot();
-    const data = await request('POST', `/containers/${container.id}/exec`, tasks[task](owner, grantee));
+    const data = await request('POST', `/containers/${container.id}/exec`, tasks[task](owner, grantee), task === 'sieve_list' ? 'text' : 'json');
+    if (task === 'sieve_list') return data.split(/\r\n|\n|\r/).filter(line => line.trim()).map(line => {
+      const active = / ACTIVE$/i.test(line), name = (active ? line.slice(0, -7) : line).trim();
+      if (!name || name.length > 255 || /[\x00-\x1f\x7f/\\"]/.test(name)) throw rejected();
+      return { name, active };
+    });
     if (task !== 'get_acl') {
       if (!data || data.type !== 'success') throw rejected();
       return { type: 'success' };
@@ -70,5 +80,5 @@ export function createDockerApi({ config, ca }) {
       !Array.isArray(row.rights) || row.rights.some(right => typeof right !== 'string'))) throw rejected();
     return data.map(row => ({ user: row.user, id: row.id, mailbox: row.mailbox, rights: [...row.rights] }));
   }
-  return { call, getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee) => call('set_acl', owner, grantee), deleteAcl: (owner, grantee) => call('delete_acl', owner, grantee) };
+  return { call, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee) => call('set_acl', owner, grantee), deleteAcl: (owner, grantee) => call('delete_acl', owner, grantee) };
 }

@@ -26,6 +26,8 @@ import { createFlowsService } from './services/flows.js';
 import flowsRoutes from './routes/flows.js';
 import { createFiltersService } from './services/filters.js';
 import filtersRoutes from './routes/filters.js';
+import { createSyncService } from './services/sync.js';
+import syncRoutes from './routes/sync.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -77,6 +79,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const filters = createFiltersService({ mailcow: app.mailcow, dockerapi, audit, lock: adminLock, history, auditDir: config.auditDir });
   app.decorate('filters', filters);
   await app.register(filtersRoutes, { service: filters });
+  const sync = createSyncService({ mailcow: app.mailcow, audit, lock: adminLock, history });
+  app.decorate('sync', sync);
+  await app.register(syncRoutes, { service: sync });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

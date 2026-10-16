@@ -482,10 +482,14 @@ admin_access apply || die "Admin access-list application failed"
 source "$SCRIPT_DIR/lib/cert-reload.sh"
 cert_reload_install || die "Cert reload cron installation failed"
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/dovecot-ready.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/dovecot-ready.sh"
 CERT_SNI_STATUS=0
-CERT_SNI_DETAILS=$(cert_reload_stale_sni_dirs "$MAILCOW_DIR") || CERT_SNI_STATUS=$?
+cert_reload_reconcile_sni "$MAILCOW_DIR" || CERT_SNI_STATUS=$?
 if [ "$CERT_SNI_STATUS" -ne 0 ]; then
-    warn "$CERT_SNI_DETAILS"
+    warn "호스트별 SNI 인증서 자동 정리 미완료 — update를 계속하며 verify 결과와 docs/guide.md 7.1절을 확인하세요"
 fi
 
 CERT_RELOAD_IMAP_STATUS=0

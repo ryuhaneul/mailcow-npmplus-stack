@@ -152,3 +152,25 @@ export function removeMember(script, address) {
   check(next, current.filter(value => value !== target));
   return { script: next, changed: true };
 }
+
+// Rename only exact, top-level copy-redirect string tokens; comments and all other bytes stay intact.
+export function renameMember(script, oldAddress, newAddress) {
+  if (!addressPattern.test(oldAddress) || !addressPattern.test(newAddress)) throw new Refused('invalid_address');
+  if (typeof script !== 'string') throw new Refused('unparseable');
+  const analysis = analyze(script), old = oldAddress.toLowerCase();
+  let tokens;
+  try { tokens = tokenize(script); } catch {
+    if (script.toLowerCase().includes(old)) throw new Refused('unparseable');
+    return { script, changed: false };
+  }
+  const hits = tokens.filter(token => token[0] === 'str' && token[1].toLowerCase().includes(old));
+  if (!hits.length) return { script, changed: false };
+  if (!analysis.parsed) throw new Refused('unparseable');
+  for (const token of hits) {
+    if (token[1].toLowerCase() !== old || !analysis.members.some(member => member.start <= token[2] && token[3] <= member.end && member.address === token[1])) throw new Refused('unsupported_redirect');
+  }
+  let next = script;
+  for (const token of [...hits].reverse()) next = next.slice(0, token[2] + 1) + newAddress + next.slice(token[3] - 1);
+  check(next, analysis.members.map(member => member.address.toLowerCase() === old ? newAddress.toLowerCase() : member.address.toLowerCase()));
+  return { script: next, changed: next !== script };
+}

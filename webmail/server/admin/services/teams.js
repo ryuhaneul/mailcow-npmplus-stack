@@ -3,7 +3,7 @@ import { mkdir, chmod, open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { AppError } from '../../errors.js';
-import { analyze, addMember, removeMember, addressPattern, Refused } from '../sieve-team.js';
+import { analyze, addMember, removeMember, renameMember, addressPattern, Refused } from '../sieve-team.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
 
@@ -145,6 +145,26 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       }, { prepare: ({ id }) => backups.write(id, '', source) });
     });
   }
+  async function renameFilter({ session, actor, ip, filter, oldAddress, newAddress }) {
+    const owner = normalize(filter.username) === oldAddress ? newAddress : normalize(filter.username);
+    const edited = renameMember(filter.script_data, oldAddress, newAddress);
+    return lock.run(owner, async () => {
+      const read = async () => (await filters(session)).find(row => String(row.id) === String(filter.id));
+      const current = await read();
+      if (!current || normalize(current.username) !== owner || current.script_data !== filter.script_data) throw conflict();
+      return audit.run({ actor, ip, action: 'mailbox.rename.filter', target: owner, kind: 'config', revertible: false,
+        before: state(filter.script_data), after: state(edited.script), ...hashFields(filter.script_data, edited.script) }, async intent => {
+        const fresh = await read();
+        if (!fresh || normalize(fresh.username) !== owner || fresh.script_data !== filter.script_data) throw conflict();
+        const attr = { script_data: edited.script };
+        for (const key of ['script_desc', 'active', 'filter_type']) if (fresh[key] !== undefined && fresh[key] !== null) attr[key] = String(fresh[key]);
+        if (edited.changed) await mailcow.call(session, 'POST', '/api/v1/edit/filter', { items: [String(filter.id)], attr });
+        const checked = await read();
+        if (!checked || normalize(checked.username) !== owner || checked.script_data !== edited.script) throw verifyFailed();
+        return { auditId: intent.id };
+      }, { prepare: ({ id }) => backups.write(id, filter.script_data, edited.script) });
+    });
+  }
   async function forwardPlan(session, team, member) {
     const boxes = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
     if (!Array.isArray(boxes) || team === member || !addressPattern.test(member) ||
@@ -202,5 +222,5 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     },
   };
   history.register('team.member.add', adapter); history.register('team.member.remove', adapter); history.register('team.forward', adapter);
-  return { list, change, create, previewForward, forward };
+  return { list, change, create, previewForward, forward, renameFilter };
 }

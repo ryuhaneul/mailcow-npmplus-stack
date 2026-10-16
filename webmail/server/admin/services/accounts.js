@@ -4,7 +4,7 @@ import { AppError } from '../../errors.js';
 import { MailcowAuthLost } from '../mailcow-client.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
-import { analyze, removeMember, Refused, addressPattern } from '../sieve-team.js';
+import { analyze, removeMember, renameMember, Refused, addressPattern } from '../sieve-team.js';
 
 const GB = 1024 ** 3;
 const scriptHash = source => createHash('sha256').update(String(source ?? '')).digest('hex');
@@ -408,5 +408,185 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       await lifecycleRun({ session, actor, ip, addr: data.address, data, mode: data.mode });
     return { ...result, warnings: leaveWarnings() };
   }
-  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave };
+  const renameNotices = [
+    '앱 암호·본인 필터 소유자는 mailcow가 함께 바꿔요.',
+    'BCC·수신 주소 바꾸기(recipient map) 설정은 확인하지 않아요 — mailcow 화면에서 확인해 주세요.',
+  ];
+  const replaceAddress = (values, old, next) => [...new Set(values.map(value => value === old ? next : value))].sort();
+  const aclReadOnly = row => row.mailbox === 'INBOX' && addressPattern.test(row.id) && isDeepStrictEqual([...new Set(row.rights)].sort(), ['lookup', 'read']);
+  async function renamePlan(session, old, next) {
+    const row = await box(session, old), account = snapshot(row);
+    if (![1, 2].includes(account.active)) throw new AppError(409, 'MAILBOX_INACTIVE', '로그인이 켜져 있거나 받기 전용인 메일함만 주소를 바꿀 수 있어요.');
+    const [boxes, aliases, filters, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'syncjobs/all/no_log')]);
+    if (boxes.some(item => normalize(item.username) === next) || aliases.some(item => normalize(item.address) === next)) throw new AppError(409, 'ADDRESS_IN_USE', '새 주소가 이미 메일함이나 별칭으로 있어요.');
+    const affectedFilters = [];
+    for (const filter of filters.filter(item => ['prefilter', 'postfilter'].includes(item.filter_type))) {
+      let edited;
+      try { edited = renameMember(filter.script_data, old, next); }
+      catch (error) {
+        if (!(error instanceof Refused)) throw error;
+        throw new AppError(409, error.code.toUpperCase(), `${normalize(filter.username)}의 필터를 안전하게 바꿀 수 없어요. 필터 화면에서 먼저 정리해 주세요.`);
+      }
+      if (edited.changed || normalize(filter.username) === old) affectedFilters.push({ ...filter, nextScript: edited.script });
+    }
+    affectedFilters.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const aliasRows = aliases.filter(item => targets(item.goto).includes(old)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
+    const senderRows = boxes.filter(item => normalize(item.username) === old || targets(item.sender_acl).includes(old)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
+    const syncRows = jobs.filter(item => normalize(item.user2) === old).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const aclByOwner = new Map(), info = await detail(session, old, { allShares: true, aclSnapshot: aclByOwner });
+    if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
+    const shares = [...aclByOwner].flatMap(([owner, acl]) => acl.filter(item => owner === old || normalize(item.id) === old).map(item => ({ owner, grantee: normalize(item.id), mailbox: item.mailbox, rights: [...item.rights] })))
+      .sort((a, b) => `${a.owner} ${a.grantee} ${a.mailbox}`.localeCompare(`${b.owner} ${b.grantee} ${b.mailbox}`));
+    for (const share of shares) {
+      const existing = aclByOwner.get(share.owner)?.find(item => normalize(item.id) === next && item.mailbox === share.mailbox);
+      if (!aclReadOnly({ ...share, id: share.grantee }) || existing && !aclReadOnly(existing)) throw new AppError(409, 'ACL_UNSUPPORTED', '관련 공유에 받은편지함 읽기 외 권한이 있어요. 공유 설정을 먼저 확인해 주세요.');
+    }
+    const changes = {
+      mailbox: [{ address: old, newAddress: next, messages: info.messages, appPasswordCount: info.appPasswordCount, description: renameNotices[0] }],
+      teamFilters: affectedFilters.map(filter => ({ mailbox: normalize(filter.username), newMailbox: normalize(filter.username) === old ? next : normalize(filter.username), filterId: filter.id, sha256Before: scriptHash(filter.script_data), sha256After: scriptHash(filter.nextScript) })),
+      aliases: aliasRows.map(alias => ({ address: normalize(alias.address), before: targets(alias.goto), after: replaceAddress(targets(alias.goto), old, next) })),
+      senderAs: [{ mailbox: old, newMailbox: next, before: account.senderAcl, after: replaceAddress(account.senderAcl, old, next) }],
+      senderGrants: senderRows.filter(item => normalize(item.username) !== old).map(item => ({ mailbox: normalize(item.username), before: snapshot(item).senderAcl, after: replaceAddress(snapshot(item).senderAcl, old, next) })),
+      shares: shares.map(share => ({ ...share, newOwner: share.owner === old ? next : share.owner, newGrantee: share.grantee === old ? next : share.grantee })),
+      syncjobs: syncRows.map(job => ({ id: job.id, before: old, after: next })),
+      oldAlias: [{ address: old, targets: [next] }],
+    };
+    const state = { old, next, keepOldAsAlias: true, account,
+      filters: affectedFilters.map(filter => ({ id: filter.id, owner: normalize(filter.username), sha256: scriptHash(filter.script_data), active: filter.active, type: filter.filter_type })),
+      aliases: aliasRows.map(alias => ({ id: alias.id, sha256: etag(alias) })),
+      senders: senderRows.map(item => ({ mailbox: normalize(item.username), sha256: etag(item.sender_acl) })),
+      shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
+      syncjobs: syncRows.map(job => ({ id: job.id, sha256: etag(job) })),
+    };
+    return { state, changes, info, account, filters: affectedFilters, aliasRows, senderRows, syncRows, shares, aclByOwner };
+  }
+  async function rename({ session, actor, ip, addr: rawAddress, data }) {
+    const old = address(rawAddress);
+    if (!data || !['preview', 'run'].includes(data.action) || typeof data.newLocal !== 'string' || data.newLocal.includes('@') || data.keepOldAsAlias !== true) throw invalid();
+    const next = address(`${data.newLocal}@${old.split('@')[1]}`);
+    if (next === old) throw invalid();
+    const preview = plan => ({ address: old, newAddress: next, changes: plan.changes, etag: etag(plan.state), sharesScope: 'all', notices: renameNotices });
+    if (data.action === 'preview') return preview(await renamePlan(session, old, next));
+    const addresses = [old, next].sort();
+    return lock.run(`flow:${addresses[0]}`, () => lock.run(`flow:${addresses[1]}`, async () => {
+      const plan = await renamePlan(session, old, next); assertUnchanged(data.etag, plan.state);
+      const steps = [], recovery = [
+        { stage: 'mailbox', message: `현재 ${next} 함을 확인해 주세요. 주소를 다시 바꾸려면 mailcow에서 모든 연결도 함께 확인해 주세요.` },
+        { stage: 'teamFilters', message: `필터 화면에서 ${old} 대신 ${next}로 팀 전달 주소를 확인해 주세요.` },
+        { stage: 'aliases', message: `별칭 대상에서 ${old}를 ${next}로 바꿔 주세요.` },
+        { stage: 'senders', message: '새 주소의 보내기 권한과 새 주소로 보낼 수 있는 사람을 권한 화면에서 확인해 주세요.' },
+        { stage: 'shares', message: '공유 화면에서 새 주소의 받은편지함 읽기 공유를 확인해 주세요.' },
+        { stage: 'syncjobs', message: '대상이 바뀌지 않은 동기화 작업은 지우고 새 주소로 다시 만들어 주세요.' },
+        { stage: 'oldAlias', message: `${old}를 ${next}로 보내는 별칭을 만들어 주세요.` },
+      ];
+      let renamed = false, fatal, stage = 'mailbox';
+      const warnings = [];
+      const expectedAccount = { ...plan.account, address: next, senderAcl: replaceAddress(plan.account.senderAcl, old, next) };
+      const record = { actor, ip, action: 'mailbox.rename', target: old, kind: 'config', revertible: false, before: { address: old, changes: plan.changes }, after: { address: next, keepOldAsAlias: true } };
+      const result = await audit.run(record, async () => {
+        const runStage = async (name, target, before, after, operation) => {
+          stage = name;
+          return audit.run({ actor, ip, action: `mailbox.rename.${name}`, target, kind: 'config', revertible: false, before, after }, async intent => {
+            await operation(); steps.push({ stage: name, target, status: 'ok', auditId: intent.id });
+          });
+        };
+        const verifyMailbox = async (final = false) => {
+          const current = await box(session, next);
+          if (Number(current.messages ?? 0) < plan.info.messages) {
+            if (!warnings.length) warnings.push({ code: 'MAIL_COUNT_DECREASED', message: '주소를 바꾼 뒤 메일 수가 줄었어요. mailcow에서 메일 보존 상태를 바로 확인해 주세요.' });
+            throw verifyFailed();
+          }
+          const actual = snapshot(current);
+          const expected = final ? expectedAccount : { ...expectedAccount, senderAcl: actual.senderAcl };
+          if (!isDeepStrictEqual(actual, expected) ||
+            (await rows(session, 'mailbox/all')).some(item => normalize(item.username) === old)) throw verifyFailed();
+          const currentFilters = await rows(session, 'filters/all');
+          if (plan.filters.some(filter => normalize(filter.username) === old && !currentFilters.some(item => String(item.id) === String(filter.id) && normalize(item.username) === next))) throw verifyFailed();
+        };
+        try {
+          await lock.run(addresses[0], () => lock.run(addresses[1], async () => {
+            assertUnchanged(data.etag, (await renamePlan(session, old, next)).state);
+            await runStage('mailbox', old, { address: old }, { address: next }, async () => {
+              assertUnchanged(data.etag, (await renamePlan(session, old, next)).state);
+              await mailcow.call(session, 'POST', '/api/v1/edit/rename-mbox', { items: [old], attr: { domain: old.split('@')[1], old_local_part: old.split('@')[0], new_local_part: next.split('@')[0], create_alias: '0' } });
+              renamed = true;
+              await verifyMailbox();
+            });
+          }));
+          for (const filter of plan.filters) {
+            stage = 'teamFilters';
+            const applied = await teams.renameFilter({ session, actor, ip, filter, oldAddress: old, newAddress: next });
+            steps.push({ stage, target: String(filter.id), status: 'ok', auditId: applied.auditId });
+          }
+          for (const alias of plan.aliasRows) await lock.run(normalize(alias.address), async () => {
+            const desired = replaceAddress(targets(alias.goto), old, next), original = [...new Set(targets(alias.goto))].sort();
+            const fresh = (await rows(session, 'alias/all')).find(item => String(item.id) === String(alias.id));
+            const current = fresh ? [...new Set(targets(fresh.goto))].sort() : null;
+            if (!isDeepStrictEqual(current, desired) && !isDeepStrictEqual(current, original)) assertUnchanged('conflict', {});
+            await runStage('aliases', normalize(alias.address), { targets: original }, { targets: desired }, async () => {
+              const checked = (await rows(session, 'alias/all')).find(item => String(item.id) === String(alias.id));
+              if (!checked || !isDeepStrictEqual(targets(checked.goto).sort(), current)) assertUnchanged('conflict', {});
+              if (!isDeepStrictEqual(current, desired)) await mailcow.call(session, 'POST', '/api/v1/edit/alias', { items: [String(alias.id)], attr: { goto: desired.join(',') } });
+              const applied = (await rows(session, 'alias/all')).find(item => String(item.id) === String(alias.id));
+              if (!applied || !isDeepStrictEqual(targets(applied.goto).sort(), desired)) throw verifyFailed();
+            });
+          });
+          for (const sender of plan.senderRows) {
+            const owner = normalize(sender.username) === old ? next : normalize(sender.username);
+            await lock.run(owner, async () => {
+              const before = snapshot(await box(session, owner)), original = snapshot(sender).senderAcl, desired = replaceAddress(original, old, next);
+              if (!isDeepStrictEqual(before.senderAcl, original) && !isDeepStrictEqual(before.senderAcl, desired)) assertUnchanged('conflict', {});
+              await runStage('senders', owner, { senderAcl: original }, { senderAcl: desired }, () => save(session, owner, before, { ...before, senderAcl: desired }));
+            });
+          }
+          for (const share of plan.changes.shares) await lock.run(share.newOwner, async () => {
+            await runStage('shares', share.newOwner, { grantee: share.grantee, owner: share.owner }, { grantee: share.newGrantee, owner: share.newOwner }, async () => {
+              let current = await dockerapi.getAcl(share.newOwner);
+              const relevant = current.filter(item => item.mailbox === 'INBOX' && [share.grantee, share.newGrantee].includes(normalize(item.id)));
+              if (relevant.some(item => !aclReadOnly(item)) || relevant.length === 0) assertUnchanged('conflict', {});
+              if (!current.some(item => item.mailbox === 'INBOX' && normalize(item.id) === share.newGrantee)) await dockerapi.setAcl(share.newOwner, share.newGrantee);
+              if (share.grantee !== share.newGrantee && current.some(item => item.mailbox === 'INBOX' && normalize(item.id) === share.grantee)) await dockerapi.deleteAcl(share.newOwner, share.grantee);
+              current = await dockerapi.getAcl(share.newOwner);
+              if (!current.some(item => normalize(item.id) === share.newGrantee && aclReadOnly(item)) || share.grantee !== share.newGrantee && current.some(item => normalize(item.id) === old)) throw verifyFailed();
+            });
+          });
+          for (const job of plan.syncRows) await runStage('syncjobs', String(job.id), { id: job.id, target: old }, { id: job.id, target: next }, async () => {
+            const checked = (await rows(session, 'syncjobs/all/no_log')).find(item => String(item.id) === String(job.id));
+            if (!checked || normalize(checked.user2) !== next) throw verifyFailed();
+          });
+          await lock.run(old, async () => {
+            await runStage('oldAlias', old, {}, { address: old, targets: [next] }, async () => {
+              if ((await rows(session, 'alias/all')).some(item => normalize(item.address) === old)) throw new AppError(409, 'ADDRESS_IN_USE', '옛 주소가 이미 별칭으로 있어요. 현재 대상을 확인해 주세요.');
+              await mailcow.call(session, 'POST', '/api/v1/add/alias', { address: old, goto: next, active: '1', sogo_visible: '0', comment: '' });
+              const checked = (await rows(session, 'alias/all')).find(item => normalize(item.address) === old);
+              if (!checked || String(checked.active) !== '1' || !isDeepStrictEqual(targets(checked.goto), [next])) throw verifyFailed();
+            });
+          });
+          stage = 'verify';
+          await verifyMailbox(true);
+          const checkedFilters = await rows(session, 'filters/all');
+          if (plan.filters.some(filter => !checkedFilters.some(item => String(item.id) === String(filter.id) && item.script_data === filter.nextScript))) throw verifyFailed();
+          const aliases = await rows(session, 'alias/all'), boxes = await rows(session, 'mailbox/all'), jobs = await rows(session, 'syncjobs/all/no_log');
+          if (aliases.some(alias => targets(alias.goto).includes(old)) || boxes.some(item => targets(item.sender_acl).includes(old)) || jobs.some(job => normalize(job.user2) === old)) throw verifyFailed();
+          for (const filter of checkedFilters) if (['prefilter', 'postfilter'].includes(filter.filter_type)) {
+            try { if (renameMember(filter.script_data, old, next).changed) throw verifyFailed(); }
+            catch (error) { if (error instanceof Refused) throw verifyFailed(); throw error; }
+          }
+          const checkedAcl = new Map(), info = await detail(session, next, { allShares: true, aclSnapshot: checkedAcl });
+          if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || [...checkedAcl.values()].some(acl => acl.some(item => normalize(item.id) === old))) throw verifyFailed();
+          for (const share of plan.changes.shares) if (!checkedAcl.get(share.newOwner)?.some(item => normalize(item.id) === share.newGrantee && aclReadOnly(item))) throw verifyFailed();
+          return { result: 'ok', address: next, steps, recovery: [], warnings, detail: { steps }, notices: renameNotices };
+        } catch (error) {
+          if (!renamed) throw error;
+          if (error instanceof MailcowAuthLost) fatal = error;
+          const instruction = recovery.find(item => item.stage === stage)?.message ?? '새 주소의 연결을 미리보기 목록과 대조하고 남은 설정을 mailcow에서 직접 고쳐 주세요.';
+          steps.push({ stage, status: 'failed', code: safeCode(error), auditId: null, recovery: instruction });
+          return { result: 'partial', address: next, steps, recovery, warnings, detail: { steps, recovery, warnings }, notices: renameNotices };
+        }
+      });
+      if (fatal) throw fatal;
+      return result;
+    }));
+  }
+  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename };
 }

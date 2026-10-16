@@ -8,4 +8,5 @@ node_modules
 npm-debug.log*
 test
 web/dist
+web/dist-admin
 web/src/dev

@@ -57,7 +57,8 @@ export function installAdminGuard(app, { config, sessions, client }) {
     if (error.restart === true) extra.restart = true;
     if (Number.isInteger(error.retryAfter) && error.retryAfter > 0) extra.retryAfter = error.retryAfter;
     if (Number.isInteger(error.remainingAttempts) && error.remainingAttempts >= 0) extra.remainingAttempts = error.remainingAttempts;
-    if (typeof error.fallbackUrl === 'string') extra.fallbackUrl = error.fallbackUrl;
+    if (error.code === 'ADMIN_PENDING_ACTION') extra.fallbackUrl = config.mailcowPublicUrl;
+    else if (typeof error.fallbackUrl === 'string') extra.fallbackUrl = error.fallbackUrl;
     if (!Object.keys(extra).length) return payload;
     const body = JSON.parse(payload);
     Object.assign(body.error, extra);

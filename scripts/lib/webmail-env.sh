@@ -2,9 +2,10 @@
 # Source this library from setup/update/verify. Public API:
 #   webmail_load_config <stack .env> <MAILCOW_DIR>
 #   webmail_ensure_db_password
+#   webmail_generate_admin_env <WEBMAIL_DIR>
 #   webmail_generate_env <WEBMAIL_DIR>
 #   webmail_extract_tls_pin <WEBMAIL_DIR>
-#   webmail_prepare <stack .env> <MAILCOW_DIR> <WEBMAIL_DIR> (all of the above)
+#   webmail_prepare <stack .env> <MAILCOW_DIR> <WEBMAIL_DIR> (public env and TLS pin)
 # Secrets are never printed. Generated env files are Compose env_file syntax,
 # with quoted values and literal dollars escaped for Compose interpolation.
 
@@ -16,6 +17,11 @@ webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 
 # Options can be loaded before mailcow exists (fresh setup Phase 0).
 webmail_options() {
+    WEBMAIL_ADMIN_ENABLE="${WEBMAIL_ADMIN_ENABLE:-false}"
+    WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
+    WEBMAIL_ADMIN_HOSTNAME=${WEBMAIL_ADMIN_HOSTNAME,,}
+    WEBMAIL_ADMIN_SESSION_IDLE_MIN="${WEBMAIL_ADMIN_SESSION_IDLE_MIN:-60}"
+    WEBMAIL_ADMIN_SESSION_MAX_HOURS="${WEBMAIL_ADMIN_SESSION_MAX_HOURS:-8}"
     WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-false}"
     SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}"
     MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
@@ -23,7 +29,7 @@ webmail_options() {
     [[ "$WEBMAIL_ATTACH_MAX_MB" =~ ^[0-9]+$ ]] || { webmail_error "invalid attachment size"; return 1; }
     local flag host joined="" label
     local -a hosts labels
-    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE"; do
+    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$WEBMAIL_ADMIN_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
     done
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
@@ -48,6 +54,26 @@ webmail_options() {
         case ",$joined," in *",$host,"*) ;; *) joined+="${joined:+,}$host" ;; esac
     done
     WEBMAIL_HOSTNAMES="$joined"
+    [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
+    [ "$WEBMAIL_ENABLE" = true ] || { webmail_error "WEBMAIL_ADMIN_ENABLE requires WEBMAIL_ENABLE=true"; return 1; }
+    host="$WEBMAIL_ADMIN_HOSTNAME"
+    [ "${#host}" -le 253 ] && [ -n "$host" ] && [[ "$host" != *. ]] || { webmail_error "invalid WEBMAIL_ADMIN_HOSTNAME"; return 1; }
+    IFS=. read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { webmail_error "invalid WEBMAIL_ADMIN_HOSTNAME"; return 1; }
+    done
+    case "$host" in
+        "mail.${DOMAIN,,}"|"mailcow.${DOMAIN,,}"|"mail-npm.${DOMAIN,,}") webmail_error "admin hostname conflicts with a stack service: $host"; return 1 ;;
+    esac
+    case ",$WEBMAIL_HOSTNAMES," in *",$host,"*) webmail_error "admin hostname conflicts with Webmail: $host"; return 1 ;; esac
+    [[ "$WEBMAIL_ADMIN_SESSION_IDLE_MIN" =~ ^[0-9]{1,3}$ ]] &&
+        [ "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" -ge 1 ] && [ "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" -le 180 ] \
+        || { webmail_error "admin idle timeout must be 1..180 minutes"; return 1; }
+    [[ "$WEBMAIL_ADMIN_SESSION_MAX_HOURS" =~ ^[0-9]{1,16}$ ]] &&
+        [ "$((10#$WEBMAIL_ADMIN_SESSION_MAX_HOURS))" -le 9007199254740991 ] &&
+        [ "$((10#$WEBMAIL_ADMIN_SESSION_MAX_HOURS))" -ge 1 ] &&
+        [ "$((10#$WEBMAIL_ADMIN_SESSION_MAX_HOURS * 60))" -ge "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" ] \
+        || { webmail_error "admin maximum timeout must cover the idle timeout"; return 1; }
 }
 
 webmail_mailcow_value() {
@@ -66,6 +92,10 @@ webmail_load_config() {
     [ -f "$MAILCOW_DIR/mailcow.conf" ] || { webmail_error "mailcow.conf not found"; return 1; }
     WEBMAIL_ENABLE=false
     SNAPPYMAIL_ENABLE=true
+    WEBMAIL_ADMIN_ENABLE=false
+    WEBMAIL_ADMIN_HOSTNAME=
+    WEBMAIL_ADMIN_SESSION_IDLE_MIN=
+    WEBMAIL_ADMIN_SESSION_MAX_HOURS=
     MAIL_AUTOEXPUNGE_ENABLE=
     WEBMAIL_CONTACTS_ENABLE=true
     # shellcheck disable=SC1090,SC1091
@@ -74,6 +104,7 @@ webmail_load_config() {
     WEBMAIL_DB_NAME=$(webmail_mailcow_value DBNAME)
     WEBMAIL_NETWORK=$(webmail_mailcow_value IPV4_NETWORK)
     WEBMAIL_TLS_NAME=$(webmail_mailcow_value MAILCOW_HOSTNAME)
+    WEBMAIL_IPV6_NETWORK=$(webmail_mailcow_value IPV6_NETWORK)
     [[ "$WEBMAIL_DB_NAME" =~ ^[a-zA-Z0-9_]+$ ]] || { webmail_error "invalid DBNAME"; return 1; }
     [[ "$WEBMAIL_NETWORK" =~ ^([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] || { webmail_error "IPV4_NETWORK must contain three IPv4 octets"; return 1; }
     local octet
@@ -103,13 +134,17 @@ webmail_load_config() {
     [[ "$MAIL_AUTOEXPUNGE_DAYS" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$MAIL_AUTOEXPUNGE_DAYS))" -ge 1 ] && [ "$((10#$MAIL_AUTOEXPUNGE_DAYS))" -le 365 ] \
         || { webmail_error "MAIL_AUTOEXPUNGE_DAYS must be 1..365"; return 1; }
     WEBMAIL_TRUST_PROXY="$(edge_address "$WEBMAIL_EDGE_SUBNET" 2)/32"
+    WEBMAIL_ADMIN_TRUST_PROXY="${WEBMAIL_NETWORK}.0/24"
     local proxy
     local -a proxies
     IFS=, read -r -a proxies <<< "${WEBMAIL_TRUSTED_PROXIES:-}"
     for proxy in "${proxies[@]}"; do
         proxy="${proxy#"${proxy%%[![:space:]]*}"}"
         proxy="${proxy%"${proxy##*[![:space:]]}"}"
-        [ -z "$proxy" ] || WEBMAIL_TRUST_PROXY+=",$proxy"
+        if [ -n "$proxy" ]; then
+            WEBMAIL_TRUST_PROXY+=",$proxy"
+            WEBMAIL_ADMIN_TRUST_PROXY+=",$proxy"
+        fi
     done
 }
 
@@ -150,14 +185,16 @@ webmail_env_line() {
 
 webmail_generate_env() (
     set +x
-    local dest="$1" tmp auto_days="" pin_file=""
+    local dest="$1" tmp auto_days="" pin_file="" logo_dir=""
     [ -n "$WEBMAIL_DB_PASSWORD" ] || { webmail_error "DB password is empty; call webmail_ensure_db_password first"; return 1; }
     mkdir -p "$dest" || return 1
     tmp=$(mktemp "$dest/.webmail.env.XXXXXX") || return 1
     trap 'rm -f "$tmp"' EXIT
     if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then auto_days=$((10#$MAIL_AUTOEXPUNGE_DAYS)); fi
     if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then pin_file=/run/mail-tls-pin.pem; fi
+    if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then logo_dir=/brand; fi
     {
+        webmail_env_line LOGO_DIR "$logo_dir" &&
         webmail_env_line PUBLIC_HOSTNAMES "$WEBMAIL_HOSTNAMES" &&
         webmail_env_line BRAND_NAME "$WEBMAIL_BRAND_NAME" &&
         webmail_env_line ORG_NAME "$WEBMAIL_ORG_NAME" &&
@@ -190,6 +227,71 @@ webmail_generate_env() (
     chmod 600 "$tmp" && mv "$tmp" "$dest/webmail.env"
 )
 
+# Stage 2 (doveadm and relay files) is deliberately disabled until MA2/B05.
+webmail_generate_admin_env() (
+    set +x
+    [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
+    local dest="$1" tmp auto_days="" pin_file=""
+    mkdir -p "$dest" || return 1
+    tmp=$(mktemp "$dest/.webmail-admin.env.XXXXXX") || return 1
+    trap 'rm -f "$tmp"' EXIT
+    if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then auto_days=$((10#$MAIL_AUTOEXPUNGE_DAYS)); fi
+    if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then pin_file=/run/mail-tls-pin.pem; fi
+    {
+        webmail_env_line ADMIN_MODE true &&
+        webmail_env_line ADMIN_HOSTNAME "$WEBMAIL_ADMIN_HOSTNAME" &&
+        webmail_env_line ADMIN_SESSION_IDLE_MIN "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" &&
+        webmail_env_line ADMIN_SESSION_MAX_HOURS "$((10#$WEBMAIL_ADMIN_SESSION_MAX_HOURS))" &&
+        webmail_env_line MAILCOW_UI_URL https://nginx-mailcow:8443 &&
+        webmail_env_line MAILCOW_UI_SERVERNAME "$WEBMAIL_TLS_NAME" &&
+        webmail_env_line MAILCOW_PUBLIC_URL "https://mailcow.${DOMAIN}/" &&
+        webmail_env_line IMAP_HOST dovecot-mailcow &&
+        webmail_env_line SMTP_HOST postfix-mailcow &&
+        webmail_env_line MAIL_TLS_SERVERNAME "$WEBMAIL_TLS_NAME" &&
+        webmail_env_line MAIL_TLS_MODE "$WEBMAIL_MAIL_TLS_MODE" &&
+        webmail_env_line MAIL_TLS_PIN_FILE "$pin_file" &&
+        webmail_env_line DOMAIN "$DOMAIN" &&
+        webmail_env_line TRUST_PROXY "$WEBMAIL_ADMIN_TRUST_PROXY" &&
+        webmail_env_line DOCKERAPI_URL https://dockerapi:443 &&
+        webmail_env_line DOVEADM_URL "" &&
+        webmail_env_line DOVEADM_KEY "" &&
+        webmail_env_line RELAY_FILES "" &&
+        webmail_env_line MAILCOW_IPV4_NETWORK "$WEBMAIL_NETWORK" &&
+        webmail_env_line MAILCOW_IPV6_NETWORK "$WEBMAIL_IPV6_NETWORK" &&
+        webmail_env_line AUTOEXPUNGE_DAYS "$auto_days" &&
+        webmail_env_line LOGO_DIR /brand &&
+        webmail_env_line AUDIT_DIR /data/audit &&
+        webmail_env_line ADMIN_RSPAMD_MAP_DIR /rspamd_custom_maps &&
+        webmail_env_line LOG_LEVEL info
+    } > "$tmp" || return 1
+    if [ -f "$dest/webmail-admin.env" ] && cmp -s "$tmp" "$dest/webmail-admin.env" && [ "$(stat -c %a "$dest/webmail-admin.env")" = 600 ]; then return 0; fi
+    chmod 600 "$tmp" && mv "$tmp" "$dest/webmail-admin.env"
+)
+
+# Add admin mounts to the edge override without changing the shared edge library.
+webmail_generate_override() (
+    set -o pipefail
+    local dest="$1"
+    edge_generate_override webmail "$dest" || return 1
+    [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
+    python3 - "$dest/docker-compose.override.yml" "$dest" "$MAILCOW_DIR" "$WEBMAIL_MAIL_TLS_MODE" <<'PYOVERRIDE' | edge_write_managed "$dest/docker-compose.override.yml" '# Generated by scripts/lib/webmail-env.sh' '# Generated by scripts/lib/edge.sh'
+import json, sys
+from pathlib import Path
+file, dest, mailcow, mode = sys.argv[1:]
+text = Path(file).read_text().split('\n', 1)[1]
+brand = '      - webmail-brand:/brand:ro\n'
+if '  webmail:\n' in text:
+    text = text.replace('  webmail:\n    volumes:\n', '  webmail:\n    volumes:\n' + brand, 1)
+else:
+    text = text.replace('services:\n', 'services:\n  webmail:\n    volumes:\n' + brand, 1)
+mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z']
+if mode == 'pin': mounts.append(f'{dest}/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z')
+admin = '  webmail-admin:\n    volumes:\n' + ''.join('      - ' + json.dumps(m.replace('$', '$$')) + '\n' for m in mounts)
+text = text.replace('\nnetworks:\n', '\n' + admin + 'networks:\n', 1)
+sys.stdout.write(text)
+PYOVERRIDE
+)
+
 webmail_extract_tls_pin() (
     local dest="$1" tmp override first
     override="$dest/docker-compose.override.yml"
@@ -220,7 +322,7 @@ webmail_extract_tls_pin() (
             mv "$tmp/cert.pem" "$dest/mail-tls-pin.pem" || return 1
         fi
     fi
-    edge_generate_override webmail "$dest" || return 1
+    webmail_generate_override "$dest" || return 1
     if [ "$WEBMAIL_MAIL_TLS_MODE" = verify ]; then rm -f "$dest/mail-tls-pin.pem"; fi
 )
 

@@ -337,3 +337,46 @@ test('lifecycle regression: sender revocation waits for alias preservation and i
   const senderWrites = writes(f).filter(row => row.path === '/api/v1/edit/mailbox' && row.body.items.includes(other));
   assert.deepEqual(senderWrites.map(row => row.body.attr.sender_acl), [[alias], []]);
 });
+
+test('lifecycle regression: concurrent deletes never lock a goto alias as a mailbox', async t => {
+  const f = await fixture(t, false), u = 'u@example.com', v = 'v@example.com', mailbox = 'a-mailbox@example.com';
+  const x = 'x-alias@example.com', z = 'z-alias@example.com';
+  f.boxes.splice(0, f.boxes.length, ...[u, v, mailbox].map(makeBox));
+  f.aliases.push({ id: 1, address: x, goto: `${u},${mailbox},${z}`, active: 1, sender_allowed: '0' },
+    { id: 2, address: z, goto: `${v},${mailbox}`, active: 1, sender_allowed: '0' });
+  const pu = await f.service.deletePreview({}, u), pv = await f.service.deletePreview({}, v);
+  const active = new Set(), originalRun = f.lock.run;
+  let notifyHeld, releaseMailbox, notifyWaiting, paused = false;
+  const held = new Promise(resolve => { notifyHeld = resolve; });
+  const released = new Promise(resolve => { releaseMailbox = resolve; });
+  const waiting = new Promise(resolve => { notifyWaiting = resolve; });
+  f.lock.run = (key, operation) => {
+    if (key === mailbox && active.has(z)) notifyWaiting();
+    return originalRun(key, async () => {
+      active.add(key);
+      try {
+        if (key === mailbox && !paused && active.has(x) && !active.has(z)) {
+          paused = true; notifyHeld(); await released;
+        }
+        return await operation();
+      } finally { active.delete(key); }
+    });
+  };
+  const removeAddress = (addr, plan) => f.service.remove({ ...context, addr, data: { etag: plan.etag, confirmAddress: addr, cleanRefs: true } });
+  let timer;
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('concurrent deletes did not finish within 5 seconds')), 5000); });
+  try {
+    const results = await Promise.race([deadline, (async () => {
+      const du = removeAddress(u, pu);
+      await held;
+      const dv = removeAddress(v, pv);
+      await waiting;
+      releaseMailbox();
+      return Promise.all([du, dv]);
+    })()]);
+    assert.deepEqual(results.map(row => row.result), ['ok', 'ok']);
+    assert.deepEqual(f.boxes.map(row => row.username), [mailbox]);
+    assert.equal(f.aliases.find(row => row.address === x).goto, `${mailbox},${z}`);
+    assert.equal(f.aliases.find(row => row.address === z).goto, mailbox);
+  } finally { clearTimeout(timer); }
+});

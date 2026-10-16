@@ -58,11 +58,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   async function editAliasPreservingSenders(session, alias, body, changed = () => {}) {
     const addr = normalize(alias.address), destinations = targets(body.attr.goto);
     // Every caller holds the alias address key already; never re-enter that key.
-    const mailboxKeys = [...new Set(destinations)].filter(value => value !== addr).sort();
+    // Keep flow → alias → sorted mailbox order; goto may also contain alias addresses.
+    const mailboxKeys = [...new Set((await rows(session, 'mailbox/all')).map(row => normalize(row.username))
+      .filter(value => value !== addr && destinations.includes(value)))].sort();
     const underLocks = index => index < mailboxKeys.length ? lock.run(mailboxKeys[index], () => underLocks(index + 1)) : preserve();
     return underLocks(0);
     async function preserve() {
-      const before = (await rows(session, 'mailbox/all')).filter(row => destinations.includes(normalize(row.username))).map(snapshot);
+      const before = await Promise.all(mailboxKeys.map(async value => snapshot(await box(session, value))));
       await aliasApi.edit(session, body);
       changed();
       const aliases = await rows(session, 'alias/all');

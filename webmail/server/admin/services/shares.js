@@ -7,7 +7,7 @@ const unsupported = () => new AppError(409, 'ACL_UNSUPPORTED', '이 공유는 �
 const readOnly = rights => isDeepStrictEqual(rights, ['lookup', 'read']);
 const address = value => typeof value === 'string' && /^[^\s@]+@[^\s@]+$/.test(value.trim()) ? value.trim().toLowerCase() : null;
 export function groupMailboxAddresses(filters) {
-  return new Set(filters.filter(row => typeof row?.username === 'string' && row.username && row.filter_type === 'prefilter' && String(row.active) === '1' && String(row.script_data ?? '').includes('redirect')).map(row => row.username.toLowerCase()));
+  return new Set(filters.filter(row => typeof row?.username === 'string' && row.username && row.filter_type === 'prefilter' && String(row.active) === '1' && String(row.script_data ?? '').toLowerCase().includes('redirect')).map(row => row.username.toLowerCase()));
 }
 export function createSharesService({ mailcow, dockerapi, audit, lock, history }) {
   async function mailboxes(session) {

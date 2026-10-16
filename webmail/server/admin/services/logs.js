@@ -45,7 +45,7 @@ export function createLogsService({ mailcow, config }) {
     if (!query || Object.keys(query).some(key => !['kind', 'preset', 'q', 'n'].includes(key)) || query.preset !== undefined && (!Object.hasOwn(presets, query.preset) || query.kind !== undefined)) throw invalid();
     const kind = query.preset === undefined ? query.kind : presets[query.preset], rawN = query.n ?? '200', n = Number(rawN), q = query.q ?? '';
     if (!kinds.includes(kind) || !/^[1-9]\d*$/.test(String(rawN)) || !Number.isSafeInteger(n) || n > 1000 || typeof q !== 'string' || Array.from(q).length > 200) throw invalid();
-    const data = await fetch(session, kind, n), projected = data.map(row => project(sanitizeSyncResponse(row), kind)), selected = projected.filter(line => searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(q.toLowerCase()));
+    const data = await fetch(session, kind, n), projected = data.map(row => project(sanitizeSyncResponse(row, [], kind === 'api' ? ['data', 'uri', 'method', 'remote'] : []), kind)), selected = projected.filter(line => searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(q.toLowerCase()));
     const result = { kind, n, lines: selected.map(trimValues), range: range(data, kind) };
     if (query.preset !== undefined) {
       const groups = new Map(); for (const line of selected) { const key = groupKey(query.preset, line); if (!key) continue; if (!groups.has(key)) groups.set(key, { key, count: 0, sample: cut(line.message, 200) }); groups.get(key).count++; }

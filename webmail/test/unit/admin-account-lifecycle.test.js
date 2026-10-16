@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAccountsService } from '../../server/admin/services/accounts.js';
+import { createSendersService } from '../../server/admin/services/senders.js';
 import { createTeamsService } from '../../server/admin/services/teams.js';
 import { createAudit } from '../../server/admin/audit.js';
 import { createResourceLock } from '../../server/admin/lock.js';
@@ -32,6 +33,9 @@ async function fixture(t, populated = true) {
   const mailcow = { async call(_session, method, path, body) {
     calls.push({ method, path, body: structuredClone(body) }); options.onCall?.({ method, path, body });
     if (method === 'POST' && options.failPath === path) throw options.failure ?? new AppError(422, 'MAILCOW_REJECTED', secret);
+    if (path === '/api/v1/edit/alias') await options.beforeAliasWrite?.();
+    if (path === '/api/v1/get/domain/all') return [{ domain_name: 'example.com', active: 1 }];
+    if (path === '/api/v1/get/alias-domain/all') return [];
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});
@@ -64,7 +68,7 @@ async function fixture(t, populated = true) {
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
   const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, audit, history, service };
+  return { dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, audit, lock, history, service };
 }
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
@@ -295,4 +299,41 @@ for (const active of [0, 1, 2]) test(`lifecycle regression: incoming shares from
   assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, rights: ['lookup', 'read'] }]);
   const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'ok');
   assert.deepEqual(f.acl.get(other), []); assert.ok(!f.boxes.some(row => row.username === user));
+});
+
+test('lifecycle regression: sender revocation waits for alias preservation and is never restored', { timeout: 5000 }, async t => {
+  const f = await fixture(t, false), alias = 'multi@example.com';
+  f.aliases.push({ id: 2, address: alias, goto: `${user},${team},${other},${other}`, active: 1, sender_allowed: '0' });
+  f.boxes[1].sender_acl = [alias]; f.boxes[2].sender_acl = [alias];
+  const senders = createSendersService(f), initial = await preview(f);
+  const active = new Set(), acquired = [], originalRun = f.lock.run;
+  let notifyBlocked, revocation, revoked = false, heldAtAliasWrite, acquiredAtAliasWrite;
+  const blocked = new Promise(resolve => { notifyBlocked = resolve; });
+  // Observe the real, non-reentrant lock; let the hook proceed once the writer is queued.
+  f.lock.run = (key, operation) => {
+    if (key === other && active.has(key)) notifyBlocked();
+    return originalRun(key, async () => {
+      active.add(key); acquired.push(key);
+      try { return await operation(); } finally { active.delete(key); }
+    });
+  };
+  f.options.beforeAliasWrite = async () => {
+    heldAtAliasWrite = [...active]; acquiredAtAliasWrite = [...acquired];
+    const current = await senders.get({}, other);
+    revocation = senders.put({ ...context, addr: other, data: { etag: current.etag, add: [], remove: [alias] } }).then(result => {
+      revoked = true; return result;
+    });
+    // Old code permits completion here; fixed code queues the revocation until restoration ends.
+    await Promise.race([revocation, blocked]);
+  };
+  const result = await remove(f, confirmed(initial.etag));
+  await revocation;
+  assert.equal(result.result, 'ok'); assert.equal(revoked, true);
+  assert.deepEqual(f.boxes.find(row => row.username === other).sender_acl, []);
+  assert.deepEqual(f.boxes.find(row => row.username === team).sender_acl, [alias]);
+  assert.ok(!f.boxes.some(row => row.username === user));
+  assert.ok(heldAtAliasWrite.includes(other) && heldAtAliasWrite.includes(team));
+  assert.deepEqual(acquiredAtAliasWrite.filter(key => [other, team].includes(key)), [other, team]);
+  const senderWrites = writes(f).filter(row => row.path === '/api/v1/edit/mailbox' && row.body.items.includes(other));
+  assert.deepEqual(senderWrites.map(row => row.body.attr.sender_acl), [[alias], []]);
 });

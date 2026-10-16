@@ -24,12 +24,16 @@ NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
 SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-update.log}"
 
+usage() { echo "Usage: $0 [--non-interactive|-y] [--skip-mailcow-update]"; }
+
 NON_INTERACTIVE=false
 SKIP_MAILCOW_UPDATE=false
 for arg in "$@"; do
     case "$arg" in
         --non-interactive|-y) NON_INTERACTIVE=true ;;
         --skip-mailcow-update) SKIP_MAILCOW_UPDATE=true ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
 [ -t 0 ] || NON_INTERACTIVE=true
@@ -477,6 +481,12 @@ admin_access apply || die "Admin access-list application failed"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/cert-reload.sh"
 cert_reload_install || die "Cert reload cron installation failed"
+
+CERT_SNI_STATUS=0
+CERT_SNI_DETAILS=$(cert_reload_stale_sni_dirs "$MAILCOW_DIR") || CERT_SNI_STATUS=$?
+if [ "$CERT_SNI_STATUS" -ne 0 ]; then
+    warn "$CERT_SNI_DETAILS"
+fi
 
 CERT_RELOAD_IMAP_STATUS=0
 cert_reload_certificate_matches "$MAILCOW_DIR" 993 || CERT_RELOAD_IMAP_STATUS=$?

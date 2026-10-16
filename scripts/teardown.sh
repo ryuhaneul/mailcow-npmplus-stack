@@ -1,5 +1,13 @@
 #!/bin/bash
 set -euo pipefail
+usage() { echo "Usage: $0 "; }
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
 
 # ============================================================
 # Clean removal: stop and remove all stack components + volumes

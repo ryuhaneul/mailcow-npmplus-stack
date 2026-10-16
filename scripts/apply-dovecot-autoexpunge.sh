@@ -4,6 +4,15 @@
 # Changes require Docker and a running dovecot-mailcow. Backups are kept beside extra.conf.
 # Reload can disconnect all IMAP/POP clients; schedule outside working hours.
 set -euo pipefail
+usage() { echo "Usage: $0 [apply|--check|--revert] [-y]"; }
+for arg in "$@"; do
+    case "$arg" in
+        apply|--check|--revert|-y) ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 if [ -f "$PROJECT_DIR/.env" ]; then
@@ -29,6 +38,10 @@ for arg in "$@"; do
         *) die "usage: $0 [apply|--check|--revert] [-y]" ;;
     esac
 done
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/dovecot-ready.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/dovecot-ready.sh"
 [ -d "$CONF_DIR" ] || die "Dovecot configuration directory not found: $CONF_DIR"
 command -v docker >/dev/null 2>&1 || die "docker not found; nothing changed"
 WORK=$(mktemp -d)
@@ -101,7 +114,7 @@ finish_change() {
     verify_live || die "effective configuration does not match; reload skipped"
     # A failed reload may have partially reached the daemon. Restore and reload
     # the original configuration before reporting the error.
-    if ! dove doveadm reload; then
+    if ! dovecot_wait_master "$MAILCOW_DIR" || ! dove doveadm reload; then
         if [ "$HAD_EXTRA" -eq 1 ]; then cp -p "$WORK/original" "$EXTRA_CONF"; else rm -f "$EXTRA_CONF"; fi
         restore_aux
         PENDING=0

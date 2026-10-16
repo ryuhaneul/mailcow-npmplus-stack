@@ -428,6 +428,14 @@ check_mail_certificate() {
 check_mail_certificate Dovecot 993
 check_mail_certificate Postfix 465
 
+CERT_SNI_STATUS=0
+CERT_SNI_DETAILS=$(cert_reload_stale_sni_dirs "$MAILCOW_DIR") || CERT_SNI_STATUS=$?
+if [ "$CERT_SNI_STATUS" -eq 0 ]; then
+    check "Host-specific SNI certificate expiry matches cert.pem (or none)" true
+else
+    check "$CERT_SNI_DETAILS" false
+fi
+
 echo ""
 echo "============================================"
 echo -e "  Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

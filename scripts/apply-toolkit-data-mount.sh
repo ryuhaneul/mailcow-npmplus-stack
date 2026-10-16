@@ -32,6 +32,16 @@
 # Exit:  0 = ok (--check: mount and directory in place), non-zero = failure
 # ============================================================
 set -euo pipefail
+usage() { echo "Usage: $0 [apply|--check]"; }
+for arg in "$@"; do
+    case "$arg" in
+        apply|--check) ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+
 
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"

@@ -30,12 +30,16 @@ SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-setup.log}"
 
 # Argument parsing (flags may appear in any order)
+usage() { echo "Usage: $0 [--non-interactive] [--skip-disk-check]"; }
+
 NON_INTERACTIVE=false
 SKIP_DISK_CHECK=false
 for arg in "$@"; do
     case "$arg" in
         --non-interactive) NON_INTERACTIVE=true ;;
         --skip-disk-check) SKIP_DISK_CHECK=true ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
 # Piped stdin also implies non-interactive

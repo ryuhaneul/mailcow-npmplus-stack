@@ -5,6 +5,22 @@
 # Env: WEBMAIL_ENV_FILE, SNAPPYMAIL_DIR, WEBMAIL_BACKUP_DIR.
 set +x
 set -euo pipefail
+# Parse before reading configuration or creating temporary files.
+python3 -B - "$@" <<'ARGS'
+import argparse
+parser = argparse.ArgumentParser(description='Explicit SnappyMail backup/stop/removal/restore; never edits .env')
+parser.add_argument('command', choices=['backup', 'stop', 'start', 'remove', 'restore'])
+parser.add_argument('archive', nargs='?')
+parser.add_argument('--delete-volume', action='store_true', help='remove: explicitly confirm named-volume deletion')
+parser.add_argument('--delete-install-dir', action='store_true', help='remove: explicitly confirm installation-directory deletion')
+args = parser.parse_args()
+if args.command != 'remove' and (args.delete_volume or args.delete_install_dir): parser.error('deletion options apply only to remove')
+if args.command != 'restore' and args.archive: parser.error('unexpected archive argument')
+if args.command == 'restore' and not args.archive: parser.error('restore requires the backup archive path')
+ARGS
+for arg in "$@"; do
+    case "$arg" in -h|--help) exit 0 ;; esac
+done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}"
 [ -f "$ENV_FILE" ] || { echo '[snappymail-remove] .env not found' >&2; exit 1; }

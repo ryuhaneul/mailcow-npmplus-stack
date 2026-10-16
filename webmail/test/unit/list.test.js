@@ -131,6 +131,7 @@ test('route: authenticated messages endpoint, invalid query 400 and non-login 40
   const config = { publicHostnames: ['newmail.example.com'], trustProxy: ['127.0.0.0/8'], logLevel: 'silent', sessionIdleMin: 480, sessionMaxHours: 24, imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com', brandName: '메일' };
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w05-test-'));
   const app = await createApp({ config, logger: false, auth: { tempRoot, clientFactory: options => new ListImap(options) } });
+  app.directory.mailboxName = async email => email;
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   assert.equal((await app.inject('/api/messages')).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-imap-password' } }); assert.equal(logged.statusCode, 200);
@@ -235,6 +236,7 @@ for (const query of ['view=allmail&q=invoice', 'view=folder&folder=Trash&q=invoi
     return client;
   } } });
   let stop;
+  app.directory.mailboxName = async email => email;
   t.after(async () => { stop?.(); await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   const logged = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-search-password' } });
   assert.equal(logged.statusCode, 200);

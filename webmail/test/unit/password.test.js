@@ -129,7 +129,9 @@ test('HTTP password route: success ends all same-user sessions only; CSRF, fallb
   const fake=await mailcow(t);
   const config={...fake.config,publicHostnames:['newmail.example.com'],trustProxy:['127.0.0.0/8'],sessionIdleMin:480,sessionMaxHours:24,logLevel:'info'};
   const localRoot=await mkdtemp(join(tempRoot,'sessions-'));const stream={write:line=>collected.push(line)};
-  const app=await createApp({config,logger:{...logOptions('info'),stream},auth:{tempRoot:localRoot,verifyLogin:async({email})=>({name:email,connection:{async logout(){}}})}});t.after(()=>app.close());
+  const app=await createApp({config,logger:{...logOptions('info'),stream},auth:{tempRoot:localRoot,verifyLogin:async({email})=>({name:email,connection:{async logout(){}}})}});
+  app.directory.mailboxName = async email => email;
+  t.after(()=>app.close());
   const login=async email=>app.inject({method:'POST',url:'/api/auth/login',headers:{origin:'https://newmail.example.com'},payload:{email,password:current}});
   const a=await login('user@example.com'),b=await login('user@example.com'),other=await login('other@example.org');
   const cookie=response=>response.headers['set-cookie'].split(';')[0];
@@ -146,7 +148,9 @@ for(const [mode,status,code] of [['2fa',403,'MAILCOW_2FA'],['bad-json',503,'MAIL
   const fake=await mailcow(t,mode);
   const config={...fake.config,publicHostnames:['newmail.example.com'],trustProxy:['127.0.0.0/8'],sessionIdleMin:480,sessionMaxHours:24,logLevel:'info'};
   const localRoot=await mkdtemp(join(tempRoot,'fallback-sessions-'));
-  const app=await createApp({config,logger:{...logOptions('info'),stream:{write:line=>collected.push(line)}},auth:{tempRoot:localRoot,verifyLogin:async()=>({name:'user',connection:{async logout(){}}})}});t.after(()=>app.close());
+  const app=await createApp({config,logger:{...logOptions('info'),stream:{write:line=>collected.push(line)}},auth:{tempRoot:localRoot,verifyLogin:async()=>({name:'user',connection:{async logout(){}}})}});
+  app.directory.mailboxName = async email => email;
+  t.after(()=>app.close());
   const logged=await app.inject({method:'POST',url:'/api/auth/login',headers:{origin:'https://newmail.example.com'},payload:{email:'user@example.com',password:current}});
   const response=await app.inject({method:'POST',url:'/api/password',headers:{cookie:logged.headers['set-cookie'].split(';')[0],origin:'https://newmail.example.com','x-webmail-csrf':logged.json().csrf},payload:mode==='wrong-current'?{...body(),current:'wrong-current'}:body()});
   assert.equal(response.statusCode,status);assert.equal(response.json().error.code,code);assert.equal(response.json().error.fallbackUrl,'https://mail.example.com');assert.equal(response.headers['www-authenticate'],undefined);assert.equal(response.headers['x-content-type-options'],'nosniff');

@@ -165,6 +165,8 @@ pre_eval:
   - filter: Is${band}Band == true && req.Host == "mail-npm.${DOMAIN}" && req.URL.Path startsWith "/api/nginx/"
     apply:
       - Remove${band}BandRuleByID(911100)
+  - filter: Is${band}Band == true && req.Host in ["127.0.0.1:81", "mail-npm.${DOMAIN}"] && ((req.Method == "POST" && req.URL.Path in ["/api/nginx/proxy-hosts", "/api/nginx/redirection-hosts", "/api/nginx/streams"]) || (req.Method == "PUT" && req.URL.Path matches "^/api/nginx/(proxy-hosts|redirection-hosts|streams)/[0-9]+$"))
+    apply:
       - Remove${band}BandRuleByID(930120)
 YAML
     _waf_mailcow_crs_exclusions "$band"

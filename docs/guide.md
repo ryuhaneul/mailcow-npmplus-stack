@@ -160,10 +160,11 @@ CrowdSec는 NPMplus의 `npmplus` 형식 접근 로그를 수집해 반복 공격
 setup·update는 이 세 키를 `.env`에 쓰거나 변경하지 않습니다. 운영 기본값은 `block`입니다. 기존 설치도 키가 없으면 다음 update부터 켜집니다. 튜닝 전 이를 막거나 필터를 해제하려면 서버 `.env`에 `WAF_ENABLE=false`를 직접 적고 update를 실행하세요. 스택이 관리하던 설정만 원복하고 기존 profiles를 복구합니다. 웹메일이 켜져 있으면 정규화한 웹메일 호스트에만 본문·검색·암호 필드 예외를 적용하며, 다른 호스트와 메서드에는 적용하지 않습니다. NPM 관리 `/api/nginx/`에는 필요한 규칙 두 개만 제외합니다. `appsec-default`와 `generic-rules`를 중복으로 싣지 않으며(중복 rule ID는 기동 실패), 403 반복을 다시 밴으로 키우지 않는 로컬 시나리오를 사용합니다. 설정이 같으면 파일 쓰기와 CrowdSec SIGHUP을 생략합니다. setup은 Phase7에서 설정을 적용하고 Phase10 마지막의 기존 NPMplus 재시작 한 번으로 읽힙니다. 그 사이 실패하면 파일만 적용된 상태일 수 있으며 다음 setup의 마지막 재시작이나 update 재시작에서 반영됩니다. update의 기존 NPMplus 재시작은 DNS 캐시 갱신을 위해 한 번 유지합니다.
 
 
-다음 예외는 모두 `mailcow.${DOMAIN}` 호스트에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
+다음 메일 서비스 예외는 `mailcow.${DOMAIN}` 호스트에만 적용합니다. NPM 관리 API 예외는 표에 적은 두 Host에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
 
 | 요청 | 예외 | 근거 |
 |---|---|---|
+| Host `127.0.0.1:81`·`mail-npm.${DOMAIN}`의 POST `/api/nginx/{proxy-hosts,redirection-hosts,streams}`·PUT 같은 경로의 `/<숫자ID>` | `forward_*`·`forwarding_*` 키 오탐인 930120만 제외. 920350·다른 공격 검사는 유지 | [고정 NPMplus 모델](https://github.com/ZoeyVid/NPMplus/blob/a30a95471e667a8207c2a349422e4ce9492fcc95/frontend/src/api/backend/models.ts#L95-L237), [JSON 키 변환](https://github.com/ZoeyVid/NPMplus/blob/a30a95471e667a8207c2a349422e4ce9492fcc95/frontend/src/api/backend/base.ts#L36-L40) |
 | POST `/Microsoft-Server-ActiveSync` | Content-Type이 `application/vnd.ms-sync.wbxml`·`message/rfc822`일 때만 920420·920180·932260 제외 | ActiveSync WBXML·MIME 발송·빈 본문 실측, [MS-ASHTTP](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ashttp/f1dda4f4-5a06-4761-8ae6-38189eb649a8) |
 | PROPFIND `/.well-known/caldav`·`/.well-known/carddav` | 끝 `/` 유무 두 형태에서만 911100 제외 | DAV 클라이언트 계정 발견 실측 |
 | PROPFIND·REPORT·PROPPATCH·MKCOL·MKCALENDAR·MOVE `/SOGo/dav/…` | 911100 제외. PUT·DELETE는 기존 허용 메서드 유지. COPY는 [SOGo 구현](https://github.com/Alinto/sogo/blob/master/SoObjects/SOGo/SOGoContentObject.m#L452-L465)이 405를 반환하므로 예외 없음 | [CalDAV RFC 4791](https://www.rfc-editor.org/rfc/rfc4791.html#section-5.3), [CardDAV RFC 6352](https://www.rfc-editor.org/rfc/rfc6352.html#section-6.3.1), [WebDAV RFC 4918](https://www.rfc-editor.org/rfc/rfc4918.html#section-9) |

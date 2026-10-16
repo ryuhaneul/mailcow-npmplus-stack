@@ -32,13 +32,15 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
     if (body && typeof body === 'object') delete body.password;
     try {
       if (!username || !password.length) throw new AppError(422, 'INVALID_INPUT', '아이디와 암호를 입력해 주세요.');
-      rateLimiter.check(request.ip, username);
+      const release = rateLimiter.reserve(request.ip, username);
       let mailcow;
       try { mailcow = await client.login({ username, password, ip: request.ip }); }
       catch (error) {
-        if (error.code === 'AUTH_FAILED') error.remainingAttempts = rateLimiter.recordFailure(request.ip, username);
+        if (error.code === 'AUTH_FAILED') error.remainingAttempts = rateLimiter.remaining(request.ip, username);
+        else release();
         throw error;
       }
+      release();
       if (!['ready', 'totp'].includes(mailcow.state)) {
         await client.logout(mailcow);
         throw new AppError(403, 'ADMIN_PENDING_ACTION', 'mailcow 관리 화면에서 필요한 작업을 먼저 끝내 주세요.');
@@ -50,6 +52,7 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
       }
       const { token, session } = sessions.create(mailcow);
       reply.setCookie(cookieName, token, cookieOptions(config));
+      request.log.info({ code: session.state === 'ready' ? 'LOGIN_SUCCESS' : 'TOTP_REQUIRED', username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
       return publicSession(session);
     } finally { password.fill(0); }
   });
@@ -57,12 +60,12 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
   app.post('/api/admin/auth/totp', async (request, reply) => {
     const session = request.session;
     if (session.state !== 'totp') throw new AppError(403, 'NO_SESSION', '2단계 인증 대기 상태가 아니에요.');
-    rateLimiter.check(request.ip, session.username);
+    const release = rateLimiter.reserve(request.ip, session.username);
     const code = request.body?.code;
     if (request.body && typeof request.body === 'object') delete request.body.code;
     if (typeof code !== 'string' || !/^\d{6}$/.test(code)) {
       const error = new AppError(422, 'INVALID_INPUT', '인증 앱의 숫자 6자리를 입력해 주세요.');
-      error.remainingAttempts = rateLimiter.recordFailure(request.ip, session.username);
+      error.remainingAttempts = rateLimiter.remaining(request.ip, session.username);
       session.totpFailures++;
       if (session.totpFailures >= 5) { error.restart = true; clear(reply); await sessions.destroy(session); }
       throw error;
@@ -70,19 +73,22 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
     try { await client.totp(session.mailcow, code); }
     catch (error) {
       if (error.code === 'TOTP_FAILED') {
-        error.remainingAttempts = rateLimiter.recordFailure(request.ip, session.username);
+        error.remainingAttempts = rateLimiter.remaining(request.ip, session.username);
         error.restart = true;
-      }
+      } else release();
       clear(reply);
       await sessions.destroy(session);
       throw error;
     }
+    release();
     session.state = 'ready';
+    request.log.info({ code: 'LOGIN_SUCCESS', username: session.username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
     return publicSession(session);
   });
   app.post('/api/admin/auth/logout', async (request, reply) => {
     clear(reply);
     await sessions.destroy(request.session);
+    request.log.info({ code: 'LOGOUT', username: request.session.username, ip: request.ip }, '관리 세션을 로그아웃했습니다.');
     return reply.code(204).send();
   });
 }

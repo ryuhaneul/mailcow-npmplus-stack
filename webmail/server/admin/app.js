@@ -57,6 +57,13 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
 export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm } = {}) {
+  if (logger !== false) {
+    const base = logOptions(config.logLevel);
+    logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
+      paths: [...new Set([...base.redact.paths, ...(logger?.redact?.paths ?? []),
+        'req.headers.cookie', 'req.headers["x-mailadmin-csrf"]', 'req.body',
+        '*.password', '*.code', '*.dataBase64', '*.script'])] } };
+  }
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);

@@ -6,7 +6,7 @@ export function createAdminRateLimiter({ now = Date.now } = {}) {
   function prune(map, key) {
     const record = map.get(key);
     if (!record) return null;
-    record.times = record.times.filter(time => time > now() - 10 * 60_000);
+    record.times = record.times.filter(time => time.at > now() - 10 * 60_000);
     if (!record.times.length && record.blockedUntil <= now()) { map.delete(key); return null; }
     return record;
   }
@@ -20,15 +20,26 @@ export function createAdminRateLimiter({ now = Date.now } = {}) {
   function remaining(ip, username) {
     return Math.max(0, 5 - Math.max(prune(ips, ip)?.times.length ?? 0, prune(usernames, username)?.times.length ?? 0));
   }
-  function recordFailure(ip, username) {
+  // Reserve before yielding to mailcow: concurrent requests share the same budget.
+  function reserve(ip, username) {
+    check(ip, username);
+    const attempt = { at: now() };
     for (const [map, key] of [[ips, ip], [usernames, username]]) {
       const record = prune(map, key) ?? { times: [], blockedUntil: 0 };
-      record.times.push(now());
+      record.times.push(attempt);
       if (record.times.length >= 5) record.blockedUntil = now() + 5 * 60_000;
       map.set(key, record);
     }
-    return remaining(ip, username);
+    return () => {
+      for (const [map, key] of [[ips, ip], [usernames, username]]) {
+        const record = prune(map, key);
+        if (!record) continue;
+        record.times = record.times.filter(time => time !== attempt);
+        record.blockedUntil = record.times.length >= 5 ? record.times.at(-1).at + 5 * 60_000 : 0;
+        prune(map, key);
+      }
+    };
   }
   function sweep() { for (const map of [ips, usernames]) for (const key of map.keys()) prune(map, key); }
-  return { check, recordFailure, remaining, sweep };
+  return { reserve, remaining, sweep };
 }

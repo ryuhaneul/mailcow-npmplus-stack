@@ -37,13 +37,17 @@ export function createAdminSessionStore({ config, client, logger, now = Date.now
     const session = sessions.get(sessionHash(token));
     if (!session) throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
     if (expired(session)) {
+      logger?.info({ code: 'SESSION_EXPIRED', username: session.username }, '관리 세션이 만료됐습니다.');
       await destroy(session);
       throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
     }
     session.lastSeen = now();
     return session;
   }
-  async function sweep() { await Promise.all([...sessions.values()].filter(expired).map(destroy)); }
+  async function sweep() { await Promise.all([...sessions.values()].filter(expired).map(session => {
+    logger?.info({ code: 'SESSION_EXPIRED', username: session.username }, '관리 세션이 만료됐습니다.');
+    return destroy(session);
+  })); }
   async function close() {
     await Promise.all([...sessions.values()].map(destroy));
     await Promise.all(cleanup.values());

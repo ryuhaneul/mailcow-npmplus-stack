@@ -37,6 +37,7 @@ export function installAdminGuard(app, { config, sessions, client }) {
       const status = await client.call(session.mailcow, 'GET', '/api/v1/get/status/version');
       if (!status || typeof status.version !== 'string' || !status.version) throw new MailcowAuthLost();
     } catch {
+      request.log.warn({ code: 'MAILCOW_SESSION_LOST', username: session.username, ip: request.ip }, 'mailcow 관리 세션을 잃었습니다.');
       clear(reply);
       await sessions.destroy(session);
       if (!isLogout) throw new MailcowAuthLost();
@@ -44,7 +45,7 @@ export function installAdminGuard(app, { config, sessions, client }) {
   });
   app.addHook('onError', async (request, reply, error) => {
     request.adminError = error;
-    if (managed(request)) request.log.warn({ code: error instanceof AppError ? error.code : 'ADMIN_REQUEST_FAILED', ip: request.ip }, '관리 요청을 처리하지 못했습니다.');
+    if (managed(request)) request.log.warn({ code: error instanceof AppError ? error.code : 'ADMIN_REQUEST_FAILED', username: request.session?.username ?? (typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : undefined), ip: request.ip }, '관리 요청을 처리하지 못했습니다.');
     if (error instanceof MailcowAuthLost && request.session) {
       clear(reply);
       await sessions.destroy(request.session);

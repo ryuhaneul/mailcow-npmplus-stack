@@ -51,14 +51,18 @@ async function fixture(t, populated = true) {
       const own = acl.get(old); if (own) { acl.delete(old); acl.set(next, own.map(row => ({ ...row, user: next, id: row.id === old ? next : row.id }))); }
     } else if (path === '/api/v1/edit/filter') {
       if (!options.ignoreFilter) Object.assign(filters.find(row => String(row.id) === body.items[0]), body.attr);
-    } else if (path === '/api/v1/edit/alias') Object.assign(aliases.find(row => String(row.id) === body.items[0]), body.attr);
-    else if (path === '/api/v1/edit/mailbox') for (const addr of body.items) Object.assign(boxes.find(row => row.username === addr), body.attr);
-    else if (path === '/api/v1/add/alias') aliases.push({ id: 100 + aliases.length, ...body });
+    } else if (path === '/api/v1/edit/alias') {
+      const alias = aliases.find(row => String(row.id) === body.items[0]); Object.assign(alias, body.attr);
+      // mailcow removes explicit grants to the supplied goto targets, even with sender_allowed=0.
+      if (Object.hasOwn(body.attr, 'goto')) for (const box of boxes) if (alias.goto.split(',').includes(box.username)) box.sender_acl = box.sender_acl.filter(value => value !== alias.address);
+    } else if (path === '/api/v1/edit/mailbox') {
+      for (const addr of body.items) if (!options.ignoreSenderWrites) Object.assign(boxes.find(row => row.username === addr), body.attr);
+    } else if (path === '/api/v1/add/alias') aliases.push({ id: 100 + aliases.length, ...body });
     else assert.fail(path);
     return [{ type: 'success' }];
   } };
   const dockerapi = {
-    async getAcl(owner) { if (options.aclFailure === owner) throw new Error(secret); return structuredClone(acl.get(owner) ?? []); },
+    async getAcl(owner) { if (options.aclFailure === owner) throw new Error(secret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); },
     async setAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/set_acl', body: { owner, grantee } }); acl.set(owner, [...(acl.get(owner) ?? []), { user: owner, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }]); },
     async deleteAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee } }); acl.set(owner, (acl.get(owner) ?? []).filter(row => row.id !== grantee || row.mailbox !== 'INBOX')); },
   };
@@ -201,4 +205,28 @@ test('rename HTTP: guard protects preview/run and permits successful rename with
   const denied = await app.inject({ method: 'POST', url, headers: { ...headers, 'x-mailadmin-csrf': '' }, payload }); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
   const initial = await app.inject({ method: 'POST', url, headers, payload }); assert.equal(initial.statusCode, 200, initial.body);
   const done = await app.inject({ method: 'POST', url, headers, payload: { ...payload, action: 'run', etag: initial.json().etag } }); assert.equal(done.statusCode, 200, done.body); assert.equal(done.json().result, 'ok'); assert.equal(done.headers['cache-control'], 'no-store');
+});
+
+for (const ignoreSenderWrites of [false, true]) test(`rename regression: alias goto preserves unrelated explicit sender ACL; restore ignored=${ignoreSenderWrites}`, async t => {
+  const f = await fixture(t, false), alias = 'many@example.com';
+  f.aliases.push({ id: 2, address: alias, goto: `${old},${other}`, active: 1, sender_allowed: '0' });
+  f.boxes[2].sender_acl = [alias, team]; const initial = await preview(f); f.options.ignoreSenderWrites = ignoreSenderWrites;
+  const result = await run(f, initial.etag);
+  if (ignoreSenderWrites) {
+    assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+    assert.equal(result.steps.at(-1).stage, 'aliases'); assert.ok(result.steps.at(-1).recovery);
+  } else {
+    assert.equal(result.result, 'ok'); assert.deepEqual(f.boxes[2].sender_acl, [alias, team]);
+  }
+});
+
+test('rename regression: mixed owned/received ACL responses use the real owner and deduplicate shares', async t => {
+  const f = await fixture(t, false);
+  const grant = { user: other, id: old, mailbox: 'INBOX', rights: ['lookup', 'read'] };
+  f.acl.set(other, [grant, structuredClone(grant)]);
+  const initial = await preview(f);
+  assert.deepEqual(initial.changes.shares, [{ owner: other, grantee: old, mailbox: 'INBOX', rights: ['lookup', 'read'], newOwner: other, newGrantee: next }]);
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  assert.deepEqual(writes(f).filter(row => row.path === 'dockerapi/set_acl').map(row => row.body), [{ owner: other, grantee: next }]);
+  assert.ok(!f.acl.has(next));
 });

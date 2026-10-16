@@ -54,17 +54,27 @@ async function fixture(t, direction = 'mailbox-to-alias') {
       for (const box of boxes) box.sender_acl = box.sender_acl.filter(value => value !== target);
       acl.delete(target);
     } else if (path === '/api/v1/add/alias') aliases.push({ id: sequence++, ...body });
-    else if (path === '/api/v1/edit/alias') Object.assign(aliases.find(row => String(row.id) === body.items[0]), body.attr);
-    else if (path === '/api/v1/delete/alias') for (const id of body) {
+    else if (path === '/api/v1/edit/alias') {
+      const alias = aliases.find(row => String(row.id) === body.items[0]); Object.assign(alias, body.attr);
+      // mailcow drops explicit alias grants before storing goto.
+      if (Object.hasOwn(body.attr, 'goto')) for (const box of boxes) if (alias.goto.split(',').includes(box.username)) box.sender_acl = box.sender_acl.filter(value => value !== alias.address);
+    } else if (path === '/api/v1/delete/alias') for (const id of body) {
       const index = aliases.findIndex(row => String(row.id) === id), target = aliases[index].address; aliases.splice(index, 1);
       for (const box of boxes) box.sender_acl = box.sender_acl.filter(value => value !== target);
     } else if (path === '/api/v1/add/mailbox') boxes.push({ ...makeBox(`${body.local_part}@${body.domain}`), name: body.name, quota: Number(body.quota) * 1024 ** 2, ...options.created });
-    else if (path === '/api/v1/edit/mailbox') for (const target of body.items) Object.assign(boxes.find(row => row.username === target), body.attr);
-    else if (path === '/api/v1/add/filter') filters.push({ id: sequence++, ...body });
+    else if (path === '/api/v1/edit/mailbox') {
+      for (const target of body.items) if (!options.ignoreSenderWrites) {
+        const box = boxes.find(row => row.username === target); Object.assign(box, body.attr);
+        if (body.attr.sender_acl) {
+          const implicit = aliases.filter(row => !row.address.startsWith('@') && row.sender_allowed === '1' && row.goto.split(',').includes(target)).map(row => row.address);
+          box.sender_acl = box.sender_acl.filter(value => !implicit.includes(value));
+        }
+      }
+    } else if (path === '/api/v1/add/filter') filters.push({ id: sequence++, ...body });
     else assert.fail(path);
     return [{ type: 'success' }];
   } };
-  const dockerapi = { async getAcl(owner) { if (options.aclFailure === owner) throw new Error(syncSecret); return structuredClone(acl.get(owner) ?? []); } };
+  const dockerapi = { async getAcl(owner) { if (options.aclFailure === owner) throw new Error(syncSecret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); } };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
   const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
@@ -241,4 +251,35 @@ test('convert HTTP: both routes use existing authentication/CSRF guard and JSON 
   f.options.failPath = '/api/v1/add/mailbox';
   const result = await app.inject({ method: 'POST', url, headers, payload: { action: 'run', address: addr, etag: initial.json().etag, password: secret } });
   assert.equal(result.statusCode, 200, result.body); assert.equal(result.json().result, 'partial'); assert.equal(result.headers['www-authenticate'], undefined); assert.equal(result.headers['cache-control'], 'no-store'); assert.ok(!result.body.includes(secret));
+});
+
+for (const ignoreSenderWrites of [false, true]) test(`convert regression: restoring alias goto preserves unrelated explicit sender ACL; restore ignored=${ignoreSenderWrites}`, async t => {
+  const f = await fixture(t), alias = f.aliases.find(row => row.id === 2);
+  alias.sender_allowed = '0'; f.boxes.find(row => row.username === other).sender_acl = [alias.address, team];
+  const initial = await preview(f); f.options.ignoreSenderWrites = ignoreSenderWrites;
+  const result = await run(f, initial.etag);
+  if (ignoreSenderWrites) {
+    assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+    assert.equal(result.steps.at(-1).stage, 'references'); assert.ok(result.steps.at(-1).recovery);
+  } else {
+    assert.equal(result.result, 'ok'); assert.deepEqual(f.boxes.find(row => row.username === other).sender_acl, [alias.address, team]);
+  }
+});
+
+test('convert regression: fixed sender aliases retain effective permission when mailcow omits explicit ACL', async t => {
+  const f = await fixture(t), alias = f.aliases.find(row => row.id === 2);
+  f.boxes.find(row => row.username === other).sender_acl = [alias.address, team];
+  const result = await run(f, (await preview(f)).etag); assert.equal(result.result, 'ok');
+  assert.equal(alias.sender_allowed, '1'); assert.ok(alias.goto.split(',').includes(other));
+  assert.deepEqual(f.boxes.find(row => row.username === other).sender_acl, [team]);
+});
+
+test('convert regression: a received share is counted once as incoming and never as owned', async t => {
+  const f = await fixture(t); f.acl.delete(addr);
+  const grant = { user: team, id: addr, mailbox: 'INBOX', rights: ['lookup', 'read'] };
+  f.acl.set(team, [grant, structuredClone(grant)]);
+  const result = await preview(f);
+  assert.equal(result.changes.refs.shares.length, 1);
+  assert.equal(result.warnings.find(row => row.code === 'OWN_SHARES_REMOVED').message, '이 메일함을 다른 사람에게 공유한 0건은 없어져요');
+  assert.equal(result.warnings.find(row => row.code === 'INCOMING_SHARES_UNUSED').message, '다른 함에서 이 주소에 준 공유 1건은 남지만 로그인할 수 없어 쓰이지 않아요');
 });

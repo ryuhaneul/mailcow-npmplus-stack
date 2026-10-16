@@ -56,13 +56,13 @@ class FakeImap extends EventEmitter {
   async messageDelete(uid, options) { this.calls.push({ action: 'delete', path: this.mailbox.path, uid, options }); return true; }
   async messageFlagsAdd(uid, flags, options) { this.calls.push({ action: 'flags', path: this.mailbox.path, uid, flags, options }); return true; }
 }
-async function fixture(t, { smtp, overrides = {}, clientSetup } = {}) {
+async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables } = {}) {
   let time = Date.UTC(2026, 0, 1), logs = ''; const calls = [], clients = [], attempts = [];
   const actualConfig = { ...config, ...smtp?.options, ...overrides }, tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w09-'));
   const stream = new Writable({ write(chunk, _encoding, callback) { logs += chunk.toString(); callback(); } });
   const app = Fastify({ logger: { ...logOptions('info'), stream } }); installErrors(app);
   await installAuth(app, { config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
-  const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
+  const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [directoryTables ? directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || [] : sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
   const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); } };
   const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot });
   await app.register(composeRoutes, { config: actualConfig, service });
@@ -134,6 +134,29 @@ test('send: real STARTTLS user auth, attachment streams, Sent Seen APPEND, draft
   assert.equal(f.calls.filter(call => call.action === 'download').length, 1); assert.ok(f.calls.indexOf(append) < f.calls.findIndex(call => call.action === 'delete')); assert.deepEqual(await readdir(f.dir), []);
   for (const value of [password, 'synthetic private body', 'uploaded-content']) assert.ok(!f.logs.includes(value));
 });
+for (const [label, ownName, delegatedName, from, expected] of [
+  ['real name', 'Example, User', undefined, 'user@example.com', '"Example, User" <user@example.com>'],
+  ['empty name', '', undefined, 'user@example.com', 'user@example.com'],
+  ['address as name', 'user@example.com', undefined, 'user@example.com', 'user@example.com'],
+  ['delegated own name', '', 'Example, Team', 'team@example.com', '"Example, Team" <team@example.com>'],
+  ['delegated login fallback', 'Example, User', '', 'team@example.com', '"Example, User" <team@example.com>'],
+  ['delegated unnamed', '', 'team@example.com', 'team@example.com', 'team@example.com'],
+]) test(`From header: ${label} in draft, SMTP and Sent copy`, async t => {
+  const smtp = await smtpFixture(t);
+  const directoryTables = { mailbox: [{ username: 'user@example.com', name: ownName, active: 1 }, ...(delegatedName === undefined ? [] : [{ username: 'team@example.com', name: delegatedName, active: 1 }])], sender_acl: [{ logged_in_as: 'user@example.com', send_as: 'team@example.com' }] };
+  const f = await fixture(t, { smtp, directoryTables });
+  assert.equal(f.session.name, 'user@example.com');
+  const content = body({ from, replyToRef: original, inReplyTo: '<original@example.com>', forwardParts: [{ ref: original, partId: '2' }] });
+  const saved = await request(f, 'PUT', '/api/drafts', content); assert.equal(saved.statusCode, 200, saved.body);
+  const sent = await request(f, 'POST', '/api/send', content); assert.equal(sent.statusCode, 200, sent.body);
+  const header = raw => /^From: (.+)$/im.exec(raw.toString().replace(/\r\n[ \t]+/g, ' '))[1].trim();
+  assert.equal(smtp.messages.length, 1);
+  assert.equal(header(smtp.messages[0].raw), expected);
+  const copies = f.calls.filter(call => call.action === 'append'); assert.equal(copies.length, 2);
+  for (const copy of copies) assert.equal(header(copy.raw), expected);
+  t.diagnostic('SMTP From: ' + header(smtp.messages[0].raw));
+});
+
 test('draft: empty recipients allowed, Draft Seen APPEND before old delete, Bcc preserved and HTML sanitized', async t => {
   const f = await fixture(t), attachment = (await upload(f, 'draft attachment')).json();
   const response = await request(f, 'PUT', '/api/drafts', body({ to: [], bcc: ['hidden@example.com'], draftRef: draft, attachmentIds: [attachment.id], html: '<script>evil()</script><p onclick="evil()" style="color:red">draft</p>' }));

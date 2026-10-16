@@ -1027,6 +1027,8 @@ sudo bash scripts/verify.sh
 
 ### 관리 화면 끄기
 
+2단계(`WEBMAIL_ADMIN_DOVEADM_ENABLE`·`WEBMAIL_ADMIN_RELAY_ENABLE`)를 켰다면 먼저 아래 [2단계 끄기와 릴레이 항목 보존](#2단계-끄기와-릴레이-항목-보존) 절차로 두 값을 `false`로 바꾸고 끕니다. 두 값 중 하나라도 `true`로 남아 있으면 아래 `webmail_prepare`가 `admin stage 2 requires WEBMAIL_ADMIN_ENABLE=true`로 멈춥니다.
+
 `.env`의 `WEBMAIL_ADMIN_ENABLE=false`를 먼저 설정하고 다음 순서로 실행합니다. `ADMIN_ACCESS_LIST`는 프록시 제거가 끝날 때까지 유지합니다.
 
 ```bash

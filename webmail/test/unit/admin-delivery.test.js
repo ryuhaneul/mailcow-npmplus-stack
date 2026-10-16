@@ -50,13 +50,13 @@ test('quarantine: exact safe projection and original contents/attachment names a
   for (const marker of ['synthetic-raw-mail-marker', 'synthetic-body-marker', 'synthetic-file-marker']) assert.ok(!JSON.stringify(result).includes(marker));
   assert.deepEqual(f.calls.map(row => row.path), ['/api/v1/get/quarantine/all']); assert.equal(writes(f).length, 0);
 });
-for (const action of ['release', 'learnham', 'learnspam', 'delete']) test(`quarantine: ${action} confirmed, irreversible, exact API body and subject capped200`, async t => {
-  const f = await fixture(t); f.messages[0].subject = '가'.repeat(300); const remove = action === 'delete';
+for (const action of ['release', 'learnham', 'learnspam', 'delete']) test(`quarantine: ${action} confirmed, irreversible, exact API body and no mail subject or addresses in audit`, async t => {
+  const f = await fixture(t); f.messages[0].subject = 'SyntheticConfidentialSubject984'; const remove = action === 'delete';
   await assert.rejects(f.quarantine.change({ ...ctx, id: '1', remove, data: { ...(remove ? {} : { action }) } }), { statusCode: 422 }); assert.equal(writes(f).length, 0);
   const result = await f.quarantine.change({ ...ctx, id: '1', remove, data: { confirm: true, ...(remove ? {} : { action }) } }); const write = writes(f)[0];
   assert.equal(write.path, remove ? '/api/v1/delete/qitem' : '/api/v1/edit/qitem'); assert.deepEqual(write.body, remove ? ['1'] : { items: ['1'], attr: { action } }); assert.equal(f.messages.length, 0);
-  const record = await f.history.detail(result.auditId); assert.equal(record.kind, 'irreversible'); assert.equal(record.before.title.length, 200); assert.equal(record.canRevert, false); assert.equal(record.before.action, action); assert.equal(record.before.msg, undefined);
-  await assert.rejects(revert(f, result.auditId), { statusCode: 409 }); assert.ok(!JSON.stringify(await f.audit.read()).includes('synthetic-raw-mail-marker')); if (action === 'release' || action === 'learnham') assert.match(result.notice, /실제로 배달/);
+  const record = await f.history.detail(result.auditId); assert.equal(record.kind, 'irreversible'); assert.deepEqual(record.before, { id: '1', qid: 'qid-synthetic', action }); assert.equal(record.canRevert, false); assert.equal(record.before.action, action); assert.equal(record.before.msg, undefined);
+  await assert.rejects(revert(f, result.auditId), { statusCode: 409 }); const recorded = JSON.stringify(await f.audit.read()); for (const marker of ['SyntheticConfidentialSubject984', 'sender@example.net', 'recipient@example.com', 'synthetic-raw-mail-marker']) assert.ok(!recorded.includes(marker)); if (action === 'release' || action === 'learnham') assert.match(result.notice, /실제로 배달/);
 });
 for (const data of [{ action: 'delete', confirm: true }, { action: 'release', confirm: 1 }, { action: 'release', confirm: false }, { action: 'unknown', confirm: true }]) test(`quarantine: invalid request ${JSON.stringify(data)}`, async t => { const f = await fixture(t); await assert.rejects(f.quarantine.change({ ...ctx, id: '1', data }), { statusCode: 422 }); assert.equal(writes(f).length, 0); });
 test('quarantine: absent404 and ignored release readback502', async t => {

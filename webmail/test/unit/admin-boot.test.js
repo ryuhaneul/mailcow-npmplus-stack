@@ -130,7 +130,7 @@ test('admin config: fixed paths, hostname, URL and network formats rejected', ()
     ADMIN_MODE: ['false', 'TRUE'], DOMAIN: ['https://example.com', '-example.com'],
     IMAP_HOST: ['https://dovecot', 'dovecot:993'], SMTP_HOST: ['postfix:465', '-postfix'], MAIL_TLS_SERVERNAME: ['mail.example.com:993', 'mail example.com'],
     MAILCOW_UI_SERVERNAME: ['example.com:443'], MAILCOW_UI_URL: ['https://example.com/path', 'https://user:synthetic@example.com'],
-    DOCKERAPI_URL: ['https://example.com:443'], RELAY_FILES: ['/tmp/extra.cf,/tmp/options.inc'],
+    DOCKERAPI_URL: ['https://example.com:443'], RELAY_FILES: ['/tmp/extra.cf,/tmp/options.inc', '/run/relay/extra.cf,/run/relay/options.inc'],
     LOGO_DIR: ['/tmp/brand'], AUDIT_DIR: ['/tmp/audit'], LOG_LEVEL: ['invalid'],
     MAILCOW_IPV4_NETWORK: ['192.0.2.0/24', '192.0.256', '0192.0.2'],
     MAILCOW_IPV6_NETWORK: ['2001:db8::', '2001:db8::/129', '192.0.2.0/24'],
@@ -152,10 +152,10 @@ test('admin config: optional feature pairs and mailcow networks retain agreed fo
     { DOVEADM_URL: 'http://dovecot:0', DOVEADM_KEY: 'synthetic-doveadm-key' },
   ]) assert.throws(() => loadAdminConfig({ ...env, ...pair }), /DOVEADM_/);
   const config = loadAdminConfig({ ...env, DOVEADM_URL: 'http://dovecot:12346', DOVEADM_KEY: 'synthetic-doveadm-key',
-    RELAY_FILES: '/run/relay/extra.cf,/run/relay/options.inc', TRUST_PROXY: '192.0.2.1,2001:db8::/32', AUTOEXPUNGE_DAYS: '' });
+    RELAY_FILES: '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc', TRUST_PROXY: '192.0.2.1,2001:db8::/32', AUTOEXPUNGE_DAYS: '' });
   assert.equal(config.doveadmUrl, 'http://dovecot:12346');
   assert.equal(config.doveadmKey, 'synthetic-doveadm-key');
-  assert.deepEqual(config.relayFiles, ['/run/relay/extra.cf', '/run/relay/options.inc']);
+  assert.deepEqual(config.relayFiles, ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc']);
   assert.equal(config.mailcowIpv4Network, '192.0.2');
   assert.equal(config.mailcowIpv6Network, '2001:db8::/64');
   assert.equal(config.autoexpungeDays, null);

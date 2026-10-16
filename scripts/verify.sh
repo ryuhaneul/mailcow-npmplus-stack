@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 
 # ============================================================
@@ -268,6 +269,12 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     check "webmail blocked webmail-admin:8080" edge_probe_tcp webmail webmail-admin 8080 closed
     check "webmail blocked dockerapi:443" edge_probe_tcp webmail dockerapi 443 closed
     check "Admin app link" env WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" check "$MAILCOW_DIR"
+    if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
+        check "Admin doveadm API block" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --check
+    fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ]; then
+        check "Admin relay files visible/readable" docker exec webmail-admin sh -c 'test -f /run/relay/postfix/extra.cf && test -r /run/relay/postfix/extra.cf && test -f /run/relay/rspamd/options.inc && test -r /run/relay/rspamd/options.inc'
+    fi
     echo ""
 fi
 

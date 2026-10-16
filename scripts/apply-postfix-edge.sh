@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 # Managed Postfix relay exclusions; apply (default), --check, --revert; -y skips confirmation.
 # Backups are kept beside extra.cf. Changes restart postfix-mailcow.
 set -euo pipefail
@@ -46,10 +47,10 @@ else
 fi
 python3 - "$WORK/original" "$WORK/next" "$MODE" "${WEBMAIL_RELAY_IPV4:-}" "${SNAPPYMAIL_RELAY_IPV4:-}" \
     "${WEBMAIL_RELAY_IPV6:-}" "${SNAPPYMAIL_RELAY_IPV6:-}" "${EDGE_IPV6_NETWORK:-}" \
-    "$(webmail_mailcow_value IPV4_NETWORK)" <<'PY' || die "cannot edit managed exclusions; nothing changed"
+    "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" <<'PY' || die "cannot edit managed exclusions; nothing changed"
 from pathlib import Path
-import re, sys
-source, dest, mode, web4, snappy4, web6, snappy6, network6, network4 = sys.argv[1:]
+import ipaddress, re, sys
+source, dest, mode, web4, snappy4, web6, snappy6, network6, network4, mailcow6 = sys.argv[1:]
 data = Path(source).read_bytes()
 def reject_backslashes(value):
     numbers = [str(i) for i, line in enumerate(value.split(b'\n'), 1) if b'\\' in line]
@@ -76,14 +77,46 @@ clean = []
 i = 0
 managed = False
 move_to_end = False
+relay_extras = []
+fixed = [ipaddress.ip_network(value, strict=False) for value in
+         ['127.0.0.0/8', '::ffff:127.0.0.0/104', '::1/128', 'fe80::/10', network4 + '.0/24', *([network6 or mailcow6] if network6 or mailcow6 else [])]]
+
+def block_entries(body):
+    # B03 edits only the mynetworks value; continued lines are legal Postfix syntax.
+    match = re.fullmatch(rb'mynetworks[ \t]*=[ \t]*(.*)\n', body, re.DOTALL)
+    if not match or any(line.strip() and not line.startswith((b' ', b'\t')) for line in body.splitlines()[1:]):
+        sys.exit('managed mynetworks block differs; nothing changed')
+    value = re.sub(rb'#[^\r\n]*', b'', match[1])
+    entries, extras = [], []
+    for raw in re.split(rb'[,\s]+', value.strip()):
+        if not raw: continue
+        token = raw.strip(b'\"\'')
+        excluded = token.startswith(b'!')
+        if excluded: token = token[1:]
+        token = re.sub(rb'^\[([^\]]+)\](.*)$', rb'\1\2', token)
+        try: item = ipaddress.ip_network(token.decode('ascii'), strict=False)
+        except (ValueError, UnicodeError): sys.exit('unknown managed mynetworks item; nothing changed')
+        if not excluded:
+            entries.append(raw)
+            if not any(item.version == base.version and item.subnet_of(base) for base in fixed): extras.append(raw)
+    return entries, extras
+
 while i < len(lines):
     line = lines[i]
     if line == begin:
-        if managed or i + 2 >= len(lines) or lines[i+2] != end or not lines[i+1].startswith(b'mynetworks = '):
+        if managed:
             sys.exit('malformed or duplicate mailstack-edge block')
+        end_index = i + 1
+        while end_index < len(lines) and lines[end_index] != end:
+            end_index += 1
+        if end_index == len(lines): sys.exit('unterminated mailstack-edge block')
+        entries, relay_extras = block_entries(b''.join(lines[i+1:end_index]))
         managed = True
-        move_to_end = mode != 'revert' and i + 3 < len(lines)
-        i += 3
+        move_to_end = mode != 'revert' and end_index + 1 < len(lines)
+        if mode == 'revert' and relay_extras:
+            # Keep the effective base and admin relay list outside our removed markers.
+            clean.append(b'mynetworks = ' + b', '.join(entries) + b'\n')
+        i = end_index + 1
         continue
     if line.startswith(marker):
         if managed or not line.endswith(b'\n') or i + 1 >= len(lines):
@@ -110,6 +143,8 @@ if mode != 'revert':
     if len(matches) > 1:
         sys.exit('multiple operator mynetworks settings; nothing changed')
     if matches:
+        if relay_extras:
+            sys.exit('admin relay items and an operator mynetworks setting coexist; manual merge required')
         i = matches[0]
         match = re.match(rb'(mynetworks[ \t]*=[ \t]*)(.*)', clean[i], re.DOTALL)
         clean[i] = marker + prefix + b'\n' + match[1] + prefix + match[2]
@@ -119,7 +154,9 @@ if mode != 'revert':
         if web6:
             address, length = network6.split('/')
             defaults += f', [{address}]/{length}'
-        data = data + begin + b'mynetworks = ' + prefix + defaults.encode() + b'\n' + end
+        data = data + begin + b'mynetworks = ' + prefix + defaults.encode() + (b', ' + b', '.join(relay_extras) if relay_extras else b'') + b'\n' + end
+if mode == 'revert' and relay_extras and sum(bool(re.match(rb'mynetworks[ \t]*=', line)) for line in data.splitlines()) != 1:
+    sys.exit('multiple mynetworks settings with admin relay items; manual merge required')
 reject_backslashes(data)
 if not move_to_end and comparable(original) == comparable(data):
     data = original

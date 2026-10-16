@@ -68,7 +68,7 @@ export function loadAdminConfig(env = process.env) {
     if (!match || Number(match[1]) > 65535) invalid('DOVEADM_URL');
     if (!doveadmKey.trim()) invalid('DOVEADM_KEY');
   } else if (doveadmKey !== '') invalid('DOVEADM_URL');
-  const relayRaw = choice('RELAY_FILES', ['', '/run/relay/extra.cf,/run/relay/options.inc']);
+  const relayRaw = choice('RELAY_FILES', ['', '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc']);
   const mailcowIpv4Network = value('MAILCOW_IPV4_NETWORK');
   if (mailcowIpv4Network.split('.').length !== 3 || isIP(`${mailcowIpv4Network}.0`) !== 4) invalid('MAILCOW_IPV4_NETWORK');
   const mailcowIpv6Network = value('MAILCOW_IPV6_NETWORK', true);

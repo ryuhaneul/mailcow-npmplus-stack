@@ -1031,3 +1031,39 @@ sudo bash scripts/verify.sh
 `TOOLKIT_ENABLE=false`는 설치·갱신만 건너뜁니다. Toolkit 제거는 기능 대조와 승인 후 별도 `toolkit-remove.sh` 도구로 진행합니다. 기존 컨테이너·데이터·API 키를 update가 자동 삭제하지 않습니다.
 
 mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON API, dockerapi 공유·필터 읽기, 실제 IP 전달, 공개 웹메일 격리를 시험 VM에서 확인합니다. 로고·변경 기록 볼륨도 별도로 백업합니다.
+
+### 2단계: 메일 정리·용량 재확인·릴레이 허용 IP
+
+두 기능은 각각 선택하며 기본 꺼짐입니다. `WEBMAIL_ADMIN_ENABLE=true`가 필수이고, 관리 끔 상태에서 아래 선택값만 켜면 설정 오류로 멈춥니다.
+
+| 변수 | 기본값 | 동작 |
+|---|---|---|
+| `WEBMAIL_ADMIN_DOVEADM_ENABLE` | `false` | 메일 정리·용량 재확인용 내부 HTTP API |
+| `WEBMAIL_ADMIN_DOVEADM_KEY` | 빈 값 | 위 기능이 켜졌을 때만 64자리 hex 키를 생성해 스택 `.env`에 권한600으로 저장. 출력·커밋 금지 |
+| `WEBMAIL_ADMIN_RELAY_ENABLE` | `false` | Postfix/Rspamd 릴레이 파일 두 개 연결 |
+
+사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 기존 IMAP·POP 접속을 끊지 않습니다. 릴레이 목록 변경은 Postfix·Rspamd를 재시작하므로 짧은 SMTP 중단이 있습니다. 운영 반영은 시간대를 정해 진행합니다.
+
+`.env`에서 원하는 선택값을 true로 바꾼 뒤 저장소 루트에서 실행합니다. 관리 컨테이너는 같은 이미지이며 서버 코드를 새로 반영했다면 먼저 이미지를 빌드합니다.
+
+```bash
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
+(cd /home/webmail && sudo docker compose --profile admin up -d webmail-admin)
+sudo bash scripts/verify.sh
+```
+
+`webmail_prepare`는 필요한 키만 생성하고 `apply-dovecot-admin-api.sh apply -y` 또는 `--revert -y`를 실행한 뒤 env·override를 만듭니다. setup·update도 같은 준비를 합니다. 같은 Dovecot 블록이면 파일 쓰기·reload가 없습니다. 키와 선택값이 없는 기존 `.env`에서는 2단계 작업을 하지 않습니다.
+
+관리 env의 `DOVEADM_URL`은 `http://dovecot:12346`이며 `dovecot`은 mailcow 내부망의 서비스 별칭입니다. 클라이언트가 `/doveadm/v1`을 붙입니다. 포트12346은 호스트에 게시하지 않습니다. `DOVEADM_KEY`는 관리 env에만 넣고 공개 웹메일에는 전달하지 않습니다.
+
+릴레이는 `/home/mailcow-dockerized/data/conf/postfix/extra.cf`와 `data/conf/rspamd/local.d/options.inc`가 모두 있을 때만 연결합니다. 특히 mailcow 기본 상태에서 `options.inc`가 없으면 빈 파일을 만들지 않고 두 마운트와 `RELAY_FILES`를 비운 뒤 경고합니다. 기능은 `RELAY_DISABLED`로 꺼지고 verify의 파일 검사는 실패로 표시됩니다. 설정을 검토해 두 파일을 준비하거나 선택값을 false로 되돌립니다.
+
+릴레이를 켜면 Postfix 설정 디렉터리를 `/run/relay/postfix`, Rspamd `local.d` 디렉터리를 `/run/relay/rspamd`에 `rw,z`로 연결합니다. 관리 env의 `RELAY_FILES`는 `/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc`입니다. 관리 서버가 쓰는 대상은 두 파일뿐이지만 컨테이너에는 두 설정 디렉터리 전체의 쓰기 권한이 노출됩니다. 이 범위 때문에 릴레이 기능은 기본 꺼짐(`WEBMAIL_ADMIN_RELAY_ENABLE=false`)이며 승인된 관리 작업에만 사용합니다. mailcow Postfix 시작 스크립트는 `sed -i`로 `extra.cf` inode를 바꿉니다. 디렉터리를 연결하면 서비스 재시작 뒤 다음 파일 열기에서도 새 inode를 찾아 읽고 쓸 수 있습니다. mailcow는 Postfix 디렉터리에 `rw,z`, Rspamd `local.d` 디렉터리에 `rw,Z`를 사용하므로 단순히 모든 경로의 라벨을 같은 방식으로 바꿔도 안전하다고 가정할 수 없습니다. 시험 VM은 도커 SELinux가 꺼져 있어 충돌을 검증하지 못했습니다. **운영 서버 반영 전 도커 SELinux 설정과 AVC(`ausearch -m avc --input-logs`) 확인 필수**입니다. 거부가 있으면 적용을 중단하고 mount/컨테이너 라벨을 확인합니다. 운영 반영 전 node UID로 두 파일에 쓸 수 있는지, Postfix 재시작으로 inode가 바뀐 뒤에도 관리 쪽에서 새 내용을 읽고 쓰는지, Rspamd 재시작 뒤에도 같은지 확인합니다. 쓰기 권한이 없으면 중단하고 보고하며 파일 소유권·모드를 자동으로 바꾸지 않습니다.
+
+검증은 `apply-dovecot-admin-api.sh --check`, 관리 컨테이너 안 두 릴레이 파일의 존재·읽기, 시험 메일함 개수·용량, 두 릴레이 목록의 일치 여부를 포함합니다. 메일 정리의 삭제는 휴지통으로 옮기지 않으므로 기준일·대상·개수를 확인해야 합니다.
+
+### 2단계 끄기와 릴레이 항목 보존
+
+원하는 선택값을 false로 바꾼 뒤 같은 `webmail_prepare` → 관리 profile up → verify 순서로 실행합니다. doveadm 관리 블록은 `--revert -y`로 제거하고 reload합니다. 릴레이는 파일 연결만 해제하며 이미 저장한 허용 IP는 자동 삭제하지 않습니다. 릴레이 목록의 원복은 연결을 끄기 전에 변경 기록 또는 `/data/relay-backup/`의 두 파일을 검토해 제자리로 복원한 뒤 Postfix·Rspamd를 재시작합니다.
+
+`apply-postfix-edge.sh apply`는 기본 고정 목록 뒤에 관리 화면이 더한 릴레이 IP를 보존합니다. `--revert`는 망 분리 표식과 중계 제외 항목만 제거합니다. 관리 릴레이 IP가 있으면 기본 허용 목록과 함께 표식 밖 `mynetworks`로 남기므로 관리 항목을 지우지 않습니다. 관리 릴레이 IP가 없으면 기존 되돌리기 동작을 유지합니다. 해석할 수 없는 항목이나 별도 `mynetworks`와의 충돌은 자동 병합하지 않고 멈춥니다. 전체 teardown도 Dovecot 관리 블록을 먼저 제거하며 관리 기록·로고 볼륨은 보존합니다.

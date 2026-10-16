@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, stat, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, stat, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseRelayFiles, renderRelayFiles, validateRelayIp, relayNetwork, writeRelayInPlace } from '../../server/admin/relay-files.js';
@@ -53,7 +53,8 @@ test('relay refuses missing/duplicate/malformed layouts', () => {
 });
 async function setup(t, overrides = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'webmail-relay-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const paths = [join(dir, 'extra.cf'), join(dir, 'options.inc')]; await Promise.all(paths.map((path, i) => writeFile(path, [baseExtra, baseOptions][i])));
+  await Promise.all(['postfix', 'rspamd'].map(name => mkdir(join(dir, name))));
+  const paths = [join(dir, 'postfix', 'extra.cf'), join(dir, 'rspamd', 'options.inc')]; await Promise.all(paths.map((path, i) => writeFile(path, [baseExtra, baseOptions][i])));
   const audit = createAudit({ dir: join(dir, 'audit') }), lock = createResourceLock(), history = createHistoryService({ audit, lock }), calls = [];
   let failed = false;
   const dockerapi = { restart: async name => { calls.push(name); if (overrides.restartFail && (!failed || overrides.alwaysFail)) { failed = true; throw new Error('synthetic'); } } };

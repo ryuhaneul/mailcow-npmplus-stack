@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 usage() { echo "Usage: $0 "; }
 for arg in "$@"; do
@@ -53,6 +54,11 @@ echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
+
+# Remove only the managed doveadm API block while Dovecot is still available.
+if grep -qFx '# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --revert -y || { warn 'Admin doveadm revert failed; teardown stopped'; exit 1; }
+fi
 
 # Remove the app link while mailcow Redis is still available.
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ] || [ -f "$WEBMAIL_DIR/webmail-admin.env" ] || docker inspect webmail-admin >/dev/null 2>&1; then

@@ -47,7 +47,7 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
     const owner = address(rawOwner), grantee = address(rawGrantee);
     if (!owner || !grantee || owner === grantee) throw invalid();
     return lock.run(owner, async () => {
-      await validate(session, owner, [grantee]);
+      if (grant) await validate(session, owner, [grantee]);
       const before = await snapshot(owner);
       assertUnchanged(expected, before);
       const existing = before.grants.find(row => row.grantee === grantee);
@@ -56,6 +56,7 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
       if (Boolean(existing) === grant) return { ...response(before), unchanged: true };
       const after = { grants: (grant ? [...before.grants, { grantee, rights: ['lookup', 'read'] }] : before.grants.filter(row => row.grantee !== grantee)).sort((a, b) => a.grantee.localeCompare(b.grantee)) };
       return audit.run({ actor, ip, action: grant ? 'share.grant' : 'share.revoke', target: owner, kind: 'config', revertible: true, before, after }, async () => {
+        assertUnchanged(expected, await snapshot(owner));
         if (grant) await dockerapi.setAcl(owner, grantee);
         else await dockerapi.deleteAcl(owner, grantee);
         const applied = await snapshot(owner);
@@ -73,7 +74,8 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
       const previous = new Map(expected.grants.map(row => [row.grantee, row.rights]));
       const desired = new Map(value.grants.map(row => [row.grantee, row.rights]));
       const changed = [...new Set([...previous.keys(), ...desired.keys()])].filter(grantee => !isDeepStrictEqual(previous.get(grantee), desired.get(grantee)));
-      await validate(session, target, changed);
+      const additions = changed.filter(grantee => desired.has(grantee));
+      if (additions.length) await validate(session, target, additions);
       for (const grantee of changed) {
         if ((previous.has(grantee) && !readOnly(previous.get(grantee))) || (desired.has(grantee) && !readOnly(desired.get(grantee)))) throw unsupported();
       }

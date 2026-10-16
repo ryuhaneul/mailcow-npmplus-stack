@@ -1242,6 +1242,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     else
         warn "Webmail admin: ADMIN_ACCESS_LIST is empty; proxy creation skipped"
     fi
+    WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
 fi
 
 admin_access apply || die "Admin access-list application failed"

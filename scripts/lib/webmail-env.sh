@@ -5,7 +5,7 @@
 #   webmail_generate_admin_env <WEBMAIL_DIR>
 #   webmail_generate_env <WEBMAIL_DIR>
 #   webmail_extract_tls_pin <WEBMAIL_DIR>
-#   webmail_prepare <stack .env> <MAILCOW_DIR> <WEBMAIL_DIR> (public env and TLS pin)
+#   webmail_prepare <stack .env> <MAILCOW_DIR> <WEBMAIL_DIR> (public/admin env and TLS pin)
 # Secrets are never printed. Generated env files are Compose env_file syntax,
 # with quoted values and literal dollars escaped for Compose interpolation.
 
@@ -328,7 +328,7 @@ webmail_extract_tls_pin() (
 
 webmail_prepare() {
     webmail_load_config "$1" "$2" && webmail_ensure_db_password &&
-        webmail_extract_tls_pin "$3" && webmail_generate_env "$3"
+        webmail_extract_tls_pin "$3" && webmail_generate_env "$3" && webmail_generate_admin_env "$3"
 }
 
 # Compare normalized public certificate fingerprints, not PEM formatting.
@@ -359,6 +359,10 @@ webmail_refresh_pin() {
     current=$(webmail_pin_fingerprint "$1/mail-tls-pin.pem") || return 1
     if [ "$previous" != "$current" ]; then
         echo '[webmail] TLS certificate changed; restarting Webmail (all users must log in again).'
-        (cd "$1" && docker compose up -d --force-recreate webmail) || return 1
+        if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
+            (cd "$1" && docker compose --profile admin up -d --force-recreate webmail webmail-admin) || return 1
+        else
+            (cd "$1" && docker compose up -d --force-recreate webmail) || return 1
+        fi
     fi
 }

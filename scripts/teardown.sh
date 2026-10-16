@@ -21,6 +21,18 @@ SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="$PROJECT_DIR/.env"
+WEBMAIL_ADMIN_ENABLE=false
+if [ -f "$ENV_FILE" ]; then
+    WEBMAIL_ADMIN_ENABLE=$(
+        set +x
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+        printf '%s' "${WEBMAIL_ADMIN_ENABLE:-false}"
+    )
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -36,10 +48,16 @@ echo "  - NPMplus + CrowdSec"
 echo "  - Snappymail"
 echo "  - Toolkit"
 echo "  - Webmail (웹메일)"
+echo "  - 관리 화면(기록·로고 볼륨은 남김)"
 echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
+
+# Remove the app link while mailcow Redis is still available.
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ] || [ -f "$WEBMAIL_DIR/webmail-admin.env" ] || docker inspect webmail-admin >/dev/null 2>&1; then
+    WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" remove "$MAILCOW_DIR" || { warn 'Admin app link removal failed; teardown stopped'; exit 1; }
+fi
 
 # Restore Postfix before its container/configuration is removed.
 if [ -d "$MAILCOW_DIR/data/conf/postfix" ]; then
@@ -76,7 +94,15 @@ fi
 if [ -d "$WEBMAIL_DIR" ]; then
     log "Stopping Webmail..."
     cd "$WEBMAIL_DIR"
-    docker compose down --remove-orphans -v 2>&1 | tail -3 || true
+    # Admin audit/brand named volumes survive teardown, including when disabled.
+    if [ -f "$WEBMAIL_DIR/webmail-admin.env" ]; then
+        docker compose --profile admin down --remove-orphans 2>&1 | tail -3 || true
+    else
+        docker compose down --remove-orphans 2>&1 | tail -3 || true
+    fi
+    log "Preserved admin audit/brand volumes:"
+    docker volume ls --quiet --filter label=com.docker.compose.volume=webmail-admin-data
+    docker volume ls --quiet --filter label=com.docker.compose.volume=webmail-brand
 fi
 
 # NPMplus and app containers are now down, so no edge endpoints should remain.

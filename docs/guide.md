@@ -999,10 +999,23 @@ sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" 
 (cd "$WEBMAIL_DIR" && sudo docker compose build && sudo docker compose --profile admin up -d)
 sudo bash scripts/webmail-cutover.sh add-admin-host
 sudo bash scripts/admin-app-link.sh add "$MAILCOW_DIR"
+sudo bash -e -c '
+  set +x
+  set -a; source "$1/.env"; set +a
+  source "$1/scripts/lib/webmail-env.sh"
+  source "$1/scripts/lib/waf.sh"
+  waf_reconcile "${NPMPLUS_DIR:-/home/npmplus}"
+  docker exec npmplus nginx -t
+  if [ "$WAF_NPMPLUS_RESTART_REQUIRED" = true ]; then
+    docker restart npmplus
+  else
+    docker exec npmplus nginx -s reload
+  fi
+' bash "$PWD"
 sudo bash scripts/verify.sh
 ```
 
-순서는 rsync → `webmail_prepare`(공개·관리 env와 override) → build·관리 profile up → 관리 프록시 → 앱 링크입니다.
+순서는 rsync → `webmail_prepare`(공개·관리 env와 override) → build·관리 profile up → 관리 프록시 → 앱 링크 → WAF 재적용 → 확인입니다. WAF 재적용은 update와 같은 `waf_reconcile`로 관리 주소 예외를 생성하고 CrowdSec 설정을 검증·재적용합니다. NPMplus도 `nginx -t` 성공 후 reload하며, 바운서 설정이 바뀌어 함수가 재시작을 요구하면 restart합니다. 어느 단계든 실패하면 다음 단계로 진행하지 말고 원인을 확인합니다.
 
 `/home/webmail/webmail-admin.env`는 권한600입니다. 스택 `.env`와 함께 출력하거나 커밋하지 마세요. `pin` 모드에서는 공개 인증서를 두 컨테이너에 `:ro,z`로 연결하고, 인증서가 바뀌면 둘 다 재생성합니다. 일반 update도 관리 env와 앱 링크를 다시 확인합니다.
 
@@ -1022,14 +1035,62 @@ sudo bash scripts/webmail-cutover.sh remove-admin-host
 sudo bash scripts/admin-app-link.sh remove /home/mailcow-dockerized
 sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
 (cd /home/webmail && sudo docker compose up -d webmail)
+sudo bash -e -c '
+  set +x
+  set -a; source "$1/.env"; set +a
+  source "$1/scripts/lib/webmail-env.sh"
+  source "$1/scripts/lib/waf.sh"
+  waf_reconcile "${NPMPLUS_DIR:-/home/npmplus}"
+  docker exec npmplus nginx -t
+  if [ "$WAF_NPMPLUS_RESTART_REQUIRED" = true ]; then
+    docker restart npmplus
+  else
+    docker exec npmplus nginx -s reload
+  fi
+' bash "$PWD"
 sudo bash scripts/verify.sh
 ```
+
+위 WAF 재적용은 바뀐 `.env`를 읽어 관리 주소 예외도 제거합니다. 설정 검증에 실패하면 reload하지 않고 원인을 확인합니다.
 
 `LOGO_DIR`가 비어 공개 웹메일은 기본 글자 로고를 표시합니다. 관리 주소가 닫혔고 컨테이너가 없는지 확인합니다. `webmail-admin-data`와 `webmail-brand` 볼륨은 남습니다. 실제 이름에는 compose 프로젝트 접두가 붙습니다. 전체 `teardown.sh`도 관리 기록·로고 볼륨을 보존하고 이름을 안내합니다. 별도 확인 없이 `down -v`나 볼륨 삭제를 실행하지 않습니다.
 
 ### Toolkit 제거와 mailcow 업데이트
 
-`TOOLKIT_ENABLE=false`는 설치·갱신만 건너뜁니다. Toolkit 제거는 기능 대조와 승인 후 별도 `toolkit-remove.sh` 도구로 진행합니다. 기존 컨테이너·데이터·API 키를 update가 자동 삭제하지 않습니다.
+`TOOLKIT_ENABLE=false`는 설치·갱신만 건너뜁니다. 관리 화면에서 Toolkit 대응 기능을 모두 확인하고 서버별 제거 승인을 받은 뒤 진행합니다. 기존 컨테이너·데이터·API 키를 update가 자동 삭제하지 않습니다. 아래 명령은 스택 저장소 루트에서 실행하며 백업 폴더는 아직 없는 경로를 지정합니다.
+
+```bash
+TOOLKIT_BACKUP_DIR=/root/toolkit-backup-$(date +%Y%m%d-%H%M%S)
+sudo env TOOLKIT_BACKUP_DIR="$TOOLKIT_BACKUP_DIR" bash scripts/toolkit-remove.sh backup
+sudo test -s "$TOOLKIT_BACKUP_DIR/toolkit-backup.json"
+sudo stat -c '%a %n' "$TOOLKIT_BACKUP_DIR/config.yml"
+```
+
+`verified backup saved` 성공 메시지와 `config.yml` 권한600을 확인합니다. 도구는 데이터 폴더가 비어 있지 않은지와 config·compose 조각·nginx 경로·PHP 인증 연결·Redis 앱 링크의 백업 및 해시를 검증합니다. 백업 내용을 대화·로그에 출력하지 마세요. 성공 확인 후 스택 `.env`에서 `TOOLKIT_ENABLE=false`로 직접 바꾸고, 같은 셸에서 같은 백업 경로로 제거합니다. `remove`에는 위치 인자를 붙이지 않습니다.
+
+```bash
+sudo env TOOLKIT_BACKUP_DIR="$TOOLKIT_BACKUP_DIR" bash scripts/toolkit-remove.sh remove
+sudo bash scripts/verify.sh
+```
+
+remove는 백업을 다시 검증한 뒤 앱 링크·컨테이너·compose 조각·nginx 경로·PHP 인증 연결을 제거하고 nginx를 reload합니다. 앱 메뉴에서 Toolkit이 사라지고 관리 화면이 남았는지, 허용 IP에서 로그인한 뒤 `https://mailcow.example.com/toolkit/`이 404인지 확인합니다(`example.com`은 실제 도메인으로 바꿈). mailcow API 키는 변경하지 않으며 `/home/mailcow-toolkit` 설치·데이터 폴더와 백업 폴더를 남깁니다.
+
+복구하려면 실제 백업 폴더를 위치 인자로 전달합니다. 아래 예의 경로를 보관한 경로로 바꿉니다.
+
+```bash
+sudo bash scripts/toolkit-remove.sh restore /root/toolkit-backup-20261017-020000
+```
+
+복구 성공 후 스택 `.env`에서 `TOOLKIT_ENABLE=true`로 직접 바꾸고 실행합니다.
+
+```bash
+(cd /home/mailcow-dockerized && sudo docker compose up -d toolkit-mailcow)
+sudo bash toolkit/app_link.sh add /home/mailcow-dockerized
+(cd /home/mailcow-dockerized && sudo docker compose exec -T nginx-mailcow nginx -s reload)
+sudo bash scripts/verify.sh
+```
+
+앱 메뉴에 Toolkit이 돌아오고 `/toolkit/`이 열리는지 확인합니다. 백업 이후 설치 파일·데이터·앱 링크가 달라졌으면 도구는 복구를 거부하므로 변경 내용을 먼저 확인합니다.
 
 mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON API, dockerapi 공유·필터 읽기, 실제 IP 전달, 공개 웹메일 격리를 시험 VM에서 확인합니다. 로고·변경 기록 볼륨도 별도로 백업합니다.
 

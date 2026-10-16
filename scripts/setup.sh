@@ -122,6 +122,7 @@ ENV_FILE="${PROJECT_DIR}/.env"
 WEBMAIL_ENABLE=false
 SNAPPYMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
+TOOLKIT_ENABLE=true
 set -a; source "$ENV_FILE"; set +a
 
 [ -z "${DOMAIN:-}" ] && die "DOMAIN is required in .env"
@@ -133,6 +134,7 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 
 
 # ============================================================
@@ -279,7 +281,9 @@ waf_resolve_bouncer_key "$NPMPLUS_DIR" true || die "Bouncer key selection failed
 [ -z "${CROWDSEC_BOUNCER_KEY:-}" ] && CROWDSEC_BOUNCER_KEY=$(openssl rand -hex 32) && log "Generated CROWDSEC_BOUNCER_KEY"
 WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
 export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
-[ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32)
+if [ "$TOOLKIT_ENABLE" = true ]; then
+    [ -z "${TOOLKIT_SECRET_KEY:-}" ] && TOOLKIT_SECRET_KEY=$(openssl rand -hex 32)
+fi
 NPM_ADMIN_EMAIL="${NPM_ADMIN_EMAIL:-admin@${DOMAIN}}"
 NPM_ADMIN_PASSWORD="${NPM_ADMIN_PASSWORD:-$(openssl rand -base64 18)}"
 
@@ -391,6 +395,15 @@ log "mailcow.conf: HTTP_PORT=8080, HTTPS_PORT=8443, BIND=127.0.0.1"
 
 # --- Install override (idempotent — overwrites) ---
 cp "$PROJECT_DIR/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
+if [ "$TOOLKIT_ENABLE" = false ]; then
+    python3 - "$MAILCOW_DIR/docker-compose.override.yml" <<'TKOVERRIDE'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r'(?ms)^  toolkit-mailcow:\n.*?(?=^  [a-zA-Z0-9_-]+:|^[a-zA-Z0-9_-]+:|\Z)', '', text)
+path.write_text(text)
+TKOVERRIDE
+fi
 log "docker-compose.override.yml installed"
 
 # --- Optional: bind vmail-vol-1 to a host path (single-disk servers leave VMAIL_DEVICE empty) ---
@@ -418,6 +431,7 @@ fi
 # --- Install Mailcow Toolkit (bundled in this repo) ---
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
+if [ "$TOOLKIT_ENABLE" = true ]; then
 if [ -d "$TOOLKIT_DIR" ]; then
     log "Toolkit: already installed at $TOOLKIT_DIR"
 else
@@ -443,6 +457,8 @@ toolkit:
     - mailboxes
     - shares
 TKCFG
+
+fi
 
 # --- Start Mailcow ---
 log "Starting Mailcow (internal ports)..."
@@ -632,6 +648,7 @@ else:
 
 fi
 
+if [ "$TOOLKIT_ENABLE" = true ]; then
 # Update toolkit config with real API key (skip if already has a real key)
 CURRENT_TK_KEY=$(grep "api_key:" "$TOOLKIT_DIR/config.yml" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "")
 if [ "$CURRENT_TK_KEY" = "placeholder" ] || [ -z "$CURRENT_TK_KEY" ]; then
@@ -675,6 +692,8 @@ log "Toolkit: nginx config installed"
 if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
     APP_LINK_RESULT=$("$TOOLKIT_DIR/app_link.sh" add "$MAILCOW_DIR" 2>/dev/null || echo "failed")
     log "Toolkit App Link: $APP_LINK_RESULT"
+fi
+
 fi
 
 # Edge stages 1/2 run before NPMplus is attached to the app networks.
@@ -873,6 +892,10 @@ fi
 # Phase 6b: Webmail
 # ============================================================
 if [ "$WEBMAIL_ENABLE" = true ]; then log "Webmail edge project already prepared and started"; fi
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
+    (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+fi
 
 # ============================================================
 # Phase 6c: Junk/Trash retention (independent of Webmail)
@@ -988,7 +1011,7 @@ print(identity)
 create_proxy_host() {
     local domain="$1" host="$2" port="$3" scheme="$4" advanced="${5:-}" access_list_id="${6:-0}"
     local http2=false
-    [ "$host" != webmail ] || http2=true
+    if [ "$host" = webmail ] || [ "$host" = webmail-admin ]; then http2=true; fi
 
     # Skip if already exists
     if echo "$EXISTING_HOSTS" | grep -qFx "$domain"; then
@@ -1005,6 +1028,19 @@ for item in json.load(sys.stdin):
                 warn "  $domain: existing target is $existing_target; skipping (use webmail-cutover.sh switch for a deliberate cutover)"
             else
                 log "  $domain: already points to webmail, skipping"
+            fi
+        elif [ "$host" = webmail-admin ]; then
+            local existing_target
+            existing_target=$(curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 -c '
+import sys,json
+for item in json.load(sys.stdin):
+    if sys.argv[1] in item.get("domain_names",[]):
+        print("{}:{}:{}".format(item.get("forward_host", "unknown"), item.get("forward_port", 0), item.get("forward_scheme", "unknown"))); break
+' "$domain") || return 1
+            if [ "$existing_target" != "$host:$port:$scheme" ]; then
+                warn "  $domain: existing target is $existing_target; skipping"
+            else
+                log "  $domain: already points to webmail-admin, skipping"
             fi
         else
             log "  $domain: already exists, skipping"
@@ -1200,6 +1236,14 @@ if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
     done
 fi
 
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    if [ -n "$ADMIN_ACCESS_ID" ] && [ "$ADMIN_ACCESS_ID" != 0 ]; then
+        create_proxy_host "$WEBMAIL_ADMIN_HOSTNAME" webmail-admin 8080 http "client_max_body_size 4m;" "$ADMIN_ACCESS_ID" >/dev/null
+    else
+        warn "Webmail admin: ADMIN_ACCESS_LIST is empty; proxy creation skipped"
+    fi
+fi
+
 admin_access apply || die "Admin access-list application failed"
 
 # 2. mailcow.DOMAIN -> nginx-mailcow
@@ -1289,6 +1333,7 @@ TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 
+if [ "$TOOLKIT_ENABLE" = true ]; then
 # Install the session-authorization PHP hook the Toolkit sidecar calls for
 # every request. The sidecar's auth.py posts here and only passes if the
 # visitor already holds a Mailcow admin PHP session.
@@ -1299,6 +1344,8 @@ if [ -f "$AUTHZ_SRC" ]; then
     log "Toolkit auth hook installed at $AUTHZ_DST"
 else
     warn "authz_toolkit_check.php source missing at $AUTHZ_SRC — Toolkit auth will fail"
+fi
+
 fi
 
 if [ -f "$TOOLKIT_UI_PATCHER" ]; then
@@ -1312,11 +1359,14 @@ else
     warn "UI patcher not found at $TOOLKIT_UI_PATCHER — skipping"
 fi
 
+if [ "$TOOLKIT_ENABLE" = true ]; then
 if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
     APP_LINK_RESULT=$("$TOOLKIT_DIR/app_link.sh" add "$MAILCOW_DIR" 2>&1 || echo "failed")
     log "Toolkit App Link: $APP_LINK_RESULT"
 else
     warn "$TOOLKIT_DIR/app_link.sh missing or not executable — APP_LINKS not registered"
+fi
+
 fi
 
 # Shared-folder INDEX relocation (dovecot shared namespace). Runs once mailcow is up.

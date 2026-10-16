@@ -74,6 +74,10 @@ echo ""
 printf "  %-38s %s\n" "mail.${DOMAIN}" "$(check_dns "mail.${DOMAIN}" A "$SERVER_IP")"
 printf "  %-38s %s\n" "mailcow.${DOMAIN}" "$(check_dns "mailcow.${DOMAIN}" A "$SERVER_IP")"
 printf "  %-38s %s\n" "mail-npm.${DOMAIN}" "$(check_dns "mail-npm.${DOMAIN}" A "$SERVER_IP")"
+if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
+    WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
+    printf "  %-38s %s\n" "$WEBMAIL_ADMIN_HOSTNAME" "$(check_dns "$WEBMAIL_ADMIN_HOSTNAME" A "$SERVER_IP")"
+fi
 printf "  %-38s %s\n" "autodiscover.${DOMAIN}" "$(check_dns "autodiscover.${DOMAIN}" A "$SERVER_IP")"
 
 echo ""
@@ -151,6 +155,9 @@ printf "%-40s %-6s %s\n" "$(printf '%.0s─' {1..40})" "──────" "$(p
 printf "%-40s %-6s %s\n" "mail.${DOMAIN}" "A" "${SERVER_IP}"
 printf "%-40s %-6s %s\n" "mailcow.${DOMAIN}" "A" "${SERVER_IP}"
 printf "%-40s %-6s %s\n" "mail-npm.${DOMAIN}" "A" "${SERVER_IP}"
+if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
+    printf "%-40s %-6s %s\n" "$WEBMAIL_ADMIN_HOSTNAME" "A" "${SERVER_IP}"
+fi
 printf "%-40s %-6s %s\n" "autodiscover.${DOMAIN}" "A" "${SERVER_IP}"
 printf "%-40s %-6s %s\n" "autoconfig.${DOMAIN}" "CNAME" "mail.${DOMAIN}"
 printf "%-40s %-6s %s\n" "${DOMAIN}" "MX" "10 mail.${DOMAIN}"

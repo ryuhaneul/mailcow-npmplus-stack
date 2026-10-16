@@ -1,6 +1,6 @@
 #!/bin/bash
 # Administrator-only, explicit NPM changes. Never called by setup/update.
-# Usage: webmail-cutover.sh {status [--json]|add-host [hostname]|remove-host hostname|switch|revert [backup.json]}
+# Usage: webmail-cutover.sh {status [--json]|add-host [hostname]|remove-host hostname|add-admin-host|remove-admin-host|switch|revert [backup.json]}
 # Env: WEBMAIL_ENV_FILE, NPM_API, WEBMAIL_BACKUP_DIR (default /root/webmail-backup-YYYYMMDD).
 set +x
 set -euo pipefail
@@ -8,12 +8,12 @@ set -euo pipefail
 python3 -B - "$@" <<'ARGS'
 import argparse
 parser = argparse.ArgumentParser(description='Explicit Webmail proxy cutover; never edits .env')
-parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'switch', 'revert'])
+parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host', 'switch', 'revert'])
 parser.add_argument('target', nargs='?')
 parser.add_argument('--json', action='store_true', help='status: full proxy JSON for backup')
 args = parser.parse_args()
 if args.json and args.command != 'status': parser.error('--json is only valid with status')
-if args.target and args.command in ('status', 'switch'): parser.error('unexpected argument')
+if args.target and args.command in ('status', 'switch', 'add-admin-host', 'remove-admin-host'): parser.error('unexpected argument')
 if args.command == 'remove-host' and not args.target: parser.error('remove-host requires a hostname')
 ARGS
 for arg in "$@"; do
@@ -39,6 +39,8 @@ export CUTOVER_API="${NPM_API:-https://127.0.0.1:81/api}"
 export CUTOVER_BACKUP="${WEBMAIL_BACKUP_DIR:-/root/webmail-backup-$(date +%Y%m%d)}"
 export DOMAIN="${DOMAIN:?DOMAIN required}" NPM_ADMIN_EMAIL
 export SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}" WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
+export WEBMAIL_ADMIN_ENABLE="${WEBMAIL_ADMIN_ENABLE:-false}" WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
+export ADMIN_ACCESS_LIST="${ADMIN_ACCESS_LIST:-}"
 export WEBMAIL_ACCESS_LIST="${WEBMAIL_ACCESS_LIST:-}" WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
 python3 -B - "$@" <<'PY'
 import argparse, json, os, pathlib, re, shutil, subprocess, sys, uuid
@@ -47,9 +49,10 @@ work = pathlib.Path(os.environ['CUTOVER_WORK'])
 backup_dir = pathlib.Path(os.environ['CUTOVER_BACKUP'])
 api = os.environ['CUTOVER_API'].rstrip('/')
 domain = os.environ['DOMAIN'].lower()
+admin_hostname = os.environ['WEBMAIL_ADMIN_HOSTNAME'].strip().lower()
 fields = ('forward_host', 'forward_port', 'forward_scheme', 'advanced_config', 'http2_support', 'allow_websocket_upgrade', 'block_exploits', 'ssl_forced')
 sys.path.insert(0, str(pathlib.Path(os.environ['CUTOVER_SCRIPT_DIR']) / 'lib'))
-from npm_api import NpmApi, proxy_access_fields
+from npm_api import NpmApi, proxy_access_fields, select_admin_access
 client = NpmApi(api, work)
 os.umask(0o077)
 
@@ -87,7 +90,11 @@ def attachment_limit():
     if not raw.isdigit() or not 1 <= int(raw) <= 9007199254740991: fail('invalid attachment limit')
     return int(raw) + 5
 
-def target_patch():
+def target_patch(admin=False):
+    if admin:
+        return dict(forward_host="webmail-admin", forward_port=8080, forward_scheme="http",
+                    advanced_config="client_max_body_size 4m;", http2_support=True,
+                    allow_websocket_upgrade=False, block_exploits=False, ssl_forced=True)
     return dict(forward_host='webmail', forward_port=8080, forward_scheme='http',
                 advanced_config=f'client_max_body_size {attachment_limit()}m;', http2_support=True,
                 allow_websocket_upgrade=False, block_exploits=False, ssl_forced=True)
@@ -101,7 +108,9 @@ def validate_original(items):
         if not isinstance(item['forward_port'], int) or item['forward_port'] < 1: fail('backup lacks a valid forward port')
         if not isinstance(item.get('domain_names'), list): fail('backup lacks domain names')
 
-def select_access():
+def select_access(admin=False):
+    if admin:
+        return select_admin_access(client, os.environ["ADMIN_ACCESS_LIST"])
     name = os.environ['WEBMAIL_ACCESS_LIST']
     if not name: return 0
     items = request('GET', '/nginx/access-lists')
@@ -152,9 +161,9 @@ def upload_selfsigned(name):
         (dest / 'privkey.pem').chmod(0o600)
     return identity
 
-def add(names):
+def add(names, admin=False):
     names = list(dict.fromkeys(valid_name(name) for name in names))
-    access = select_access()
+    access = select_access(admin)
     if access is None: return
     try:
         current = hosts()
@@ -167,9 +176,10 @@ def add(names):
     for name in names:
         existing = next((item for item in current if name in item.get('domain_names', [])), None)
         if existing:
-            print(f'[webmail-cutover] {name}: existing target {existing.get("forward_host", "unknown")}; skipped')
+            print(f'[webmail-cutover] {name}: existing target {existing.get("forward_host", "unknown")}; skipped',
+                  file=sys.stderr if admin else sys.stdout)
             continue
-        payload = dict(domain_names=[name], **target_patch(), **access_fields,
+        payload = dict(domain_names=[name], **target_patch(admin), **access_fields,
                        certificate_id='new', locations=[],
                        meta=dict(letsencrypt_email=os.environ['NPM_ADMIN_EMAIL'], letsencrypt_agree=True, dns_challenge=False))
         try:
@@ -200,7 +210,7 @@ def add(names):
                 result = request('POST', '/nginx/proxy-hosts', payload)
             if not isinstance(result, dict) or not isinstance(result.get('id'), int): fail('creation returned no ID')
         current.append(result)
-        print(f'[webmail-cutover] added {name} -> webmail:8080')
+        print(f'[webmail-cutover] added {name} -> {payload["forward_host"]}:8080')
 
 def switch():
     current = hosts()
@@ -238,18 +248,28 @@ def revert(path):
 
 def main():
     parser = argparse.ArgumentParser(description='Explicit Webmail proxy cutover; never edits .env')
-    parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'switch', 'revert'])
+    parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host', 'switch', 'revert'])
     parser.add_argument('target', nargs='?')
     parser.add_argument('--json', action='store_true', help='status: full proxy JSON for backup')
     args = parser.parse_args()
     if args.json and args.command != 'status': fail('--json is only valid with status')
-    if args.target and args.command in ('status', 'switch'): fail('unexpected argument')
+    if args.target and args.command in ('status', 'switch', 'add-admin-host', 'remove-admin-host'): fail('unexpected argument')
     # Validate names before authenticating or changing anything.
     names = []
     if args.command == 'add-host':
         names = [args.target] if args.target else os.environ['WEBMAIL_HOSTNAMES'].split(',')
         if not args.target and os.environ['SNAPPYMAIL_ENABLE'] == 'false': names.append(f'mail.{domain}')
         names = [valid_name(name) for name in names]
+        if admin_hostname in names: fail('admin hostname requires add-admin-host')
+    if args.command in ('add-admin-host', 'remove-admin-host'):
+        name = valid_name(admin_hostname)
+        if name == f'mail.{domain}' or name in [host.strip().lower() for host in os.environ['WEBMAIL_HOSTNAMES'].split(',')]:
+            fail('admin hostname conflicts with Webmail')
+        if not os.environ['ADMIN_ACCESS_LIST']: fail('ADMIN_ACCESS_LIST is required for admin hosts')
+        if args.command == 'add-admin-host' and os.environ['WEBMAIL_ADMIN_ENABLE'] != 'true':
+            fail('WEBMAIL_ADMIN_ENABLE=true is required')
+        names = [name]
+        args.target = name
     if args.command == 'remove-host':
         if not args.target: fail('remove-host requires a hostname')
         args.target = valid_name(args.target, allow_mail=True)
@@ -261,6 +281,7 @@ def main():
             for item in current:
                 print(f'{item["id"]}\t{",".join(item.get("domain_names", []))}\t{item.get("forward_host")}:{item.get("forward_port")}\taccess={item.get("access_list_id", 0)}')
     elif args.command == 'add-host': add(names)
+    elif args.command == 'add-admin-host': add(names, admin=True)
     elif args.command == 'switch': switch()
     elif args.command == 'revert': revert(pathlib.Path(args.target) if args.target else backup_dir / 'webmail-cutover-before.json')
     else:
@@ -268,7 +289,12 @@ def main():
         if not selected:
             print('[webmail-cutover] hostname absent; nothing changed')
             return
-        if len(selected) != 1 or selected[0].get('forward_host') != 'webmail': fail('remove-host only removes a Webmail proxy')
+        if args.command == 'remove-admin-host':
+            if len(selected) != 1 or selected[0].get('domain_names') != [args.target] or any(
+                    selected[0].get(key) != value for key, value in
+                    [('forward_host', 'webmail-admin'), ('forward_port', 8080), ('forward_scheme', 'http')]):
+                fail('remove-admin-host only removes its dedicated Webmail admin proxy')
+        elif len(selected) != 1 or selected[0].get('forward_host') != 'webmail': fail('remove-host only removes a Webmail proxy')
         item = selected[0]
         path = save_json(backup_dir / f'webmail-removed-host-{item["id"]}.json', item)
         request('DELETE', f'/nginx/proxy-hosts/{item["id"]}')

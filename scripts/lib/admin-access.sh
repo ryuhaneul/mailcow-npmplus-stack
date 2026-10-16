@@ -2,7 +2,7 @@
 # Run the shared cookie-based NPM client in a private temporary workspace.
 admin_access() (
     set +x
-    local mode="$1" work
+    local mode="$1" work admin_hostname=""
     if [ -z "${ADMIN_ACCESS_LIST:-}" ] && [ "$mode" != verify ]; then
         [ "$mode" != preflight ] || echo 0
         return 0
@@ -28,5 +28,6 @@ admin_access() (
         python3 -B -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_LOGIN_EMAIL"],"secret":os.environ["NPM_LOGIN_SECRET"]}))' > "$work/login.json" || return 1
     chmod 600 "$work/login.json" || return 1
     export -n NPM_ADMIN_PASSWORD
-    python3 -B "$SCRIPT_DIR/lib/npm_api.py" "$mode" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "${ADMIN_ACCESS_LIST:-}" "$DOMAIN"
+    if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then admin_hostname="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"; fi
+    python3 -B "$SCRIPT_DIR/lib/npm_api.py" "$mode" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "${ADMIN_ACCESS_LIST:-}" "$DOMAIN" "$admin_hostname"
 )

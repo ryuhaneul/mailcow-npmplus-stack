@@ -84,7 +84,7 @@ test('admin auth: random host-only strict cookie, hashed storage and sanitized r
   assert.equal(session.mailcow, f.remoteSessions[0]);
   assert.equal(f.calls[0].username, 'admin'); assert.equal(f.calls[0].ip, '198.51.100.9');
   assert.ok(f.calls[0].password.every(byte => byte === 0));
-  assert.deepEqual(Object.keys(response.json()).sort(), ['csrf', 'expiresAt', 'step', 'user']);
+  assert.deepEqual(Object.keys(response.json()).sort(), ['csrf', 'expiresAt', 'features', 'step', 'user']);
   assert.deepEqual(response.json().user, { username: 'admin' }); assert.equal(response.json().step, 'done');
   const current = await f.app.inject({ url: '/api/admin/auth/session', headers: credentials(response) });
   assert.deepEqual(current.json(), response.json()); assert.equal(count(f, 'call'), 0);
@@ -164,7 +164,7 @@ test('admin auth: totp cookie returns CSRF and fixed five-minute expiry, blocks 
   failure(await write(f, '/api/admin/auth/totp', noCsrf, { code: '123456' }), 403, 'CSRF');
   assert.equal(count(f, 'totp'), 0); assert.equal(count(f, 'call'), 0);
   const done = await write(f, '/api/admin/auth/totp', headers, { code: '123456' });
-  assert.equal(done.statusCode, 200, done.body); assert.equal(done.json().step, 'done'); assert.equal(count(f, 'totp'), 1);
+  assert.equal(done.statusCode, 200, done.body); assert.deepEqual(done.json().features, { cleanup: false, relay: false }); assert.equal(done.json().step, 'done'); assert.equal(count(f, 'totp'), 1);
   assert.equal((await f.app.inject({ url: '/api/admin/test-local', headers })).statusCode, 200);
 });
 
@@ -287,4 +287,17 @@ test('admin auth: oversized JSON is rejected without sending credentials upstrea
   const f = await fixture(t);
   const response = await login(f, { payload: { username: 'admin', password: 'x'.repeat(64 * 1024) } });
   assert.equal(response.statusCode, 413); assert.equal(count(f, 'login'), 0);
+});
+
+for (const [doveadmUrl, doveadmKey, relayFiles, expected] of [
+  ['', '', [], { cleanup: false, relay: false }],
+  ['http://dovecot:12346', 'synthetic-feature-key', [], { cleanup: true, relay: false }],
+  ['http://dovecot:12346', '', ['/run/relay/extra.cf'], { cleanup: false, relay: true }],
+  ['http://dovecot:12346', 'synthetic-feature-key', ['/run/relay/extra.cf'], { cleanup: true, relay: true }],
+]) test(`admin feature flags cleanup=${expected.cleanup} relay=${expected.relay} expose booleans only`, async t => {
+  const f = await fixture(t, { overrides: { doveadmUrl, doveadmKey, relayFiles } });
+  const response = await login(f); assert.deepEqual(response.json().features, expected);
+  const current = await f.app.inject({ url: '/api/admin/auth/session', headers: credentials(response) });
+  assert.deepEqual(current.json().features, expected);
+  assert.ok(!JSON.stringify(current.json()).includes('synthetic-feature-key'));
 });

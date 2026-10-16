@@ -17,6 +17,9 @@ webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 
 # Options can be loaded before mailcow exists (fresh setup Phase 0).
 webmail_options() {
+    WEBMAIL_ADMIN_DOVEADM_ENABLE="${WEBMAIL_ADMIN_DOVEADM_ENABLE:-false}"
+    WEBMAIL_ADMIN_RELAY_ENABLE="${WEBMAIL_ADMIN_RELAY_ENABLE:-false}"
+    WEBMAIL_ADMIN_DOVEADM_KEY="${WEBMAIL_ADMIN_DOVEADM_KEY:-}"
     WEBMAIL_ADMIN_ENABLE="${WEBMAIL_ADMIN_ENABLE:-false}"
     WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
     WEBMAIL_ADMIN_HOSTNAME=${WEBMAIL_ADMIN_HOSTNAME,,}
@@ -29,7 +32,7 @@ webmail_options() {
     [[ "$WEBMAIL_ATTACH_MAX_MB" =~ ^[0-9]+$ ]] || { webmail_error "invalid attachment size"; return 1; }
     local flag host joined="" label
     local -a hosts labels
-    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$WEBMAIL_ADMIN_ENABLE"; do
+    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
     done
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
@@ -54,6 +57,9 @@ webmail_options() {
         case ",$joined," in *",$host,"*) ;; *) joined+="${joined:+,}$host" ;; esac
     done
     WEBMAIL_HOSTNAMES="$joined"
+    if [ "$WEBMAIL_ADMIN_ENABLE" != true ] && { [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ] || [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ]; }; then
+        webmail_error "admin stage 2 requires WEBMAIL_ADMIN_ENABLE=true"; return 1
+    fi
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
     [ "$WEBMAIL_ENABLE" = true ] || { webmail_error "WEBMAIL_ADMIN_ENABLE requires WEBMAIL_ENABLE=true"; return 1; }
     host="$WEBMAIL_ADMIN_HOSTNAME"
@@ -93,6 +99,9 @@ webmail_load_config() {
     WEBMAIL_ENABLE=false
     SNAPPYMAIL_ENABLE=true
     WEBMAIL_ADMIN_ENABLE=false
+    WEBMAIL_ADMIN_DOVEADM_ENABLE=false
+    WEBMAIL_ADMIN_RELAY_ENABLE=false
+    WEBMAIL_ADMIN_DOVEADM_KEY=
     WEBMAIL_ADMIN_HOSTNAME=
     WEBMAIL_ADMIN_SESSION_IDLE_MIN=
     WEBMAIL_ADMIN_SESSION_MAX_HOURS=
@@ -116,6 +125,10 @@ webmail_load_config() {
     [[ "$WEBMAIL_TLS_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { webmail_error "MAILCOW_HOSTNAME is required and must be a hostname"; return 1; }
     edge_load_config || return 1
     webmail_options || return 1
+    WEBMAIL_ADMIN_RELAY_READY=false
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ -f "$MAILCOW_DIR/data/conf/postfix/extra.cf" ] && [ -f "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc" ]; then
+        WEBMAIL_ADMIN_RELAY_READY=true
+    fi
     WEBMAIL_BRAND_NAME="${WEBMAIL_BRAND_NAME:-메일}"
     WEBMAIL_ORG_NAME="${WEBMAIL_ORG_NAME:-}"
     WEBMAIL_BRAND_MARK="${WEBMAIL_BRAND_MARK:-}"
@@ -174,6 +187,43 @@ webmail_ensure_db_password() {
     fi
 }
 
+webmail_ensure_admin_key() {
+    set +x
+    [ "$WEBMAIL_ADMIN_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ] || return 0
+    if [ -n "$WEBMAIL_ADMIN_DOVEADM_KEY" ]; then
+        [[ "$WEBMAIL_ADMIN_DOVEADM_KEY" =~ ^[A-Za-z0-9_+/=.-]+$ ]] || { webmail_error "invalid doveadm key token"; return 1; }
+        chmod 600 "$WEBMAIL_STACK_ENV" || return 1
+        return 0
+    fi
+    WEBMAIL_ADMIN_DOVEADM_KEY=$(openssl rand -hex 32) || return 1
+    local tmp line found=0
+    tmp=$(mktemp "$WEBMAIL_STACK_ENV.tmp.XXXXXX") || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ ^(export[[:space:]]+)?WEBMAIL_ADMIN_DOVEADM_KEY= ]]; then
+            if [ "$found" -eq 0 ]; then printf 'WEBMAIL_ADMIN_DOVEADM_KEY=%s\n' "$WEBMAIL_ADMIN_DOVEADM_KEY"; found=1; fi
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$WEBMAIL_STACK_ENV" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if [ "$found" -eq 0 ]; then printf 'WEBMAIL_ADMIN_DOVEADM_KEY=%s\n' "$WEBMAIL_ADMIN_DOVEADM_KEY" >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+    if ! chmod 600 "$tmp" || ! mv "$tmp" "$WEBMAIL_STACK_ENV"; then rm -f "$tmp"; return 1; fi
+}
+
+# Run before env/override generation and container recreation. Empty defaults do no work.
+webmail_reconcile_admin_api() {
+    set +x
+    local scripts="$1"
+    if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
+        WEBMAIL_ADMIN_DOVEADM_KEY="$WEBMAIL_ADMIN_DOVEADM_KEY" MAILCOW_DIR="$MAILCOW_DIR" \
+            bash "$scripts/apply-dovecot-admin-api.sh" apply -y || return 1
+    elif grep -qFx '# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+        MAILCOW_DIR="$MAILCOW_DIR" bash "$scripts/apply-dovecot-admin-api.sh" --revert -y || return 1
+    fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" != true ]; then
+        echo '[webmail-env] WARNING: relay extra.cf/options.inc missing; both relay mounts and feature disabled' >&2
+    fi
+}
+
 webmail_env_line() {
     local value="$2"
     [[ ! "$value" =~ [[:cntrl:]] ]] || { webmail_error "control character in $1"; return 1; }
@@ -227,11 +277,16 @@ webmail_generate_env() (
     chmod 600 "$tmp" && mv "$tmp" "$dest/webmail.env"
 )
 
-# Stage 2 (doveadm and relay files) is deliberately disabled until MA2/B05.
 webmail_generate_admin_env() (
     set +x
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
-    local dest="$1" tmp auto_days="" pin_file=""
+    local dest="$1" tmp auto_days="" pin_file="" doveadm_url="" doveadm_key="" relay_files=""
+    if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
+        [ -n "$WEBMAIL_ADMIN_DOVEADM_KEY" ] || { webmail_error "doveadm key is empty; call webmail_ensure_admin_key first"; return 1; }
+        doveadm_url=http://dovecot:12346
+        doveadm_key="$WEBMAIL_ADMIN_DOVEADM_KEY"
+    fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then relay_files=/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc; fi
     mkdir -p "$dest" || return 1
     tmp=$(mktemp "$dest/.webmail-admin.env.XXXXXX") || return 1
     trap 'rm -f "$tmp"' EXIT
@@ -253,9 +308,9 @@ webmail_generate_admin_env() (
         webmail_env_line DOMAIN "$DOMAIN" &&
         webmail_env_line TRUST_PROXY "$WEBMAIL_ADMIN_TRUST_PROXY" &&
         webmail_env_line DOCKERAPI_URL https://dockerapi:443 &&
-        webmail_env_line DOVEADM_URL "" &&
-        webmail_env_line DOVEADM_KEY "" &&
-        webmail_env_line RELAY_FILES "" &&
+        webmail_env_line DOVEADM_URL "$doveadm_url" &&
+        webmail_env_line DOVEADM_KEY "$doveadm_key" &&
+        webmail_env_line RELAY_FILES "$relay_files" &&
         webmail_env_line MAILCOW_IPV4_NETWORK "$WEBMAIL_NETWORK" &&
         webmail_env_line MAILCOW_IPV6_NETWORK "$WEBMAIL_IPV6_NETWORK" &&
         webmail_env_line AUTOEXPUNGE_DAYS "$auto_days" &&
@@ -274,10 +329,10 @@ webmail_generate_override() (
     local dest="$1"
     edge_generate_override webmail "$dest" || return 1
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
-    python3 - "$dest/docker-compose.override.yml" "$dest" "$MAILCOW_DIR" "$WEBMAIL_MAIL_TLS_MODE" <<'PYOVERRIDE' | edge_write_managed "$dest/docker-compose.override.yml" '# Generated by scripts/lib/webmail-env.sh' '# Generated by scripts/lib/edge.sh'
+    python3 - "$dest/docker-compose.override.yml" "$dest" "$MAILCOW_DIR" "$WEBMAIL_MAIL_TLS_MODE" "$WEBMAIL_ADMIN_RELAY_READY" <<'PYOVERRIDE' | edge_write_managed "$dest/docker-compose.override.yml" '# Generated by scripts/lib/webmail-env.sh' '# Generated by scripts/lib/edge.sh'
 import json, sys
 from pathlib import Path
-file, dest, mailcow, mode = sys.argv[1:]
+file, dest, mailcow, mode, relay_ready = sys.argv[1:]
 text = Path(file).read_text().split('\n', 1)[1]
 brand = '      - webmail-brand:/brand:ro\n'
 if '  webmail:\n' in text:
@@ -285,6 +340,9 @@ if '  webmail:\n' in text:
 else:
     text = text.replace('services:\n', 'services:\n  webmail:\n    volumes:\n' + brand, 1)
 mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z']
+if relay_ready == 'true':
+    mounts.extend([f'{mailcow}/data/conf/postfix:/run/relay/postfix:z',
+                   f'{mailcow}/data/conf/rspamd/local.d:/run/relay/rspamd:z'])
 if mode == 'pin': mounts.append(f'{dest}/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z')
 admin = '  webmail-admin:\n    volumes:\n' + ''.join('      - ' + json.dumps(m.replace('$', '$$')) + '\n' for m in mounts)
 text = text.replace('\nnetworks:\n', '\n' + admin + 'networks:\n', 1)
@@ -327,7 +385,8 @@ webmail_extract_tls_pin() (
 )
 
 webmail_prepare() {
-    webmail_load_config "$1" "$2" && webmail_ensure_db_password &&
+    webmail_load_config "$1" "$2" && webmail_ensure_db_password && webmail_ensure_admin_key &&
+        webmail_reconcile_admin_api "$(dirname "${BASH_SOURCE[0]}")/.." &&
         webmail_extract_tls_pin "$3" && webmail_generate_env "$3" && webmail_generate_admin_env "$3"
 }
 

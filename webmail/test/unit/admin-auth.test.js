@@ -295,8 +295,8 @@ test('admin auth: oversized JSON is rejected without sending credentials upstrea
 for (const [doveadmUrl, doveadmKey, relayFiles, expected] of [
   ['', '', [], { cleanup: false, relay: false }],
   ['http://dovecot:12346', 'synthetic-feature-key', [], { cleanup: true, relay: false }],
-  ['http://dovecot:12346', '', ['/run/relay/extra.cf'], { cleanup: false, relay: true }],
-  ['http://dovecot:12346', 'synthetic-feature-key', ['/run/relay/extra.cf'], { cleanup: true, relay: true }],
+  ['http://dovecot:12346', '', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { cleanup: false, relay: true }],
+  ['http://dovecot:12346', 'synthetic-feature-key', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { cleanup: true, relay: true }],
 ]) test(`admin feature flags cleanup=${expected.cleanup} relay=${expected.relay} expose booleans only`, async t => {
   const f = await fixture(t, { overrides: { doveadmUrl, doveadmKey, relayFiles } });
   const response = await login(f); assert.deepEqual(response.json().features, expected);

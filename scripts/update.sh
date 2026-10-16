@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 
 # ============================================================
@@ -407,6 +408,8 @@ fi
 # Phase 5b: Webmail/SnappyMail edge migration
 # ============================================================
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+webmail_ensure_admin_key || die "Webmail admin key preparation failed"
+webmail_reconcile_admin_api "$SCRIPT_DIR" || die "Webmail admin API reconciliation failed"
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"

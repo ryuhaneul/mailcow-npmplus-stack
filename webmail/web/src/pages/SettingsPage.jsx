@@ -70,7 +70,7 @@ export function LayoutPicker() {
     return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
   },[open]);
   return <div class="layout-control" ref={root}>
-    <button class="ib" type="button" ref={trigger} aria-label="보기 배치" title="보기 배치" aria-expanded={open} aria-haspopup="dialog" onClick={()=>setOpen(!open)}><Icon name="layers"/></button>
+    <button class="ib" type="button" ref={trigger} aria-label="보기 배치" title="보기 배치" aria-expanded={open} aria-haspopup="dialog" onClick={()=>setOpen(!open)}><Icon name="layout"/></button>
     {open&&<section class="pop layout-menu" ref={popup} role="dialog" aria-label="보기 배치"><h5>보기 배치</h5>{Object.entries(layouts).map(([kind,rows])=><label key={kind}>{kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'}<select class="inp" aria-label={kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'} value={layout[kind]} onChange={event=>updatePrefs({layout:{...(prefs.value.layout||themes[prefs.value.theme].layout),[kind]:event.currentTarget.value}})}>{rows.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>)}</section>}
   </div>;
 }

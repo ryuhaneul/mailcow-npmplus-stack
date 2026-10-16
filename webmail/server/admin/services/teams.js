@@ -107,7 +107,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const found = items.filter(row => `${row.mailbox} ${names.get(row.mailbox) ?? ''} ${row.members.map(member => member.address).join(' ')}`.toLowerCase().includes(search));
     return { items: found.slice((Number(page) - 1) * 50, Number(page) * 50), forwards, mailboxes: boxes.sort((a, b) => a.address.localeCompare(b.address)), total: found.length, page: Number(page), pageSize: 50 };
   }
-  async function change({ session, actor, ip, team: rawTeam, member: rawMember, etag: expected, add }) {
+  async function change({ session, actor, ip, team: rawTeam, member: rawMember, etag: expected, add, irreversible = false }) {
     const team = normalize(rawTeam), member = normalize(rawMember);
     if (!team || !member || member.length > 254 || /[\s"\\\x00-\x1f]/.test(member)) throw invalid();
     return lock.run(team, async () => {
@@ -119,7 +119,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       try { edited = (add ? addMember : removeMember)(filter.script_data, member); } catch (error) { refused(error); }
       const response = source => ({ mailbox: team, members: state(source).members, etag: etag({ id: filter.id, source }) });
       if (!edited.changed) return { ...response(filter.script_data), unchanged: true, auditId: null };
-      return audit.run({ actor, ip, action: add ? 'team.member.add' : 'team.member.remove', target: team, kind: 'config', revertible: true,
+      return audit.run({ actor, ip, action: add ? 'team.member.add' : 'team.member.remove', target: team, kind: irreversible ? 'irreversible' : 'config', revertible: !irreversible,
         before: state(filter.script_data), after: state(edited.script), ...hashFields(filter.script_data, edited.script) }, async intent => {
         await save(session, team, filter, edited.script); return { ...response(edited.script), auditId: intent.id };
       }, { prepare: ({ id }) => backups.write(id, filter.script_data, edited.script) });
@@ -145,6 +145,42 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       }, { prepare: ({ id }) => backups.write(id, '', source) });
     });
   }
+  async function forwardPlan(session, team, member) {
+    const boxes = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    if (!Array.isArray(boxes) || team === member || !addressPattern.test(member) ||
+      !boxes.some(row => normalize(row.username) === member && String(row.active) === '1') ||
+      !boxes.some(row => normalize(row.username) === team && ['1', '2'].includes(String(row.active)))) throw invalid();
+    const entries = prefilters(await filters(session), team);
+    if (entries.length > 1) throw new AppError(409, 'MULTIPLE_PREFILTERS', '사전 필터가 여러 개예요. 필터 화면에서 먼저 정리해 주세요.');
+    const original = entries[0];
+    if (!original) return { original: null, before: '', next: `require ["copy"];\nredirect :copy "${member}";\n` };
+    let edited;
+    try { edited = addMember(original.script_data, member); } catch (error) { refused(error); }
+    return { original, before: original.script_data, next: edited.script };
+  }
+  async function previewForward(session, team, member) {
+    const plan = await forwardPlan(session, normalize(team), normalize(member));
+    return { etag: etag({ id: plan.original?.id ?? null, source: plan.before }) };
+  }
+  async function forward({ session, actor, ip, team: rawTeam, member: rawMember, etag: expected }) {
+    const team = normalize(rawTeam), member = normalize(rawMember);
+    return lock.run(team, async () => {
+      const plan = await forwardPlan(session, team, member);
+      assertUnchanged(expected, { id: plan.original?.id ?? null, source: plan.before });
+      if (plan.next === plan.before) return { unchanged: true, auditId: null };
+      return audit.run({ actor, ip, action: 'team.forward', target: team, kind: 'config', revertible: Boolean(plan.original),
+        before: state(plan.before), after: state(plan.next), ...hashFields(plan.before, plan.next) }, async intent => {
+        if (plan.original) await save(session, team, plan.original, plan.next);
+        else {
+          if (prefilters(await filters(session), team).length) throw conflict();
+          await mailcow.call(session, 'POST', '/api/v1/add/filter', { username: team, filter_type: 'prefilter', active: '1', script_desc: '퇴사 후 내부 전달', script_data: plan.next });
+          const checked = prefilters(await filters(session), team);
+          if (checked.length !== 1 || checked[0].script_data !== plan.next) throw verifyFailed();
+        }
+        return { auditId: intent.id };
+      }, { prepare: ({ id }) => backups.write(id, plan.before, plan.next) });
+    });
+  }
   const adapter = {
     label: '팀 구성원을 바꿨어요',
     async read({ session, target }) {
@@ -165,6 +201,6 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       await save(session, target, filter, original);
     },
   };
-  history.register('team.member.add', adapter); history.register('team.member.remove', adapter);
-  return { list, change, create };
+  history.register('team.member.add', adapter); history.register('team.member.remove', adapter); history.register('team.forward', adapter);
+  return { list, change, create, previewForward, forward };
 }

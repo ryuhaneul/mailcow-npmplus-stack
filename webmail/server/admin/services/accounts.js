@@ -1,11 +1,13 @@
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import { AppError } from '../../errors.js';
 import { MailcowAuthLost } from '../mailcow-client.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
-import { analyze, addressPattern } from '../sieve-team.js';
+import { analyze, removeMember, Refused, addressPattern } from '../sieve-team.js';
 
 const GB = 1024 ** 3;
+const scriptHash = source => createHash('sha256').update(String(source ?? '')).digest('hex');
 const protocols = ['imap', 'pop3', 'smtp', 'sieve', 'eas', 'dav'];
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const invalid = () => new AppError(422, 'INVALID_INPUT', '계정 입력값을 확인해 주세요.');
@@ -55,20 +57,22 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       (kind === 'all' || (kind === 'off' ? String(row.active) !== '1' : kindOf(row, groups) === kind))).sort((a, b) => a.username.localeCompare(b.username));
     return { items: found.slice((Number(page) - 1) * 50, Number(page) * 50).map(row => summary(row, groups)), total: found.length, page: Number(page), pageSize: 50 };
   }
-  async function detail(session, rawAddress) {
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot } = {}) {
     const addr = address(rawAddress), row = await box(session, addr);
     const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
       rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
       rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), rows(session, 'syncjobs/all/no_log'),
     ]);
     const groups = groupMailboxAddresses(filters), warnings = [], shares = [];
-    const owners = [...new Set([...groups, addr])];
+    const owners = [...new Set([...(allShares ? boxes.filter(box => String(box.active) === '1').map(box => normalize(box.username)) : groups), addr])];
     let cursor = 0, sharesPartial = false;
     await Promise.all(Array.from({ length: Math.min(4, owners.length) }, async () => {
       while (cursor < owners.length) {
         const owner = owners[cursor++];
         try {
-          for (const acl of await dockerapi.getAcl(owner)) {
+          const ownerAcl = await dockerapi.getAcl(owner);
+          aclSnapshot?.set(owner, ownerAcl);
+          for (const acl of ownerAcl) {
             const grantee = normalize(acl.id);
             if (normalize(acl.user) === owner && acl.mailbox === 'INBOX' && (owner === addr || grantee === addr)) shares.push({ owner, grantee, rights: [...acl.rights] });
           }
@@ -79,7 +83,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
     const state = snapshot(row);
-    return { ...summary(row, groups), appPasswordCount: appPasswords.length, etag: etag(state), sharesScope: 'teams+own', warnings,
+    return { ...summary(row, groups), appPasswordCount: appPasswords.length, etag: etag(state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
       refs: {
         aliases: aliases.filter(alias => targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
@@ -224,5 +228,185 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return result;
     } finally { password?.fill(0); }
   }
-  return { list, detail, create, edit };
+  const leaveWarnings = () => [
+    { code: 'LOGIN_BLOCK_DELAY', message: '로그인 차단은 최대 5분 안에 적용돼요' },
+    { code: 'REMOVE_DEVICE_ACCOUNT', message: '퇴사자 기기의 메일 계정 설정을 지워 주세요' },
+  ];
+  const prefilters = (filters, addr) => filters.filter(filter => normalize(filter.username) === addr && filter.filter_type === 'prefilter' && String(filter.active) === '1');
+  function protectTeams(filters, addr) {
+    const involved = [];
+    for (const filter of filters.filter(row => row.filter_type === 'prefilter' && String(row.active) === '1')) {
+      const parsed = analyze(filter.script_data), owner = normalize(filter.username);
+      if (!parsed.parsed && String(filter.script_data ?? '').toLowerCase().includes('redirect')) {
+        throw new AppError(409, 'UNPARSEABLE', `${owner}의 분배 필터를 해석할 수 없어요. 필터 화면에서 먼저 확인해 주세요.`);
+      }
+      if (!parsed.members.some(member => normalize(member.address) === addr)) continue;
+      if (prefilters(filters, owner).length > 1) throw new AppError(409, 'MULTIPLE_PREFILTERS', `${owner}의 사전 필터가 여러 개예요. 필터 화면에서 먼저 정리해 주세요.`);
+      try { removeMember(filter.script_data, addr); }
+      catch (error) {
+        if (!(error instanceof Refused)) throw error;
+        throw new AppError(409, error.code.toUpperCase(), error.code === 'last_member' ?
+          `${owner}에서 이 사람이 마지막 구성원이에요. 팀 분배에서 다른 구성원을 먼저 넣어 주세요.` : `${owner}의 분배 필터를 안전하게 바꿀 수 없어요. 팀 분배에서 먼저 정리해 주세요.`);
+      }
+      involved.push(filter);
+    }
+    return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
+  }
+  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo }) {
+    const account = snapshot(await box(session, addr));
+    const filters = await rows(session, 'filters/all');
+    const ownFilters = prefilters(filters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    let forward;
+    if (forwardTo) forward = await teams.previewForward(session, addr, forwardTo);
+    const operation = { mode, cleanRefs, forwardTo };
+    if (mode === 'disable' && !cleanRefs) return { state: { account, ownFilters, operation }, account, filters, forward,
+      refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
+    const teamsToClean = protectTeams(filters, addr), aclByOwner = new Map();
+    const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
+    if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
+    const [aliases, boxes, jobs] = await Promise.all([rows(session, 'alias/all'), rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
+    const aliasRows = aliases.filter(row => targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
+    const senderRows = boxes.filter(row => normalize(row.username) === addr && targets(row.sender_acl).length || targets(row.sender_acl).includes(addr)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
+    const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const refs = { ...info.refs, aliases: info.refs.aliases.map(alias => ({ ...alias, effect: mode === 'disable' ? 'kept' : alias.targets.every(target => target === addr) ? 'deleted' : 'target_removed' })) };
+    const versions = {
+      aliases: aliasRows.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
+      teams: teamsToClean.map(row => ({ mailbox: normalize(row.username), id: row.id, sha256: scriptHash(row.script_data) })),
+      senders: senderRows.map(row => ({ mailbox: normalize(row.username), sha256: etag(row.sender_acl) })),
+      shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
+      syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
+    };
+    return { state: { account, ownFilters, operation, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
+      teamsToClean, aliasRows, senderRows, syncRows, aclByOwner, info };
+  }
+  async function deletePreview(session, rawAddress, options = {}) {
+    const addr = address(rawAddress), mode = options.mode ?? 'delete', cleanRefs = options.cleanRefs ?? true;
+    const forwardTo = options.forwardTo ? address(options.forwardTo) : null;
+    if (!['disable', 'delete'].includes(mode) || typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo)) throw invalid();
+    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo });
+    const row = plan.info ?? await box(session, addr);
+    return { address: addr, mode, cleanRefs, forwardTo, etag: etag(plan.state), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
+      refs: plan.refs, sharesScope: plan.sharesScope, irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
+      confirmation: mode === 'delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.',
+      warnings: mode === 'disable' ? leaveWarnings() : [] };
+  }
+  async function lifecycleRun({ session, actor, ip, addr: rawAddress, data, mode = 'delete' }) {
+    const addr = address(rawAddress), cleanRefs = data?.cleanRefs, forwardTo = data?.forwardTo ? address(data.forwardTo) : null;
+    if (typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo) || mode === 'delete' && data.confirmAddress !== addr) throw invalid();
+    return lock.run(`flow:${addr}`, async () => {
+      const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo });
+      assertUnchanged(data.etag, plan.state);
+      const steps = [], cleaned = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
+      const expectedAccount = structuredClone(plan.account);
+      let lostSession, stage, touched = false;
+      const entry = { actor, ip, action: mode === 'delete' ? 'mailbox.delete' : 'mailbox.leave', target: addr,
+        kind: mode === 'delete' ? 'irreversible' : 'config', revertible: false, before: { account: plan.account, refs: plan.refs }, after: mode === 'delete' ? {} : { active: 2, forwardTo } };
+      const result = await audit.run(entry, async () => {
+        const success = (name, target, auditId = null) => { touched = true; steps.push({ stage: name, target, status: 'ok', auditId }); };
+        try {
+          // Recheck the full preview once more after the durable intent and before the first write.
+          assertUnchanged(data.etag, (await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo })).state);
+          if (mode === 'disable') {
+            stage = 'active';
+            await lock.run(addr, async () => {
+              const after = { ...plan.account, active: 2 };
+              await save(session, addr, plan.account, after); expectedAccount.active = 2;
+            });
+            success(stage, addr);
+            if (forwardTo) {
+              stage = 'forward';
+              const applied = await teams.forward({ session, actor, ip, team: addr, member: forwardTo, etag: plan.forward.etag });
+              success(stage, addr, applied.auditId);
+            }
+          }
+          if (cleanRefs) {
+            if (mode === 'delete') for (const alias of plan.aliasRows) {
+              stage = 'aliases'; const aliasAddress = normalize(alias.address);
+              await lock.run(aliasAddress, async () => {
+                const current = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
+                assertUnchanged(etag(alias), current ?? {});
+                const remaining = targets(alias.goto).filter(target => target !== addr);
+                if (remaining.length) await mailcow.call(session, 'POST', '/api/v1/edit/alias', { items: [String(alias.id)], attr: { goto: remaining.join(',') } });
+                else await mailcow.call(session, 'POST', '/api/v1/delete/alias', [String(alias.id)]);
+                const checked = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
+                if (remaining.length ? !checked || !isDeepStrictEqual(targets(checked.goto), remaining) : Boolean(checked)) throw verifyFailed();
+              });
+              cleaned.aliases.push(aliasAddress); success(stage, aliasAddress);
+            }
+            for (const filter of plan.teamsToClean) {
+              stage = 'teams'; const owner = normalize(filter.username);
+              const applied = await teams.change({ session, actor, ip, team: owner, member: addr, add: false, irreversible: mode === 'delete', etag: etag({ id: filter.id, source: filter.script_data }) });
+              cleaned.teams.push(owner); success(stage, owner, applied.auditId);
+            }
+            for (const sender of plan.senderRows) {
+              stage = 'senders'; const owner = normalize(sender.username);
+              await lock.run(owner, async () => {
+                const before = snapshot(await box(session, owner));
+                assertUnchanged(etag(sender.sender_acl), (await box(session, owner)).sender_acl);
+                const after = { ...before, senderAcl: owner === addr ? [] : before.senderAcl.filter(target => target !== addr) };
+                await save(session, owner, before, after);
+                if (owner === addr) expectedAccount.senderAcl = [];
+              });
+              cleaned.senders.push(owner); success(stage, owner);
+            }
+            const owners = [...new Set(plan.refs.shares.map(share => share.owner))].sort();
+            for (const owner of owners) {
+              stage = 'shares';
+              await lock.run(owner, async () => {
+                assertUnchanged(etag(plan.aclByOwner.get(owner)), await dockerapi.getAcl(owner));
+                const grants = [...new Set(plan.refs.shares.filter(share => share.owner === owner).map(share => share.grantee))];
+                for (const grantee of grants) {
+                  await dockerapi.deleteAcl(owner, grantee); touched = true;
+                  cleaned.shares.push({ owner, grantee }); success(stage, `${owner} → ${grantee}`);
+                }
+                const checked = await dockerapi.getAcl(owner);
+                if (checked.some(row => row.mailbox === 'INBOX' && grants.includes(normalize(row.id)))) throw verifyFailed();
+              });
+            }
+            for (const job of plan.syncRows) {
+              stage = 'syncjobs';
+              await lock.run(`syncjob:${job.id}`, async () => {
+                const current = (await rows(session, 'syncjobs/all/no_log')).find(row => String(row.id) === String(job.id));
+                assertUnchanged(etag(job), current ?? {});
+                await mailcow.call(session, 'POST', '/api/v1/delete/syncjob', [String(job.id)]);
+                if ((await rows(session, 'syncjobs/all/no_log')).some(row => String(row.id) === String(job.id))) throw verifyFailed();
+              });
+              cleaned.syncjobs.push(job.id); success(stage, String(job.id));
+            }
+          }
+          if (mode === 'delete') {
+            stage = 'mailbox';
+            await lock.run(addr, async () => {
+              const current = await detail(session, addr, { allShares: true });
+              if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못해 삭제를 멈췄어요.');
+              if (Object.values(current.refs).some(refs => refs.length)) throw new AppError(409, 'REFERENCES_REMAIN', '연결이 남아 있어 메일함을 지우지 않았어요. 다시 미리보기를 확인해 주세요.');
+              assertUnchanged(etag(expectedAccount), snapshot(await box(session, addr)));
+              const checkedFilters = await rows(session, 'filters/all');
+              protectTeams(checkedFilters, addr);
+              const ownFilters = prefilters(checkedFilters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+              assertUnchanged(etag(plan.state.ownFilters), ownFilters);
+              await mailcow.call(session, 'POST', '/api/v1/delete/mailbox', [addr]);
+              if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
+            });
+            success(stage, addr);
+          }
+          return { result: 'ok', steps, detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: mode === 'disable' ? leaveWarnings() : [] };
+        } catch (error) {
+          if (!touched) throw error;
+          if (error instanceof MailcowAuthLost) lostSession = error;
+          steps.push({ stage: stage ?? 'verify', status: 'failed', code: safeCode(error), auditId: null });
+          return { result: 'partial', steps, detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: mode === 'disable' ? leaveWarnings() : [] };
+        }
+      });
+      if (lostSession) throw lostSession;
+      return result;
+    });
+  }
+  async function leave({ session, actor, ip, data }) {
+    if (!data || !['preview', 'run'].includes(data.action) || !['disable', 'delete'].includes(data.mode) || typeof data.cleanRefs !== 'boolean') throw invalid();
+    const result = data.action === 'preview' ? await deletePreview(session, data.address, data) :
+      await lifecycleRun({ session, actor, ip, addr: data.address, data, mode: data.mode });
+    return { ...result, warnings: leaveWarnings() };
+  }
+  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave };
 }

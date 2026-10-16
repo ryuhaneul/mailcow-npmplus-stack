@@ -41,12 +41,15 @@ async function fixture(t, populated = true) {
     if (path.startsWith('/api/v1/get/app-passwd/all/')) return [];
     if (options.ignoreWrites) return [{ type: 'success' }];
     if (path === '/api/v1/delete/alias') for (const id of body) aliases.splice(aliases.findIndex(row => String(row.id) === id), 1);
-    else if (path === '/api/v1/edit/alias') for (const id of body.items) Object.assign(aliases.find(row => String(row.id) === id), body.attr);
-    else if (path === '/api/v1/edit/filter') for (const id of body.items) Object.assign(filters.find(row => String(row.id) === id), body.attr);
+    else if (path === '/api/v1/edit/alias') for (const id of body.items) {
+      const alias = aliases.find(row => String(row.id) === id); Object.assign(alias, body.attr);
+      // mailcow deletes explicit alias grants for every supplied goto (functions.mailbox.inc.php:2752).
+      if (Object.hasOwn(body.attr, 'goto')) for (const box of boxes) if (alias.goto.split(',').includes(box.username)) box.sender_acl = box.sender_acl.filter(value => value !== alias.address);
+    } else if (path === '/api/v1/edit/filter') for (const id of body.items) Object.assign(filters.find(row => String(row.id) === id), body.attr);
     else if (path === '/api/v1/add/filter') filters.push({ id: 100 + filters.length, ...body });
     else if (path === '/api/v1/edit/mailbox') for (const addr of body.items) {
       const row = boxes.find(box => box.username === addr);
-      for (const [key, value] of Object.entries(body.attr)) row[key] = key === 'active' ? Number(value) : structuredClone(value);
+      for (const [key, value] of Object.entries(body.attr)) if (key !== 'sender_acl' || !options.ignoreSenderWrites) row[key] = key === 'active' ? Number(value) : structuredClone(value);
     } else if (path === '/api/v1/delete/syncjob') for (const id of body) jobs.splice(jobs.findIndex(row => String(row.id) === id), 1);
     else if (path === '/api/v1/delete/mailbox') for (const addr of body) {
       boxes.splice(boxes.findIndex(row => row.username === addr), 1);
@@ -55,7 +58,7 @@ async function fixture(t, populated = true) {
     return [{ type: 'success' }];
   } };
   const dockerapi = {
-    async getAcl(owner) { aclCalls.push(owner); if (options.aclFailure === owner) throw new Error(secret); return structuredClone(acl.get(owner) ?? []); },
+    async getAcl(owner) { aclCalls.push(owner); if (options.aclFailure === owner) throw new Error(secret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); },
     async deleteAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee } }); if (!options.ignoreAclWrites) acl.set(owner, (acl.get(owner) ?? []).filter(row => row.mailbox !== 'INBOX' || row.id !== grantee)); },
   };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
@@ -267,4 +270,29 @@ test('lifecycle: a late unparseable redirect blocks final delete even when membe
   const result = await remove(f, confirmed(initial.etag));
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'UNPARSEABLE');
   assert.ok(!writes(f).some(row => row.path === '/api/v1/delete/mailbox'));
+});
+
+for (const ignoreSenderWrites of [false, true]) test(`lifecycle regression: alias goto preserves unrelated explicit sender ACL; restore ignored=${ignoreSenderWrites}`, async t => {
+  const f = await fixture(t, false), alias = 'multi@example.com';
+  f.aliases.push({ id: 2, address: alias, goto: `${user},${other}`, active: 1, sender_allowed: '0' });
+  f.boxes[2].sender_acl = [alias, team];
+  const initial = await preview(f); f.options.ignoreSenderWrites = ignoreSenderWrites;
+  const result = await remove(f, confirmed(initial.etag));
+  if (ignoreSenderWrites) {
+    assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+    assert.equal(result.steps.at(-1).stage, 'aliases'); assert.ok(result.recovery[0].message.includes('보내기 권한'));
+    assert.ok(f.boxes.some(row => row.username === user));
+    assert.equal((await f.history.list()).items.find(row => row.action === 'mailbox.delete').result, 'partial');
+  } else {
+    assert.equal(result.result, 'ok'); assert.deepEqual(f.boxes.find(row => row.username === other).sender_acl, [alias, team]);
+  }
+});
+
+for (const active of [0, 1, 2]) test(`lifecycle regression: incoming shares from owner active=${active} are previewed and removed`, async t => {
+  const f = await fixture(t, false); f.boxes[2].active = active;
+  f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  const initial = await preview(f);
+  assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, rights: ['lookup', 'read'] }]);
+  const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'ok');
+  assert.deepEqual(f.acl.get(other), []); assert.ok(!f.boxes.some(row => row.username === user));
 });

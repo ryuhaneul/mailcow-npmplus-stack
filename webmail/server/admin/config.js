@@ -54,6 +54,11 @@ export function loadAdminConfig(env = process.env) {
     try { new X509Certificate(readFileSync(mailTlsPinFile)); } catch { invalid('MAIL_TLS_PIN_FILE'); }
   } else if (mailTlsPinFile !== '') invalid('MAIL_TLS_PIN_FILE');
   const domain = host('DOMAIN');
+  const mailcowPublicRaw = env.MAILCOW_PUBLIC_URL ?? `https://mailcow.${domain}/`;
+  let mailcowPublicUrl;
+  try { mailcowPublicUrl = new URL(mailcowPublicRaw); } catch { invalid('MAILCOW_PUBLIC_URL'); }
+  if (mailcowPublicUrl.protocol !== 'https:' || !mailcowPublicUrl.hostname || mailcowPublicUrl.username || mailcowPublicUrl.password ||
+    mailcowPublicUrl.search || mailcowPublicUrl.hash || mailcowPublicUrl.pathname !== '/') invalid('MAILCOW_PUBLIC_URL');
   const trustProxy = value('TRUST_PROXY').split(',').map(part => cidr(part.trim(), 'TRUST_PROXY'));
   const dockerapiUrl = choice('DOCKERAPI_URL', ['https://dockerapi:443']);
   const doveadmUrl = value('DOVEADM_URL', true);
@@ -77,7 +82,7 @@ export function loadAdminConfig(env = process.env) {
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
     adminHostname, sessionIdleMin, sessionMaxHours, mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
-    imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
+    imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel,
   });

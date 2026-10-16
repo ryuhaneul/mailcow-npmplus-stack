@@ -301,3 +301,13 @@ for (const [doveadmUrl, doveadmKey, relayFiles, expected] of [
   assert.deepEqual(current.json().features, expected);
   assert.ok(!JSON.stringify(current.json()).includes('synthetic-feature-key'));
 });
+
+
+test('admin auth: pending action links to the public mailcow administration URL', async t => {
+  const f = await fixture(t, { overrides: { mailcowPublicUrl: 'https://mailcow.example.com/' } });
+  f.options.loginError = () => new AppError(403, 'ADMIN_PENDING_ACTION', 'mailcow에서 먼저 완료해 주세요.');
+  const response = await login(f);
+  failure(response, 403, 'ADMIN_PENDING_ACTION');
+  assert.equal(response.json().error.fallbackUrl, 'https://mailcow.example.com/');
+  assert.equal(response.headers['set-cookie'], undefined);
+});

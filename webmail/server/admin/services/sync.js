@@ -24,7 +24,7 @@ const secretKey = key => key.replace(/[^a-z0-9]/gi, '').toLowerCase() === 'passw
 // A09 can pass the submitted source password(s); also discover passwords in nested API log objects.
 export function sanitizeSyncResponse(value, secrets = []) {
   const hidden = new Set(secrets.filter(item => typeof item === 'string' && item));
-  const credential = /(?:--?password1|--?passfile1|["']?password1["']?)\s*(?:[=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,;\]}]+)/gi;
+  const credential = /(?:--?password1|--?passfile1|["']?password1["']?)\s*(?:[=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)/gi;
   function collect(item) {
     if (typeof item === 'string') {
       for (const match of item.matchAll(credential)) {
@@ -39,8 +39,9 @@ export function sanitizeSyncResponse(value, secrets = []) {
   collect(value);
   function clean(item) {
     if (typeof item === 'string') {
-      let result = item.replace(credential, match => match.replace(/([=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,;\]}]+)$/, '$1***'));
+      let result = item;
       for (const secret of [...hidden].sort((a, b) => b.length - a.length)) result = result.split(secret).join('***');
+      result = result.replace(credential, match => match.replace(/([=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)$/, '$1***'));
       return result.replace(/\*[^\s*<>"'@]+@mailcow\.local/gi, '****@mailcow.local');
     }
     if (Array.isArray(item)) return item.map(clean);

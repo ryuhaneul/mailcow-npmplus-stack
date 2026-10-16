@@ -61,6 +61,18 @@ function reachesLoop(edges, start) {
   }
   return false;
 }
+export function validateAlias(alias, context, all, { allowCatchAll = false, allowDiscard = false } = {}) {
+  address(alias.address, allowCatchAll);
+  if (!context.active.has(alias.address.split('@')[1])) throw new AppError(422, 'DOMAIN_NOT_ACTIVE', '활성 사내 도메인을 선택해 주세요.');
+  const destinations = split(alias.goto);
+  if (!destinations.length) throw invalid();
+  if (!(allowDiscard && isDeepStrictEqual(destinations, ['null@localhost'])) && destinations.some(target => !addressPattern.test(target) || !context.active.has(target.split('@')[1]))) {
+    throw new AppError(422, 'EXTERNAL_TARGET', '별칭 대상은 활성 사내 도메인만 쓸 수 있어요.');
+  }
+  const desired = [...all.filter(row => normalize(row.address) !== alias.address), alias];
+  if (reachesLoop(graph(desired, context.map, true), alias.address)) throw loopError();
+}
+
 export function createAliasesService({ mailcow, audit, lock, history }) {
   const api = createAliasApi(mailcow);
   async function rows(session, path) {
@@ -88,17 +100,6 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     const [aliases, boxes] = await Promise.all([rows(session, 'alias/all'), rows(session, 'mailbox/all')]);
     return state(addr, aliases, boxes, participants);
   }
-  function validate(alias, context, all, { allowCatchAll = false, allowDiscard = false } = {}) {
-    address(alias.address, allowCatchAll);
-    if (!context.active.has(alias.address.split('@')[1])) throw new AppError(422, 'DOMAIN_NOT_ACTIVE', '활성 사내 도메인을 선택해 주세요.');
-    const destinations = split(alias.goto);
-    if (!destinations.length) throw invalid();
-    if (!(allowDiscard && isDeepStrictEqual(destinations, ['null@localhost'])) && destinations.some(target => !addressPattern.test(target) || !context.active.has(target.split('@')[1]))) {
-      throw new AppError(422, 'EXTERNAL_TARGET', '별칭 대상은 활성 사내 도메인만 쓸 수 있어요.');
-    }
-    const desired = [...all.filter(row => normalize(row.address) !== alias.address), alias];
-    if (reachesLoop(graph(desired, context.map, true), alias.address)) throw loopError();
-  }
   const dto = (addr, value) => ({ address: addr, targets: split(value.alias.goto), discard: value.alias.goto === 'null@localhost',
     sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag(value),
     metadata: { sogoVisible: value.alias.sogo_visible === '1', internal: value.alias.internal === '1', publicComment: value.alias.public_comment, privateComment: value.alias.private_comment } });
@@ -124,7 +125,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     assertUnchanged(etag(before), await read(session, addr, names));
     const aliases = await rows(session, 'alias/all');
     if (after.alias) {
-      validate(after.alias, await domains(session), aliases, { allowCatchAll, allowDiscard });
+      validateAlias(after.alias, await domains(session), aliases, { allowCatchAll, allowDiscard });
       if (!before.alias && (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '이미 메일함이 있는 주소예요.');
       assertUnchanged(etag(before), await read(session, addr, names));
       const body = { ...after.alias, ...(after.alias.goto === 'null@localhost' ? { goto_null: '1' } : {}) };
@@ -172,7 +173,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
       if (typeof data[key] !== 'boolean') throw invalid(); alias[field] = data[key] ? '1' : '0';
     }
     after = { alias, senders: before.senders };
-    validate(after.alias, context, aliases, { allowDiscard });
+    validateAlias(after.alias, context, aliases, { allowDiscard });
     return { before, after, allowDiscard, etag: etag(before) };
   }
   async function change({ session, actor, ip, addr: rawAddress, data, operation }) {
@@ -199,7 +200,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
           const plan = await previewEdit(session, addr, data, { before, aliases, context });
           after = plan.after; allowDiscard = plan.allowDiscard;
         }
-        if (operation !== 'edit') validate(after.alias, context, aliases, { allowDiscard });
+        if (operation !== 'edit') validateAlias(after.alias, context, aliases, { allowDiscard });
       }
       if (isDeepStrictEqual(before, after)) return { ...dto(addr, before), unchanged: true };
       const unsafe = before.alias && (split(before.alias.goto).some(target => target !== 'null@localhost' && !context.active.has(target.split('@')[1])) || reachesLoop(graph(aliases, context.map, false), addr));

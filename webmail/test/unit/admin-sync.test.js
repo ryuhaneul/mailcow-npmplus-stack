@@ -176,3 +176,11 @@ test('sync multi-source HTTP:409 with jobs, confirmed PATCH success, history409 
   const disabled = await send({ etag: allowed.json().etag, options: { delete2: false } }); assert.equal(disabled.statusCode, 200);
   const reverted = await app.inject({ method: 'POST', url: `/api/admin/history/${disabled.json().auditId}/revert`, headers, payload: { confirm: true } }); assert.equal(reverted.statusCode, 409, reverted.body); assert.equal(reverted.json().error.code, 'DELETE2_MULTI_SOURCE'); assert.match(reverted.json().error.message, /동기화 화면/);
 });
+
+test('sync sanitizer: known full comma password replaced before flag parsing', () => {
+  const secret = 'Synthetic,Quoted-Password!'; assert.equal(sanitizeSyncResponse(`bad --password1 ${secret}`, [secret]), 'bad --password1 ***');
+  assert.equal(sanitizeSyncResponse({ password1: secret, error: `bad --password1 ${secret}` }).error, 'bad --password1 ***');
+});
+for (const value of ['--password1 Synthetic,Quoted-Password!', '--password1=Synthetic;Quoted-Password!', '--passfile1 /tmp/Synthetic,Secret;Path', 'password1: Synthetic,Quoted;Password!', '--password1 "Synthetic,Quoted;Password!"', "--password1 'Synthetic,Quoted;Password!'"]) test(`sync sanitizer: unknown punctuation/quoted credential ${value}`, () => {
+  const result = sanitizeSyncResponse(`${value} next`); assert.ok(!result.includes('Synthetic')); assert.ok(!result.includes('Quoted')); assert.ok(!result.includes('Secret')); assert.match(result, /\*\*\*/); assert.match(result, / next$/);
+});

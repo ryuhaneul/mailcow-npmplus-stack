@@ -84,7 +84,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const sync = createSyncService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('sync', sync);
   await app.register(syncRoutes, { service: sync });
-  const batch = createBatchService({ mailcow: app.mailcow, accounts, domains, teams, audit });
+  const batch = createBatchService({ mailcow: app.mailcow, accounts, domains, teams, aliases, audit, lock: adminLock });
   app.decorate('batch', batch);
   await app.register(batchRoutes, { service: batch });
   app.get('/healthz', async () => ({ ok: true }));

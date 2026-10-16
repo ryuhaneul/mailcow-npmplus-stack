@@ -233,7 +233,12 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     try { parsed = await inspect(session, kind, data.csv, options, credentials); }
     catch (error) { error.message = sanitizeSyncResponse(error.message, [...credentials.values()]); throw error; }
     const safe = value => kind === 'syncjobs' ? sanitizeSyncResponse(value, [...credentials.values()]) : value;
-    if (data.action === 'parse') return safe(parsed);
+    if (data.action === 'parse') {
+      const preview = safe(parsed);
+      // This fixed preview marker is display data, not an upstream credential.
+      if (kind === 'syncjobs') for (const row of preview.rows) row.password = '●●●●';
+      return preview;
+    }
     const chosen = data.lines.map(line => parsed.rows.find(row => row.line === line));
     if (chosen.some(row => !row?.valid)) throw invalid('오류 줄이 포함돼 실행하지 않았어요. 줄별 미리보기를 다시 확인해 주세요.');
     const results = []; let lost;

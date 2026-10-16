@@ -279,3 +279,13 @@ test('batch sync HTTP: comma password in flag error fully masked, disk/logger va
   const disk = (await Promise.all((await fs.readdir(f.dir)).filter(name => name.endsWith('.jsonl')).map(name => fs.readFile(join(f.dir, name), 'utf8')))).join('');
   for (const text of [response.body, disk, logs.join('')]) { assert.ok(!text.includes(secret)); assert.ok(!text.includes('Quoted-Password!')); }
 });
+
+for (const sourcePassword of ['ok', '1', 'example']) test(`CSV sync: short source password ${sourcePassword} preserves success, IDs and addresses`, async t => {
+  const f = await fixture(t), csv = `source,password,target,host\nsource@example.net,${sourcePassword},existing@example.com,imap.example.net`;
+  const result = await sync(f, { csv, action: 'run', lines: [2] });
+  assert.equal(f.jobs.length, 1); assert.equal(result.result, 'ok'); assert.equal(result.results[0].result, 'ok');
+  assert.equal(result.results[0].jobId, '1'); assert.equal(result.results[0].line, 2);
+  assert.equal(result.results[0].source, 'source@example.net'); assert.equal(result.results[0].target, 'existing@example.com');
+  const parent = (await f.history.list()).items.find(row => row.action === 'batch.syncjobs');
+  assert.equal(parent.result, 'ok'); assert.equal(parent.detail.results[0].result, 'ok');
+});

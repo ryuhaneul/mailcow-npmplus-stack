@@ -957,3 +957,77 @@ bash scripts/snappymail-remove.sh remove
 `MAIL_AUTOEXPUNGE_ENABLE=false`, `MAIL_AUTOEXPUNGE_DAYS=30`이 기본값입니다. 새 기능은 기본 꺼짐이며 선택값 키가 없는 서버에서는 관련 단계를 건너뜁니다. 웹메일 설치 여부와 무관하게 Dovecot의 실제 `Junk`·`Trash` 폴더에 적용되어 Outlook·휴대폰 등 **모든 메일 프로그램**에 영향을 줍니다. 1~365일만 허용하며 이미 삭제된 메일은 복원되지 않습니다.
 
 **기존 서버는 update만으로 자동 삭제가 켜지지 않습니다.** 적용하려면 사용자에게 시각과 일수를 공지한 뒤 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 명시하세요. 보존 기간 축소 전에도 공지해야 합니다. 끄려면 `.env`에서 `MAIL_AUTOEXPUNGE_ENABLE=false`로 바꾸고 `bash scripts/apply-dovecot-autoexpunge.sh --revert -y`를 실행합니다. 이미 삭제된 메일은 돌아오지 않습니다. `apply-dovecot-autoexpunge.sh --check`로 켜진 정책을 확인할 수 있습니다.
+
+
+## 12. 관리 화면
+
+`WEBMAIL_ADMIN_ENABLE=true`로 켜는 별도 `webmail-admin` 컨테이너입니다. 공개 웹메일과 같은 이미지를 쓰고 mailcow 내부망에서 관리자 로그인·계정·팀·별칭·보내기 권한·필터·동기화·운영 상태·변경 기록·웹메일 로고를 관리합니다. 공개 웹메일은 관리 API를 등록하지 않으며 관리 컨테이너에 연결할 수 없습니다.
+
+mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다. 2단계 인증은 인증 앱의 6자리 TOTP를 지원합니다. 도메인 관리자와 보안 키만 사용하는 계정은 지원하지 않습니다. 암호 변경·2단계 등록 대기 상태이면 mailcow 관리 화면에서 먼저 완료합니다. 암호·mailcow 세션·API 키를 디스크에 저장하지 않으며 재시작하면 관리자는 다시 로그인합니다.
+
+### 설정값과 DNS
+
+| 변수 | 기본값 | 의미 |
+|---|---|---|
+| `WEBMAIL_ADMIN_ENABLE` | `false` | 관리 기능 선택. `WEBMAIL_ENABLE=true`가 필수 |
+| `WEBMAIL_ADMIN_HOSTNAME` | `mailadmin.${DOMAIN}` | 관리 주소 한 개. mail/mailcow/mail-npm 및 공개 웹메일 주소와 중복 불가 |
+| `WEBMAIL_ADMIN_SESSION_IDLE_MIN` | `60` | 유휴 만료, 1~180분 |
+| `WEBMAIL_ADMIN_SESSION_MAX_HOURS` | `8` | 최대 시간. 유휴 만료보다 짧을 수 없음 |
+| `ADMIN_ACCESS_LIST` | 기존 설정 | NPMplus의 IP 허용 목록. 허용 IP가 있어야 하고 HTTP 인증 사용자는 없어야 함. 비면 관리 프록시 생성 안 함 |
+| `TOOLKIT_ENABLE` | `true` | Toolkit 설치·갱신. false는 자동 제거를 뜻하지 않음 |
+
+관리 주소의 DNS A 레코드를 서버 IP로 만듭니다. `sudo bash scripts/dns-records.sh`가 주소와 확인 표시를 출력합니다. 인증서는 NPMplus가 발급합니다. 다른 대상으로 향하는 기존 프록시는 덮어쓰지 않고 경고합니다. 관리 프록시는 `http://webmail-admin:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, 요청 크기 4m입니다.
+
+### 기존 서버에서 켜기
+
+먼저 웹메일 전용 망 분리를 완료하고 변경 시각을 공지합니다. 스택을 검토된 커밋으로 갱신한 뒤 `.env`, `/home/webmail`의 env·override, NPM 프록시 목록 JSON, Redis `APP_LINKS`를 비공개 백업에 보관합니다. 공개 웹메일의 `LOGO_DIR` 변경으로 사용자가 다시 로그인할 수 있습니다.
+
+서버 `.env`에 `WEBMAIL_ENABLE=true`, `WEBMAIL_ADMIN_ENABLE=true`를 설정하고 `ADMIN_ACCESS_LIST`를 확인합니다. 관리 IP가 목록에 포함돼 있어야 합니다. update는 mailcow 갱신도 할 수 있으므로 관리 화면만 켤 때는 다음 개별 명령 순서를 사용합니다. 스택 저장소 루트에서 실행합니다.
+
+```bash
+STACK_DIR=$PWD
+MAILCOW_DIR=/home/mailcow-dockerized
+WEBMAIL_DIR=/home/webmail
+sudo mkdir -p "$WEBMAIL_DIR"
+sudo rsync -a --delete --exclude=node_modules --exclude=webmail.env \
+  --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
+  --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
+  "$STACK_DIR/webmail/" "$WEBMAIL_DIR/"
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" "$2" "$3"' \
+  bash "$STACK_DIR" "$MAILCOW_DIR" "$WEBMAIL_DIR"
+(cd "$WEBMAIL_DIR" && sudo docker compose build && sudo docker compose --profile admin up -d)
+sudo bash scripts/webmail-cutover.sh add-admin-host
+sudo bash scripts/admin-app-link.sh add "$MAILCOW_DIR"
+sudo bash scripts/verify.sh
+```
+
+순서는 rsync → `webmail_prepare`(공개·관리 env와 override) → build·관리 profile up → 관리 프록시 → 앱 링크입니다.
+
+`/home/webmail/webmail-admin.env`는 권한600입니다. 스택 `.env`와 함께 출력하거나 커밋하지 마세요. `pin` 모드에서는 공개 인증서를 두 컨테이너에 `:ro,z`로 연결하고, 인증서가 바뀌면 둘 다 재생성합니다. 일반 update도 관리 env와 앱 링크를 다시 확인합니다.
+
+### 확인과 업데이트
+
+`sudo bash scripts/verify.sh`에서 관리 컨테이너 running/healthy, 관리 `/healthz` 200, 비로그인 logout 403 및 인증 요구 헤더 부재, 공개 웹메일 관리 경로 404, 공개 웹메일에서 관리 컨테이너·dockerapi 연결 차단, 관리 앱 링크를 확인합니다. 접근 목록에 의해 `/healthz`가 403이면 해당 항목은 건너뜀으로 표시하므로 허용 IP의 브라우저에서도 확인합니다. 관리자 로그인 뒤 상태와 계정 정보가 mailcow 화면과 같은지도 확인합니다.
+
+`sudo bash scripts/update.sh -y`는 켜진 관리 컨테이너의 env를 다시 만들고 같은 이미지로 올린 뒤 앱 링크를 유지합니다. mailcow 갱신을 빼려면 `--skip-mailcow-update`를 붙입니다. 관리 선택을 false로만 바꾸면 실행 중인 관리 컨테이너를 지우지 않고 끄기 절차를 경고합니다.
+
+### 관리 화면 끄기
+
+`.env`의 `WEBMAIL_ADMIN_ENABLE=false`를 먼저 설정하고 다음 순서로 실행합니다. `ADMIN_ACCESS_LIST`는 프록시 제거가 끝날 때까지 유지합니다.
+
+```bash
+(cd /home/webmail && sudo docker compose --profile admin stop webmail-admin && sudo docker compose --profile admin rm -f webmail-admin)
+sudo bash scripts/webmail-cutover.sh remove-admin-host
+sudo bash scripts/admin-app-link.sh remove /home/mailcow-dockerized
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
+(cd /home/webmail && sudo docker compose up -d webmail)
+sudo bash scripts/verify.sh
+```
+
+`LOGO_DIR`가 비어 공개 웹메일은 기본 글자 로고를 표시합니다. 관리 주소가 닫혔고 컨테이너가 없는지 확인합니다. `webmail-admin-data`와 `webmail-brand` 볼륨은 남습니다. 실제 이름에는 compose 프로젝트 접두가 붙습니다. 전체 `teardown.sh`도 관리 기록·로고 볼륨을 보존하고 이름을 안내합니다. 별도 확인 없이 `down -v`나 볼륨 삭제를 실행하지 않습니다.
+
+### Toolkit 제거와 mailcow 업데이트
+
+`TOOLKIT_ENABLE=false`는 설치·갱신만 건너뜁니다. Toolkit 제거는 기능 대조와 승인 후 별도 `toolkit-remove.sh` 도구로 진행합니다. 기존 컨테이너·데이터·API 키를 update가 자동 삭제하지 않습니다.
+
+mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON API, dockerapi 공유·필터 읽기, 실제 IP 전달, 공개 웹메일 격리를 시험 VM에서 확인합니다. 로고·변경 기록 볼륨도 별도로 백업합니다.

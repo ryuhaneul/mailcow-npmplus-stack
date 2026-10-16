@@ -28,6 +28,7 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 | SMTP/IMAP | 리버스 프록시 우회, 직접 노출 |
 | Snappymail | Docker 내부 네트워크로 Dovecot/Postfix 연결 (DNS 불필요) |
 | 웹메일 | 선택 설치하는 메일스택 웹메일. `webmail:8080`, 사용자 IMAP/Sieve/SMTP 자격과 열 단위 DB 읽기 계정 사용 |
+| 관리 화면 | 선택 설치하는 `webmail-admin:8080`. mailcow 관리자 로그인, IP 접근 목록, 변경 기록·웹메일 로고 관리 |
 
 ## 웹메일 선택값
 
@@ -35,7 +36,11 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 |---|---|---|
 | `WEBMAIL_ENABLE` | `false` | 웹메일 설치·빌드·기동·검증 |
 | `SNAPPYMAIL_ENABLE` | `true` | SnappyMail 설치·업데이트·기동·검증 |
+| `WEBMAIL_ADMIN_ENABLE` | `false` | 웹메일 관리 화면. `WEBMAIL_ENABLE=true`와 관리자 IP 접근 목록 필요 |
+| `TOOLKIT_ENABLE` | `true` | Toolkit 설치·업데이트. false로 바꿔도 기존 컨테이너는 자동 삭제하지 않음 |
 | `MAIL_AUTOEXPUNGE_ENABLE` | `false` | 모든 메일 프로그램의 Junk·Trash 자동 삭제. `MAIL_AUTOEXPUNGE_DAYS=30`(1~365일) |
+
+관리 주소는 `WEBMAIL_ADMIN_HOSTNAME`(기본 `mailadmin.${DOMAIN}`), 세션 기본값은 유휴 60분·최대 8시간입니다. `ADMIN_ACCESS_LIST`가 비면 관리 프록시를 만들지 않습니다. 기존 서버의 켜기·DNS·검증·끄기는 [관리 화면 안내](docs/guide.md#12-관리-화면)를 따르세요.
 
 웹메일과 SnappyMail은 함께 켤 수 있습니다. 웹메일 기본 주소는 `newmail.${DOMAIN}`입니다.
 웹메일만 켜면 `mail.${DOMAIN}`도 연결하고 로그인 허용 주소에 자동 추가합니다.
@@ -297,6 +302,9 @@ CrowdSec request filtering and local log-based IP bans are enabled by default (`
 | acme-mailcow | Disabled (`sleep infinity`) — NPMplus handles certificates |
 | SMTP/IMAP | Direct exposure, bypasses reverse proxy |
 | Snappymail | Connects to Dovecot/Postfix via Docker internal network (no DNS required) |
+| Webmail administration | Optional `webmail-admin:8080`, mailcow administrator login, IP access restriction, audit history and branding |
+
+Webmail administration defaults to off (`WEBMAIL_ADMIN_ENABLE=false`) and requires Webmail plus an IP-only `ADMIN_ACCESS_LIST`. The default hostname is `mailadmin.${DOMAIN}`. `TOOLKIT_ENABLE` defaults to true; disabling it preserves existing Toolkit containers. See the [administration guide](docs/guide.md#12-관리-화면).
 
 ## Tested On
 

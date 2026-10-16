@@ -142,6 +142,7 @@ body[data-r=inbox] .mailview,body[data-r=allmail] .mailview,body[data-r=spam] .m
 .tb.danger{color:var(--danger)}
 .vr{width:1px;height:18px;background:var(--line-2);margin:0 6px;flex:none}
 :root[data-pane=right] .tools .lbl,:root[data-pane=right] .tools .pager span{display:none}
+:root[data-pane=right] .tools.bulk .tb{padding:0 6px}
 
 .cb{width:16px;height:16px;border-radius:4px;border:1.5px solid var(--ink-3);display:grid;place-items:center;flex:none;background:var(--surface)}
 .cb svg{width:12px;height:12px;stroke-width:2.6;opacity:0}
@@ -655,7 +656,7 @@ table.ft{width:100%;border-collapse:collapse;font-size:13.5px}
   .sbar{margin:0 16px 10px}
   .top{height:56px;padding:0 8px;gap:4px}
   .search{height:40px!important;max-width:none}
-  .search .kbd,.ooo .t,.top .r .hide-m{display:none}
+  .search .kbd,.ooo .t,.top .r .hide-m,.sidebar-keys.hide-m{display:none}
   .ooo{padding:0 9px;margin-right:0;height:30px}
   .ooo b{display:none}
   .ooo .tm{display:inline}
@@ -670,6 +671,7 @@ table.ft{width:100%;border-collapse:collapse;font-size:13.5px}
   .seg{margin-left:0;width:100%}
   .tools{padding:0 8px;height:42px}
   .tools .pager span,.tools .lbl{display:none}
+  .tools.bulk .tb{padding:0 6px}
   .grp{padding:12px 16px 4px}
   .m,:root[data-pane=right] .m{grid-template-columns:40px minmax(0,1fr) auto;grid-template-areas:"av from time" "av txt txt" "av sn chips";height:auto;padding:11px 14px 12px 12px;column-gap:10px;row-gap:1px;align-items:start}
   .m .cbw,.m .st,.m .clip{display:none!important}
@@ -761,3 +763,9 @@ body[data-r=filters] [data-v=filters],body[data-r=rule] [data-v=rule],body[data-
 .reader h1{overflow-wrap:anywhere}
 .files .file>div{flex:1}
 .files .file .ib+.ib{margin-left:0}
+
+.sidebar-keys{padding:2px 10px 0;flex:none}
+.sidebar-keys .ib{width:26px;height:26px}
+.layout-menu{left:auto;right:8px;top:calc(100% - 4px);width:260px;max-width:calc(100% - 16px);padding:12px;max-height:calc(100dvh - 160px);overflow-y:auto}
+.layout-menu label{display:block;font-size:12.5px;color:var(--ink-2);margin:10px 0 0}
+.layout-menu .inp{display:block;width:100%;margin-top:4px}

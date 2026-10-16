@@ -405,7 +405,7 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     header "Phase 5b: Webmail"
     mkdir -p "$WEBMAIL_DIR"
     rsync -a --delete --exclude=node_modules --exclude=webmail.env \
-        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml \
+        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
         "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
     # Mailcow's Phase 3 update may have renewed its certificate. Refresh a pin
     # before the rebuild; a changed certificate alone forces recreation.

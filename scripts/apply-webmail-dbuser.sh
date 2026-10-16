@@ -3,7 +3,7 @@
 # Env: MAILCOW_DIR (default /home/mailcow-dockerized),
 #      WEBMAIL_ENV_FILE (default stack .env).
 # Root authentication is passed through MYSQL_PWD, never through command arguments.
-# Applies only column SELECT grants; --revert restores the legacy subnet account.
+# Applies only column SELECT grants; --revert removes relay and legacy accounts.
 set +x
 set -euo pipefail
 usage() { echo "Usage: $0 [apply|--check|--revert]"; }
@@ -34,11 +34,6 @@ ACCOUNT="'webmail_ro'@'$WEBMAIL_RELAY_IPV4'"
 TARGET="webmail_ro@$WEBMAIL_RELAY_IPV4"
 OLD_HOST="$WEBMAIL_NETWORK.%"
 DROP_HOST="$OLD_HOST"
-if [ "$MODE" = --revert ]; then
-    ACCOUNT="'webmail_ro'@'$OLD_HOST'"
-    TARGET="webmail_ro@$OLD_HOST"
-    DROP_HOST="$WEBMAIL_RELAY_IPV4"
-fi
 mysql_root() {
     (cd "$MAILCOW_DIR" && MYSQL_PWD="$DBROOT" docker compose exec -T -e MYSQL_PWD mysql-mailcow \
         mysql --user=root --batch --raw --skip-column-names) 2>/dev/null
@@ -88,7 +83,7 @@ verify_grants() {
 }
 account_absent() {
     local count
-    count=$(printf "SELECT COUNT(*) FROM mysql.user WHERE User = 'webmail_ro' AND Host = '%s';\n" "$DROP_HOST" | mysql_root) || return 1
+    count=$(printf "SELECT COUNT(*) FROM mysql.user WHERE User = 'webmail_ro' AND Host = '%s';\n" "${1:-$DROP_HOST}" | mysql_root) || return 1
     [ "$count" = 0 ]
 }
 case "$MODE" in
@@ -96,7 +91,15 @@ case "$MODE" in
         if ! verify_grants || ! account_absent; then die "relay account grants differ or legacy account remains"; fi
         log "verified: relay account only, column-level SELECT on the five directory tables"
         ;;
-    apply|--revert)
+    --revert)
+        for host in "$WEBMAIL_RELAY_IPV4" "$OLD_HOST"; do
+            if account_absent "$host"; then continue; fi
+            printf "DROP USER IF EXISTS 'webmail_ro'@'%s';\n" "$host" | mysql_root >/dev/null || die "could not drop managed account"
+            account_absent "$host" || die "managed account still exists"
+        done
+        log "relay and legacy accounts removed"
+        ;;
+    apply)
         if verify_grants && account_absent; then
             log "already $MODE; no changes"
             exit 0

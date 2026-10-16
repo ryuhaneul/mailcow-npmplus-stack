@@ -874,7 +874,7 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     webmail_ensure_db_password || die "Webmail DB password preparation failed"
     mkdir -p "$WEBMAIL_DIR"
     rsync -a --delete --exclude=node_modules --exclude=webmail.env \
-        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml \
+        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
         "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
     webmail_prepare "$ENV_FILE" "$MAILCOW_DIR" "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
     MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply

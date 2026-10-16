@@ -133,7 +133,7 @@ def access_state(host, identity):
     raise RuntimeError('NPM API 형식을 판별할 수 없음')
 
 
-def admin_main(mode, work, api, name, domain):
+def admin_main(mode, work, api, name, domain, admin_hostname=""):
     client = NpmApi(api, work)
     client.login(work / 'login.json', retry_seconds=90 if mode in ('apply', 'verify') else 0)
     identity = select_admin_access(client, name) if name else 0
@@ -145,7 +145,10 @@ def admin_main(mode, work, api, name, domain):
     selected = []
     changes = []
     failed = False
-    for hostname in (f'mailcow.{domain}', f'mail-npm.{domain}'):
+    hostnames = [f'mailcow.{domain}', f'mail-npm.{domain}']
+    if admin_hostname:
+        hostnames.append(admin_hostname)
+    for hostname in hostnames:
         matches = [item for item in current if hostname in item.get('domain_names', [])]
         if len(matches) > 1:
             raise RuntimeError('multiple admin proxy hosts match one hostname')
@@ -155,6 +158,11 @@ def admin_main(mode, work, api, name, domain):
             failed = failed or level == 'FAIL'
             continue
         host = matches[0]
+        if hostname == admin_hostname and (host.get('forward_host'), host.get('forward_port'), host.get('forward_scheme')) != ('webmail-admin', 8080, 'http'):
+            level = 'FAIL' if mode == 'verify' else 'WARN'
+            print(f'{level} {hostname}: existing target differs from webmail-admin:8080; skipped')
+            failed = failed or mode == 'verify'
+            continue
         selected.append(host)
         own_locations = [location.get('path', '(unknown)') for location in host.get('locations', [])
                          if location.get('npmplus_enabled') is not False
@@ -204,8 +212,10 @@ if __name__ == '__main__':
         if mode == 'fields':
             print(json.dumps(proxy_access_fields(json.load(sys.stdin), int(sys.argv[2])))[1:-1] + ',')
             sys.exit(0)
-        _, _, work, api, name, domain = sys.argv
-        sys.exit(admin_main(mode, pathlib.Path(work), api, name, domain))
+        if len(sys.argv) not in (6, 7):
+            raise ValueError("invalid arguments")
+        _, _, work, api, name, domain = sys.argv[:6]
+        sys.exit(admin_main(mode, pathlib.Path(work), api, name, domain, sys.argv[6] if len(sys.argv) == 7 else ""))
     except (RuntimeError, http.client.HTTPException, OSError, ValueError, KeyError, TypeError) as error:
         message = str(error) if isinstance(error, RuntimeError) else 'operation failed; check NPM configuration'
         if mode == 'verify':

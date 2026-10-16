@@ -1,0 +1,9 @@
+{
+  "mailboxList": ["doveadmResponse", [{"mailbox":"Drafts"},{"mailbox":"Sent"},{"mailbox":"Archive"},{"mailbox":"Junk"},{"mailbox":"Trash"},{"mailbox":"INBOX"}]],
+  "quotaGet": ["doveadmResponse", [{"root":"Userquota","type":"STORAGE","value":"11","limit":"2097152","percent":"0"},{"root":"Userquota","type":"MESSAGE","value":"3","limit":"-","percent":"0"}]],
+  "search": ["doveadmResponse", [{"mailbox-guid":"0123456789abcdef0123456789abcdef","uid":"1"},{"mailbox-guid":"0123456789abcdef0123456789abcdef","uid":"2"},{"mailbox-guid":"0123456789abcdef0123456789abcdef","uid":"3"}]],
+  "expunge": ["doveadmResponse", []],
+  "quotaRecalc": ["doveadmResponse", []],
+  "unauthorized": ["error", {"type":"unAuthorized","exitCode":0}],
+  "missing": ["error", {"type":"exitCode","exitCode":67}]
+}

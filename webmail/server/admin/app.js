@@ -44,13 +44,17 @@ import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
 import { createLogoService } from './services/logo.js';
 import logoRoutes from './routes/logo.js';
+import { createDoveadm } from './doveadm.js';
+import { createCleanupService } from './services/cleanup.js';
+import { createQuotaService } from './services/quota.js';
+import cleanupRoutes from './routes/cleanup.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
@@ -122,6 +126,10 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const logo = createLogoService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });
   app.decorate('logo', logo);
   await app.register(logoRoutes, { service: logo });
+  doveadm ??= createDoveadm({ config });
+  const quota = createQuotaService({ doveadm, audit, lock: adminLock });
+  const cleanup = createCleanupService({ mailcow: app.mailcow, doveadm, quota, audit, lock: adminLock });
+  await app.register(cleanupRoutes, { cleanup, quota, enabled: Boolean(config.doveadmUrl && config.doveadmKey) });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

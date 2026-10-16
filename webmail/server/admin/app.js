@@ -36,6 +36,8 @@ import { createFwdhostsService } from './services/fwdhosts.js';
 import fwdhostsRoutes from './routes/fwdhosts.js';
 import { createRspamdMapsService } from './services/rspamd-maps.js';
 import rspamdMapsRoutes from './routes/rspamd-maps.js';
+import { createF2bService } from './services/f2b.js';
+import securityRoutes from './routes/security.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -102,6 +104,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const rspamdMaps = createRspamdMapsService({ mailcow: app.mailcow, audit, lock: adminLock, history, mapDir: config.rspamdMapDir });
   app.decorate('rspamdMaps', rspamdMaps);
   await app.register(rspamdMapsRoutes, { service: rspamdMaps });
+  const f2b = createF2bService({ mailcow: app.mailcow, audit, lock: adminLock, history });
+  app.decorate('f2b', f2b);
+  await app.register(securityRoutes, { service: f2b });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

@@ -44,6 +44,8 @@ import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
 import { createLogoService } from './services/logo.js';
 import logoRoutes from './routes/logo.js';
+import { createRelayService } from './services/relay.js';
+import relayRoutes from './routes/relay.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -122,6 +124,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const logo = createLogoService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });
   app.decorate('logo', logo);
   await app.register(logoRoutes, { service: logo });
+  const relay = createRelayService({ config, mailcow: app.mailcow, dockerapi, audit, lock: adminLock, logs, history });
+  app.decorate('relay', relay);
+  await app.register(relayRoutes, { service: relay });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

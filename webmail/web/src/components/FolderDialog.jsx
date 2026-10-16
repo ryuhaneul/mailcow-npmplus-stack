@@ -1,7 +1,7 @@
 import { signal } from '@preact/signals';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
-import { folders, folderColor } from '../state/folders.js';
+import { folders, folderColor, folderColorsAfterChange } from '../state/folders.js';
 import { prefs, updatePrefs } from '../state/prefs.js';
 import { toast } from '../state/toast.js';
 import { route, navigate } from '../router.js';
@@ -19,24 +19,9 @@ export default function FolderDialog({folder}) {
     try {
       const path=folder?`/api/folders/${encodeURIComponent(folder.path)}`:'/api/folders';
       const result=await api(path,{method:deleting?'DELETE':folder?'PATCH':'POST',...(deleting?{}:{body:{name}})});
-      if(folder && !deleting && result.folder.path !== folder.path) {
-        const colors = {...prefs.value.folderColors};
-        let changed = false;
-        for(const item of folders.value.folders) {
-          if(!item.specialUse && !item.shared && (item.path === folder.path || item.path.startsWith(`${folder.path}/`)) && prefs.value.folderColors[item.path] == null) {
-            colors[result.folder.path + item.path.slice(folder.path.length)] = folderColor(item);
-            changed = true;
-          }
-        }
-        for(const [path,color] of Object.entries(prefs.value.folderColors)) {
-          if(path === folder.path || path.startsWith(`${folder.path}/`)) {
-            delete colors[path];
-            colors[result.folder.path + path.slice(folder.path.length)] = color;
-            changed = true;
-          }
-        }
-        if(changed) updatePrefs({folderColors:colors});
-      }
+      updatePrefs({folderColors:folderColorsAfterChange(folder
+        ? {from:folder.path,to:result?.folder?.path,deleted:deleting}
+        : {created:result.folder.path})});
       folders.value=await api('/api/folders');
       if(folder && route.value.name==='f' && route.value.value===folder.path)navigate(deleting?'inbox':`f/${encodeURIComponent(result.folder.path)}`);
       toast.value={kind:'success',message:deleting?'폴더를 지웠어요.':folder?'폴더 이름을 바꿨어요.':'폴더를 만들었어요.'};close();

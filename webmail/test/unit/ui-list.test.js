@@ -5,7 +5,7 @@ import { parseSearchQuery } from '../../server/mail/search-query.js';
 import { parseRoute, route } from '../../web/src/router.js';
 import { list, cursor, acting, loadMessages, cancelListLoad, runAction, connectMailboxEvents, deleteMessages, deleteConfirmation, settleDeleteConfirmation, resetMailbox } from '../../web/src/state/list.js';
 import { selection } from '../../web/src/state/selection.js';
-import { folders, folderColor } from '../../web/src/state/folders.js';
+import { folders, folderColor, folderColorsAfterChange } from '../../web/src/state/folders.js';
 import { storage } from '../../web/src/state/storage.js';
 import { session, sessionReady } from '../../web/src/state/session.js';
 import { toast } from '../../web/src/state/toast.js';
@@ -144,20 +144,61 @@ test('Inbox deletion remains trash and permanent-delete rejection retains messag
 });
 
 
-test('personal folder colors are path-stable across additions, deletions and ordering without saving preferences', t => {
+test('automatic colors balance six, seven and eight folders without saving preferences', t => {
   const previousPrefs=prefs.value,previousFolders=folders.value;
   t.after(()=>{prefs.value=previousPrefs;folders.value=previousFolders;});
   prefs.value={...prefs.value,folderColors:{}};
   const rows=['거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰'].map(path=>({path,color:null}));
-  const expected=rows.map(folderColor);
-  assert.deepEqual(expected,[6,6,3,3,4,2]);
-  assert.ok(expected.every(color=>color>=1&&color<=7));
-  assert.ok(new Set(expected).size>1);
-  folders.value={folders:[...rows,{path:'새 폴더'}]};
-  assert.deepEqual(rows.map(folderColor),expected);
-  folders.value={folders:rows.slice(1).reverse()};
-  assert.deepEqual(rows.map(folderColor),expected);
+  folders.value={folders:rows};
+  assert.deepEqual(rows.map(folderColor),[1,6,5,4,2,3]);
+  assert.equal(new Set(rows.map(folderColor)).size,6);
+  folders.value={folders:rows.slice().reverse()};
+  assert.deepEqual(rows.map(folderColor),[1,6,5,4,2,3]);
+  for (const count of [7,8]) {
+    const added=[...rows,{path:'추가'},{path:'또 추가'}].slice(0,count);
+    folders.value={folders:added};
+    assert.equal(new Set(added.map(folderColor)).size,7);
+    assert.equal(added.map(folderColor).filter(color=>color===1).length,count===8?2:1);
+  }
   assert.deepEqual(prefs.value.folderColors,{});
+});
+test('automatic colors count chosen and server colors, exclude gray, special and shared folders',t=>{
+  const previousPrefs=prefs.value,previousFolders=folders.value;
+  t.after(()=>{prefs.value=previousPrefs;folders.value=previousFolders;});
+  prefs.value={...prefs.value,folderColors:{A:1,B:0}};
+  const rows=[{path:'A'},{path:'B'},{path:'C',color:2},{path:'D'},{path:'E'},
+    {path:'INBOX',specialUse:'\\Inbox',color:3},{path:'Shared',shared:true,color:4}];
+  folders.value={folders:rows};
+  assert.deepEqual(rows.map(folderColor),[1,0,2,3,4,null,null]);
+  folders.value={folders:[{path:'\u{10000}'},{path:'\uE000'}]};
+  assert.deepEqual(folders.value.folders.map(folderColor),[2,1]);
+});
+test('successful create, delete and rename freeze all existing colors and migrate descendants',t=>{
+  const previousPrefs=prefs.value,previousFolders=folders.value;
+  t.after(()=>{prefs.value=previousPrefs;folders.value=previousFolders;});
+  prefs.value={...prefs.value,folderColors:{}};
+  let rows=['B','B/child','C','D','E','F'].map(path=>({path}));
+  folders.value={folders:rows};
+  const initial=Object.fromEntries(rows.map(folder=>[folder.path,folderColor(folder)]));
+  prefs.value={...prefs.value,folderColors:folderColorsAfterChange({created:'A'})};
+  rows=[...rows,{path:'A'}];folders.value={folders:rows};
+  assert.equal(folderColor(rows.at(-1)),7);
+  for(const folder of rows.slice(0,-1))assert.equal(folderColor(folder),initial[folder.path]);
+  // Freeze unsaved remaining folders too, and remove stale descendant keys.
+  prefs.value={...prefs.value,folderColors:{'A/stale':0}};
+  const beforeDelete=Object.fromEntries(rows.map(folder=>[folder.path,folderColor(folder)]));
+  prefs.value={...prefs.value,folderColors:folderColorsAfterChange({from:'A',deleted:true})};
+  rows=rows.filter(folder=>folder.path!=='A');folders.value={folders:rows};
+  assert.equal(prefs.value.folderColors.A,undefined);
+  assert.equal(prefs.value.folderColors['A/stale'],undefined);
+  for(const folder of rows)assert.equal(folderColor(folder),beforeDelete[folder.path]);
+  prefs.value={...prefs.value,folderColors:{B:0,'B/stale':5}};
+  const beforeRename=Object.fromEntries(rows.map(folder=>[folder.path,folderColor(folder)]));
+  prefs.value={...prefs.value,folderColors:folderColorsAfterChange({from:'B',to:'Z'})};
+  rows=rows.map(folder=>({...folder,path:folder.path.replace(/^B(?=\/|$)/,'Z')}));folders.value={folders:rows};
+  for(const [path,color] of Object.entries(beforeRename))assert.equal(folderColor(rows.find(folder=>folder.path===path.replace(/^B(?=\/|$)/,'Z'))),color);
+  assert.equal(prefs.value.folderColors['Z/stale'],5);
+  assert.ok(!Object.keys(prefs.value.folderColors).some(path=>path==='B'||path.startsWith('B/')));
 });
 test('folder color gives preferences including gray priority over server color and automatic color',t=>{
   const previous=prefs.value;t.after(()=>{prefs.value=previous;});

@@ -37,14 +37,29 @@
       "sync"
     ],
     [
+      "domains",
+      "도메인·DKIM",
+      "relay"
+    ],
+    [
       "cleanup",
       "메일 정리",
       "clean"
     ],
     [
+      "quarantine",
+      "격리함",
+      "shield"
+    ],
+    [
       "relay",
       "릴레이 허용 IP",
       "relay"
+    ],
+    [
+      "trust",
+      "전달·발신자 허용",
+      "share"
     ],
     [
       "fail2ban",

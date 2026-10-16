@@ -51,6 +51,16 @@ from pathlib import Path
 import re, sys
 source, dest, mode, web4, snappy4, web6, snappy6, network6, network4 = sys.argv[1:]
 data = Path(source).read_bytes()
+original = data
+# mailcow rewrites the generated hostname and strips trailing LF on startup.
+# Keep all other bytes significant, including operator whitespace/backslashes.
+def comparable(value):
+    return b''.join(line for line in value.splitlines(keepends=True)
+                    if not (re.match(rb'myhostname[ \t]*=', line) and b'$myhostname' not in line)).rstrip(b'\n')
+
+data = data.rstrip(b'\n')
+if data:
+    data += b'\n'
 begin = b'# BEGIN mailstack-edge mynetworks (apply-postfix-edge.sh)\n'
 end = b'# END mailstack-edge mynetworks\n'
 marker = b'# mailstack-edge exclusions (apply-postfix-edge.sh): '
@@ -59,12 +69,14 @@ lines = data.splitlines(keepends=True)
 clean = []
 i = 0
 managed = False
+move_to_end = False
 while i < len(lines):
     line = lines[i]
     if line == begin:
         if managed or i + 2 >= len(lines) or lines[i+2] != end or not lines[i+1].startswith(b'mynetworks = '):
             sys.exit('malformed or duplicate mailstack-edge block')
         managed = True
+        move_to_end = mode != 'revert' and i + 3 < len(lines)
         i += 3
         continue
     if line.startswith(marker):
@@ -101,7 +113,9 @@ if mode != 'revert':
         if web6:
             address, length = network6.split('/')
             defaults += f', [{address}]/{length}'
-        data = begin + b'mynetworks = ' + prefix + defaults.encode() + b'\n' + end + data
+        data = data + begin + b'mynetworks = ' + prefix + defaults.encode() + b'\n' + end
+if not move_to_end and comparable(original) == comparable(data):
+    data = original
 Path(dest).write_bytes(data)
 PY
 if cmp -s "$WORK/original" "$WORK/next"; then log "already $MODE; no changes"; exit 0; fi

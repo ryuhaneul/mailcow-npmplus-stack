@@ -168,3 +168,5 @@ test('admin config: existing mail connection environment names are retained for 
   const result = loadAdminConfig({ ...env, IMAP_HOST: 'Dovecot-Mailcow', SMTP_HOST: 'Postfix-Mailcow', MAIL_TLS_SERVERNAME: 'Mail.Example.Com' });
   assert.equal(result.imapHost, 'dovecot-mailcow'); assert.equal(result.smtpHost, 'postfix-mailcow'); assert.equal(result.mailTlsServername, 'mail.example.com');
 });
+
+test('admin config: empty LOGO_DIR disables logo management', () => { assert.equal(loadAdminConfig({ ...env, LOGO_DIR: '' }).logoDir, ''); });

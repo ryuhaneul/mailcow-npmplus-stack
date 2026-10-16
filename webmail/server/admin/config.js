@@ -70,7 +70,7 @@ export function loadAdminConfig(env = process.env) {
   if (mailcowIpv6Network !== '') cidr(mailcowIpv6Network, 'MAILCOW_IPV6_NETWORK', 6);
   const autoexpungeRaw = value('AUTOEXPUNGE_DAYS', true);
   const autoexpungeDays = autoexpungeRaw === '' ? null : integer('AUTOEXPUNGE_DAYS', 365);
-  const logoDir = choice('LOGO_DIR', ['/brand']);
+  const logoDir = choice('LOGO_DIR', ['', '/brand']);
   const auditDir = choice('AUDIT_DIR', ['/data/audit']);
   const rspamdMapDir = env.ADMIN_RSPAMD_MAP_DIR ?? '/rspamd_custom_maps';
   if (typeof rspamdMapDir !== 'string' || !isAbsolute(rspamdMapDir) || rspamdMapDir.includes('\0')) invalid('ADMIN_RSPAMD_MAP_DIR');

@@ -42,6 +42,8 @@ import { createStatusService } from './services/status.js';
 import statusRoutes from './routes/status.js';
 import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
+import { createLogoService } from './services/logo.js';
+import logoRoutes from './routes/logo.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -117,6 +119,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const logs = createLogsService({ mailcow: app.mailcow, config });
   app.decorate('logs', logs);
   await app.register(logsRoutes, { service: logs });
+  const logo = createLogoService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });
+  app.decorate('logo', logo);
+  await app.register(logoRoutes, { service: logo });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

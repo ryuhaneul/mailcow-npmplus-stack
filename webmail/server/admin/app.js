@@ -12,6 +12,8 @@ import historyRoutes from './routes/history.js';
 import { createDockerApi } from './dockerapi.js';
 import { createSharesService } from './services/shares.js';
 import sharesRoutes from './routes/shares.js';
+import { createTeamsService } from './services/teams.js';
+import teamsRoutes from './routes/teams.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -42,6 +44,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const shares = createSharesService({ mailcow: app.mailcow, dockerapi, audit, lock: adminLock, history });
   app.decorate('shares', shares);
   await app.register(sharesRoutes, { service: shares });
+  const teams = createTeamsService({ mailcow: app.mailcow, audit, lock: adminLock, history, auditDir: config.auditDir });
+  app.decorate('teams', teams);
+  await app.register(teamsRoutes, { service: teams });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

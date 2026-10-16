@@ -13,7 +13,9 @@ export function sanitizeAudit(value) {
   const entries = [];
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.replace(/[^a-z0-9]/gi, '');
-    if (normalized.toLowerCase() === 'password' && ['changed', 'set'].includes(item)) entries.push([key, item]);
+    if (['scriptSha256Before', 'scriptSha256After'].includes(key)) {
+      if (typeof item === 'string' && /^[a-f0-9]{64}$/.test(item)) entries.push([key, item]);
+    } else if (normalized.toLowerCase() === 'password' && ['changed', 'set'].includes(item)) entries.push([key, item]);
     else if (!secret.test(normalized)) entries.push([key, sanitizeAudit(item)]);
   }
   return Object.fromEntries(entries);
@@ -40,7 +42,7 @@ export function createAudit({ dir, now = Date.now, logger, fs = { mkdir, open, r
       } finally { await handle.close(); }
     });
   }
-  async function run(entry, operation) {
+  async function run(entry, operation, { prepare } = {}) {
     const ts = kstTimestamp(now());
     const filename = `${ts.slice(0, 7)}.jsonl`;
     const id = randomBytes(16).toString('hex');
@@ -48,8 +50,12 @@ export function createAudit({ dir, now = Date.now, logger, fs = { mkdir, open, r
       action: entry.action, target: entry.target, kind: entry.kind,
       revertible: entry.kind === 'config' && entry.revertible === true,
       before: sanitizeAudit(entry.before ?? {}), after: sanitizeAudit(entry.after ?? {}),
-      ...(entry.revertOf ? { revertOf: entry.revertOf } : {}) };
-    try { await append(filename, intent); } catch { throw unavailable(); }
+      ...(entry.revertOf ? { revertOf: entry.revertOf } : {}),
+      ...sanitizeAudit({ scriptSha256Before: entry.scriptSha256Before, scriptSha256After: entry.scriptSha256After }),
+      ...(Number.isSafeInteger(entry.bytesBefore) && entry.bytesBefore >= 0 ? { bytesBefore: entry.bytesBefore } : {}),
+      ...(Number.isSafeInteger(entry.bytesAfter) && entry.bytesAfter >= 0 ? { bytesAfter: entry.bytesAfter } : {}) };
+    try { await prepare?.(intent); await append(filename, intent); }
+    catch (error) { if (error instanceof AppError) throw error; throw unavailable(); }
     let value, failure, failed = false;
     try { value = await operation(intent); } catch (error) { failed = true; failure = error; }
     const result = failed ? 'failed' : value?.result === 'partial' ? 'partial' : 'ok';

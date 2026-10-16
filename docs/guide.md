@@ -597,6 +597,8 @@ setup·update는 cron이 없으면 설치하고, 스택의 옛 두 줄과 정확
 
 ### 7.1 옛 호스트별 SNI 인증서 정리
 
+자동 정리는 CA가 발급한 일반 인증서를 전제로 하며, DNS 값 안에 구분자를 흉내 낸 비정상 인증서는 구별하지 못합니다.
+
 `data/assets/ssl/<호스트>/`에 `domains`·`cert.pem`·`key.pem`이 모두 남아 있으면 Dovecot이 시작할 때 그 인증서를 SNI 설정에 넣습니다. 기본 `cert.pem`을 NPM 인증서로 바꾸거나 reload만 해서는 이 경로가 바뀌지 않아, update마다 reload가 반복될 수 있습니다. verify는 기본 인증서와 만료일이 다른 디렉터리를 FAIL로 표시합니다. update는 해당 디렉터리의 `domains` 이름이 모두 기본 NPM 인증서의 DNS SAN에 포함되면 자동 정리합니다. 대소문자를 무시한 정확 일치와 맨 왼쪽 라벨 전체의 와일드카드(예: `*.example.com`은 `mail.example.com`만, `a.b.example.com`·`example.com`은 제외)를 지원합니다. 부분 와일드카드·IP SAN은 인정하지 않습니다. 조건을 충족하지 못하거나 검사할 수 없는 디렉터리는 이유를 경고하고 보존합니다. 파일이 미완비인 디렉터리는 INFO로 표시하며 검사에서 제외합니다.
 
 자동 정리는 디렉터리를 SSL 디렉터리 밖 `/root/mailcow-sni-backup-<날짜시각>-<임의값>/`(700)로 이동하고 Dovecot·Postfix를 한 번에 재시작합니다. Dovecot master를 최대 60초 기다린 뒤, 남은 옛 디렉터리가 원래 보존하기로 한 목록과 같은지 재검사합니다. 실패하면 이동한 디렉터리를 모두 원위치하고 두 서비스를 다시 재시작하며 경고합니다. update는 계속 진행하고 verify가 남은 문제를 표시합니다. 정리 뒤 기존 993·465 대조를 하므로 이미 일치하면 추가 reload를 하지 않습니다. 이동 경로·백업·재시작 시각은 update 로그와 `mailcow-cert-reload` 시스템 로그에 남습니다.

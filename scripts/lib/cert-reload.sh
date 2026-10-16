@@ -142,7 +142,8 @@ cert_reload_sni_name_covered() {
 # Callers source dovecot-ready.sh and handle failure as a warning, like reload.
 cert_reload_reconcile_sni() {
     local mailcow_dir="$1" scan_status=0 san_text directory name backup failed=false
-    local expected_remaining actual_remaining
+    local expected_remaining actual_remaining san_body san_item domains_text
+    local dns_pattern='^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$'
     local -a sans=() domains=() eligible=() retained=() moved=()
     cert_reload_stale_sni_dirs "$mailcow_dir" true || scan_status=$?
     if [ "$CERT_RELOAD_SNI_BASE_UNAVAILABLE" = true ]; then
@@ -161,9 +162,41 @@ cert_reload_reconcile_sni() {
         warn "호스트별 SNI 인증서 자동 정리 안 함: 기본 인증서 SAN 확인 불가 — docs/guide.md 7.1절"
         return 2
     fi
-    mapfile -t sans < <(printf '%s\n' "$san_text" | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:\([^[:space:]]*\)[[:space:]]*$/\1/p')
+    # OpenSSL text is usable only for ordinary CA-issued DNS/IP SANs.
+    # Reject other GeneralName types before splitting their potentially ambiguous values.
+    if [[ "${san_text,,}" =~ (uri:|email:|othername:|dirname:|registered\ id:|x400name:|edipartyname:) ]]; then
+        warn "호스트별 SNI 인증서 자동 정리 안 함: 기본 인증서 SAN 종류 확인 불가 (DNS·IP 외 항목) — docs/guide.md 7.1절"
+        return 2
+    fi
+    san_body="${san_text#*$'\n'}"
+    san_body="${san_body//$'\n'/ }"
+    while :; do
+        san_item="${san_body%%,*}"
+        san_item="${san_item#"${san_item%%[![:space:]]*}"}"
+        san_item="${san_item%"${san_item##*[![:space:]]}"}"
+        case "$san_item" in
+            DNS:*)
+                name="${san_item#DNS:}"
+                if [[ "${name,,}" =~ $dns_pattern ]]; then sans+=("${name,,}"); else failed=true; fi
+                ;;
+            'IP Address:'*) ;;
+            *) failed=true ;;
+        esac
+        [[ "$san_body" == *,* ]] || break
+        san_body="${san_body#*,}"
+    done
+    if [ "$failed" = true ]; then
+        warn "호스트별 SNI 인증서 자동 정리 안 함: 기본 인증서 SAN 형식 확인 불가 — docs/guide.md 7.1절"
+        return 2
+    fi
     for directory in "${CERT_RELOAD_SNI_STALE[@]}"; do
-        mapfile -t domains < <(tr '[:space:]' '\n' < "$directory/domains" | sed '/^$/d')
+        if ! domains_text=$(set -o pipefail; tr '[:space:]' '\n' < "$directory/domains" | sed '/^$/d'); then
+            retained+=("$directory")
+            warn "옛 호스트별 인증서 $directory: domains 읽기 확인 불가 — 보존, docs/guide.md 7.1절"
+            continue
+        fi
+        domains=()
+        [ -z "$domains_text" ] || mapfile -t domains <<< "$domains_text"
         if [ "${#domains[@]}" -eq 0 ]; then
             retained+=("$directory")
             warn "옛 호스트별 인증서 $directory: domains가 비어 있어 보존 — docs/guide.md 7.1절"

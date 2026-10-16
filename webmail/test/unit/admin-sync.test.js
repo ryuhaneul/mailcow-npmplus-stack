@@ -184,3 +184,37 @@ test('sync sanitizer: known full comma password replaced before flag parsing', (
 for (const value of ['--password1 Synthetic,Quoted-Password!', '--password1=Synthetic;Quoted-Password!', '--passfile1 /tmp/Synthetic,Secret;Path', 'password1: Synthetic,Quoted;Password!', '--password1 "Synthetic,Quoted;Password!"', "--password1 'Synthetic,Quoted;Password!'"]) test(`sync sanitizer: unknown punctuation/quoted credential ${value}`, () => {
   const result = sanitizeSyncResponse(`${value} next`); assert.ok(!result.includes('Synthetic')); assert.ok(!result.includes('Quoted')); assert.ok(!result.includes('Secret')); assert.match(result, /\*\*\*/); assert.match(result, / next$/);
 });
+
+test('sync: unchanged historical showpasswords log stays hidden after removing the flag', async t => {
+  const f = await fixture(t), secret = 'SyntheticHistoricalSecret984';
+  f.jobs[0].custom_params = '--showpasswords --debugimap';
+  f.jobs[0].log = `--passfile1 /tmp/synthetic-pass --showpasswords --debugimap\nSending: 1 LOGIN source@example.net ${secret}`;
+  assert.equal((await get(f)).logHidden, true);
+  await patch(f, { options: { custom_params: '' } });
+  const result = await get(f);
+  assert.equal(result.logHidden, true); assert.equal(result.log, undefined); assert.match(result.logHiddenReason, /이전 실행 로그/);
+  assert.ok(!JSON.stringify(result).includes(secret));
+  f.jobs[0].log = 'new safe execution';
+  assert.equal((await get(f)).log, 'new safe execution');
+});
+for (const name of ['password1', 'password2', 'passfile1', 'passfile2', 'oauthaccesstoken1', 'oauthaccesstoken2', 'oauthdirect1', 'oauthdirect2', 'authuser1', 'authuser2']) {
+  test(`sync: reject credential ${name}; existing value masked and removal allowed without reversible secret history`, async t => {
+    const f = await fixture(t), secret = 'SyntheticCredential984';
+    await assert.rejects(patch(f, { options: { custom_params: `--${name}=${secret}` } }), { statusCode: 422 });
+    assert.equal(writes(f).length, 0);
+    f.jobs[0].custom_params = `--${name}='${secret}' --dry`;
+    assert.equal((await get(f)).custom_params, `--${name}=*** --dry`);
+    assert.ok(!JSON.stringify(await f.service.list({})).includes(secret));
+    await assert.rejects(patch(f, { active: false }), { statusCode: 422 });
+    const changed = await patch(f, { options: { custom_params: '--dry' } });
+    const record = await f.history.detail(changed.auditId);
+    assert.equal(record.before.options.custom_params, `--${name}=*** --dry`); assert.equal(record.after.options.custom_params, '--dry');
+    assert.equal(record.canRevert, false); assert.ok(!JSON.stringify(await f.audit.read()).includes(secret));
+    assert.equal(f.jobs[0].custom_params, '--dry');
+  });
+}
+test('sync sanitizer: short secrets preserve structural values while masking human text and argument values', () => {
+  const result = sanitizeSyncResponse({ id: '1', result: 'ok', code: 'LOOKUP', line: 1, user1: 'ok@example.net', custom_params: '--password1=1 --dry', log: 'password 1 and ok', notice: 'ok', password1: '1' }, ['ok']);
+  assert.equal(result.id, '1'); assert.equal(result.result, 'ok'); assert.equal(result.code, 'LOOKUP'); assert.equal(result.line, 1); assert.equal(result.user1, 'ok@example.net');
+  assert.equal(result.custom_params, '--password1=*** --dry'); assert.ok(!result.log.includes('ok')); assert.equal(result.notice, '***'); assert.equal(result.password1, undefined);
+});

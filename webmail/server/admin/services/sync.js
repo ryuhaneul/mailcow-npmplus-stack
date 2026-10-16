@@ -16,19 +16,31 @@ function customParams(value) {
   if (typeof value !== 'string') throw invalid();
   for (const name of paramNames(value)) {
     // Exact allowlist also rejects abbreviated option names accepted by Getopt::Long.
-    if (!allowedParams.has(name) || /\s/.test(name) || destructive.some(option => option.startsWith(name)) || name === 'showpasswords') throw invalid();
+    if (!allowedParams.has(name) || /\s/.test(name) || destructive.some(option => option.startsWith(name)) || name === 'showpasswords' || secretParams.includes(name)) throw invalid();
   }
   return value;
 }
-const secretKey = key => key.replace(/[^a-z0-9]/gi, '').toLowerCase() === 'password1';
-// A09 can pass the submitted source password(s); also discover passwords in nested API log objects.
+// imapsync 19828–19842, 19935–19936: string-valued credential options.
+const secretParams = ['password1', 'password2', 'passfile1', 'passfile2', 'oauthaccesstoken1', 'oauthaccesstoken2', 'oauthdirect1', 'oauthdirect2', 'authuser1', 'authuser2'];
+const secretPattern = String.raw`${secretParams.join('|')}|password[\w]*|passwd[\w]*|passfile[\w]*|oauthaccesstoken[\w]*|[\w]*secret[\w]*|[\w]*token[\w]*|[\w]+_key|apikey|privatekey`;
+const secretName = new RegExp(`^(?:${secretPattern})$`, 'i');
+const secretKey = key => secretName.test(key) || secretName.test(key.replace(/[^a-z0-9]/gi, ''));
+const hasSecretParams = value => [...String(value).matchAll(/(?:^|\s)--?([a-z0-9]+)/gi)].some(([, name]) => secretParams.some(option => option.startsWith(name.toLowerCase())));
+const credential = new RegExp(String.raw`(?<![\w])((?:--?|["']?)(?:${secretPattern})["']?\s*(?:[=:]\s*|\s+))("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)`, 'gi');
+const humanFields = new Set(['message', 'msg', 'log', 'returned_text', 'error', 'notice', 'recovery', 'reason']);
+function parsedStructure(value) {
+  if (!/^[\s]*[\[{]/.test(value)) return null;
+  try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : null; } catch { return null; }
+}
+// Known values are replaced only in human-readable text, never IDs, addresses or status codes.
 export function sanitizeSyncResponse(value, secrets = []) {
   const hidden = new Set(secrets.filter(item => typeof item === 'string' && item));
-  const credential = /(?:--?password1|--?passfile1|["']?password1["']?)\s*(?:[=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)/gi;
   function collect(item) {
     if (typeof item === 'string') {
+      const parsed = parsedStructure(item);
+      if (parsed) { collect(parsed); return; }
       for (const match of item.matchAll(credential)) {
-        const raw = match[1], plain = /^["']/.test(raw) ? raw.slice(1, -1) : raw;
+        const raw = match[2], plain = /^["']/.test(raw) ? raw.slice(1, -1) : raw;
         if (plain) hidden.add(plain);
       }
     } else if (item && typeof item === 'object') for (const [key, child] of Object.entries(item)) {
@@ -37,18 +49,22 @@ export function sanitizeSyncResponse(value, secrets = []) {
     }
   }
   collect(value);
-  function clean(item) {
+  function clean(item, human = false, key = '') {
     if (typeof item === 'string') {
+      const parsed = parsedStructure(item);
+      if (parsed) return JSON.stringify(clean(parsed, human, key));
+      if (key === 'custom_params') return item.replace(credential, '$1***');
+      if (!human) return item;
       let result = item;
       for (const secret of [...hidden].sort((a, b) => b.length - a.length)) result = result.split(secret).join('***');
-      result = result.replace(credential, match => match.replace(/([=:]\s*|\s+)("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)$/, '$1***'));
+      result = result.replace(credential, '$1***');
       return result.replace(/\*[^\s*<>"'@]+@mailcow\.local/gi, '****@mailcow.local');
     }
-    if (Array.isArray(item)) return item.map(clean);
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, clean(child)]));
+    if (Array.isArray(item)) return item.map(child => clean(child, human, key));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, clean(child, humanFields.has(key), key)]));
     return item;
   }
-  return clean(value);
+  return clean(value, typeof value === 'string');
 }
 function id(value) {
   if (!/^[1-9]\d*$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw invalid();
@@ -84,9 +100,9 @@ export function createSyncService({ mailcow, audit, lock, history }) {
     const jobId = id(rawId), row = await requireRow(session, jobId);
     const detail = (await rows(session, encodeURIComponent(row.user2))).find(item => String(item.id) === jobId);
     if (!detail) throw missing();
-    if (exposesPassword(detail.custom_params)) {
+    if (exposesPassword(detail.custom_params) || /showpasswords/i.test(`${detail.log ?? ''} ${detail.returned_text ?? ''}`)) {
       const { log, returned_text, ...safe } = detail;
-      return { ...dto(safe), logHidden: true, logHiddenReason: hiddenReason };
+      return { ...dto(safe), logHidden: true, logHiddenReason: `${hiddenReason} — 이전 실행 로그에 원본 암호가 찍혔을 수 있음` };
     }
     return dto(detail);
   }
@@ -106,7 +122,7 @@ export function createSyncService({ mailcow, audit, lock, history }) {
         }
       }
     }
-    if (exposesPassword(after.options.custom_params)) throw invalid();
+    if (exposesPassword(after.options.custom_params) || hasSecretParams(after.options.custom_params)) throw invalid();
     for (const key of ['delete1', 'delete2']) if (!before.options[key] && after.options[key] && data[key === 'delete1' ? 'confirmDelete1' : 'confirmDelete2'] !== true) throw invalid();
     return after;
   }
@@ -128,7 +144,7 @@ export function createSyncService({ mailcow, audit, lock, history }) {
   }
   async function apply(session, before, after, confirmed = false) {
     // History confirms the operation, but may never restore password-printing options.
-    if (exposesPassword(after.options.custom_params)) throw invalid();
+    if (exposesPassword(after.options.custom_params) || hasSecretParams(after.options.custom_params)) throw invalid();
     const rows = await listRows(session), existing = rows.find(row => String(row.id) === before.id);
     if (!existing) throw missing();
     const current = snapshot(existing); assertUnchanged(etag(before), current);
@@ -146,8 +162,8 @@ export function createSyncService({ mailcow, audit, lock, history }) {
       const after = desired(before, data);
       const others = !before.options.delete2 && after.options.delete2 ? multiSource(before, after, await listRows(session), data.confirmMultiSource) : [];
       if (isDeepStrictEqual(before, after)) return { ...dto(row), unchanged: true };
-      const removedUnsafe = exposesPassword(before.options.custom_params);
-      const detail = removedUnsafe ? { reason: '추가 인자 showpasswords 는 로그에 원본 암호를 남길 수 있어 다시 넣지 않음', notice: '함께 바꾼 옵션을 포함해 이 기록 전체는 되돌릴 수 없어요. 다른 옵션은 새 수정으로 바꿔 주세요.' } : {};
+      const removedUnsafe = exposesPassword(before.options.custom_params) || hasSecretParams(before.options.custom_params);
+      const detail = removedUnsafe ? { reason: '비밀값 또는 showpasswords 추가 인자는 로그에 원본 암호를 남길 수 있어 다시 넣지 않음', notice: '함께 바꾼 옵션을 포함해 이 기록 전체는 되돌릴 수 없어요. 다른 옵션은 새 수정으로 바꿔 주세요.' } : {};
       if (others.length) detail.multiSourceConfirmed = true;
       return audit.run({ actor, ip, action: 'sync.edit', target: `sync:${jobId}`, kind: 'config', revertible: !removedUnsafe, before, after }, async intent => ({ ...dto(await apply(session, before, after, data.confirmMultiSource)), auditId: intent.id, detail }));
     });

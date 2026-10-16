@@ -28,6 +28,8 @@ import { createFiltersService } from './services/filters.js';
 import filtersRoutes from './routes/filters.js';
 import { createSyncService } from './services/sync.js';
 import syncRoutes from './routes/sync.js';
+import { createBatchService } from './services/batch.js';
+import batchRoutes from './routes/batch.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -82,6 +84,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const sync = createSyncService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('sync', sync);
   await app.register(syncRoutes, { service: sync });
+  const batch = createBatchService({ mailcow: app.mailcow, accounts, domains, teams, audit });
+  app.decorate('batch', batch);
+  await app.register(batchRoutes, { service: batch });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

@@ -10,8 +10,11 @@ export function visibleTasks(features = {}) { return homeTasks.filter(task => ta
 export function hasStatusError(value) { return Boolean(value && typeof value === 'object' && (value.error || Object.values(value).some(hasStatusError))); }
 export function kst(value) {
   if (value == null || value === '') return '—';
-  const date = new Date(/^\d+(?:\.\d+)?$/.test(String(value)) ? Number(value) * 1000 : value);
-  return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(date) : String(value);
+  const numeric = /^-?\d+(?:\.\d+)?$/.test(String(value)) ? Number(value) : null;
+  const date = new Date(numeric === null ? value : Math.abs(numeric) < 1e11 ? numeric * 1000 : numeric);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(date).map(part => [part.type, part.value]));
+  return `${parts.month} ${parts.day}일 ${parts.weekday} · ${parts.hour}:${parts.minute}`;
 }
 export function duration(seconds) { return seconds >= 60 ? `${Math.floor(seconds / 60)}분` : `${seconds}초`; }
 export function bytes(value) { return `${(value / 1073741824).toFixed(1)} GB`; }

@@ -132,3 +132,47 @@ test('sync: empty upstream object is empty list; malformed result is502', async 
   const empty = createSyncService({ ...base, mailcow: { async call() { return {}; } } }); assert.deepEqual(await empty.list({}), { items: [] });
   const malformed = createSyncService({ ...base, mailcow: { async call() { return 'bad'; } } }); await assert.rejects(malformed.list({}), { statusCode: 502 });
 });
+
+test('sync multi-source: inactive source blocks delete2, projects safe list, basic confirmation422 comes first', async t => {
+  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, user1: 'other@example.net', host1: 'other.example.net', active: '0', password1: 'synthetic-other-password', log: 'synthetic-other-log' });
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }), error => {
+    assert.equal(error.statusCode, 409); assert.equal(error.code, 'DELETE2_MULTI_SOURCE'); assert.deepEqual(error.jobs, [{ id: '2', user1: 'other@example.net', host1: 'other.example.net', active: false, delete2: false }]); assert.ok(!JSON.stringify(error.jobs).includes('password')); assert.ok(!JSON.stringify(error.jobs).includes('log')); return true;
+  });
+  assert.equal(writes(f).length, 0); assert.equal((await f.audit.read()).rows.length, 0);
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmMultiSource: true }), { statusCode: 422 });
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true, confirmMultiSource: false }), { statusCode: 409 });
+});
+test('sync multi-source: confirmed change allowed and audited; user2 case ignored', async t => {
+  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, user2: 'OWNER@EXAMPLE.COM', active: '0', delete2: '1' });
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }), { code: 'DELETE2_MULTI_SOURCE' });
+  const result = await patch(f, { options: { delete2: true }, confirmDelete2: true, confirmMultiSource: true }); assert.equal(f.jobs[0].delete2, 1); assert.equal(writes(f).length, 1);
+  const record = await f.history.detail(result.auditId); assert.equal(record.kind, 'config'); assert.equal(record.result, 'ok'); assert.equal(record.detail.multiSourceConfirmed, true);
+});
+for (const value of [1, 0, 'true', null]) test(`sync multi-source: boolean confirmation required ${value}`, async t => {
+  const f = await fixture(t); await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true, confirmMultiSource: value }), { statusCode: 422 }); assert.equal(writes(f).length, 0);
+});
+test('sync multi-source: self only/different user2 no additional confirmation', async t => {
+  const f = await fixture(t); await patch(f, { options: { delete2: true }, confirmDelete2: true }); assert.equal(f.jobs[0].delete2, 1);
+  await patch(f, { options: { delete2: false } }); f.jobs.push({ ...f.jobs[0], id: 2, user2: 'other@example.com' }); await patch(f, { options: { delete2: true }, confirmDelete2: true }); assert.equal(f.jobs[0].delete2, 1);
+});
+test('sync multi-source: already enabled delete2 allows other options and disabling', async t => {
+  const f = await fixture(t); f.jobs[0].delete2 = '1'; f.jobs.push({ ...f.jobs[0], id: 2 }); await patch(f, { options: { maxage: 20 } }); assert.equal(f.jobs[0].maxage, 20); await patch(f, { options: { delete2: false } }); assert.equal(f.jobs[0].delete2, 0);
+});
+test('sync multi-source: undo cannot re-enable delete2 with another job; no upstream changes', async t => {
+  const f = await fixture(t); f.jobs[0].delete2 = '1'; const result = await patch(f, { options: { delete2: false } }); f.jobs.push({ ...f.jobs[0], id: 2 });
+  const count = writes(f).length; await assert.rejects(revert(f, result.auditId), error => error.statusCode === 409 && error.code === 'DELETE2_MULTI_SOURCE' && error.message.includes('동기화 화면') && error.message.includes('다른 동기화 작업')); assert.equal(writes(f).length, count); assert.equal(f.jobs[0].delete2, 0);
+});
+test('sync multi-source: source appearing after preflight caught immediately before write', async t => {
+  const f = await fixture(t), tag = (await get(f)).etag; let reads = 0; f.options.onCall = ({ path }) => { if (path.endsWith('all/no_log') && ++reads === 3) f.jobs.push({ ...f.jobs[0], id: 2 }); };
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }, tag), { code: 'DELETE2_MULTI_SOURCE' }); assert.equal(writes(f).length, 0);
+});
+test('sync multi-source HTTP:409 with jobs, confirmed PATCH success, history409 contains guidance', async t => {
+  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, active: '0', password1: 'synthetic-other-password', log: 'synthetic-other-log' });
+  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
+  const send = payload => app.inject({ method: 'PATCH', url: '/api/admin/syncjobs/1', headers, payload });
+  const data = { etag: (await get(f)).etag, options: { delete2: true }, confirmDelete2: true }, denied = await send(data); assert.equal(denied.statusCode, 409, denied.body); assert.deepEqual(denied.json().error.jobs, [{ id: '2', user1: 'source@example.net', host1: 'imap.example.net', active: false, delete2: false }]); assert.ok(!denied.body.includes('password1')); assert.ok(!denied.body.includes('log')); assert.equal(writes(f).length, 0);
+  const allowed = await send({ ...data, confirmMultiSource: true }); assert.equal(allowed.statusCode, 200, allowed.body);
+  const disabled = await send({ etag: allowed.json().etag, options: { delete2: false } }); assert.equal(disabled.statusCode, 200);
+  const reverted = await app.inject({ method: 'POST', url: `/api/admin/history/${disabled.json().auditId}/revert`, headers, payload: { confirm: true } }); assert.equal(reverted.statusCode, 409, reverted.body); assert.equal(reverted.json().error.code, 'DELETE2_MULTI_SOURCE'); assert.match(reverted.json().error.message, /동기화 화면/);
+});

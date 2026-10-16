@@ -90,10 +90,10 @@ export function createSyncService({ mailcow, audit, lock, history }) {
     return dto(detail);
   }
   function desired(before, data) {
-    object(data, ['etag', 'active', 'options', 'confirmDelete1', 'confirmDelete2']);
+    object(data, ['etag', 'active', 'options', 'confirmDelete1', 'confirmDelete2', 'confirmMultiSource']);
     const after = structuredClone(before);
     if ('active' in data) after.active = boolean(data.active);
-    for (const flag of ['confirmDelete1', 'confirmDelete2']) if (flag in data) boolean(data[flag]);
+    for (const flag of ['confirmDelete1', 'confirmDelete2', 'confirmMultiSource']) if (flag in data) boolean(data[flag]);
     if ('options' in data) {
       object(data.options, fields);
       for (const [key, value] of Object.entries(data.options)) {
@@ -115,10 +115,23 @@ export function createSyncService({ mailcow, audit, lock, history }) {
     for (const key of fields) if (before.options[key] !== after.options[key]) attr[key] = typeof after.options[key] === 'boolean' ? Number(after.options[key]) : after.options[key];
     return attr;
   }
-  async function apply(session, before, after) {
+  function multiSource(before, after, rows, confirmed = false) {
+    if (before.options.delete2 || !after.options.delete2) return [];
+    const jobs = rows.filter(row => String(row.id) !== before.id && String(row.user2).trim().toLowerCase() === String(before.user2).trim().toLowerCase())
+      .map(row => ({ id: String(row.id), user1: String(row.user1 ?? ''), host1: String(row.host1 ?? ''), active: String(row.active) === '1', delete2: String(row.delete2) === '1' }));
+    if (jobs.length && confirmed !== true) {
+      const error = new AppError(409, 'DELETE2_MULTI_SOURCE', '같은 대상 메일함에 다른 동기화 작업이 있어요. 동기화 화면에서 목록을 확인하고 설정을 새로 바꿔 주세요.');
+      error.jobs = jobs; throw error;
+    }
+    return jobs;
+  }
+  async function apply(session, before, after, confirmed = false) {
     // History confirms the operation, but may never restore password-printing options.
     if (exposesPassword(after.options.custom_params)) throw invalid();
-    const current = snapshot(await requireRow(session, before.id)); assertUnchanged(etag(before), current);
+    const rows = await listRows(session), existing = rows.find(row => String(row.id) === before.id);
+    if (!existing) throw missing();
+    const current = snapshot(existing); assertUnchanged(etag(before), current);
+    multiSource(before, after, rows, confirmed);
     await call(session, 'POST', '/api/v1/edit/syncjob', { items: [before.id], attr: attrs(before, after) });
     const row = await requireRow(session, before.id);
     if (!isDeepStrictEqual(snapshot(row), after)) throw failed();
@@ -128,12 +141,14 @@ export function createSyncService({ mailcow, audit, lock, history }) {
     const jobId = id(rawId);
     return lock.run(`sync:${jobId}`, async () => {
       const row = await requireRow(session, jobId), before = snapshot(row);
-      object(data, ['etag', 'active', 'options', 'confirmDelete1', 'confirmDelete2']); assertUnchanged(data.etag, before);
+      object(data, ['etag', 'active', 'options', 'confirmDelete1', 'confirmDelete2', 'confirmMultiSource']); assertUnchanged(data.etag, before);
       const after = desired(before, data);
+      const others = !before.options.delete2 && after.options.delete2 ? multiSource(before, after, await listRows(session), data.confirmMultiSource) : [];
       if (isDeepStrictEqual(before, after)) return { ...dto(row), unchanged: true };
       const removedUnsafe = exposesPassword(before.options.custom_params);
       const detail = removedUnsafe ? { reason: '추가 인자 showpasswords 는 로그에 원본 암호를 남길 수 있어 다시 넣지 않음', notice: '함께 바꾼 옵션을 포함해 이 기록 전체는 되돌릴 수 없어요. 다른 옵션은 새 수정으로 바꿔 주세요.' } : {};
-      return audit.run({ actor, ip, action: 'sync.edit', target: `sync:${jobId}`, kind: 'config', revertible: !removedUnsafe, before, after }, async intent => ({ ...dto(await apply(session, before, after)), auditId: intent.id, detail }));
+      if (others.length) detail.multiSourceConfirmed = true;
+      return audit.run({ actor, ip, action: 'sync.edit', target: `sync:${jobId}`, kind: 'config', revertible: !removedUnsafe, before, after }, async intent => ({ ...dto(await apply(session, before, after, data.confirmMultiSource)), auditId: intent.id, detail }));
     });
   }
   async function runNow({ session, actor, ip, id: rawId }) {

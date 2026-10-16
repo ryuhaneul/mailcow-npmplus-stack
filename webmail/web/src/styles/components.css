@@ -784,3 +784,7 @@ body[data-r=filters] [data-v=filters],body[data-r=rule] [data-v=rule],body[data-
 @media(max-width:760px){
   .layout-buttons{display:none}.layout-mobile{display:grid}.layout-control>.layout-menu{display:block}
 }
+
+.brand-picture{display:flex;align-items:center;max-width:160px;max-height:32px}
+.brand-image{display:block;width:auto;height:auto;max-width:160px;max-height:32px;object-fit:contain}
+.brand-image.square{height:32px}

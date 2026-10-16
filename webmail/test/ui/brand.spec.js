@@ -1,0 +1,32 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'vite';
+import preact from '@preact/preset-vite';
+import { chromium, expect } from '@playwright/test';
+import { createFakeApi } from '../../web/dev/fake-api.js';
+const captures = process.env.A17B_CAPTURE_DIR || '/ductor/workspace/design-pipeline/screenshots/a17b';
+await test('Brand actual browser approved placement, theme variants, dimensions and text fallbacks', async t => {
+  const fake = createFakeApi(), server = await createServer({ configFile: false, root: fileURLToPath(new URL('../../web', import.meta.url)), logLevel: 'error', plugins: [preact(), { name: 'brand-test-api', configureServer(server) { server.middlewares.use(fake.middleware); } }], server: { host: '127.0.0.1', port: 0 } }); await server.listen(); t.after(() => server.close());
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || '/ductor/opt/ms-playwright/chromium-1228/chrome-linux64/chrome', args: ['--no-sandbox'] }); t.after(() => browser.close()); await mkdir(captures, { recursive: true });
+  const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+  async function pageFor({ mode = 'light', system = 'light', shape = 'wide', authenticated = false, width = 1280, broken = false, noLogo = false, noDark = false } = {}) {
+    fake.state.authenticated = authenticated; fake.state.prefs.mode = mode; fake.state.config.logo = noLogo ? null : { light: '/brand/logo/light?v=synthetic', dark: noDark ? null : '/brand/logo/dark?v=synthetic' };
+    const context = await browser.newContext({ viewport: { width, height: width < 700 ? 844 : 900 }, colorScheme: system }); await context.addInitScript(({ mode }) => localStorage.setItem('webmail-prefs', JSON.stringify({ theme: 'ink', mode })), { mode });
+    const page = await context.newPage(), errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/brand/logo/*', route => { if (broken) return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' }); const dark = route.request().url().includes('/dark?'), wide = shape === 'wide', w = wide ? 500 : 100, h = 100; return route.fulfill({ status: 200, contentType: 'image/svg+xml', body: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${dark ? '#17202b' : '#f0f3f7'}"/><text x="${wide ? 12 : 30}" y="65" fill="${dark ? '#ffffff' : '#17202b'}" font-size="50">${wide ? 'SYNTHETIC MAIL' : 'S'}</text></svg>` }); });
+    await page.goto(`${origin}/#inbox`); const container = authenticated ? '.side .brand' : '.login-card .brand'; if (authenticated && width < 1000 && await page.getByRole('button', { name: '메일함 열기' }).isVisible()) await page.getByRole('button', { name: '메일함 열기' }).click(); await expect(page.locator(container)).toBeVisible();
+    return { page, context, errors, container };
+  }
+  for (const width of [1280, 768, 375]) for (const authenticated of [false, true]) for (const mode of ['light', 'dark']) for (const shape of ['wide', 'square']) await t.test(`${authenticated ? 'sidebar' : 'login'} ${mode} ${shape} ${width}`, async () => {
+    const { page, context, errors, container } = await pageFor({ width, authenticated, mode, shape }); try {
+      const image = page.locator(`${container} img.brand-image`); await expect(image).toBeVisible(); await expect(image).toHaveAttribute('alt', fake.state.config.brandName); await expect.poll(() => image.evaluate(element => element.currentSrc)).toContain(`/brand/logo/${mode}?`); await expect.poll(() => image.evaluate(element => element.naturalWidth)).toBe(shape === 'wide' ? 500 : 100); if (shape === 'square') await expect(image).toHaveClass(/square/);
+      const box = await image.boundingBox(); assert.ok(box.width <= 160.1 && box.height <= 32.1, JSON.stringify(box)); if (shape === 'square') assert.ok(Math.abs(box.height - 32) < .1); else assert.ok(Math.abs(box.width - 160) < .1);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false); assert.deepEqual(errors, []); await page.screenshot({ path: `${captures}/${authenticated ? 'sidebar' : 'login'}-${mode}-${shape}-${width}.png` });
+    } finally { await context.close(); }
+  });
+  for (const authenticated of [false, true]) for (const mode of ['light', 'dark']) await t.test(`system follows OS ${authenticated} ${mode}`, async () => { const { page, context, container } = await pageFor({ authenticated, mode: 'system', system: mode }); try { const image = page.locator(`${container} img`); await expect.poll(() => image.evaluate(el => el.currentSrc)).toContain(`/brand/logo/${mode}?`); const next = mode === 'dark' ? 'light' : 'dark'; await page.emulateMedia({ colorScheme: next }); await expect.poll(() => image.evaluate(el => el.currentSrc)).toContain(`/brand/logo/${next}?`); } finally { await context.close(); } });
+  for (const noLogo of [true, false]) await t.test(noLogo ? 'absent logo retains original mark/name/org' : 'onError restores original mark/name/org', async () => { const { page, context, container } = await pageFor({ noLogo, broken: !noLogo }); try { await expect(page.locator(`${container} .mark`)).toBeVisible(); await expect(page.locator(container)).toContainText(fake.state.config.brandName); await expect(page.locator(container)).toContainText(fake.state.config.orgName); await expect(page.locator(`${container} img`)).toHaveCount(0); await page.screenshot({ path: `${captures}/${noLogo ? 'text' : 'onerror'}-fallback.png` }); } finally { await context.close(); } });
+  await t.test('forced theme mode switches source, missing dark falls back to light', async () => { const { page, context, container } = await pageFor({ authenticated: true }); try { const image = page.locator(`${container} img`); await expect.poll(() => image.evaluate(el => el.currentSrc)).toContain('/light?'); await page.getByRole('button', { name: '다크 모드로 전환' }).click(); await expect.poll(() => image.evaluate(el => el.currentSrc)).toContain('/dark?'); } finally { await context.close(); } const fallback = await pageFor({ mode: 'dark', noDark: true }); try { await expect.poll(() => fallback.page.locator(`${fallback.container} img`).evaluate(el => el.currentSrc)).toContain('/light?'); } finally { await fallback.context.close(); } });
+});

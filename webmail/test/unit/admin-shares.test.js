@@ -40,7 +40,8 @@ async function fakeApi(t, options = {}) {
     if (req.url === '/containers/json') return json(options.inspect ?? inspect);
     if (req.url !== '/containers/abc123/exec') { res.statusCode = 404; return res.end(); }
     if (options.execData !== undefined) return json(options.execData);
-    if (body.task === 'get_acl') return json([...acl.entries()].filter(([name]) => name.startsWith(body.id + '|')).map(([name, rights]) => ({ user: body.id, id: name.split('|')[1], mailbox: 'INBOX', rights, Env: [secret] })));
+    // DockerApi.py:416-465 returns both owned and received shares.
+    if (body.task === 'get_acl') return json([...acl.entries()].filter(([name]) => name.split('|').includes(body.id)).map(([name, rights]) => ({ user: name.split('|')[0], id: name.split('|')[1], mailbox: 'INBOX', rights, Env: [secret] })));
     const name = `${body.user}|${body.id}`;
     if (!options.ignoreWrites) {
       if (body.task === 'set_acl') acl.set(name, body.rights);
@@ -191,6 +192,55 @@ test('shares: rejects same, unknown or inactive mailboxes without invoking ACL c
   f.boxes.find(row => row.username === grantee).active = 2;
   await assert.rejects(change(f, item.etag), { statusCode: 422 });
   assert.equal((await f.audit.read()).rows.length, 0);
+});
+
+for (const state of [2, 0, 'deleted']) test(`shares: revoke existing ACL after grantee becomes ${state}`, async t => {
+  const f = await fixture(t);
+  await change(f, (await ownerItem(f)).etag);
+  const item = await ownerItem(f);
+  // Grantee status/deletion leaves ACLs stored in the owner's maildir intact.
+  const index = f.boxes.findIndex(row => row.username === grantee);
+  if (state === 'deleted') f.boxes.splice(index, 1);
+  else f.boxes[index].active = state;
+  assert.deepEqual(f.acl.get(`${owner}|${grantee}`), ['lookup', 'read']);
+  const result = await change(f, item.etag, false);
+  assert.equal(result.applied, true);
+  assert.equal(f.acl.has(`${owner}|${grantee}`), false);
+  const record = (await f.history.list()).items.find(row => row.action === 'share.revoke');
+  assert.equal(record.result, 'ok');
+});
+
+for (const state of [2, 0, 'deleted']) test(`shares: reverting a grant revokes ACL after grantee becomes ${state}`, async t => {
+  const f = await fixture(t);
+  await change(f, (await ownerItem(f)).etag);
+  const record = (await f.history.list()).items[0];
+  const index = f.boxes.findIndex(row => row.username === grantee);
+  if (state === 'deleted') f.boxes.splice(index, 1);
+  else f.boxes[index].active = state;
+  await f.history.revert(record.id, { confirm: true, session: {}, actor: 'admin', ip: '198.51.100.9' });
+  assert.equal(f.acl.has(`${owner}|${grantee}`), false);
+});
+
+for (const grant of [true, false]) test(`shares: ACL changed after intent blocks grant=${grant} and records failure`, async t => {
+  const f = await fixture(t);
+  if (!grant) f.acl.set(`${owner}|${grantee}`, ['lookup', 'read']);
+  const item = await ownerItem(f);
+  const run = f.audit.run;
+  f.audit.run = (entry, operation, options) => run(entry, async intent => {
+    const rows = (await f.audit.read()).rows;
+    assert.ok(rows.some(row => row.phase === 'intent' && row.id === intent.id));
+    assert.ok(!rows.some(row => row.phase === 'result' && row.id === intent.id));
+    // set_acl replaces this entry's rights rather than merging them.
+    f.acl.set(`${owner}|${grantee}`, ['lookup', 'read', 'write']);
+    return operation(intent);
+  }, options);
+  await assert.rejects(change(f, item.etag, grant), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  assert.deepEqual(f.acl.get(`${owner}|${grantee}`), ['lookup', 'read', 'write']);
+  assert.equal(f.calls.filter(call => ['set_acl', 'delete_acl'].includes(call.body?.task)).length, 0);
+  const record = (await f.history.list()).items[0];
+  assert.equal(record.result, 'failed');
+  assert.equal(record.code, 'CHANGED_ELSEWHERE');
+  assert.equal(record.canRevert, false);
 });
 
 test('shares: ignores received shares and non-INBOX grants when building owner snapshot', async t => {

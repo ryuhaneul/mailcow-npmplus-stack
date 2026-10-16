@@ -1,0 +1,6 @@
+.relay-page h2,.relay-workflow h1{overflow-wrap:anywhere}
+.relay-page .relay-recent,.relay-workflow .relay-recent{margin-top:16px}
+.relay-workflow .relay-recent{border:1px solid var(--line);border-radius:12px;padding:19px}
+.relay-recent p{margin-top:8px}.relay-recent .hint{font-size:13px;color:var(--ink-3);overflow-wrap:anywhere}
+.relay-workflow .field small[role=alert]{display:block;color:var(--danger);margin-top:8px}
+.relay-workflow .ac-intro p{margin-top:5px}.relay-workflow .checkline{align-items:flex-start}

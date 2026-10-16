@@ -174,6 +174,7 @@ test('admin auth: TOTP failure immediately revokes session, returns restart and 
   const response = await write(f, '/api/admin/auth/totp', headers, { code: '654321' });
   failure(response, 403, 'TOTP_FAILED'); assert.equal(response.json().error.restart, true); assert.equal(response.json().error.remainingAttempts, 4);
   assert.equal(count(f, 'logout'), 1); assert.match(response.headers['set-cookie'], /Max-Age=0/);
+  assert.ok(f.logs.split('\n').filter(Boolean).map(line => JSON.parse(line)).some(record => record.code === 'TOTP_FAILED' && record.username === 'admin' && record.ip === '198.51.100.9'));
   failure(await write(f, '/api/admin/auth/totp', headers, { code: '123456' }), 403, 'SESSION_EXPIRED');
   f.options.loginError = () => new AppError(403, 'AUTH_FAILED', '로그인 실패');
   const next = await login(f, { username: 'other' }); failure(next, 403, 'AUTH_FAILED'); assert.equal(next.json().error.remainingAttempts, 3);
@@ -256,6 +257,7 @@ test('admin auth: one-minute sweeper path removes inactive TOTP sessions at fixe
   const f = await fixture(t, { state: 'totp' }); const response = await login(f); const headers = credentials(response);
   f.advance(4 * 60_000); assert.equal((await f.app.inject({ url: '/api/admin/auth/session', headers })).statusCode, 200);
   f.advance(60_000); await f.app.adminSessions.sweep(); assert.equal(count(f, 'logout'), 1);
+  assert.ok(f.logs.split('\n').filter(Boolean).map(line => JSON.parse(line)).some(record => record.code === 'SESSION_EXPIRED' && record.username === 'admin'));
   failure(await f.app.inject({ url: '/api/admin/auth/session', headers }), 403, 'SESSION_EXPIRED');
 });
 
@@ -264,6 +266,7 @@ for (const lost of [false, true]) test(`admin auth: logout clears cookie and rem
   if (lost) f.options.probeError = () => new MailcowAuthLost();
   const response = await write(f, '/api/admin/auth/logout', headers);
   assert.equal(response.statusCode, 204, response.body); assert.equal(response.body, '');
+  if (lost) assert.ok(f.logs.split('\n').filter(Boolean).map(line => JSON.parse(line)).some(record => record.code === 'MAILCOW_SESSION_LOST' && record.username === 'admin'));
   assert.match(response.headers['set-cookie'], /Max-Age=0/); assert.ok(!/domain=/i.test(response.headers['set-cookie']));
   assert.equal(count(f, 'logout'), 1); failure(await f.app.inject({ url: '/api/admin/auth/session', headers }), 403, 'SESSION_EXPIRED');
 });
@@ -310,4 +313,99 @@ test('admin auth: pending action links to the public mailcow administration URL'
   failure(response, 403, 'ADMIN_PENDING_ACTION');
   assert.equal(response.json().error.fallbackUrl, 'https://mailcow.example.com/');
   assert.equal(response.headers['set-cookie'], undefined);
+});
+
+for (const stage of ['login', 'totp']) test(`admin auth: eight concurrent ${stage} attempts reserve the shared budget before mailcow`, async t => {
+  const f = await fixture(t, { state: stage === 'totp' ? 'totp' : 'ready' });
+  const headers = [];
+  if (stage === 'totp') for (let i = 0; i < 8; i++) headers.push(credentials(await login(f)));
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let entered = 0, admitted;
+  const fiveEntered = new Promise(resolve => { admitted = resolve; });
+  const original = f.client[stage];
+  f.client[stage] = async (...args) => {
+    entered++;
+    if (entered === 5) admitted();
+    await gate;
+    // The final submitted request would succeed if it reached mailcow.
+    if (stage === 'totp' ? args[1] === '999999' : args[0].password.toString() === 'synthetic-success') return original(...args);
+    throw new AppError(403, stage === 'totp' ? 'TOTP_FAILED' : 'AUTH_FAILED', '인증 실패');
+  };
+  const pending = Array.from({ length: 8 }, (_, i) => stage === 'totp'
+    ? write(f, '/api/admin/auth/totp', headers[i], { code: i === 7 ? '999999' : '000000' })
+    : login(f, { payload: { username: 'admin', password: i === 7 ? 'synthetic-success' : password } }));
+  // Start every injection while the fake upstream holds all admitted requests.
+  const results = pending.map(response => Promise.resolve(response));
+  await fiveEntered;
+  await new Promise(resolve => setImmediate(resolve));
+  const beforeResult = entered;
+  release();
+  const responses = await Promise.all(results);
+  assert.equal(beforeResult, 5);
+  assert.equal(entered, 5);
+  assert.equal(responses.filter(response => response.statusCode === 200).length, 0);
+  for (let i = 0; i < 8; i++) failure(responses[i], i < 5 ? 403 : 429, i < 5 ? (stage === 'totp' ? 'TOTP_FAILED' : 'AUTH_FAILED') : 'RATE_LIMITED');
+  failure(await login(f), 429, 'RATE_LIMITED');
+  assert.equal(entered, 5);
+  assert.ok(f.logs.split('\n').filter(Boolean).map(line => JSON.parse(line)).some(record => record.code === 'RATE_LIMITED' && record.username === 'admin' && record.ip === '198.51.100.9'));
+});
+
+test('admin auth: successful TOTP releases only its reservation, retaining other recent failures', async t => {
+  const f = await fixture(t, { state: 'totp' });
+  const first = credentials(await login(f));
+  const second = credentials(await login(f));
+  f.options.totpError = () => new AppError(403, 'TOTP_FAILED', '인증 실패');
+  failure(await write(f, '/api/admin/auth/totp', first, { code: '000000' }), 403, 'TOTP_FAILED');
+  f.options.totpError = null;
+  assert.equal((await write(f, '/api/admin/auth/totp', second, { code: '123456' })).statusCode, 200);
+  assert.equal(f.app.adminRateLimiter.remaining('198.51.100.9', 'admin'), 4);
+  assert.equal(f.app.adminRateLimiter.remaining('203.0.113.8', 'other'), 5);
+});
+
+test('admin auth: management redact removes every planned secret field from emitted JSON', async t => {
+  const f = await fixture(t);
+  const secrets = ['synthetic-cookie-secret', 'synthetic-csrf-secret', 'synthetic-body-secret',
+    'synthetic-password-secret', 'synthetic-code-secret', 'synthetic-data-secret', 'synthetic-script-secret'];
+  // Override the request serializer to exercise redaction independently of its normal filtering.
+  const logger = f.app.log.child({}, { serializers: { req: value => value } });
+  logger.info({ req: { headers: { cookie: secrets[0], 'x-mailadmin-csrf': secrets[1] }, body: { value: secrets[2] } },
+    payload: { password: secrets[3], code: secrets[4], dataBase64: secrets[5], script: secrets[6], safe: 'visible' } }, 'redact probe');
+  assert.match(f.logs, /redact probe/);
+  assert.match(f.logs, /visible/);
+  for (const secret of secrets) assert.ok(!f.logs.includes(secret), secret);
+  const record = f.logs.trim().split('\n').map(line => JSON.parse(line)).find(line => line.msg === 'redact probe');
+  assert.deepEqual(record.req, { headers: {} });
+  assert.deepEqual(record.payload, { safe: 'visible' });
+});
+
+test('admin auth: authentication lifecycle emits identity, IP and safe event codes', async t => {
+  const f = await fixture(t);
+  f.options.loginError = () => new AppError(403, 'AUTH_FAILED', '인증 실패');
+  failure(await login(f), 403, 'AUTH_FAILED');
+  f.options.loginError = null;
+  const headers = credentials(await login(f));
+  assert.equal((await write(f, '/api/admin/auth/logout', headers)).statusCode, 204);
+  const records = f.logs.trim().split('\n').map(line => JSON.parse(line));
+  for (const code of ['AUTH_FAILED', 'LOGIN_SUCCESS', 'LOGOUT']) {
+    const record = records.find(record => record.code === code);
+    assert.equal(record?.username, 'admin');
+    assert.equal(record.ip, '198.51.100.9');
+  }
+});
+
+test('admin auth: fifth successful reservation releases the block without erasing four failures', async t => {
+  const f = await fixture(t);
+  f.options.loginError = () => new AppError(403, 'AUTH_FAILED', '인증 실패');
+  for (let i = 0; i < 4; i++) failure(await login(f), 403, 'AUTH_FAILED');
+  f.options.loginError = null;
+  assert.equal((await login(f)).statusCode, 200);
+  assert.equal(f.app.adminRateLimiter.remaining('198.51.100.9', 'admin'), 1);
+  f.options.loginError = () => new AppError(403, 'AUTH_FAILED', '인증 실패');
+  failure(await login(f), 403, 'AUTH_FAILED');
+  failure(await login(f), 429, 'RATE_LIMITED');
+  f.advance(5 * 60_000);
+  f.options.loginError = null;
+  assert.equal((await login(f)).statusCode, 200);
+  assert.equal((await login(f)).statusCode, 200);
 });

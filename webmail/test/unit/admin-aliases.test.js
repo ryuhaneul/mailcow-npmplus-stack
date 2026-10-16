@@ -19,7 +19,7 @@ async function fixture(t) {
   const aliasDomains = [{ alias_domain: 'alias.example.com', target_domain: 'example.com', active: 1 }, { alias_domain: 'off.example.com', target_domain: 'example.com', active: 0 }, { alias_domain: 'bad.example.com', target_domain: 'inactive.example.com', active: 1 }];
   const calls = [], options = {}; let sequence = 0;
   const mailcow = { async call(_session, method, path, body) {
-    calls.push({ method, path, body: structuredClone(body) }); options.onCall?.({ method, path, body });
+    calls.push({ method, path, body: structuredClone(body) }); await options.onCall?.({ method, path, body });
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/alias/all') return structuredClone(aliases);
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
@@ -34,13 +34,17 @@ async function fixture(t) {
     } else if (path === '/api/v1/delete/alias') {
       const row = aliases.find(item => String(item.id) === body[0]); aliases.splice(aliases.indexOf(row), 1);
       for (const box of boxes) box.sender_acl = box.sender_acl.filter(value => value !== row.address);
-    } else if (path === '/api/v1/edit/mailbox') for (const address of body.items) boxes.find(box => box.username === address).sender_acl = [...body.attr.sender_acl];
+    } else if (path === '/api/v1/edit/mailbox') for (const address of body.items) {
+      // mailcow functions.mailbox.inc.php:3409,4315 skips aliases already allowed by sender_allowed.
+      const fixed = new Set(aliases.filter(row => !row.address.startsWith('@') && row.sender_allowed === '1' && row.goto.split(',').includes(address)).map(row => row.address));
+      boxes.find(box => box.username === address).sender_acl = body.attr.sender_acl.filter(value => !fixed.has(value));
+    }
     else assert.fail(path);
     return [{ type: 'success' }];
   } };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const service = createAliasesService({ mailcow, audit, lock, history });
-  return { dir, aliases, boxes, primary, aliasDomains, calls, options, mailcow, audit, history, service };
+  return { dir, aliases, boxes, primary, aliasDomains, calls, options, mailcow, audit, lock, history, service };
 }
 const item = async (f, address = alias) => (await f.service.list({}, { q: address })).items.find(row => row.address === address);
 const edit = (f, etag, data = {}, address = alias) => f.service.edit({ ...context, addr: address, data: { etag, ...data } });
@@ -75,13 +79,13 @@ test('aliases: discard stores null@localhost and permits flags-only PATCH, norma
   assert.equal((await edit(f, edited.etag, { targets: [first], mode: 'move' }, result.address)).discard, false);
 });
 
-test('aliases: both unions targets, move replaces, flags preserve metadata and explicit sender ACL deleted by upstream', async t => {
+test('aliases: both unions targets, move replaces, flags preserve metadata and reflect mailcow fixed sender grants', async t => {
   const f = await fixture(t), initial = await item(f);
   const both = await edit(f, initial.etag, { targets: [second, first], mode: 'both', sendAllowed: true }); assert.deepEqual(both.targets, [first, second]); assert.equal(both.sendAllowed, true);
-  assert.deepEqual(f.boxes[0].sender_acl, [alias, unrelated]); assert.ok(writes(f).some(call => call.path === '/api/v1/edit/mailbox'));
+  assert.deepEqual(f.boxes[0].sender_acl, [unrelated]);
   assert.equal(both.metadata.privateComment, '내부 설명');
   const moved = await edit(f, both.etag, { targets: [second], mode: 'move', active: false }); assert.deepEqual(moved.targets, [second]); assert.equal(moved.active, false);
-  assert.deepEqual(f.boxes[0].sender_acl, [alias, unrelated]); assert.equal(f.aliases[0].sender_allowed, '1');
+  assert.deepEqual(f.boxes[0].sender_acl, [unrelated]); assert.equal(f.aliases[0].sender_allowed, '1');
 });
 
 for (const data of [{ targets: [], mode: 'move' }, { targets: [second] }, { mode: 'bad', active: true }, { active: 1 }, { sendAllowed: 'yes' }]) test(`aliases: invalid PATCH ${JSON.stringify(data)} does not mutate`, async t => {
@@ -193,4 +197,72 @@ test('aliases: POST existing alias/mailbox returns ADDRESS_IN_USE and DELETE mis
   for (const address of [alias, first]) await assert.rejects(create(f, { address }), { statusCode: 409, code: 'ADDRESS_IN_USE' });
   await assert.rejects(remove(f, 'stale', {}, 'missing@example.com'), { statusCode: 404, code: 'NOT_FOUND' });
   assert.equal(writes(f).length, 0);
+});
+
+
+test('aliases: enabling sendAllowed with an explicit grant succeeds, records stored ACL and reverts', async t => {
+  const f = await fixture(t), before = await item(f);
+  const result = await edit(f, before.etag, { sendAllowed: true });
+  assert.equal(result.sendAllowed, true); assert.deepEqual(f.boxes[0].sender_acl, [unrelated]);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.result, 'ok'); assert.equal(record.canRevert, true);
+  assert.deepEqual(record.before.senders, [{ mailbox: first, senderAcl: [alias, unrelated] }]);
+  assert.deepEqual(record.after.senders, [{ mailbox: first, senderAcl: [unrelated] }]);
+  await revert(f, result.auditId);
+  assert.equal((await item(f)).sendAllowed, false); assert.deepEqual(f.boxes[0].sender_acl, [alias, unrelated]);
+  const undo = (await f.history.list()).items.find(row => row.revertOf === result.auditId);
+  assert.equal(undo.result, 'ok');
+  await revert(f, undo.id); assert.equal((await item(f)).sendAllowed, true); assert.deepEqual(f.boxes[0].sender_acl, [unrelated]);
+});
+
+test('aliases: an original fixed-allowed duplicate cannot be restored and is recorded as non-revertible', async t => {
+  const f = await fixture(t); f.aliases[0].sender_allowed = '1';
+  const result = await edit(f, (await item(f)).etag, { active: false });
+  assert.deepEqual(f.boxes[0].sender_acl, [unrelated]);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.result, 'ok'); assert.equal(record.canRevert, false);
+  await assert.rejects(revert(f, result.auditId), { code: 'NOT_REVERTIBLE' });
+});
+
+test('aliases: catch-all loop through a missing address is rejected and reported, mailbox delivery terminates', async t => {
+  const f = await fixture(t); f.aliases.push(meta('@example.com', alias));
+  assert.deepEqual((await f.service.checks({})).cycles, []);
+  const before = await item(f);
+  await assert.rejects(edit(f, before.etag, { targets: ['missing@example.com'], mode: 'move' }), { statusCode: 409, code: 'ALIAS_LOOP' });
+  assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, first);
+  f.aliases[0].goto = 'missing@example.com';
+  assert.deepEqual((await f.service.checks({})).cycles, [{ addresses: ['@example.com', alias], active: true }]);
+  f.aliases[0].goto = 'first@alias.example.com';
+  assert.deepEqual((await f.service.checks({})).cycles, []);
+  f.aliases[0].goto = 'missing@alias.example.com';
+  assert.deepEqual((await f.service.checks({})).cycles, [{ addresses: ['@example.com', alias], active: true }]);
+  f.aliases.push(meta('missing@example.com', second));
+  assert.deepEqual((await f.service.checks({})).cycles, []);
+});
+
+test('aliases: edit and history undo share graph then target locks and reject the resulting loop', async t => {
+  const f = await fixture(t), b = 'b@example.com';
+  f.aliases[0].goto = b; f.aliases.push(meta(b, first));
+  const changed = await edit(f, (await item(f)).etag, { targets: [first], mode: 'move' });
+  const bState = await item(f, b);
+  let reached, release;
+  const writing = new Promise(resolve => { reached = resolve; });
+  const permitted = new Promise(resolve => { release = resolve; });
+  const baseRun = f.lock.run;
+  f.options.onCall = async ({ method, path, body }) => {
+    if (method === 'POST' && path === '/api/v1/edit/alias') {
+      if (body.items[0] === b) { reached(); await permitted; }
+      else release();
+    }
+  };
+  const modifying = edit(f, bState.etag, { targets: [alias], mode: 'move' }, b);
+  await writing;
+  // Undo queues behind the graph lock; pre-fix undo instead releases B at its own upstream write.
+  f.lock.run = (key, operation) => { if (key === 'alias-graph') release(); return baseRun(key, operation); };
+  const undoing = revert(f, changed.auditId);
+  const outcomes = await Promise.allSettled([modifying, undoing]);
+  assert.equal(outcomes[0].status, 'fulfilled'); assert.equal(outcomes[1].status, 'rejected');
+  assert.equal(outcomes[1].reason.code, 'ALIAS_LOOP');
+  assert.deepEqual((await f.service.checks({})).cycles, []);
+  assert.equal(f.aliases[0].goto, first); assert.equal(f.aliases[1].goto, alias);
 });

@@ -25,15 +25,20 @@ function address(value, allowCatchAll = false) {
   if (!addr || addr.length > 254 || !(addressPattern.test(addr) || allowCatchAll && catchAll(addr))) throw invalid();
   return addr;
 }
-function graph(rows, domainMap, activeOnly) {
+function graph(rows, domainMap, activeOnly, mailboxes) {
   const selected = rows.filter(row => !activeOnly || String(row.active) === '1');
   const nodes = new Set(selected.map(row => normalize(row.address)));
-  const canonical = target => {
+  const canonical = (target, visited = new Set()) => {
+    // Postfix virtual(5), TABLE SEARCH ORDER: exact address, mailbox, alias-domain rewrite, then @domain (https://www.postfix.org/virtual.5.html).
     if (nodes.has(target)) return target;
+    if (mailboxes?.has(target) || visited.has(target)) return null;
+    visited.add(target);
     const [local, domain] = target.split('@'), primary = domainMap.get(domain);
-    return primary ? `${local}@${primary}` : target;
+    if (primary) return canonical(`${local}@${primary}`, visited);
+    // Legacy validation callers without mailbox facts retain exact-address checks only.
+    return mailboxes && nodes.has(`@${domain}`) ? `@${domain}` : null;
   };
-  return new Map(selected.map(row => [normalize(row.address), unique(split(row.goto).map(canonical).filter(target => nodes.has(target)))]));
+  return new Map(selected.map(row => [normalize(row.address), unique(split(row.goto).map(target => canonical(target)).filter(target => nodes.has(target)))]));
 }
 function cycles(edges) {
   let sequence = 0;
@@ -70,7 +75,7 @@ export function validateAlias(alias, context, all, { allowCatchAll = false, allo
     throw new AppError(422, 'EXTERNAL_TARGET', '별칭 대상은 활성 사내 도메인만 쓸 수 있어요.');
   }
   const desired = [...all.filter(row => normalize(row.address) !== alias.address), alias];
-  if (reachesLoop(graph(desired, context.map, true), alias.address)) throw loopError();
+  if (reachesLoop(graph(desired, context.map, true, context.mailboxes), alias.address)) throw loopError();
 }
 
 export function createAliasesService({ mailcow, audit, lock, history }) {
@@ -82,12 +87,20 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     throw new AppError(502, 'MAILCOW_REJECTED', '별칭 정보를 읽을 수 없어요.');
   }
   async function domains(session) {
-    const [primary, aliases] = await Promise.all([rows(session, 'domain/all'), rows(session, 'alias-domain/all')]);
+    const [primary, aliases, boxes] = await Promise.all([rows(session, 'domain/all'), rows(session, 'alias-domain/all'), rows(session, 'mailbox/all')]);
     const active = new Set(primary.filter(row => String(row.active) === '1' && typeof (row.domain_name ?? row.domain) === 'string').map(row => normalize(row.domain_name ?? row.domain)));
     const map = new Map(aliases.filter(row => String(row.active) === '1' && active.has(normalize(row.target_domain))).map(row => [normalize(row.alias_domain), normalize(row.target_domain)]));
-    return { active: new Set([...active, ...map.keys()]), map };
+    return { active: new Set([...active, ...map.keys()]), map, mailboxes: new Set(boxes.map(row => normalize(row.username))) };
   }
   const senderAcl = row => unique(split(row.sender_acl));
+  const storedAcl = (mailbox, acl, aliases) => {
+    if (!Array.isArray(acl)) return acl;
+    if (acl.includes('*')) return ['*'];
+    // mailcow functions.mailbox.inc.php:3409,4315 omits fixed allowed aliases, including inactive ones.
+    const fixed = new Set(aliases.filter(row => !catchAll(normalize(row.address)) && String(row.sender_allowed) === '1' && split(row.goto).includes(mailbox)).map(row => normalize(row.address)));
+    return acl.filter(value => !fixed.has(value));
+  };
+  const storedState = (value, aliases) => ({ ...value, senders: value.senders.map(row => ({ ...row, senderAcl: storedAcl(row.mailbox, row.senderAcl, aliases) })) });
   function state(addr, aliases, boxes, participants = []) {
     const names = new Set([...participants, ...boxes.filter(row => senderAcl(row).includes(addr)).map(row => normalize(row.username))]);
     const senders = [...names].sort().map(mailbox => {
@@ -101,7 +114,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     return state(addr, aliases, boxes, participants);
   }
   const dto = (addr, value) => ({ address: addr, targets: split(value.alias.goto), discard: value.alias.goto === 'null@localhost',
-    sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag(value),
+    sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag({ ...value, senders: value.senders.filter(row => row.senderAcl?.includes(addr)) }),
     metadata: { sogoVisible: value.alias.sogo_visible === '1', internal: value.alias.internal === '1', publicComment: value.alias.public_comment, privateComment: value.alias.private_comment } });
   async function list(session, { q = '', target = '', page = '1' } = {}) {
     if (typeof q !== 'string' || typeof target !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
@@ -113,7 +126,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
   }
   async function checks(session) {
     const [aliases, context] = await Promise.all([rows(session, 'alias/all'), domains(session)]);
-    const allLoops = cycles(graph(aliases, context.map, false)), activeLoops = cycles(graph(aliases, context.map, true));
+    const allLoops = cycles(graph(aliases, context.map, false, context.mailboxes)), activeLoops = cycles(graph(aliases, context.map, true, context.mailboxes));
     return {
       external: aliases.flatMap(row => split(row.goto).filter(target => target !== 'null@localhost' && !context.active.has(target.split('@')[1])).map(target => ({ address: normalize(row.address), target, active: String(row.active) === '1' }))),
       cycles: allLoops.map(addresses => ({ addresses, active: activeLoops.some(loop => loop.every(member => addresses.includes(member))) })),
@@ -172,7 +185,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     for (const [key, field] of [['sendAllowed', 'sender_allowed'], ['active', 'active']]) if (Object.hasOwn(data, key)) {
       if (typeof data[key] !== 'boolean') throw invalid(); alias[field] = data[key] ? '1' : '0';
     }
-    after = { alias, senders: before.senders };
+    after = storedState({ alias, senders: before.senders }, [...aliases.filter(row => normalize(row.address) !== addr), alias]);
     validateAlias(after.alias, context, aliases, { allowDiscard });
     return { before, after, allowDiscard, etag: etag(before) };
   }
@@ -203,9 +216,10 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
         if (operation !== 'edit') validateAlias(after.alias, context, aliases, { allowDiscard });
       }
       if (isDeepStrictEqual(before, after)) return { ...dto(addr, before), unchanged: true };
-      const unsafe = before.alias && (split(before.alias.goto).some(target => target !== 'null@localhost' && !context.active.has(target.split('@')[1])) || reachesLoop(graph(aliases, context.map, false), addr));
-      const detail = unsafe ? { reason: '정책 위반 별칭이라 되돌리기 없음' } : {};
-      return audit.run({ actor, ip, action: `alias.${operation}`, target: addr, kind: 'config', revertible: !unsafe, before, after }, async intent => {
+      const unsafe = before.alias && (split(before.alias.goto).some(target => target !== 'null@localhost' && !context.active.has(target.split('@')[1])) || reachesLoop(graph(aliases, context.map, false, context.mailboxes), addr));
+      const duplicates = !isDeepStrictEqual(before, storedState(before, aliases));
+      const detail = unsafe ? { reason: '정책 위반 별칭이라 되돌리기 없음' } : duplicates ? { reason: '별칭으로 이미 허용된 주소는 mailcow 가 명시 권한으로 다시 저장하지 않아 원래 목록으로 되돌릴 수 없음' } : {};
+      return audit.run({ actor, ip, action: `alias.${operation}`, target: addr, kind: 'config', revertible: !unsafe && !duplicates, before, after }, async intent => {
         const applied = await apply(session, addr, before, after, { allowDiscard });
         return { ...(applied.alias ? dto(addr, applied) : { address: addr, deleted: true }), auditId: intent.id, detail };
       });
@@ -213,6 +227,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
   }
   const adapter = {
     label: '별칭 설정을 바꿨어요',
+    runLocked: (target, operation) => lock.run('alias-graph', () => lock.run(target, operation)),
     read: ({ session, target, record }) => read(session, target, unique([...(record?.before?.senders ?? []), ...(record?.after?.senders ?? [])].map(row => row.mailbox))),
     write: ({ session, target, expected, value }) => apply(session, target, expected, value, { allowCatchAll: Boolean(value.alias && catchAll(value.alias.address)), allowDiscard: value.alias?.goto === 'null@localhost' }),
   };

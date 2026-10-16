@@ -338,6 +338,11 @@ body[data-r=compose] .composer{display:flex}
 .from-sel span{color:var(--ink-3);overflow:hidden;text-overflow:ellipsis}
 .team{font-size:11px;font-weight:700;padding:1px 6px;border-radius:5px;background:var(--l7-bg);color:var(--l7-ink)}
 .pop{position:absolute;z-index:5;left:84px;top:calc(100% - 4px);width:420px;max-width:calc(100% - 96px);background:var(--surface);border-radius:var(--r-pop);box-shadow:var(--float);padding:6px}
+.from-menu{max-height:min(360px,var(--from-menu-height,calc(100dvh - 160px)));overflow-y:auto;overscroll-behavior:contain}
+.from-menu .opt{scroll-margin-block:6px}
+.from-menu .opt b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.from-sel b{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.from-sel>span{font-size:12.5px}
 .pop h5{margin:6px 10px 4px;font-size:11.5px;font-weight:700;color:var(--ink-3)}
 .opt{display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--r-ctl);font-size:13.5px;line-height:1.3;width:100%;text-align:left}
 .opt i{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:11px;font-weight:700;background:var(--sunken);box-shadow:inset 0 0 0 1px var(--line-2);color:var(--ink)}

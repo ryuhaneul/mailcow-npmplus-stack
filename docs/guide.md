@@ -159,6 +159,22 @@ CrowdSec는 NPMplus의 `npmplus` 형식 접근 로그를 수집해 반복 공격
 
 setup·update는 이 세 키를 `.env`에 쓰거나 변경하지 않습니다. 운영 기본값은 `block`입니다. 기존 설치도 키가 없으면 다음 update부터 켜집니다. 튜닝 전 이를 막거나 필터를 해제하려면 서버 `.env`에 `WAF_ENABLE=false`를 직접 적고 update를 실행하세요. 스택이 관리하던 설정만 원복하고 기존 profiles를 복구합니다. 웹메일이 켜져 있으면 정규화한 웹메일 호스트에만 본문·검색·암호 필드 예외를 적용하며, 다른 호스트와 메서드에는 적용하지 않습니다. NPM 관리 `/api/nginx/`에는 필요한 규칙 두 개만 제외합니다. `appsec-default`와 `generic-rules`를 중복으로 싣지 않으며(중복 rule ID는 기동 실패), 403 반복을 다시 밴으로 키우지 않는 로컬 시나리오를 사용합니다. 설정이 같으면 파일 쓰기와 CrowdSec SIGHUP을 생략합니다. setup은 Phase7에서 설정을 적용하고 Phase10 마지막의 기존 NPMplus 재시작 한 번으로 읽힙니다. 그 사이 실패하면 파일만 적용된 상태일 수 있으며 다음 setup의 마지막 재시작이나 update 재시작에서 반영됩니다. update의 기존 NPMplus 재시작은 DNS 캐시 갱신을 위해 한 번 유지합니다.
 
+
+다음 메일 서비스 예외는 `mailcow.${DOMAIN}` 호스트에만 적용합니다. NPM 관리 API 예외는 표에 적은 두 Host에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
+
+| 요청 | 예외 | 근거 |
+|---|---|---|
+| Host `127.0.0.1:81`·`mail-npm.${DOMAIN}`의 POST `/api/nginx/{proxy-hosts,redirection-hosts,streams}`·PUT 같은 경로의 `/<숫자ID>` | `forward_*`·`forwarding_*` 키 오탐인 930120만 제외. 920350·다른 공격 검사는 유지 | [고정 NPMplus 모델](https://github.com/ZoeyVid/NPMplus/blob/a30a95471e667a8207c2a349422e4ce9492fcc95/frontend/src/api/backend/models.ts#L95-L237), [JSON 키 변환](https://github.com/ZoeyVid/NPMplus/blob/a30a95471e667a8207c2a349422e4ce9492fcc95/frontend/src/api/backend/base.ts#L36-L40) |
+| POST `/Microsoft-Server-ActiveSync` | Content-Type이 `application/vnd.ms-sync.wbxml`·`message/rfc822`일 때만 920420·920180·932260 제외 | ActiveSync WBXML·MIME 발송·빈 본문 실측, [MS-ASHTTP](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ashttp/f1dda4f4-5a06-4761-8ae6-38189eb649a8) |
+| PROPFIND `/.well-known/caldav`·`/.well-known/carddav` | 끝 `/` 유무 두 형태에서만 911100 제외 | DAV 클라이언트 계정 발견 실측 |
+| PROPFIND·REPORT·PROPPATCH·MKCOL·MKCALENDAR·MOVE `/SOGo/dav/…` | 911100 제외. PUT·DELETE는 기존 허용 메서드 유지. COPY는 [SOGo 구현](https://github.com/Alinto/sogo/blob/master/SoObjects/SOGo/SOGoContentObject.m#L452-L465)이 405를 반환하므로 예외 없음 | [CalDAV RFC 4791](https://www.rfc-editor.org/rfc/rfc4791.html#section-5.3), [CardDAV RFC 6352](https://www.rfc-editor.org/rfc/rfc6352.html#section-6.3.1), [WebDAV RFC 4918](https://www.rfc-editor.org/rfc/rfc4918.html#section-9) |
+| PUT `/SOGo/dav/…` | Content-Type이 `text/calendar`·`text/vcard`일 때만 920420 제외 | 일정·연락처 업로드 실측. CRS가 이 MIME 본문을 파싱하지 않아 `.ics`·`.vcf` 본문 값은 검사하지 않음 |
+| POST `/inc/ajax/sieve_validation.php` | 리터럴 폼 필드 `script`만 CRS 검사 제외 | Sieve `require [...]`·기본 프리셋 실측 |
+| POST `/api/v1/add/filter`·`/api/v1/edit/filter` | 리터럴 폼 필드 `attr`만 CRS 검사 제외 | Sieve를 담은 JSON 문자열, [mailcow 필터 수정](https://github.com/mailcow/mailcow-dockerized/blob/master/data/web/templates/edit/filter.twig) |
+| POST `/SOGo/so/<사용자>/Preferences/save` | 사용자 경로 한 구간으로 한정해 942220·930120만 제외 | 기본값 `CDefaultsSize=4294967295`와 `Forward` 필드명 오탐. `.forward`가 `ARGS_NAMES`의 소문자 필드명과 매치하며 배열 키도 있어 리터럴 필드 예외로 처리할 수 없음 |
+
+CalDAV·CardDAV의 위 PUT 예외는 원래 MIME 규칙이 요청 전체를 막던 것을 허용합니다. `text/calendar`·`text/vcard` 본문의 명령 문자열·HTML 값도 CRS 검사 대상이 아닙니다. 쓰기에는 SOGo 로그인 인증이 필요하며, 저장한 일정·연락처를 화면에 표시할 때의 이스케이프는 SOGo가 담당합니다. 인증 없는 PUT의 401 거절은 이번 로컬 CrowdSec 시험에서 미확인입니다. 허용하지 않은 MIME(`application/x-custom`)으로 보낸 같은 원시 공격 본문은 403이고, 유효한 JSON으로 감싼 공격도 403이며, Preferences/save에서도 다른 SQLi·XSS·RCE·경로 이동 검사는 유지됩니다. 다만 `Content-Type: application/json`에 JSON이 아닌 원문을 보내면 본문이 해석되지 않아 호스트·경로와 관계없이 본문 값은 검사되지 않습니다(이 예외 추가 전부터 같은 동작 — 알려진 한계).
+
 시험 VM에서는 합성 데이터로 `WAF_MODE=detect`를 설정하고 update → 정상 동작·공격 재현 → `cscli alerts list`·`cscli alerts inspect ID`로 확인 → 필요한 호스트·경로·필드만 예외 조정 → `WAF_MODE=block`으로 update → 정상 요청 통과와 공격 403을 다시 확인하세요. 예외 변경은 스택의 렌더 원본을 수정해 검토·검증한 뒤 배포합니다. 컨테이너 파일만 직접 수정하면 다음 update가 다시 적용할 수 있습니다. Coraza v1.7.8에서는 예외를 리터럴 필드 키 → 개별 규칙 → 요청 단위 순으로 좁혀 적용합니다. 정규식·`ARGS` 전체·`ARGS_NAMES` 예외는 기대대로 작동하지 않습니다. 본문 검사 한도 10MiB를 넘는 첨부는 업로드 경로에서만 본문 검사를 제외합니다.
 
 block은 스캐너 규칙 913100 외의 일반 AppSec 경보를 취소하므로 무엇이 막았는지 경보에 남지 않을 수 있습니다. **운영에서 detect를 쓰면 경보와 CrowdSec DB에 사용자 입력이 남을 수 있습니다.** block에서 오탐 신고가 오면 필요한 짧은 시간만 detect로 내려 같은 동작을 재현하고, 경보를 확인해 예외를 조정한 다음 block으로 복귀하세요. 종료 후 `docker exec crowdsec cscli alerts delete --all`로 경보를 삭제하세요. 이 명령은 모든 경보를 지우므로 필요한 조사 내용을 먼저 확인합니다. 스택은 경보를 자동 삭제하지 않습니다.

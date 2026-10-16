@@ -58,8 +58,12 @@ _waf_webmail_exempt() {
 
 waf_render_crs_after_conf() (
     waf_options || return 1
-    [ "$WEBMAIL_ENABLE" = true ] || return 0
     local domain host base=9500100
+    host="^mailcow\\.${DOMAIN//./\\.}(?::[0-9]+)?\$"
+    _waf_webmail_exempt "$host" 9600100 POST /inc/ajax/sieve_validation.php 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:script'
+    _waf_webmail_exempt "$host" 9600101 POST /api/v1/add/filter 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:attr'
+    _waf_webmail_exempt "$host" 9600102 POST /api/v1/edit/filter 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:attr'
+    [ "$WEBMAIL_ENABLE" = true ] || return 0
     local -a hosts
     IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
     for domain in "${hosts[@]}"; do
@@ -104,6 +108,27 @@ YAML
     done
 }
 
+_waf_mailcow_crs_exclusions() {
+    local band=$1
+    cat <<YAML
+  - filter: Is${band}Band == true && req.Host == "mailcow.${DOMAIN}" && ((req.URL.Path startsWith "/SOGo/dav/" && req.Method in ["PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "MKCALENDAR", "MOVE"]) || (req.URL.Path in ["/.well-known/caldav", "/.well-known/caldav/", "/.well-known/carddav", "/.well-known/carddav/"] && req.Method == "PROPFIND"))
+    apply:
+      - Remove${band}BandRuleByID(911100)
+  - filter: Is${band}Band == true && req.Host == "mailcow.${DOMAIN}" && req.Method == "POST" && req.URL.Path == "/Microsoft-Server-ActiveSync" && Lower(req.Header.Get("Content-Type")) matches "^(application/vnd[.]ms-sync[.]wbxml|message/rfc822)(;.*)?$"
+    apply:
+      - Remove${band}BandRuleByID(920420)
+      - Remove${band}BandRuleByID(920180)
+      - Remove${band}BandRuleByID(932260)
+  - filter: Is${band}Band == true && req.Host == "mailcow.${DOMAIN}" && req.Method == "PUT" && req.URL.Path startsWith "/SOGo/dav/" && Lower(req.Header.Get("Content-Type")) matches "^text/(calendar|vcard)(;.*)?$"
+    apply:
+      - Remove${band}BandRuleByID(920420)
+  - filter: Is${band}Band == true && req.Host == "mailcow.${DOMAIN}" && req.Method == "POST" && req.URL.Path matches "^/SOGo/so/[^/]+/Preferences/save$"
+    apply:
+      - Remove${band}BandRuleByID(942220)
+      - Remove${band}BandRuleByID(930120)
+YAML
+}
+
 waf_render_appsec_config() (
     waf_options || return 1
     local band=In rules=inband_rules domain
@@ -140,8 +165,11 @@ pre_eval:
   - filter: Is${band}Band == true && req.Host == "mail-npm.${DOMAIN}" && req.URL.Path startsWith "/api/nginx/"
     apply:
       - Remove${band}BandRuleByID(911100)
+  - filter: Is${band}Band == true && req.Host in ["127.0.0.1:81", "mail-npm.${DOMAIN}"] && ((req.Method == "POST" && req.URL.Path in ["/api/nginx/proxy-hosts", "/api/nginx/redirection-hosts", "/api/nginx/streams"]) || (req.Method == "PUT" && req.URL.Path matches "^/api/nginx/(proxy-hosts|redirection-hosts|streams)/[0-9]+$"))
+    apply:
       - Remove${band}BandRuleByID(930120)
 YAML
+    _waf_mailcow_crs_exclusions "$band"
     if [ "$WEBMAIL_ENABLE" = true ]; then
         IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
         for domain in "${hosts[@]}"; do _waf_webmail_crs_exclusions "$band" "$domain"; done

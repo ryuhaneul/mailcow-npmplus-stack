@@ -46,7 +46,8 @@ export default function Shell() {
   useEffect(() => {
     let active = true, stopEvents;
     folders.value = { folders: [], virtualAllMail: null }; storage.value = null; vacation.value = null;
-    Promise.all([api('/api/folders'),api('/api/storage?quotaOnly=1')]).then(([f,s]) => { if (active) {folders.value=f;storage.value=s;stopEvents=connectMailboxEvents();} }).catch(error => {if(active) onError(error);});
+    api('/api/folders').then(value => {if(active) {folders.value=value;stopEvents=connectMailboxEvents();}}).catch(error => {if(active) onError(error);});
+    api('/api/storage?quotaOnly=1').then(value => {if(active) storage.value=value;}).catch(error => {if(active) onError(error);});
     api('/api/rules').then(value => {if(active) vacation.value=value.doc?.vacation ?? null;}).catch(error => {if(active) onError(error);});
     return () => {active=false;stopEvents?.();};
   }, []);

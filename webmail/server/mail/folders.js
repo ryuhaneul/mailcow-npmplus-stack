@@ -175,25 +175,29 @@ export function createFolderService({ imap, rulesService, logger, now = Date.now
     return imap.withMailbox(session, 'INBOX', async client => {
       // imapflow의 getQuota는 STORAGE KB를 이미 byte로 변환한다.
       const result = await mailCall(() => client.getQuota('INBOX'));
-      if (!result?.storage || !Number.isFinite(result.storage.usage) || !Number.isFinite(result.storage.limit)) throw unavailable();
-      const quota = { usedBytes: result.storage.usage, limitBytes: result.storage.limit };
-      const percent = quota.limitBytes > 0 ? quota.usedBytes / quota.limitBytes : 0;
+      // A successful GETQUOTAROOT without QUOTA returns { path }; false/undefined signal failure or unmet preconditions.
+      if (!result || result.path !== 'INBOX' && !result.storage) throw unavailable();
+      const unlimited = !Object.hasOwn(result, 'storage');
+      if (!unlimited && (!result.storage || !Number.isFinite(result.storage.usage) || !Number.isFinite(result.storage.limit))) throw unavailable();
+      const quota = unlimited ? { usedBytes: 0, limitBytes: 0 } : { usedBytes: result.storage.usage, limitBytes: result.storage.limit };
       let folders = [];
-      if (!quotaOnly) {
+      if (!quotaOnly || unlimited) {
         let cached = storageCache.get(session);
         if (!cached || now() - cached.at >= 60000) {
           const rows = (await list(client)).filter(row => !shared(row.path));
           const stats = [];
           for (const row of rows) {
-            const status = await mailboxStatus(client, row.path);
+            const status = await mailboxStatus(client, row.path).catch(() => { throw unavailable(); });
             stats.push({ path: row.path, name: row.name || nameOf(row.path), messages: status.messages, sizeBytes: status.size });
           }
           stats.sort((a, b) => b.sizeBytes - a.sizeBytes || a.path.localeCompare(b.path));
           cached = { at: now(), folders: stats };
           storageCache.set(session, cached);
         }
-        folders = cached.folders;
+        if (unlimited) quota.usedBytes = cached.folders.reduce((sum, folder) => sum + folder.sizeBytes, 0);
+        if (!quotaOnly) folders = cached.folders;
       }
+      const percent = quota.limitBytes > 0 ? quota.usedBytes / quota.limitBytes : 0;
       return { quota, level: percent >= 0.95 ? 'crit' : percent >= 0.8 ? 'warn' : 'ok', folders };
     });
   }

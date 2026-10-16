@@ -23,7 +23,7 @@ export function parseCsv(csv) {
   if (count > 1000) throw invalid('제목을 포함해 CSV는 1,000줄 이하로 넣어 주세요.');
   const records = []; let fields = [], field = '', quoted = false, closed = false, line = 1, start = 1, quoteLine = 1, touched = false;
   function finish() {
-    fields.push(field.trim());
+    fields.push(closed ? field : field.trim());
     if (touched || fields.some(value => value)) records.push({ line: start, fields });
     fields = []; field = ''; closed = false; touched = false;
   }
@@ -33,12 +33,12 @@ export function parseCsv(csv) {
       if (char === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { quoted = false; closed = true; } }
       else { field += char; if (char === '\n') line++; }
     } else if (char === '\n') { finish(); line++; start = line; }
-    else if (char === ',') { fields.push(field.trim()); field = ''; closed = false; touched = true; }
+    else if (char === ',') { fields.push(closed ? field : field.trim()); field = ''; closed = false; touched = true; }
     else if (char === '"') {
       if (field.trim() || closed) throw syntax(line);
       field = ''; quoted = true; quoteLine = line; touched = true;
     } else {
-      if (closed && char.trim()) throw syntax(line);
+      if (closed) { if (char.trim()) throw syntax(line); continue; }
       field += char; if (char.trim()) touched = true;
     }
   }
@@ -90,9 +90,11 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     return { boxes, aliases, primary, aliasDomains, groups };
   }
   async function inspect(session, kind, csv, options, credentials) {
-    const records = parseCsv(csv), header = records.shift().fields, allowed = columns[kind];
+    const records = parseCsv(csv), header = records.shift().fields.map(value => value.trim()), allowed = columns[kind];
     const required = { mailboxes: ['email'], quotas: ['email', 'quota_gb'], aliases: ['address', 'targets'], syncjobs: ['source', 'password', 'target'] }[kind];
     if (header.some(key => !allowed.includes(key)) || new Set(header).size !== header.length || required.some(key => !header.includes(key))) throw invalid('CSV 열 제목을 확인해 주세요.');
+    // Preserve quoted source-password whitespace; all other cells keep their existing normalization.
+    for (const record of records) record.fields = record.fields.map((value, index) => kind === 'syncjobs' && header[index] === 'password' ? value : value.trim());
     if (kind === 'syncjobs') for (const record of records) credentials.set(record.line, record.fields[header.indexOf('password')] ?? '');
     const facts = await context(session, kind), seen = new Map();
     if (kind === 'aliases' || kind === 'syncjobs') {

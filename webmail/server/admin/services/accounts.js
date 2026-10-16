@@ -4,6 +4,7 @@ import { AppError } from '../../errors.js';
 import { MailcowAuthLost } from '../mailcow-client.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
+import { aliasBackup, createAliasApi } from './aliases.js';
 import { analyze, removeMember, renameMember, Refused, addressPattern } from '../sieve-team.js';
 
 const GB = 1024 ** 3;
@@ -32,6 +33,7 @@ function snapshot(row) {
 const kindOf = (row, groups) => groups.has(normalize(row.username)) ? 'team' : Number(row.quota) === 3 * GB ? 'admin' : 'personal';
 const summary = (row, groups) => ({ ...snapshot(row), kind: kindOf(row, groups), usedBytes: Number(row.quota_used ?? 0), messages: Number(row.messages ?? 0) });
 export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams }) {
+  const aliasApi = createAliasApi(mailcow);
   const get = (session, path) => mailcow.call(session, 'GET', `/api/v1/get/${path}`);
   async function rows(session, path) {
     const result = await get(session, path);
@@ -201,7 +203,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               await domainActive(session, alias.split('@')[1]);
               if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === alias) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === alias)) throw new AppError(409, 'ALIAS_EXISTS', '이미 있는 주소라 별칭을 만들지 않았어요.');
               await audit.run({ actor, ip, action: 'alias/create', target: alias, kind: 'config', revertible: false, before: {}, after: { address: alias, targets: [addr], active: 1 } }, async intent => {
-                await mailcow.call(session, 'POST', '/api/v1/add/alias', { address: alias, goto: addr, active: '1', sogo_visible: '0', comment: '' });
+                await aliasApi.add(session, { address: alias, goto: addr, active: '1', sogo_visible: '0', comment: '' });
                 const checked = (await rows(session, 'alias/all')).find(row => normalize(row.address) === alias);
                 if (!checked || !isDeepStrictEqual(targets(checked.goto), [addr]) || String(checked.active) !== '1') throw verifyFailed();
                 steps.push({ stage, status: 'ok', auditId: intent.id });
@@ -326,8 +328,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 const current = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
                 assertUnchanged(etag(alias), current ?? {});
                 const remaining = targets(alias.goto).filter(target => target !== addr);
-                if (remaining.length) await mailcow.call(session, 'POST', '/api/v1/edit/alias', { items: [String(alias.id)], attr: { goto: remaining.join(',') } });
-                else await mailcow.call(session, 'POST', '/api/v1/delete/alias', [String(alias.id)]);
+                if (remaining.length) await aliasApi.edit(session, { items: [String(alias.id)], attr: { goto: remaining.join(',') } });
+                else await aliasApi.remove(session, [String(alias.id)]);
                 const checked = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
                 if (remaining.length ? !checked || !isDeepStrictEqual(targets(checked.goto), remaining) : Boolean(checked)) throw verifyFailed();
               });
@@ -526,7 +528,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             await runStage('aliases', normalize(alias.address), { targets: original }, { targets: desired }, async () => {
               const checked = (await rows(session, 'alias/all')).find(item => String(item.id) === String(alias.id));
               if (!checked || !isDeepStrictEqual(targets(checked.goto).sort(), current)) assertUnchanged('conflict', {});
-              if (!isDeepStrictEqual(current, desired)) await mailcow.call(session, 'POST', '/api/v1/edit/alias', { items: [String(alias.id)], attr: { goto: desired.join(',') } });
+              if (!isDeepStrictEqual(current, desired)) await aliasApi.edit(session, { items: [String(alias.id)], attr: { goto: desired.join(',') } });
               const applied = (await rows(session, 'alias/all')).find(item => String(item.id) === String(alias.id));
               if (!applied || !isDeepStrictEqual(targets(applied.goto).sort(), desired)) throw verifyFailed();
             });
@@ -557,7 +559,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           await lock.run(old, async () => {
             await runStage('oldAlias', old, {}, { address: old, targets: [next] }, async () => {
               if ((await rows(session, 'alias/all')).some(item => normalize(item.address) === old)) throw new AppError(409, 'ADDRESS_IN_USE', '옛 주소가 이미 별칭으로 있어요. 현재 대상을 확인해 주세요.');
-              await mailcow.call(session, 'POST', '/api/v1/add/alias', { address: old, goto: next, active: '1', sogo_visible: '0', comment: '' });
+              await aliasApi.add(session, { address: old, goto: next, active: '1', sogo_visible: '0', comment: '' });
               const checked = (await rows(session, 'alias/all')).find(item => normalize(item.address) === old);
               if (!checked || String(checked.active) !== '1' || !isDeepStrictEqual(targets(checked.goto), [next])) throw verifyFailed();
             });
@@ -588,9 +590,6 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return result;
     }));
   }
-  const aliasBackup = row => ({ address: normalize(row.address), goto: String(row.goto ?? ''), active: String(row.active ?? '1'),
-    sogo_visible: String(row.sogo_visible ?? '0'), sender_allowed: String(row.sender_allowed ?? '0'),
-    public_comment: String(row.public_comment ?? ''), private_comment: String(row.private_comment ?? '') });
   const notEmpty = () => new AppError(409, 'MAILBOX_NOT_EMPTY', '메일이 있는 메일함은 별칭으로 바꿀 수 없어요. 메일을 옮기거나 지워 주세요.');
   const gapWarning = { code: 'CONVERSION_GAP', message: '같은 주소의 메일함과 별칭은 함께 있을 수 없어 전환 중 잠깐 메일을 받지 못할 수 있어요.' };
   async function conversionPlan(session, addr, direction, options) {
@@ -690,7 +689,11 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           { stage: 'senders', message: '변경 기록의 원래 목록을 보고 다른 사람의 보내기 권한을 복원해 주세요.' },
           { stage: 'grant', message: '권한 화면에서 요청자의 보내기 권한 목록에 새 메일함 주소를 추가해 주세요.' },
         ];
-        const mutate = async (path, body) => { const value = await mailcow.call(session, 'POST', path, body); touched = true; return value; };
+        const mutate = async (path, body) => {
+          const value = path === '/api/v1/add/alias' ? await aliasApi.add(session, body) : path === '/api/v1/edit/alias' ? await aliasApi.edit(session, body) :
+            path === '/api/v1/delete/alias' ? await aliasApi.remove(session, body) : await mailcow.call(session, 'POST', path, body);
+          touched = true; return value;
+        };
         const result = await audit.run({ actor, ip, action: `mailbox.convert.${direction}`, target: addr, kind, revertible: false,
           before: plan.changes, after: { address: addr, direction, ...options, ...(direction === 'alias-to-mailbox' ? { password: 'set' } : {}) } }, async () => {
           const step = async (name, target, before, after, operation) => {

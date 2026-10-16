@@ -50,14 +50,14 @@ export function createHistoryService({ audit, lock }) {
     if (!record.canRevert) throw notRevertible();
     return lock.run(record.target, async () => {
       const adapter = adapters.get(record.action);
-      const current = await adapter.read({ session, target: record.target });
+      const current = await adapter.read({ session, target: record.target, record });
       if (!isDeepStrictEqual(current, record.after)) throw changed();
       return audit.run({ actor, ip, action: record.action, target: record.target, kind: 'config', revertible: true,
         before: record.after, after: record.before, revertOf: record.id,
         scriptSha256Before: record.scriptSha256After, scriptSha256After: record.scriptSha256Before,
         bytesBefore: record.bytesAfter, bytesAfter: record.bytesBefore }, async intent => {
         await adapter.write({ session, target: record.target, value: record.before, expected: record.after, record });
-        const applied = await adapter.read({ session, target: record.target });
+        const applied = await adapter.read({ session, target: record.target, record });
         if (!isDeepStrictEqual(applied, record.before)) throw new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 값이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
         return { id: intent.id, result: 'ok', detail: {} };
       }, { prepare: adapter.prepare ? intent => adapter.prepare({ record, intent }) : undefined });

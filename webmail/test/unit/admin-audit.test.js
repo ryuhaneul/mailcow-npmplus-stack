@@ -267,3 +267,14 @@ test('admin history HTTP: incomplete line produces 200 plus damaged locations wi
   assert.equal(response.statusCode, 200); assert.equal(response.json().damaged.count, 1);
   assert.ok(!response.body.includes('synthetic-damaged-secret')); assert.ok(!f.httpLogs.includes('synthetic-damaged-secret'));
 });
+
+test('admin history: both adapter reads receive the original record for participant-scoped snapshots', async t => {
+  const f = await fixture(t), original = await seed(f); let current = entry.after; const received = [];
+  f.history.register(entry.action, {
+    read({ record }) { received.push(record); return current; },
+    write({ value }) { current = value; },
+  });
+  await f.history.revert(original.id, { confirm: true, actor: 'admin', ip: '198.51.100.9', session: {} });
+  assert.equal(received.length, 2); assert.ok(received.every(record => record.id === original.id));
+  assert.deepEqual(current, entry.before);
+});

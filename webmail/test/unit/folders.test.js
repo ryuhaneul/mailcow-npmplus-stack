@@ -164,6 +164,32 @@ test('storage: virtual/shared excluded, sizes sorted descending, cached 60s; quo
   f.advance(59999); await f.request('GET', '/api/storage'); assert.equal(f.client.statusCount, calls);
   f.advance(1); await f.request('GET', '/api/storage'); assert.ok(f.client.statusCount > calls);
 });
+for (const quotaOnly of [false, true]) test(`storage: no QUOTA response sums personal STATUS sizes, quotaOnly=${quotaOnly}`, async t => {
+  const f = await fixture(t);
+  f.client.getQuota = async () => ({ path: 'INBOX' });
+  f.client.rows.push({ path: 'NotSelectable', flags: new Set(['\\Noselect']) });
+  f.client.stats.set('NotSelectable', { messages: 0, size: 999999 });
+  const response = await f.request('GET', '/api/storage' + (quotaOnly ? '?quotaOnly=1' : ''));
+  assert.equal(response.statusCode, 200, response.body);
+  const body = response.json();
+  assert.deepEqual(body.quota, { usedBytes: 2800, limitBytes: 0 });
+  assert.equal(body.level, 'ok');
+  const paths = f.client.calls.filter(call => call.command === 'STATUS').map(call => decodePath(f.client, call.args[0].value));
+  assert.deepEqual(paths, ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archive', 'Projects', 'Empty']);
+  assert.equal(f.client.statusCount, paths.length);
+  assert.equal(body.folders.length, quotaOnly ? 0 : paths.length);
+});
+for (const [label, result] of [['false', false], ['undefined', undefined], ['empty object', {}], ['invalid storage', { path: 'INBOX', storage: {} }], ['null storage', { path: 'INBOX', storage: null }]]) test(`storage: ${label} is not mistaken for unlimited quota`, async t => {
+  const f = await fixture(t); f.client.getQuota = async () => result;
+  error(await f.request('GET', '/api/storage?quotaOnly=1'), 503, 'MAIL_UNAVAILABLE');
+  assert.equal(f.client.statusCount, 0);
+});
+for (const step of ['quota', 'status', 'status-no']) test(`storage: real ${step} command failure stays 503`, async t => {
+  const f = await fixture(t);
+  f.client.getQuota = async () => { if (step === 'quota') throw new Error('synthetic connection lost'); return { path: 'INBOX' }; };
+  if (step.startsWith('status')) { const exec = f.client.exec.bind(f.client); f.client.exec = async (command, ...args) => { if (command === 'STATUS') throw Object.assign(new Error('synthetic command failed'), { responseStatus: step === 'status-no' ? 'NO' : undefined }); return exec(command, ...args); }; }
+  error(await f.request('GET', '/api/storage?quotaOnly=1'), 503, 'MAIL_UNAVAILABLE');
+});
 test('storage: level thresholds 80/95 percent and zero limit', async t => {
   const f = await fixture(t); f.client.quotaLimit = 10000;
   for (const [used, level] of [[7999, 'ok'], [8000, 'warn'], [9499, 'warn'], [9500, 'crit']]) { f.client.quotaUsed = used; assert.equal((await f.request('GET', '/api/storage?quotaOnly=1')).json().level, level); }

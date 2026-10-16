@@ -94,6 +94,14 @@ test('SSE: initial mailbox/quota payloads, changes deduplicated, watch cleanup',
   f.client.total=4;f.client.unseen=3;f.client.usage=200;f.event();await nextTurn();assert.match(text,/{"path":"INBOX","unseen":3,"total":4}/);assert.match(text,/"usedBytes":200/);
   const closed=once(stream,'close');stream.destroy();await closed;assert.equal(f.stops(),1);
 });
+test('SSE: mailbox changes without a QUOTA response emit no quota override', async t => {
+  const f = eventFixture(); f.client.getQuota = async () => ({ path: 'INBOX' });
+  const stream = f.open(); t.after(() => stream.destroy());
+  let text = ''; stream.on('data', chunk => { text += chunk; });
+  await nextTurn(); assert.match(text, /event: mailbox/); assert.doesNotMatch(text, /event: quota/);
+  f.client.total = 4; f.event(); await nextTurn();
+  assert.match(text, /"total":4/); assert.doesNotMatch(text, /event: quota/);
+});
 test('SSE: exact 25-second ping interval and expiry event/close',async t=>{
   t.mock.timers.enable({apis:['setInterval']});const f=eventFixture();const stream=f.open();let text='';stream.on('data',chunk=>{text+=chunk;});await nextTurn();
   t.mock.timers.tick(24999);await nextTurn();assert.ok(!text.includes(': ping'));

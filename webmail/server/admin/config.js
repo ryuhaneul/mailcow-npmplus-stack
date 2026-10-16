@@ -71,11 +71,13 @@ export function loadAdminConfig(env = process.env) {
   const autoexpungeDays = autoexpungeRaw === '' ? null : integer('AUTOEXPUNGE_DAYS', 365);
   const logoDir = choice('LOGO_DIR', ['/brand']);
   const auditDir = choice('AUDIT_DIR', ['/data/audit']);
+  const rspamdMapDir = env.ADMIN_RSPAMD_MAP_DIR ?? '/rspamd_custom_maps';
+  if (typeof rspamdMapDir !== 'string' || !isAbsolute(rspamdMapDir) || rspamdMapDir.includes('\0')) invalid('ADMIN_RSPAMD_MAP_DIR');
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
     adminHostname, sessionIdleMin, sessionMaxHours, mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     mailTlsMode, mailTlsPinFile, domain, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
-    autoexpungeDays, logoDir, auditDir, logLevel,
+    autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel,
   });
 }

@@ -155,3 +155,9 @@ test('admin config: optional feature pairs and mailcow networks retain agreed fo
   assert.equal(config.autoexpungeDays, null);
   assert.equal(loadAdminConfig({ ...env, MAILCOW_IPV6_NETWORK: '' }).mailcowIpv6Network, '');
 });
+
+test('admin config: optional read-only rspamd map directory defaults and absolute-path validation', () => {
+  assert.equal(loadAdminConfig(env).rspamdMapDir, '/rspamd_custom_maps');
+  assert.equal(loadAdminConfig({ ...env, ADMIN_RSPAMD_MAP_DIR: '/synthetic/maps' }).rspamdMapDir, '/synthetic/maps');
+  for (const value of ['', 'relative/maps', '/bad\0path']) assert.throws(() => loadAdminConfig({ ...env, ADMIN_RSPAMD_MAP_DIR: value }), /ADMIN_RSPAMD_MAP_DIR/);
+});

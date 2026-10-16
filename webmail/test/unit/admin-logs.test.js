@@ -56,3 +56,17 @@ for (const kind of ['ui', 'api']) for (const serialized of [false, true]) test(`
   assert.deepEqual(obj, { nested: {}, host1: 'imap.example.net' });
   assert.equal((await f.service.logs({}, { kind, q: secret })).lines.length, 0);
 });
+
+for (const quoted of [false, true]) for (const withMessage of [false, true]) test(`logs: actual API attr string masks credentials before projection and search, quoted=${quoted}, message=${withMessage}`, async () => {
+  const f = fixture(), secret = 'SyntheticOauthToken984';
+  const custom_params = quoted ? `--oauthaccesstoken1="${secret} with space" --dry` : `--oauthaccesstoken1=${secret}`;
+  const data = `attr='${JSON.stringify({ custom_params })}', items='["1"]'`;
+  if (quoted) assert.ok(data.includes(String.raw`\"`));
+  f.data.api = [{ time: '1', data, uri: `/api/v1/edit/syncjob?echo=${secret}${quoted ? ' with space' : ''}`, method: 'POST', ...(withMessage ? { message: `echo ${secret}${quoted ? ' with space' : ''}` } : {}) }];
+  const result = await f.service.logs({}, { kind: 'api' });
+  assert.ok(!JSON.stringify(result).includes(secret)); assert.match(result.lines[0].fields.data, /\*\*\*/);
+  assert.equal(result.lines[0].fields.uri, '/api/v1/edit/syncjob?echo=***');
+  if (withMessage) assert.equal(result.lines[0].message, 'echo ***');
+  assert.equal((await f.service.logs({}, { kind: 'api', q: secret })).lines.length, 0);
+  assert.equal((await f.service.logs({}, { kind: 'api', q: 'syncjob' })).lines.length, 1);
+});

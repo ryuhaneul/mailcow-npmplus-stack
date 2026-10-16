@@ -26,21 +26,31 @@ const secretPattern = String.raw`${secretParams.join('|')}|password[\w]*|passwd[
 const secretName = new RegExp(`^(?:${secretPattern})$`, 'i');
 const secretKey = key => secretName.test(key) || secretName.test(key.replace(/[^a-z0-9]/gi, ''));
 const hasSecretParams = value => [...String(value).matchAll(/(?:^|\s)--?([a-z0-9]+)/gi)].some(([, name]) => secretParams.some(option => option.startsWith(name.toLowerCase())));
-const credential = new RegExp(String.raw`(?<![\w])((?:--?|["']?)(?:${secretPattern})["']?\s*(?:[=:]\s*|\s+))("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)`, 'gi');
+const credential = new RegExp(String.raw`(?<![\w-])(--?(?:${secretParams.join('|')})\b\s*(?:=\s*|\s+))(\\"(?:\\\\.|[^\\])*?\\"|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s]+)`, 'gi');
 const humanFields = new Set(['message', 'msg', 'log', 'returned_text', 'error', 'notice', 'recovery', 'reason']);
 function parsedStructure(value) {
   if (!/^[\s]*[\[{]/.test(value)) return null;
   try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : null; } catch { return null; }
 }
 // Known values are replaced only in human-readable text, never IDs, addresses or status codes.
-export function sanitizeSyncResponse(value, secrets = []) {
+export function sanitizeSyncResponse(value, secrets = [], extraHumanFields = []) {
   const hidden = new Set(secrets.filter(item => typeof item === 'string' && item));
   function collect(item) {
     if (typeof item === 'string') {
       const parsed = parsedStructure(item);
       if (parsed) { collect(parsed); return; }
       for (const match of item.matchAll(credential)) {
-        const raw = match[2], plain = /^["']/.test(raw) ? raw.slice(1, -1) : raw;
+        const raw = match[2];
+        let plain = raw;
+        // API_LOG wraps JSON in attr='…'; decode JSON-escaped option quotes as well.
+        if (raw.startsWith('\\"')) {
+          try { plain = JSON.parse(`"${raw}"`); } catch { /* Keep the raw value masked. */ }
+        }
+        if (/^["']/.test(plain)) {
+          if (plain.startsWith('"')) {
+            try { plain = JSON.parse(plain); } catch { plain = plain.slice(1, -1); }
+          } else plain = plain.slice(1, -1).replace(/\\(.)/g, '$1');
+        } else plain = plain.replace(/[\\"'},]+$/, '');
         if (plain) hidden.add(plain);
       }
     } else if (item && typeof item === 'object') for (const [key, child] of Object.entries(item)) {
@@ -61,7 +71,7 @@ export function sanitizeSyncResponse(value, secrets = []) {
       return result.replace(/\*[^\s*<>"'@]+@mailcow\.local/gi, '****@mailcow.local');
     }
     if (Array.isArray(item)) return item.map(child => clean(child, human, key));
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, clean(child, humanFields.has(key), key)]));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, clean(child, humanFields.has(key) || extraHumanFields.includes(key), key)]));
     return item;
   }
   return clean(value, typeof value === 'string');
@@ -100,7 +110,7 @@ export function createSyncService({ mailcow, audit, lock, history }) {
     const jobId = id(rawId), row = await requireRow(session, jobId);
     const detail = (await rows(session, encodeURIComponent(row.user2))).find(item => String(item.id) === jobId);
     if (!detail) throw missing();
-    if (exposesPassword(detail.custom_params) || /showpasswords/i.test(`${detail.log ?? ''} ${detail.returned_text ?? ''}`)) {
+    if (exposesPassword(detail.custom_params) || /(?<![\w-])--?showpasswords\b/i.test(`${detail.log ?? ''} ${detail.returned_text ?? ''}`)) {
       const { log, returned_text, ...safe } = detail;
       return { ...dto(safe), logHidden: true, logHiddenReason: `${hiddenReason} — 이전 실행 로그에 원본 암호가 찍혔을 수 있음` };
     }

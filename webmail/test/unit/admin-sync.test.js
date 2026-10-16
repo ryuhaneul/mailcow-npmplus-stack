@@ -45,7 +45,7 @@ test('sync sanitizer: add log nested password keys removed, secrets masked throu
   const result = sanitizeSyncResponse({ log: ['add', { password1: 'synthetic-password-marker', nested: { PASSWORD_1: 'second-marker' } }], msg: 'synthetic-password-marker second-marker owner@example.com*synthetic-master@mailcow.local' });
   assert.deepEqual(result.log, ['add', { nested: {} }]); assert.equal(result.msg, '*** *** owner@example.com****@mailcow.local'); assert.equal(sanitizeSyncResponse('bad arbitrary-secret', ['arbitrary-secret']), 'bad ***');
 });
-for (const flag of ['--password1 test-secret', '--password1=test-secret', '-password1 "test secret"', "--password1='test secret'", '--passfile1 /tmp/source-secret', 'password1: test-secret', '"password1":"test-secret"']) test(`sync sanitizer masks ${flag}`, () => {
+for (const flag of ['--password1 test-secret', '--password1=test-secret', '-password1 "test secret"', "--password1='test secret'", '--passfile1 /tmp/source-secret']) test(`sync sanitizer masks ${flag}`, () => {
   const result = sanitizeSyncResponse(`${flag} end`); for (const secret of ['test-secret', 'test secret', '/tmp/source-secret']) assert.ok(!result.includes(secret)); assert.match(result, /\*\*\*/); assert.match(result, /end$/);
 });
 test('sync: changed attrs only, reversible config including re-enabling deletes on confirmed undo', async t => {
@@ -181,7 +181,7 @@ test('sync sanitizer: known full comma password replaced before flag parsing', (
   const secret = 'Synthetic,Quoted-Password!'; assert.equal(sanitizeSyncResponse(`bad --password1 ${secret}`, [secret]), 'bad --password1 ***');
   assert.equal(sanitizeSyncResponse({ password1: secret, error: `bad --password1 ${secret}` }).error, 'bad --password1 ***');
 });
-for (const value of ['--password1 Synthetic,Quoted-Password!', '--password1=Synthetic;Quoted-Password!', '--passfile1 /tmp/Synthetic,Secret;Path', 'password1: Synthetic,Quoted;Password!', '--password1 "Synthetic,Quoted;Password!"', "--password1 'Synthetic,Quoted;Password!'"]) test(`sync sanitizer: unknown punctuation/quoted credential ${value}`, () => {
+for (const value of ['--password1 Synthetic,Quoted-Password!', '--password1=Synthetic;Quoted-Password!', '--passfile1 /tmp/Synthetic,Secret;Path', '--password1 "Synthetic,Quoted;Password!"', "--password1 'Synthetic,Quoted;Password!'"]) test(`sync sanitizer: unknown punctuation/quoted credential ${value}`, () => {
   const result = sanitizeSyncResponse(`${value} next`); assert.ok(!result.includes('Synthetic')); assert.ok(!result.includes('Quoted')); assert.ok(!result.includes('Secret')); assert.match(result, /\*\*\*/); assert.match(result, / next$/);
 });
 
@@ -217,4 +217,40 @@ test('sync sanitizer: short secrets preserve structural values while masking hum
   const result = sanitizeSyncResponse({ id: '1', result: 'ok', code: 'LOOKUP', line: 1, user1: 'ok@example.net', custom_params: '--password1=1 --dry', log: 'password 1 and ok', notice: 'ok', password1: '1' }, ['ok']);
   assert.equal(result.id, '1'); assert.equal(result.result, 'ok'); assert.equal(result.code, 'LOOKUP'); assert.equal(result.line, 1); assert.equal(result.user1, 'ok@example.net');
   assert.equal(result.custom_params, '--password1=*** --dry'); assert.ok(!result.log.includes('ok')); assert.equal(result.notice, '***'); assert.equal(result.password1, undefined);
+});
+
+for (const params of ['--folder="token inbox"', '--folder "INBOX/secret"', '--include "passwd.*"', '--folder=INBOX/apikey']) test(`sync: normal arguments preserve response snapshot and etag ${params}`, async t => {
+  const f = await fixture(t); f.jobs[0].custom_params = params;
+  const before = await get(f);
+  assert.equal(before.custom_params, params);
+  assert.equal((await f.service.list({})).items[0].etag, before.etag);
+  const result = await patch(f, { active: false }, before.etag);
+  assert.equal(result.custom_params, params);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.before.options.custom_params, params); assert.equal(record.after.options.custom_params, params);
+  await revert(f, result.auditId); assert.equal((await get(f)).etag, before.etag);
+});
+test('sync: folder containing token saves and verifies unchanged argument text', async t => {
+  const f = await fixture(t), params = '--folder="token inbox"';
+  const result = await patch(f, { options: { custom_params: params } });
+  assert.equal(result.custom_params, params); assert.equal(f.jobs[0].custom_params, params);
+});
+for (const field of ['log', 'returned_text']) test(`sync: ${field} hides option forms only`, async t => {
+  const f = await fixture(t);
+  f.jobs[0][field] = 'copied INBOX/showpasswords-notes';
+  assert.equal((await get(f))[field], f.jobs[0][field]); assert.equal((await get(f)).logHidden, undefined);
+  for (const flag of ['--showpasswords', '-SHOWPASSWORDS']) {
+    f.jobs[0][field] = `previous command ${flag} end`;
+    assert.equal((await get(f)).logHidden, true); assert.equal((await get(f))[field], undefined);
+  }
+});
+for (const name of ['password1', 'password2', 'passfile1', 'passfile2', 'oauthaccesstoken1', 'oauthaccesstoken2', 'oauthdirect1', 'oauthdirect2', 'authuser1', 'authuser2']) {
+  for (const value of ['SyntheticSecret984', '"Synthetic Secret984"', "'Synthetic Secret984'", String.raw`\"Synthetic Secret984\"`, String.raw`"Synthetic \"quoted\" Secret984"`]) test(`sync sanitizer: exact credential option ${name} ${value}`, () => {
+    const result = sanitizeSyncResponse({ custom_params: `--${name.toUpperCase()}=${value} --dry`, message: `-${name} ${value} end` });
+    assert.equal(result.custom_params, `--${name.toUpperCase()}=*** --dry`); assert.equal(result.message, `-${name} *** end`);
+  });
+}
+test('sync sanitizer: generic words and non-exact option names are untouched', () => {
+  const text = 'password1: normal passwd=normal token inbox secret api_key=normal --password1extra=normal --token=normal';
+  assert.equal(sanitizeSyncResponse(text), text);
 });

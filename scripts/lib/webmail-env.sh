@@ -186,6 +186,7 @@ webmail_generate_env() (
         webmail_env_line TRUST_PROXY "$WEBMAIL_TRUST_PROXY" &&
         webmail_env_line LOG_LEVEL info
     } > "$tmp" || return 1
+    if [ -f "$dest/webmail.env" ] && cmp -s "$tmp" "$dest/webmail.env" && [ "$(stat -c %a "$dest/webmail.env")" = 600 ]; then return 0; fi
     chmod 600 "$tmp" && mv "$tmp" "$dest/webmail.env"
 )
 

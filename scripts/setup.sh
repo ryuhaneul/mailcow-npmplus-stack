@@ -677,6 +677,11 @@ if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
     log "Toolkit App Link: $APP_LINK_RESULT"
 fi
 
+# Edge stages 1/2 run before NPMplus is attached to the app networks.
+webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
+edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
+
 # ============================================================
 # Phase 5: NPMplus + CrowdSec
 # ============================================================
@@ -692,7 +697,7 @@ NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
-_waf_npmplus_compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
+edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
 log "Waiting for NPMplus health check..."
 for i in $(seq 1 60); do
@@ -709,16 +714,15 @@ for i in $(seq 1 60); do
     sleep 5
 done
 
+edge_apply_trust "$SCRIPT_DIR" || die "Edge step 4 failed; app/NPMplus migration completed, mailcow trust incomplete"
+
 # ============================================================
 # Phase 6: Snappymail
 # ============================================================
 if [ "$SNAPPYMAIL_ENABLE" = true ]; then
 header "Phase 6: Snappymail"
 
-mkdir -p "$SNAPPYMAIL_DIR"
-cp "$PROJECT_DIR/snappymail/docker-compose.yml" "$SNAPPYMAIL_DIR/docker-compose.yml"
 cd "$SNAPPYMAIL_DIR"
-docker compose up -d 2>&1 | tail -3
 log "Snappymail: deployed"
 
 # Wait for Snappymail data directory to be ready
@@ -868,19 +872,7 @@ fi
 # ============================================================
 # Phase 6b: Webmail
 # ============================================================
-if [ "$WEBMAIL_ENABLE" = true ]; then
-    header "Phase 6b: Webmail"
-    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Webmail configuration failed"
-    webmail_ensure_db_password || die "Webmail DB password preparation failed"
-    mkdir -p "$WEBMAIL_DIR"
-    rsync -a --delete --exclude=node_modules --exclude=webmail.env \
-        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
-        "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
-    webmail_prepare "$ENV_FILE" "$MAILCOW_DIR" "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
-    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply
-    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" apply -y
-    (cd "$WEBMAIL_DIR" && docker compose build && docker compose up -d)
-fi
+if [ "$WEBMAIL_ENABLE" = true ]; then log "Webmail edge project already prepared and started"; fi
 
 # ============================================================
 # Phase 6c: Junk/Trash retention (independent of Webmail)
@@ -1355,6 +1347,13 @@ fi
 # ============================================================
 # Done
 # ============================================================
+# Verification reports issues without failing an otherwise completed setup.
+if [ -x "$SCRIPT_DIR/verify.sh" ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" bash "$SCRIPT_DIR/verify.sh" || warn "verify.sh reported issues — review above"
+else
+    warn "verify.sh not found or not executable — skipping"
+fi
+
 header "Setup Complete"
 
 echo "  Services:"

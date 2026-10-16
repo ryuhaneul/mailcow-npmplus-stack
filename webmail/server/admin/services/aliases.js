@@ -150,6 +150,31 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     if (!isDeepStrictEqual(applied, after)) throw verifyFailed();
     return applied;
   }
+  async function previewEdit(session, rawAddress, data, loaded) {
+    const addr = address(rawAddress, true);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw invalid();
+    const before = loaded?.before ?? await read(session, addr);
+    if (!before.alias) throw new AppError(404, 'NOT_FOUND', '별칭을 찾을 수 없어요.');
+    if (data.etag !== undefined) assertUnchanged(data.etag, before);
+    const aliases = loaded?.aliases ?? await rows(session, 'alias/all'), context = loaded?.context ?? await domains(session);
+    let after, allowDiscard = false;
+    if (Object.keys(data).some(key => !['etag', 'targets', 'mode', 'sendAllowed', 'active'].includes(key)) || !['targets', 'sendAllowed', 'active'].some(key => Object.hasOwn(data, key))) throw invalid();
+    const alias = { ...before.alias };
+    if (Object.hasOwn(data, 'targets')) {
+      if (!Array.isArray(data.targets) || !data.targets.length || !['both', 'move'].includes(data.mode)) throw invalid();
+      const requested = data.targets.map(value => address(value));
+      alias.goto = unique(data.mode === 'both' ? [...split(alias.goto), ...requested] : requested).join(',');
+    } else {
+      if (data.mode !== undefined && !['both', 'move'].includes(data.mode)) throw invalid();
+      allowDiscard = alias.goto === 'null@localhost';
+    }
+    for (const [key, field] of [['sendAllowed', 'sender_allowed'], ['active', 'active']]) if (Object.hasOwn(data, key)) {
+      if (typeof data[key] !== 'boolean') throw invalid(); alias[field] = data[key] ? '1' : '0';
+    }
+    after = { alias, senders: before.senders };
+    validate(after.alias, context, aliases, { allowDiscard });
+    return { before, after, allowDiscard, etag: etag(before) };
+  }
   async function change({ session, actor, ip, addr: rawAddress, data, operation }) {
     const addr = address(rawAddress ?? data?.address, operation !== 'create');
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw invalid();
@@ -171,22 +196,10 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
           after = { alias: { ...aliasBackup({ address: addr, goto: destinations.join(','), active: '1', sender_allowed: '0', sogo_visible: '0' }), internal: '0' }, senders: before.senders };
           allowDiscard = data.discard === true;
         } else {
-          if (Object.keys(data).some(key => !['etag', 'targets', 'mode', 'sendAllowed', 'active'].includes(key)) || !['targets', 'sendAllowed', 'active'].some(key => Object.hasOwn(data, key))) throw invalid();
-          const alias = { ...before.alias };
-          if (Object.hasOwn(data, 'targets')) {
-            if (!Array.isArray(data.targets) || !data.targets.length || !['both', 'move'].includes(data.mode)) throw invalid();
-            const requested = data.targets.map(value => address(value));
-            alias.goto = unique(data.mode === 'both' ? [...split(alias.goto), ...requested] : requested).join(',');
-          } else {
-            if (data.mode !== undefined && !['both', 'move'].includes(data.mode)) throw invalid();
-            allowDiscard = alias.goto === 'null@localhost';
-          }
-          for (const [key, field] of [['sendAllowed', 'sender_allowed'], ['active', 'active']]) if (Object.hasOwn(data, key)) {
-            if (typeof data[key] !== 'boolean') throw invalid(); alias[field] = data[key] ? '1' : '0';
-          }
-          after = { alias, senders: before.senders };
+          const plan = await previewEdit(session, addr, data, { before, aliases, context });
+          after = plan.after; allowDiscard = plan.allowDiscard;
         }
-        validate(after.alias, context, aliases, { allowDiscard });
+        if (operation !== 'edit') validate(after.alias, context, aliases, { allowDiscard });
       }
       if (isDeepStrictEqual(before, after)) return { ...dto(addr, before), unchanged: true };
       const unsafe = before.alias && (split(before.alias.goto).some(target => target !== 'null@localhost' && !context.active.has(target.split('@')[1])) || reachesLoop(graph(aliases, context.map, false), addr));
@@ -203,5 +216,5 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     write: ({ session, target, expected, value }) => apply(session, target, expected, value, { allowCatchAll: Boolean(value.alias && catchAll(value.alias.address)), allowDiscard: value.alias?.goto === 'null@localhost' }),
   };
   for (const operation of ['create', 'edit', 'delete']) history.register(`alias.${operation}`, adapter);
-  return { list, checks, create: args => change({ ...args, operation: 'create' }), edit: args => change({ ...args, operation: 'edit' }), remove: args => change({ ...args, operation: 'delete' }) };
+  return { list, checks, previewEdit, create: args => change({ ...args, operation: 'create' }), edit: args => change({ ...args, operation: 'edit' }), remove: args => change({ ...args, operation: 'delete' }) };
 }

@@ -81,7 +81,7 @@ export async function readAndMergeSenderAcl({ mailcow, session, address: rawAddr
   for (const value of add.map(item => grant(item))) if (value.startsWith('@') && !known.has(value.slice(1))) throw invalid();
   const after = expectedStored(state, diff.after);
   const duplicates = state.senderAcl.filter(value => fixedAllowed(state).includes(value));
-  return { state, etag: etag(writeState(state)), diff: { ...diff, after, alreadyAllowedByAlias: diff.after.filter(value => !after.includes(value)),
+  return { state, writeState: writeState(state), etag: etag(writeState(state)), diff: { ...diff, after, alreadyAllowedByAlias: diff.after.filter(value => !after.includes(value)),
     removedAsAliasDuplicates: duplicates, ...(duplicates.length ? { storageNotice: '저장하면 목록에서 빠짐(별칭으로 이미 허용돼 보내기는 그대로 됨)' } : {}),
     added: after.filter(value => !diff.before.includes(value)), removed: diff.before.filter(value => !after.includes(value)), kept: diff.before.filter(value => after.includes(value)) } };
 }

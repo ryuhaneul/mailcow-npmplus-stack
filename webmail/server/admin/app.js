@@ -22,6 +22,8 @@ import { createDomainsService } from './services/domains.js';
 import domainsRoutes from './routes/domains.js';
 import { createSendersService } from './services/senders.js';
 import sendersRoutes from './routes/senders.js';
+import { createFlowsService } from './services/flows.js';
+import flowsRoutes from './routes/flows.js';
 import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
@@ -67,6 +69,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const senders = createSendersService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('senders', senders);
   await app.register(sendersRoutes, { service: senders });
+  const flows = createFlowsService({ mailcow: app.mailcow, teams, aliases, senders, audit, lock: adminLock });
+  app.decorate('flows', flows);
+  await app.register(flowsRoutes, { service: flows });
   app.get('/healthz', async () => ({ ok: true }));
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();

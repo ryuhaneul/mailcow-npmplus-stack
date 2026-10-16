@@ -31,6 +31,7 @@ trap 'rm -rf "$WORK"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export SNAPPY_TOOL_WORK="$WORK" SNAPPY_TOOL_SCRIPTS="$SCRIPT_DIR" SNAPPY_TOOL_ENV="$ENV_FILE"
+export SNAPPY_TOOL_NPMPLUS="${NPMPLUS_DIR:-/home/npmplus}"
 export SNAPPY_TOOL_INSTALL="${SNAPPYMAIL_DIR:-/home/snappymail}"
 export SNAPPY_TOOL_BACKUP="${WEBMAIL_BACKUP_DIR:-/root/webmail-backup-$(date +%Y%m%d)}"
 python3 - "$@" <<'PY'
@@ -125,6 +126,8 @@ def remove(delete_volume, delete_directory):
     # No -v: the default removal always preserves data and the install directory.
     if (install / 'docker-compose.yml').is_file(): compose('down', project=manifest['project'])
     elif container is not None: fail('cannot remove an existing container without its compose file')
+    subprocess.run(['bash', '-c', 'source "$1/lib/webmail-env.sh"; edge_remove_snappymail "$2" "$3"', 'bash',
+                    str(scripts), str(install), os.environ['SNAPPY_TOOL_NPMPLUS']], check=True)
     if delete_volume: docker('volume', 'rm', manifest['volume'])
     if delete_directory and install.exists(): shutil.rmtree(install)
     print('[snappymail-remove] container removed; volume ' + ('deleted' if delete_volume else 'preserved') + '; installation ' + ('deleted' if delete_directory else 'preserved'))
@@ -146,8 +149,9 @@ def restore(path):
     with path.open('rb') as source:
         docker('run', '--rm', '-i', '--user', '0', '--entrypoint', 'tar', '--mount', f'type=volume,source={manifest["volume"]},target=/data',
                manifest['image'], '-xzf', '-', '-C', '/data', stdin=source)
-    compose('up', '-d', project=manifest['project'])
-    print('[snappymail-remove] volume restored and SnappyMail started')
+    if all((install / name).is_file() for name in ('haproxy.cfg', 'docker-compose.override.yml')):
+        compose('up', '-d', project=manifest['project'])
+    print('[snappymail-remove] volume restored; run update.sh -y --skip-mailcow-update to recreate networks and relays')
     print('운영자가 .env에서 SNAPPYMAIL_ENABLE=true를 선택했는지 확인하고 webmail-cutover.sh revert로 주소를 복원하세요. .env는 변경하지 않았습니다.')
 
 def main():
@@ -164,8 +168,10 @@ def main():
         compose('stop')
         print('[snappymail-remove] stopped for observation; container, volume and installation preserved')
     elif args.command == 'start':
-        compose('up', '-d')
-        print('[snappymail-remove] started; select SNAPPYMAIL_ENABLE=true manually for ongoing updates')
+        if all((install / name).is_file() for name in ('haproxy.cfg', 'docker-compose.override.yml')):
+            compose('up', '-d')
+            print('[snappymail-remove] started')
+        print('SNAPPYMAIL_ENABLE=true를 선택하고 update.sh -y --skip-mailcow-update 로 망·중계를 다시 만드세요.')
     elif args.command == 'remove': remove(args.delete_volume, args.delete_install_dir)
     else:
         if not args.archive: fail('restore requires the backup archive path')

@@ -14,6 +14,7 @@ done
 # Usage: sudo ./scripts/teardown.sh
 # ============================================================
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
 SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
@@ -39,6 +40,11 @@ echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
+
+# Restore Postfix before its container/configuration is removed.
+if [ -d "$MAILCOW_DIR/data/conf/postfix" ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-edge.sh" --revert -y || { warn 'Postfix edge revert failed; teardown stopped'; exit 1; }
+fi
 
 # Stop Mailcow (includes toolkit via override)
 if [ -d "$MAILCOW_DIR" ]; then
@@ -72,6 +78,13 @@ if [ -d "$WEBMAIL_DIR" ]; then
     cd "$WEBMAIL_DIR"
     docker compose down --remove-orphans -v 2>&1 | tail -3 || true
 fi
+
+# NPMplus and app containers are now down, so no edge endpoints should remain.
+for EDGE_NETWORK in mailstack-webmail-edge mailstack-snappymail-edge; do
+    if docker network inspect "$EDGE_NETWORK" >/dev/null 2>&1; then
+        docker network rm "$EDGE_NETWORK" || { warn "Cannot remove $EDGE_NETWORK; teardown stopped"; exit 1; }
+    fi
+done
 
 # Remove external volume
 if ! NPM_VOLUME=$(docker volume ls --quiet --filter 'name=^npmplus_npmplus-data$'); then

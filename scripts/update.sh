@@ -96,9 +96,6 @@ export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/admin-access.sh"
 admin_access preflight >/dev/null || die "Invalid ADMIN_ACCESS_LIST; update stopped before changes"
-if [ "$SNAPPYMAIL_ENABLE" = false ] && docker ps -a --format '{{.Names}}' | grep -qFx snappymail; then
-    warn "SnappyMail is disabled but its container exists; preserving it. Removal: scripts/snappymail-remove.sh"
-fi
 
 # ============================================================
 # Phase 1: git pull for component repos
@@ -297,11 +294,6 @@ else
     warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
-# Re-apply Webmail configuration after mailcow's update, before app rebuild.
-if [ "$WEBMAIL_ENABLE" = true ]; then
-    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" apply -y
-    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply
-fi
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
     warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" apply -y
@@ -399,47 +391,12 @@ else
 fi
 
 # ============================================================
-# Phase 5b: Webmail source/environment refresh and rebuild
+# Phase 5b: Webmail/SnappyMail edge migration
 # ============================================================
-if [ "$WEBMAIL_ENABLE" = true ]; then
-    header "Phase 5b: Webmail"
-    mkdir -p "$WEBMAIL_DIR"
-    rsync -a --delete --exclude=node_modules --exclude=webmail.env \
-        --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml \
-        "$PROJECT_DIR/webmail/" "$WEBMAIL_DIR/"
-    # Mailcow's Phase 3 update may have renewed its certificate. Refresh a pin
-    # before the rebuild; a changed certificate alone forces recreation.
-    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Webmail configuration failed"
-    webmail_ensure_db_password || die "Webmail DB password preparation failed"
-    WEBMAIL_PIN_BEFORE=""
-    WEBMAIL_PIN_CHANGED=false
-    if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
-        WEBMAIL_PIN_BEFORE=$(webmail_pin_fingerprint "$WEBMAIL_DIR/mail-tls-pin.pem") || true
-    fi
-    webmail_extract_tls_pin "$WEBMAIL_DIR" || die "Webmail TLS configuration failed"
-    if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
-        WEBMAIL_PIN_AFTER=$(webmail_pin_fingerprint "$WEBMAIL_DIR/mail-tls-pin.pem") || die "Webmail TLS pin fingerprint failed"
-        if [ "$WEBMAIL_PIN_BEFORE" != "$WEBMAIL_PIN_AFTER" ]; then WEBMAIL_PIN_CHANGED=true; fi
-    fi
-    webmail_generate_env "$WEBMAIL_DIR" || die "Webmail environment preparation failed"
-    (cd "$WEBMAIL_DIR" && docker compose build --pull)
-    WEBMAIL_IP_BEFORE=""
-    if [ -z "${WEBMAIL_IPV4:-}" ]; then
-        WEBMAIL_IP_BEFORE=$(docker inspect --format '{{with index .NetworkSettings.Networks "mailcowdockerized_mailcow-network"}}{{.IPAddress}}{{end}}' webmail 2>/dev/null || true)
-    fi
-    if [ "$WEBMAIL_PIN_CHANGED" = true ]; then
-        (cd "$WEBMAIL_DIR" && docker compose up -d --force-recreate webmail)
-    else
-        (cd "$WEBMAIL_DIR" && docker compose up -d)
-    fi
-    if [ -z "${WEBMAIL_IPV4:-}" ] && [ -n "$WEBMAIL_IP_BEFORE" ]; then
-        WEBMAIL_IP_AFTER=$(docker inspect --format '{{with index .NetworkSettings.Networks "mailcowdockerized_mailcow-network"}}{{.IPAddress}}{{end}}' webmail 2>/dev/null || true)
-        if [ -n "$WEBMAIL_IP_AFTER" ] && [ "$WEBMAIL_IP_BEFORE" != "$WEBMAIL_IP_AFTER" ]; then
-            warn "웹메일 내부 주소가 ${WEBMAIL_IP_BEFORE}→${WEBMAIL_IP_AFTER}로 바뀜 — 앞단 NPMplus가 최대 10분 옛 주소를 쓸 수 있음. 예방: WEBMAIL_IPV4 지정. 조치: docs/guide.md#웹메일-고정-주소와-ip-변경 (전체 update는 Phase6의 기존 NPMplus 재시작으로 캐시 초기화)"
-        fi
-    fi
-    warn "웹메일 재시작으로 사용자 전원 다시 로그인"
-fi
+webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
+edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
+edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
 # ============================================================
 # Phase 6: Bring up remaining stacks
@@ -456,11 +413,11 @@ compose_up() {
     (cd "$dir" && {
         if [ "$label" = npmplus ]; then _waf_npmplus_compose up -d; else docker compose up -d; fi
     } 2>&1 | tee -a "$LOGFILE" | tail -5) \
-        || warn "$label: docker compose up -d had issues"
+        || die "$label: docker compose up -d failed after app migration; review NPMplus state"
 }
 
 compose_up "$NPMPLUS_DIR" "npmplus"
-[ "$SNAPPYMAIL_ENABLE" != true ] || compose_up "$SNAPPYMAIL_DIR" "snappymail"
+edge_apply_trust "$SCRIPT_DIR" || die "Edge step 4 failed; app/NPMplus migration completed, mailcow trust incomplete"
 
 # Reconcile before the existing DNS restart; WAF never adds a second restart.
 waf_reconcile "$NPMPLUS_DIR" || die "WAF reconciliation failed"

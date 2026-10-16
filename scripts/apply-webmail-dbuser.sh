@@ -3,7 +3,7 @@
 # Env: MAILCOW_DIR (default /home/mailcow-dockerized),
 #      WEBMAIL_ENV_FILE (default stack .env).
 # Root authentication is passed through MYSQL_PWD, never through command arguments.
-# Applies only column SELECT grants; --revert drops the managed subnet account.
+# Applies only column SELECT grants; --revert removes all webmail_ro accounts.
 set +x
 set -euo pipefail
 usage() { echo "Usage: $0 [apply|--check|--revert]"; }
@@ -30,8 +30,8 @@ webmail_load_config "${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}" "${MAIL
 command -v docker >/dev/null 2>&1 || die "docker not found"
 DBROOT=$(webmail_mailcow_value DBROOT)
 [ -n "$DBROOT" ] || die "DBROOT is missing from mailcow.conf"
-ACCOUNT="'webmail_ro'@'$WEBMAIL_NETWORK.%'"
-TARGET="webmail_ro@$WEBMAIL_NETWORK.%"
+ACCOUNT="'webmail_ro'@'$WEBMAIL_RELAY_IPV4'"
+TARGET="webmail_ro@$WEBMAIL_RELAY_IPV4"
 mysql_root() {
     (cd "$MAILCOW_DIR" && MYSQL_PWD="$DBROOT" docker compose exec -T -e MYSQL_PWD mysql-mailcow \
         mysql --user=root --batch --raw --skip-column-names) 2>/dev/null
@@ -79,14 +79,37 @@ verify_grants() {
         'sender_acl:logged_in_as,send_as' | LC_ALL=C sort)
     [ "$actual" = "$expected" ]
 }
+verify_account_count() {
+    local count
+    count=$(printf "SELECT COUNT(*) FROM mysql.user WHERE User = 'webmail_ro';\n" | mysql_root) || return 1
+    [ "$count" = "$1" ]
+}
+drop_accounts() {
+    local condition="$1" statements
+    # Render host literals in SQL, including embedded quotes/newlines. The DROP
+    # session uses doubled quotes without interpreting host backslashes.
+    statements=$(mysql_root <<SQL
+SELECT CONCAT(
+  'DROP USER IF EXISTS ', CHAR(39), 'webmail_ro', CHAR(39), '@',
+  CHAR(39), REPLACE(Host, CHAR(39), CONCAT(CHAR(39), CHAR(39))), CHAR(39), ';'
+) FROM mysql.user WHERE User = 'webmail_ro' $condition;
+SQL
+    ) || return 1
+    [ -n "$statements" ] || return 0
+    {
+        printf "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES';\n"
+        printf '%s\n' "$statements"
+    } | mysql_root >/dev/null
+}
 case "$MODE" in
     --check)
-        verify_grants || die "account is missing or column grants differ"
-        log "verified: column-level SELECT only on the five directory tables"
+        if ! verify_grants || ! verify_account_count 1; then die "relay account grants differ or other webmail_ro hosts remain"; fi
+        log "verified: relay account only, column-level SELECT on the five directory tables"
         ;;
     --revert)
-        printf 'DROP USER IF EXISTS %s;\n' "$ACCOUNT" | mysql_root >/dev/null || die "could not drop account"
-        log "subnet account removed"
+        drop_accounts '' || die "could not drop webmail_ro accounts"
+        verify_account_count 0 || die "webmail_ro accounts still exist"
+        log "all webmail_ro accounts removed"
         ;;
     apply)
         webmail_ensure_db_password || die "could not persist DB password"
@@ -108,6 +131,8 @@ case "$MODE" in
         } | mysql_root >/dev/null || die "could not apply column grants; check may be used after recovery"
         unset PASSWORD_SQL
         verify_grants || die "column grant verification failed"
+        drop_accounts "AND Host <> '$WEBMAIL_RELAY_IPV4'" || die "could not remove previous accounts"
+        verify_account_count 1 || die "other webmail_ro accounts still exist"
         log "applied and verified: column-level SELECT only on the five directory tables"
         ;;
 esac

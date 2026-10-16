@@ -202,6 +202,36 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
 fi
 echo ""
 
+# --- Edge network isolation ---
+if [ "$WEBMAIL_ENABLE" = true ] || [ "$SNAPPYMAIL_ENABLE" = true ]; then
+    echo "[Webmail edge isolation]"
+    if webmail_load_config "$ENV_FILE" "$MAILCOW_DIR"; then
+        for edge_app in webmail snappymail; do
+            if [ "$edge_app" = webmail ]; then
+                edge_enabled="$WEBMAIL_ENABLE"
+                edge_open=(dovecot-mailcow:993 dovecot-mailcow:4190 postfix-mailcow:587 mysql-mailcow:3306 nginx-mailcow:8443)
+                edge_closed=(dockerapi:443 redis-mailcow:6379 dovecot-mailcow:24 1.1.1.1:443)
+            else
+                edge_enabled="$SNAPPYMAIL_ENABLE"
+                edge_open=(dovecot-mailcow:993 dovecot-mailcow:4190 postfix-mailcow:465)
+                edge_closed=(postfix-mailcow:587 mysql-mailcow:3306 nginx-mailcow:8443 dockerapi:443 redis-mailcow:6379 dovecot-mailcow:24 1.1.1.1:443)
+            fi
+            [ "$edge_enabled" = true ] || continue
+            for edge_target in "${edge_open[@]}"; do
+                check "$edge_app open $edge_target" edge_probe_tcp "$edge_app" "${edge_target%:*}" "${edge_target##*:}" open
+            done
+            for edge_target in "${edge_closed[@]}"; do
+                check "$edge_app blocked $edge_target" edge_probe_tcp "$edge_app" "${edge_target%:*}" "${edge_target##*:}" closed
+            done
+            check "$edge_app relay backend DNS stays in mailcow network" edge_check_backend_dns "$edge_app"
+        done
+        if [ "$WEBMAIL_ENABLE" = true ]; then check "webmail_ro has exactly one relay host" edge_check_db_host; fi
+        check "Postfix relay exclusions" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-edge.sh" --check
+    else
+        check "Edge configuration" false
+    fi
+fi
+
 # --- Security ---
 echo "[Security]"
 check "Port 8080 not exposed" sh -c '! curl -sk --connect-timeout 3 "http://${SERVER_IP}:8080" 2>/dev/null | grep -q .'

@@ -758,6 +758,23 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 메일스택 웹메일은 `/home/webmail`에 설치되는 별도 컨테이너입니다. 개인 메일 자격으로 IMAP·SMTP·ManageSieve를 사용하며, 주소록·보낼 주소·사내 도메인은 열 단위 SELECT만 허용한 `webmail_ro` 계정으로 읽습니다. 세션은 메모리에 있으므로 웹메일 재시작·업데이트 후에는 사용자 전원이 다시 로그인해야 합니다.
 
+### 전용 망과 TCP 중계
+
+```text
+인터넷 → NPMplus (.2)
+           ├─ mailstack-webmail-edge → 웹메일 (자동 주소)
+           │                           └→ mailrelay-webmail (.3)
+           │                              → mailcow: IMAPS 993, Sieve 4190,
+           │                                SMTP 587, MySQL 3306, HTTPS 8443
+           └─ mailstack-snappymail-edge → SnappyMail (자동 주소)
+                                       └→ mailrelay-snappymail (.3)
+                                          → mailcow: IMAPS 993, Sieve 4190, SMTP 465
+```
+
+`.2`·`.3`은 각 전용 서브넷 시작 주소에서의 오프셋입니다. 전용 망은 `internal: true`, IPv6 끔, isolated bridge이며 Docker 서버 28 이상이 필요합니다. 앱은 자기 전용 망에만 붙고, mailcow 망에는 앱별 중계만 붙습니다. 중계는 전용 망 주소에서 정해진 TCP 포트만 받으며 호스트 포트를 열지 않습니다. NPMplus의 기존 mailcow 망 연결은 유지합니다.
+
+중계는 공식 HAProxy 3.4.7 Alpine을 태그·다이제스트로 고정하며 비루트·읽기 전용·capability 제거로 실행합니다. 중계 백엔드는 mailcow 망 전용 별칭 `dovecot`, `postfix`, `mysql`, `nginx`를 Docker DNS로 다시 해석합니다. 전용 망에서는 기존 전체 서비스명 별칭을 제공하므로 웹메일 연결 대상·TLS 검증 이름은 바뀌지 않습니다.
+
 ### 선택값과 주소
 
 | WEBMAIL_ENABLE | SNAPPYMAIL_ENABLE | 설치·업데이트 대상 | mail.DOMAIN 연결 |
@@ -767,7 +784,7 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 | true | false | 웹메일 | webmail:8080 |
 | false | false | 둘 다 생략 | 새 프록시 생성 안 함 |
 
-`.env.example`의 새 설정값을 스택 `.env`에 넣습니다. 레포 기본값은 `WEBMAIL_ENABLE=false`, `SNAPPYMAIL_ENABLE=true`, `MAIL_AUTOEXPUNGE_ENABLE=false`이며 대체 후에도 유지합니다. 선택값 키가 없는 기존 서버에서는 새 기능을 실행하지 않습니다. setup·update는 선택값을 쓰거나 바꾸지 않으며, 켜진 기능에 필요한 비밀값이 비어 있을 때만 생성하고 기존 비밀값은 보존합니다. update에서 SnappyMail을 끄더라도 기존 컨테이너·데이터는 보존하며 제거 절차를 안내합니다.
+`.env.example`의 새 설정값을 스택 `.env`에 넣습니다. 레포 기본값은 `WEBMAIL_ENABLE=false`, `SNAPPYMAIL_ENABLE=true`, `MAIL_AUTOEXPUNGE_ENABLE=false`이며 대체 후에도 유지합니다. 선택값 키가 없는 기존 서버에서는 새 기능을 실행하지 않습니다. setup·update는 선택값을 쓰거나 바꾸지 않으며, 켜진 기능에 필요한 비밀값이 비어 있을 때만 생성하고 기존 비밀값은 보존합니다. setup/update에서 앱을 끄면 그 앱의 망·중계·설정을 새로 만들지 않고 NPMplus override에서도 제외합니다. 이미 있던 앱 컨테이너·데이터·전용 망·중계는 자동 제거하지 않으며 남은 자원은 경고합니다. 제거는 아래 명시적 절차를 따릅니다.
 
 | 설정 | 기본값·뜻 |
 |---|---|
@@ -779,8 +796,12 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 | `WEBMAIL_ALLMAIL_EXCLUDE` | 전체편지함에서 더 뺄 폴더 이름의 쉼표 목록 |
 | `WEBMAIL_ATTACH_MAX_MB` | `25`. 프록시 본문 한도는 이 값 + 5MiB |
 | `WEBMAIL_SESSION_IDLE_MIN`, `WEBMAIL_SESSION_MAX_HOURS` | `480`분 유휴, `24`시간 최대 세션 |
-| `WEBMAIL_IPV4` | 선택적 고정 IP. mailcow 내부망의 사용하지 않는 주소 지정 |
-| `WEBMAIL_TRUSTED_PROXIES` | 추가 신뢰 프록시 IP/CIDR 쉼표 목록. mailcow 내부 대역은 항상 포함 |
+| `WEBMAIL_RELAY_IPV4` | 빈 값이면 `<IPV4_NETWORK>.240`. 웹메일 중계의 mailcow 쪽 고정 출발 주소 |
+| `SNAPPYMAIL_RELAY_IPV4` | 빈 값이면 `<IPV4_NETWORK>.239`. SnappyMail 중계의 고정 출발 주소 |
+| `WEBMAIL_EDGE_SUBNET` | `172.22.10.0/24`. 웹메일 전용 RFC1918 서브넷, /24~/29 |
+| `SNAPPYMAIL_EDGE_SUBNET` | `172.22.11.0/24`. SnappyMail 전용 RFC1918 서브넷, /24~/29 |
+| `WEBMAIL_IPV4` | 폐기. `.env`에 남아 있으면 경고만 하며 값을 바꾸지 않음 |
+| `WEBMAIL_TRUSTED_PROXIES` | 추가 신뢰 프록시 IP/CIDR 쉼표 목록. 기본 신뢰는 NPMplus의 웹메일 전용 망 주소 하나(`/32`) |
 | `WEBMAIL_MAIL_TLS_MODE` | `verify` 또는 `pin`. 검증을 끄는 모드는 없음 |
 | `WEBMAIL_DB_PASSWORD` | 비면 32자 무작위 생성 후 스택 `.env`에 저장. 출력·로그 금지 |
 
@@ -788,24 +809,13 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 ### 설치·업데이트·TLS
 
-새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. Phase 6은 선택적으로 SnappyMail을 설치하며, Phase 6b는 웹메일 환경·DB 계정·Dovecot 블록과 이미지를 준비하고 Phase 6c는 해당 서버에서 명시적으로 켰을 때만 독립적인 자동 삭제 정책을 적용합니다. 웹메일 주소의 DNS A 레코드도 서버를 가리켜야 합니다. 프록시 인증서는 Let's Encrypt를 시도하고 실패하거나 DNS가 없으면 자체서명을 사용합니다.
+새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. 기존 서버는 사용자 공지·설정/데이터 백업 후 `sudo ./scripts/update.sh -y --skip-mailcow-update`로 스택만 전환할 수 있습니다. 웹메일 주소의 DNS A 레코드는 서버를 가리켜야 합니다.
 
-기존 서버에 웹메일만 추가할 때에는 먼저 `.env`에 `WEBMAIL_ENABLE=true`와 사용할 주소·TLS 모드를 설정합니다. 전체 mailcow 업데이트를 실행하는 `update.sh` 대신, 사용자 공지·백업 후 다음 순서로 개별 적용합니다. 스택 루트에서 root로 실행하며 `.env`, Dovecot `extra.conf`, NPM 프록시 JSON을 먼저 백업하세요.
+두 명령은 ① Docker 판·다른 Docker 망/호스트 경로와의 겹침 검사 및 앱 설정 생성 → ② 앱 프로젝트 전환 → ③ NPMplus 전용 망 연결 → ④ Dovecot·DB·Postfix 신뢰 변경 → ⑤ verify 순서로 처리합니다. 옛 mailcow 망에 붙은 앱만 처음 한 번 `compose down` 후 올라옵니다(볼륨 보존). 이미 전용 망 구조이면 내리지 않으며, 같은 생성 파일은 다시 쓰지 않습니다. 1~4단계 실패 시 중단하고 바뀐 단계와 재시도 안내를 출력하며, 5단계 verify 실패는 경고합니다.
 
-```bash
-source scripts/lib/webmail-env.sh
-webmail_load_config "$PWD/.env" /home/mailcow-dockerized
-webmail_ensure_db_password
-bash scripts/apply-webmail-dbuser.sh apply
-bash scripts/apply-dovecot-webmail.sh apply -y
-# 자동 삭제를 켜기로 했다면 실행(모든 메일 프로그램에 적용)
-bash scripts/apply-dovecot-autoexpunge.sh apply -y
-mkdir -p /home/webmail
-rsync -a --delete --exclude=node_modules --exclude=webmail.env \
-  --exclude=mail-tls-pin.pem --exclude=docker-compose.override.yml webmail/ /home/webmail/
-webmail_prepare "$PWD/.env" /home/mailcow-dockerized /home/webmail
-(cd /home/webmail && docker compose build && docker compose up -d)
-```
+처음 전환할 때 웹메일·SnappyMail 재로그인이 필요하고, NPMplus 재생성과 Postfix 재시작으로 웹·SMTP가 각각 몇 초 끊길 수 있습니다. 반복 실행에서는 변경이 없는 앱·중계·NPMplus를 재생성하지 않고 Postfix 재시작·Dovecot reload도 하지 않습니다. 웹메일 DB 계정의 암호·권한은 매번 다시 맞춥니다(값이 같으면 결과는 그대로). 다만 기존 NPMplus DNS 캐시 초기화 재시작과 Toolkit의 php/nginx 재시작은 계속 실행됩니다. 프로그램·이미지·인증서가 실제로 바뀌면 해당 서비스는 다시 뜹니다.
+
+SnappyMail 런타임 compose가 옛 레포 구조이면 원본을 `docker-compose.yml.bak.<날짜>.*`로 백업하고 중계 구조로 바꿉니다. 운영자가 고정한 SnappyMail 이미지 값은 유지합니다. 다른 구조를 직접 편집한 파일이면 차이의 줄 범위를 출력하고 중단하므로 레포 구조에 맞춘 뒤 다시 실행합니다.
 
 추가 주소 프록시는 `bash scripts/webmail-cutover.sh add-host`로 생성합니다. 선택한 주소만 추가하려면 뒤에 호스트 이름을 지정합니다. 기존 호스트는 변경하지 않으며, 접근 목록이 없거나 인증 사용자를 포함하면 공개로 생성하지 않고 건너뜁니다. 시험 주소의 upstream은 `http://webmail:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, `client_max_body_size`는 첨부 한도 + 5m입니다.
 
@@ -817,17 +827,84 @@ TLS 이름은 mailcow.conf의 `MAILCOW_HOSTNAME`입니다. 자체서명 메일 �
 
 ### 웹메일 고정 주소와 IP 변경
 
-웹메일을 켤 때에는 운영자가 `WEBMAIL_IPV4`를 지정하는 것을 **권장**합니다. 해당 mailcow 네트워크 안에서 사용 중이지 않고 다른 서비스에 예약되지 않은 주소를 골라 서버 `.env`에 직접 적고, 위 설치·업데이트 절차로 신뢰 블록과 웹메일 환경을 반영하세요. 이 구성은 mailcow 실패 차단(fail2ban)이 실제 사용자 IP를 보도록 하며, 재생성 때 같은 내부 주소를 유지해 앞단 프록시의 옛 주소 캐시 문제도 예방합니다. 처음 프록시 호스트를 만들 때부터 고정 주소를 사용하면 이후 같은 주소로 재생성할 때 IP 변경에 따른 캐시 문제가 생기지 않습니다. setup·update는 이 선택값을 자동 생성하거나 덮어쓰지 않습니다.
+`WEBMAIL_IPV4`는 더 이상 사용하지 않습니다. 중계 IPv4 두 개는 mailcow /24 안에서 서로 달라야 하며 `.0`·`.1`·`.248`~`.255`는 사용할 수 없습니다. 다른 컨테이너가 쓰는 주소인지도 전환 전에 확인하세요. mailcow IPv6가 켜졌다면 두 중계에 mailcow /64의 `::240`·`::239`를 고정합니다. Postfix는 두 중계의 IPv4·IPv6를 `mynetworks` 맨 앞에서 제외하므로 중계 경유 SMTP도 로그인이 필요합니다. Dovecot 사용자 IP 신뢰와 DB 접근은 웹메일 중계 주소에만 허용합니다.
 
-이미 운영 중인 웹메일을 수동 `docker compose up -d`로 재생성하면서 주소가 바뀌면 최대 10분 동안 502가 날 수 있습니다(이번 시험에서는 4~8분). 고정 판 NPMplus는 [공유 upstream과 resolve](https://github.com/ZoeyVid/NPMplus/blob/2026-07-24-r1/backend/templates/_upstream.conf)를 사용하고 [resolver에 valid 상한을 지정하지 않으며](https://github.com/ZoeyVid/NPMplus/blob/2026-07-24-r1/rootfs/usr/local/nginx/conf/nginx.conf#L39), Docker DNS의 [기본 TTL은 600초](https://github.com/moby/moby/blob/v28.5.1/libnetwork/resolver.go#L57)입니다. 단순 nginx reload도 이전 주소·유효기간을 이어받을 수 있어 즉시 캐시를 비우는 방법으로 보장되지 않습니다.
+전용 망의 자동 IPAM 범위는 서브넷 위쪽 절반입니다(`/24` 기본값은 `.128/25`, `/29`는 시작 주소 +4부터의 `/30`). NPMplus +2와 중계 +3의 고정 주소를 앱이 먼저 할당받지 않게 합니다. 생성 파일은 기본 `/home/webmail/`·`/home/snappymail/`의 `haproxy.cfg`·`docker-compose.override.yml`, `/home/npmplus/docker-compose.override.yml`입니다. 웹메일 소스 동기화는 이 파일들을 보존합니다. 다른 사람이 만든 override는 덮어쓰지 않습니다.
 
-전체 `update.sh`는 Phase6에서 **기존 동작인 NPMplus 재시작 1회**로 캐시를 초기화하므로 정상 완료하면 위 TTL 대기를 피합니다. update는 고정 주소를 지정하지 않은 웹메일의 재생성 전후 주소가 달라졌을 때만 감지 경고를 남깁니다. 경고가 떴거나 수동 재생성 뒤 502가 계속되면, 운영자는 전체 update의 Phase6 재시작 성공 여부를 확인하고 필요하면 다른 프록시의 영향도 확인한 뒤 `docker restart npmplus`를 직접 실행하세요. NPMplus 재시작은 모든 앞단 프록시에 영향을 주며 소요 시간은 환경에 따라 다릅니다. 이번 변경은 자동 IP 선택·프록시 설정 변경·추가 재시작을 하지 않습니다.
+NPMplus는 앱 이름을 그대로 사용합니다. 수동 재생성으로 앱의 자동 주소가 바뀌어 502가 남으면 기존 update의 NPMplus DNS 초기화 재시작을 확인하세요. 수동 `docker restart npmplus`는 모든 앞단 웹에 영향을 줍니다.
 
 ### 검증·되돌리기
 
 `sudo ./scripts/verify.sh`는 선택 서비스의 컨테이너 상태, 주소별 `/healthz`, Dovecot·DB 계정, 비로그인 logout의 403 및 WWW-Authenticate 부재를 확인합니다. 접근 목록이 있는 주소의 외부 HTTP 검사는 건너뜀으로 표시합니다. pin 모드는 저장한 인증서와 현재 메일 서버의 SHA-256 지문도 비교합니다.
 
-Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 있으므로 근무 시간 밖에 사용자 공지 후 실행합니다. 되돌리기는 프록시 추가 주소 제거 → 웹메일 `docker compose down` → `.env`에서 `WEBMAIL_ENABLE=false` → `apply-dovecot-webmail.sh --revert -y` → `apply-webmail-dbuser.sh --revert` 순서입니다. 색인은 남기며 사용자 설정·메일 데이터는 지우지 않습니다. `teardown.sh`는 별도의 전체 제거 명령으로 확인 후 웹메일까지 제거합니다.
+verify는 앱 안에서 TCP 열림·막힘, 중계의 백엔드 DNS가 mailcow 망으로만 풀리는지, Dovecot 신뢰·DB 단일 호스트·Postfix 제외를 검사합니다. 웹메일은 Node, SnappyMail은 이미지의 PHP CLI를 쓰며 TCP 연결 제한은 3초입니다. 중계 DNS 검사는 Alpine BusyBox `nslookup`을 사용합니다. 전체 차단 목록·인증 없는 SMTP 발송 거부·실제 로그인/보내기·재부팅 복구는 별도 서버 시험이 필요합니다.
+
+#### 웹메일 끄기
+
+사용자 공지·백업 후 추가 프록시 주소를 `webmail-cutover.sh remove-host <주소>`로 제거하고, 서버 `.env`의 `WEBMAIL_ENABLE=false`를 선택합니다. 데이터 볼륨은 지우지 않습니다. Dovecot 원복은 IMAP/POP 연결을 한 번 끊을 수 있습니다.
+
+```bash
+(cd /home/webmail && docker compose down)
+source scripts/lib/webmail-env.sh
+webmail_load_config "$PWD/.env" /home/mailcow-dockerized
+edge_reconcile_npmplus /home/npmplus
+bash scripts/apply-dovecot-webmail.sh --revert -y
+bash scripts/apply-webmail-dbuser.sh --revert
+# 남아 있을 때만 제거. NPMplus 연결이 먼저 빠져야 합니다.
+if docker network inspect mailstack-webmail-edge >/dev/null 2>&1; then
+  docker network rm mailstack-webmail-edge
+fi
+rm -f /home/webmail/haproxy.cfg /home/webmail/docker-compose.override.yml
+```
+
+DB 원복 명령은 호스트와 상관없이 `webmail_ro` 계정을 모두 제거하며 옛 계정을 다시 만들지 않습니다. Postfix 제외는 SnappyMail을 위해 남깁니다. 전체 데이터를 지우는 `teardown.sh`는 별도 확인 후 실행합니다.
+
+#### 망 분리 전체 되돌리기
+
+운영자가 변경 커밋 ID와 SnappyMail 전환 백업을 확인한 뒤 실행합니다. 아래 변수에는 실제 커밋 ID와 확인한 백업 경로를 넣습니다. 레포의 다른 미커밋 변경이 있으면 먼저 정리하세요. 이 명령은 스크립트가 자동 실행하지 않습니다.
+
+```bash
+set -e
+source scripts/lib/webmail-env.sh
+webmail_load_config "$PWD/.env" /home/mailcow-dockerized
+# 검증된 중계 주소를 같은 셸에 보관(암호는 출력하지 않음).
+RELAY_TO_DROP="$WEBMAIL_RELAY_IPV4"
+bash scripts/apply-postfix-edge.sh --revert -y
+# 설치된 앱 프로젝트만 실행. -v는 쓰지 않습니다.
+for dir in /home/webmail /home/snappymail; do
+  if [ -f "$dir/docker-compose.yml" ]; then (cd "$dir" && docker compose down); fi
+done
+ROLLBACK_BACKUP="/root/mailstack-edge-rollback-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$ROLLBACK_BACKUP"
+for app in webmail snappymail npmplus; do
+  file="/home/$app/docker-compose.override.yml"
+  if [ -f "$file" ]; then
+    grep -qFx '# Generated by scripts/lib/edge.sh' <(head -n1 "$file") || { echo '표식이 다른 override: 수동 검토 필요' >&2; exit 1; }
+    cp -p "$file" "$ROLLBACK_BACKUP/$app.override.yml"
+    rm "$file"
+  fi
+done
+# 출력된 전환 백업 경로를 찾고, 내용을 검토한 한 파일을 선택합니다.
+find /home/snappymail -maxdepth 1 -name 'docker-compose.yml.bak.*' -print
+# SNAPPY_COMPOSE_BACKUP에 확인한 전환 백업의 절대 경로를 지정한 뒤:
+cp -p "$SNAPPY_COMPOSE_BACKUP" /home/snappymail/docker-compose.yml
+# NETSPLIT_N2B_COMMIT/N2A_COMMIT/N1_COMMIT에는 실제 변경 커밋 ID를 지정:
+git revert "$NETSPLIT_N2B_COMMIT" "$NETSPLIT_N2A_COMMIT" "$NETSPLIT_N1_COMMIT"
+# 서버 .env에서 예전 WEBMAIL_IPV4 값(예: 172.22.1.240)을 확인·복원합니다.
+sudo ./scripts/update.sh -y --skip-mailcow-update
+source scripts/lib/webmail-env.sh
+webmail_load_config "$PWD/.env" /home/mailcow-dockerized
+DBROOT_ROLLBACK=$(webmail_mailcow_value DBROOT)
+printf "DROP USER IF EXISTS 'webmail_ro'@'%s';\n" "$RELAY_TO_DROP" | \
+  (cd /home/mailcow-dockerized && MYSQL_PWD="$DBROOT_ROLLBACK" docker compose exec -T -e MYSQL_PWD mysql-mailcow mysql --user=root)
+unset DBROOT_ROLLBACK
+# 남아 있는 전용 망만 제거합니다.
+for network in mailstack-webmail-edge mailstack-snappymail-edge; do
+  if docker network inspect "$network" >/dev/null 2>&1; then docker network rm "$network"; fi
+done
+```
+
+표식이 다르면 override를 지우지 말고 멈춰 수동 검토합니다. SnappyMail을 설치한 적이 없으면 해당 down·compose 복원은 생략합니다. 전환 백업이 없으면 옛 레포의 SnappyMail compose를 복원하고 운영자 이미지 고정값을 대조해야 합니다. Postfix `extra.cf`는 생성 백업과 대조하세요. 제외만 남아 있어도 인증해서 보내는 메일에는 영향이 없습니다.
 
 2026-09a의 `Global setting mail_plugins won't change ...` 경고는 기본 conf의 IMAP·LMTP 설정(183·188행) 뒤에 `extra.conf`가 포함되어 발생합니다([Dovecot 2.3.21.1 config-parser.c 902~916](https://github.com/dovecot/core/blob/2.3.21.1/src/config/config-parser.c#L902)); 전역 가상 네임스페이스를 프로토콜 필터 없는 도구에서도 열 수 있도록 전역 virtual을 유지하고 IMAP·LMTP에도 명시적으로 추가하므로, 각 프로토콜에 virtual이 한 번씩 있는 현재 설정에서는 무해합니다.
 
@@ -840,7 +917,7 @@ Dovecot 블록 적용·원복 때 모든 IMAP/POP 연결이 한 번 끊길 수 �
 3. `webmail-cutover.sh status`로 대상을 확인하고 `switch`로 SnappyMail을 향하는 주소들을 `webmail:8080`으로 바꿉니다. 기존 접근 목록을 유지하고 변경 전 JSON을 보관합니다.
 4. 운영자가 먼저 해당 서버 `.env`에서 `SNAPPYMAIL_ENABLE=false`로 바꾼 다음 전환 주소를 `WEBMAIL_HOSTNAMES`에 추가합니다. 대표는 `webmail.${DOMAIN}`, 기존 시험 주소는 유지합니다. 이 순서는 환경 검증과 Origin 허용 주소를 일치시키며 컨테이너·데이터를 삭제하지 않습니다. `webmail.env` 재생성과 `up -d` 후 주소별 healthz·로그인·보내기·verify를 확인합니다.
 5. 운영자가 정한 관찰 기간(권장 1주)에는 `bash scripts/snappymail-remove.sh stop`으로 컨테이너만 정지합니다. 컨테이너·볼륨·폴더는 보존합니다. 문제 시 `webmail-cutover.sh revert` → 운영자가 `WEBMAIL_HOSTNAMES`를 전환 전 목록으로 원복하고 `SNAPPYMAIL_ENABLE=true` 선택 → `snappymail-remove.sh start`로 되돌립니다.
-6. 관찰 후 `snappymail-remove.sh remove`로 컨테이너를 내립니다. 기본적으로 볼륨·폴더를 보존하고 앞서 운영자가 선택한 `SNAPPYMAIL_ENABLE=false`도 그대로 둡니다. 볼륨·설치 폴더 삭제는 별도 확인 후 진행합니다. 컨테이너 제거 뒤 원복은 선택값을 true로 바꾸고 `up -d` → `revert` 순서입니다. 볼륨까지 삭제했다면 `restore <백업 tar>`가 먼저입니다.
+6. 관찰 후 `snappymail-remove.sh remove`로 컨테이너를 내립니다. 앱·중계·전용 망·생성 파일·NPM 연결을 정리하며 볼륨·폴더는 보존하고 앞서 운영자가 선택한 `SNAPPYMAIL_ENABLE=false`도 그대로 둡니다. 볼륨·설치 폴더 삭제는 별도 확인 후 진행합니다. 제거 뒤 원복은 선택값을 true로 바꾸고 `update.sh -y --skip-mailcow-update` → `revert` 순서입니다. 볼륨까지 삭제했다면 `restore <백업 tar>`가 먼저입니다.
 7. 최종 대체 완료 후에도 레포 기본값은 변경하지 않습니다. 전환할 서버의 `.env`에서만 웹메일 true·SnappyMail false를 선택합니다. 사용자 필터 원복은 기존 스크립트를 `doveadm sieve activate -u <주소> <원래 이름>`으로 다시 활성화합니다.
 
 ### 수동 도구 사용법과 백업
@@ -855,7 +932,7 @@ bash scripts/webmail-cutover.sh switch
 # 여기서 운영자가 .env의 SNAPPYMAIL_ENABLE=false 및 주소 목록을 수정
 # 웹메일 환경 재생성·up -d와 주소별 검증 후 관찰 시작
 bash scripts/snappymail-remove.sh stop
-# 관찰을 마친 뒤 컨테이너만 제거(볼륨·폴더 보존)
+# 관찰을 마친 뒤 앱·중계·전용 망 제거(볼륨·폴더 보존)
 bash scripts/snappymail-remove.sh remove
 ```
 
@@ -867,11 +944,11 @@ bash scripts/snappymail-remove.sh remove
 | `switch` | 정확히 `snappymail`을 향하는 호스트만 변경. 원본 전체 JSON을 `webmail-cutover-before.json`에 먼저 저장 |
 | `revert [백업 JSON]` | 백업의 전환 대상만 원복. 바꾼 필드만 PUT하며 포트·원래 고급 설정을 복원 |
 | `snappymail-remove.sh backup` | 실제 데이터 볼륨 이름을 찾아 압축 파일·compose·NPM JSON·복구 메타데이터를 저장하고 검증 |
-| `stop` / `start` | 관찰을 위한 정지 / 보존된 볼륨으로 기동 |
-| `remove` | 완전한 백업이 없으면 거부. 기본값은 컨테이너만 제거 |
-| `restore <압축 파일>` | 삭제된 볼륨을 만들고 데이터를 풀어 compose 프로젝트를 기동. 기존 볼륨은 덮어쓰지 않음 |
+| `stop` / `start` | 관찰 정지 / 생성 파일이 남아 있으면 기동. 없으면 update 안내 |
+| `remove` | 완전한 백업 필요. 앱·중계·전용 망·생성 파일·NPM 연결 제거, 데이터·설치 폴더 보존 |
+| `restore <압축 파일>` | 삭제된 볼륨을 복원. 생성 설정이 없으면 up 생략 후 update 안내. 기존 볼륨은 덮어쓰지 않음 |
 
-볼륨 삭제가 별도로 승인됐을 때만 `remove --delete-volume`을 사용합니다. 설치 폴더 삭제는 `--delete-install-dir`로 따로 선택하며 두 옵션을 함께 사용할 수도 있습니다. 백업이 설치 폴더 안에 있으면 폴더 삭제를 거부합니다. 데이터가 남아 있는 컨테이너 제거 단계에서는 `start`로 원복하고, 볼륨까지 삭제한 뒤에는 백업 압축 파일을 `restore`한 뒤 주소를 `revert`합니다. 설치 폴더만 지웠다면 보관한 compose 파일을 먼저 원래 위치에 복원하세요. 사용자 필터는 별도로 원래 Sieve 스크립트를 활성화합니다.
+볼륨 삭제가 별도로 승인됐을 때만 `remove --delete-volume`을 사용합니다. 설치 폴더 삭제는 `--delete-install-dir`로 따로 선택하며 두 옵션을 함께 사용할 수도 있습니다. 백업이 설치 폴더 안에 있으면 폴더 삭제를 거부합니다. 생성 파일이 남아 있는 관찰 정지 단계에서는 `start`로 원복합니다. remove 뒤에는 운영자가 `SNAPPYMAIL_ENABLE=true`를 선택하고 `update.sh -y --skip-mailcow-update`로 망·중계를 다시 만듭니다. 데이터가 남아 있다면 그대로 사용하며, 볼륨까지 삭제했다면 먼저 백업 압축 파일을 `restore`한 다음 같은 update 명령으로 생성 설정을 복구하고 주소를 `revert`합니다. backup은 기존 데이터 압축·manifest·compose·NPM JSON 네 파일만 보관하며 생성 설정은 포함하지 않습니다. 설치 폴더만 지웠다면 보관한 compose 파일을 먼저 원래 위치에 복원하세요. 사용자 필터는 별도로 원래 Sieve 스크립트를 활성화합니다.
 
 백업·쿠키·관리자 암호 임시 파일은 비공개 권한으로 다룹니다. NPM 암호를 명령 인자나 로그에 남기지 않습니다. NPM PUT에는 변경할 필드만 보내며 접근 목록·인증서는 전환 중 그대로 보존합니다. 여러 호스트 중 일부 전환이 실패해도 최초 백업을 유지하므로 원인을 확인한 뒤 `revert`할 수 있습니다. 전환 후 다른 관리자가 대상·주소를 바꾼 경우에는 원복을 거부하고 수동 검토를 요구합니다.
 

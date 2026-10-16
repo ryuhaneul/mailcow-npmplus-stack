@@ -16,16 +16,38 @@ services:
     volumes:
       - snappymail-data:/var/lib/snappymail
     networks:
-      mailcow-network:
+      mailstack-snappymail-edge:
         aliases:
           - snappymail
     environment:
       - SECURE_COOKIES=true
 
+  mailrelay-snappymail:
+    image: haproxy:3.4.7-alpine@sha256:251da69821897ec8c4819f12b1babbc4b71f562943addc9b9eb14bb6ece40dc6
+    container_name: mailrelay-snappymail
+    restart: always
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro,z
+    networks:
+      mailstack-snappymail-edge:
+        aliases: [dovecot-mailcow, postfix-mailcow]
+      mailcow-network: {}
+
 volumes:
   snappymail-data:
 
 networks:
+  mailstack-snappymail-edge:
+    name: mailstack-snappymail-edge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
   mailcow-network:
     external: true
     name: mailcowdockerized_mailcow-network

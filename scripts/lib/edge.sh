@@ -1,0 +1,471 @@
+#!/bin/bash
+# Public relay/subnet output variables are consumed by callers.
+# shellcheck disable=SC2034
+# Shared N1 configuration. Source webmail-env.sh for mailcow.conf value reading.
+edge_error() { echo "[edge] ERROR: $*" >&2; return 1; }
+
+edge_mailcow_ipv6() {
+    local enabled network
+    enabled=$(webmail_mailcow_value ENABLE_IPV6)
+    network=$(webmail_mailcow_value IPV6_NETWORK)
+    EDGE_IPV6_ENABLED=${enabled:-true}
+    EDGE_IPV6_NETWORK=${network:-fd4d:6169:6c63:6f77::/64}
+    WEBMAIL_RELAY_IPV6=
+    SNAPPYMAIL_RELAY_IPV6=
+    case "$EDGE_IPV6_ENABLED" in
+        false) return 0 ;;
+        true) ;;
+        *) edge_error 'ENABLE_IPV6 must be true or false'; return 1 ;;
+    esac
+    local addresses
+    addresses=$(python3 - "$EDGE_IPV6_NETWORK" <<'PY'
+import ipaddress, sys
+try:
+    network = ipaddress.IPv6Network(sys.argv[1])
+    if network.prefixlen != 64:
+        raise ValueError('IPV6_NETWORK must be /64')
+    print(ipaddress.IPv6Address(int(network.network_address) + 0x240))
+    print(ipaddress.IPv6Address(int(network.network_address) + 0x239))
+except ValueError as exc:
+    sys.exit('[edge] ERROR: ' + str(exc))
+PY
+    ) || return 1
+    { read -r WEBMAIL_RELAY_IPV6; read -r SNAPPYMAIL_RELAY_IPV6; } <<< "$addresses"
+}
+
+edge_load_config() {
+    local network
+    network=$(webmail_mailcow_value IPV4_NETWORK)
+    WEBMAIL_RELAY_IPV4=${WEBMAIL_RELAY_IPV4:-$network.240}
+    SNAPPYMAIL_RELAY_IPV4=${SNAPPYMAIL_RELAY_IPV4:-$network.239}
+    WEBMAIL_EDGE_SUBNET=${WEBMAIL_EDGE_SUBNET:-172.22.10.0/24}
+    SNAPPYMAIL_EDGE_SUBNET=${SNAPPYMAIL_EDGE_SUBNET:-172.22.11.0/24}
+    python3 - "$network" "$WEBMAIL_RELAY_IPV4" "$SNAPPYMAIL_RELAY_IPV4" \
+        "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" <<'PY' || return 1
+import ipaddress, sys
+try:
+    network = ipaddress.IPv4Network(sys.argv[1] + '.0/24')
+    relays = [ipaddress.IPv4Address(value) for value in sys.argv[2:4]]
+    for relay in relays:
+        if relay not in network or not 2 <= int(relay) - int(network.network_address) <= 247:
+            raise ValueError('relay must be in the mailcow /24, excluding gateway, network, broadcast and .248-.254')
+    if relays[0] == relays[1]:
+        raise ValueError('relay IPv4 addresses must differ')
+    private = [ipaddress.IPv4Network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+    for value in sys.argv[4:]:
+        if '/' not in value:
+            raise ValueError('edge subnet must have a CIDR prefix')
+        subnet = ipaddress.IPv4Network(value)
+        if not 24 <= subnet.prefixlen <= 29 or not any(subnet.subnet_of(block) for block in private):
+            raise ValueError('edge subnet must be an RFC1918 /24 through /29')
+except ValueError as exc:
+    sys.exit('[edge] ERROR: ' + str(exc))
+PY
+    edge_mailcow_ipv6 || return 1
+    if [ -f "${WEBMAIL_STACK_ENV:-}" ] && grep -qE '^(export[[:space:]]+)?WEBMAIL_IPV4=' "$WEBMAIL_STACK_ENV"; then
+        echo '[edge] WARNING: WEBMAIL_IPV4 더 이상 쓰지 않음 — 웹메일은 mailcow 망에서 빠짐, 중계 주소는 WEBMAIL_RELAY_IPV4' >&2
+    fi
+}
+
+# Network offsets also work for /25-/29 subnets whose last octet is not zero.
+edge_address() {
+    python3 - "$1" "$2" <<'PY'
+import ipaddress, sys
+print(ipaddress.IPv4Network(sys.argv[1]).network_address + int(sys.argv[2]))
+PY
+}
+
+edge_check_docker_version() {
+    local version
+    version=$(docker version --format '{{.Server.Version}}') || { edge_error 'cannot read Docker server version'; return 1; }
+    [[ "$version" =~ ^([0-9]+)\. ]] && [ "${BASH_REMATCH[1]}" -ge 28 ] \
+        || { edge_error 'Docker server 28+ is required for isolated bridge networks'; return 1; }
+}
+
+# Read-only preflight. Ignore our two bridges and their host routes, not other
+# bridges whose CIDRs happen to match. Include non-default routes from all tables.
+edge_check_overlap() (
+    local work ids
+    work=$(mktemp -d) || return 1
+    trap 'rm -rf "$work"' EXIT
+    ids=$(docker network ls -q) || { edge_error 'cannot list Docker networks'; return 1; }
+    if [ -n "$ids" ]; then
+        local -a network_ids
+        mapfile -t network_ids <<< "$ids"
+        docker network inspect "${network_ids[@]}" > "$work/networks.json" || { edge_error 'cannot inspect Docker networks'; return 1; }
+    else
+        printf '[]\n' > "$work/networks.json"
+    fi
+    ip -4 -j route show table all > "$work/routes.json" || { edge_error 'cannot read IPv4 host routes'; return 1; }
+    python3 - "$work" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" \
+        "${WEBMAIL_ENABLE:-false}" "${SNAPPYMAIL_ENABLE:-true}" <<'PY'
+import ipaddress, json, sys
+from pathlib import Path
+work = Path(sys.argv[1])
+names = ('mailstack-webmail-edge', 'mailstack-snappymail-edge')
+candidates = [(name, ipaddress.IPv4Network(value)) for name, value, enabled in zip(names, sys.argv[2:4], sys.argv[4:6]) if enabled == 'true']
+try:
+    if len(candidates) == 2 and candidates[0][1].overlaps(candidates[1][1]):
+        raise ValueError('webmail and SnappyMail edge subnets overlap')
+    devices = set()
+    networks = json.loads((work/'networks.json').read_text())
+    for network in networks:
+        if network['Name'] in names:
+            bridge = (network.get('Options') or {}).get('com.docker.network.bridge.name')
+            devices.add(bridge or 'br-' + network['Id'][:12])
+            continue
+        for config in network.get('IPAM', {}).get('Config', []) or []:
+            if not config.get('Subnet'):
+                continue
+            subnet = ipaddress.ip_network(config['Subnet'])
+            for name, candidate in candidates:
+                if candidate.overlaps(subnet):
+                    raise ValueError(f'{name} overlaps Docker network {network["Name"]} ({subnet})')
+    for route in json.loads((work/'routes.json').read_text()):
+        destination = route.get('dst', 'default')
+        if destination in ('default', '0.0.0.0/0') or route.get('dev') in devices:
+            continue
+        subnet = ipaddress.IPv4Network(destination, strict=False)
+        for name, candidate in candidates:
+            if candidate.overlaps(subnet):
+                raise ValueError(f'{name} overlaps host route {destination}')
+except (ValueError, KeyError, TypeError) as exc:
+    sys.exit('[edge] ERROR: ' + str(exc))
+PY
+)
+
+# Preserve operator files, accept only our marker (or an explicitly named legacy
+# marker), and replace atomically only when the generated bytes differ.
+edge_write_managed() (
+    local file="$1" marker="$2" legacy="${3:-}" tmp first
+    mkdir -p "$(dirname "$file")" || return 1
+    if [ -f "$file" ]; then
+        IFS= read -r first < "$file" || true
+        if [ "$first" != "$marker" ] && { [ -z "$legacy" ] || [ "$first" != "$legacy" ]; }; then
+            edge_error "unmanaged $file; refusing to overwrite"; return 1
+        fi
+    fi
+    tmp=$(mktemp "$file.tmp.XXXXXX") || return 1
+    trap 'rm -f "$tmp"' EXIT
+    { printf '%s\n' "$marker"; cat; } > "$tmp" || return 1
+    if [ -f "$file" ] && cmp -s "$tmp" "$file"; then return 0; fi
+    chmod 644 "$tmp" && mv "$tmp" "$file"
+)
+
+# edge_generate_relay <webmail|snappymail> <compose directory>
+# Short backend aliases exist only on mailcow-network, avoiding self-resolution
+# of the full service-name aliases attached to the relay's edge interface.
+edge_generate_relay() (
+    set -o pipefail
+    local app="$1" dest="$2" subnet address port host
+    local -a backends
+    case "$app" in
+        webmail) subnet="$WEBMAIL_EDGE_SUBNET"; backends=(dovecot:993 dovecot:4190 postfix:587 mysql:3306 nginx:8443) ;;
+        snappymail) subnet="$SNAPPYMAIL_EDGE_SUBNET"; backends=(dovecot:993 dovecot:4190 postfix:465) ;;
+        *) edge_error 'unknown relay app'; return 1 ;;
+    esac
+    address=$(edge_address "$subnet" 3) || return 1
+    {
+        printf 'global\n\ndefaults\n    mode tcp\n    timeout connect 5s\n    timeout client 1h\n    timeout server 1h\n\nresolvers docker\n    nameserver dns 127.0.0.11:53\n    hold valid 10s\n'
+        for host in "${backends[@]}"; do
+            port=${host##*:}
+            printf '\nlisten relay_%s\n    bind %s:%s\n    server upstream %s resolvers docker resolve-prefer ipv4 init-addr last,libc,none\n' "$port" "$address" "$port" "$host"
+        done
+    } | edge_write_managed "$dest/haproxy.cfg" '# Generated by scripts/lib/edge.sh'
+)
+
+# edge_generate_override <webmail|snappymail> <compose directory>
+# TLS pin mounts share webmail's existing default override; dynamic IPAM starts
+# in the upper half so NPMplus .2 and the relay .3 stay free for fixed allocation.
+edge_generate_override() (
+    set -o pipefail
+    local app="$1" dest="$2" subnet relay4 relay6 address range mount
+    case "$app" in
+        webmail) subnet="$WEBMAIL_EDGE_SUBNET"; relay4="$WEBMAIL_RELAY_IPV4"; relay6="$WEBMAIL_RELAY_IPV6" ;;
+        snappymail) subnet="$SNAPPYMAIL_EDGE_SUBNET"; relay4="$SNAPPYMAIL_RELAY_IPV4"; relay6="$SNAPPYMAIL_RELAY_IPV6" ;;
+        *) edge_error 'unknown relay app'; return 1 ;;
+    esac
+    address=$(edge_address "$subnet" 3) || return 1
+    range=$(python3 - "$subnet" <<'PY'
+import ipaddress, sys
+print(list(ipaddress.IPv4Network(sys.argv[1]).subnets(prefixlen_diff=1))[1])
+PY
+    ) || return 1
+    {
+        printf 'services:\n'
+        if [ "$app" = webmail ] && [ "${WEBMAIL_MAIL_TLS_MODE:-verify}" = pin ]; then
+            mount="$dest/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z"
+            mount=${mount//\\/\\\\}; mount=${mount//\"/\\\"}; mount=${mount//\$/\$\$}
+            printf '  webmail:\n    volumes:\n      - "%s"\n' "$mount"
+        fi
+        printf '  mailrelay-%s:\n    networks:\n      mailstack-%s-edge:\n        ipv4_address: %s\n      mailcow-network:\n        ipv4_address: %s\n' "$app" "$app" "$address" "$relay4"
+        if [ -n "$relay6" ]; then printf '        ipv6_address: %s\n' "$relay6"; fi
+        printf 'networks:\n  mailstack-%s-edge:\n    ipam:\n      config:\n        - subnet: %s\n          ip_range: %s\n' "$app" "$subnet" "$range"
+    } | edge_write_managed "$dest/docker-compose.override.yml" '# Generated by scripts/lib/edge.sh' '# Generated by scripts/lib/webmail-env.sh'
+)
+
+# Default override in the NPMplus compose directory. Existing base networks stay
+# attached; only enabled apps gain a .2 attachment. Caller applies it in N2b.
+edge_generate_npmplus_override() (
+    set -o pipefail
+    local dest="$1" app subnet address enabled
+    {
+        printf 'services:\n  npmplus:\n    networks:\n      npmplus-net: {}\n      mailcow-network: {}\n'
+        for app in webmail snappymail; do
+            if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-false}"; subnet="$WEBMAIL_EDGE_SUBNET"
+            else enabled="${SNAPPYMAIL_ENABLE:-true}"; subnet="$SNAPPYMAIL_EDGE_SUBNET"; fi
+            if [ "$enabled" = true ]; then
+                address=$(edge_address "$subnet" 2) || return 1
+                printf '      mailstack-%s-edge:\n        ipv4_address: %s\n' "$app" "$address"
+            fi
+        done
+        if [ "${WEBMAIL_ENABLE:-false}" = true ] || [ "${SNAPPYMAIL_ENABLE:-true}" = true ]; then
+            printf 'networks:\n'
+            for app in webmail snappymail; do
+                if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-false}"; else enabled="${SNAPPYMAIL_ENABLE:-true}"; fi
+                if [ "$enabled" = true ]; then printf '  mailstack-%s-edge:\n    external: true\n    name: mailstack-%s-edge\n' "$app" "$app"; fi
+            done
+        fi
+    } | edge_write_managed "$dest/docker-compose.override.yml" '# Generated by scripts/lib/edge.sh'
+)
+
+edge_log() { echo "[edge] $*" >&2; }
+
+# Upgrade only the two known stack layouts; keep the operator's SnappyMail image.
+edge_sync_snappymail_compose() {
+    python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import datetime, difflib, os, re, shutil, sys, tempfile
+source, target = map(Path, sys.argv[1:])
+desired = source.read_bytes()
+if not target.exists():
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(desired)
+    sys.exit(0)
+original = target.read_bytes()
+image = re.compile(rb'(?m)^    image: [^\r\n]*')
+def normalized(data):
+    return image.sub(b'    image: SNAPPYMAIL_IMAGE', data, count=1)
+if normalized(original) == normalized(desired): sys.exit(0)
+legacy = re.sub(rb'\n  mailrelay-snappymail:.*?(?=\nvolumes:)', b'', desired, flags=re.S)
+legacy = legacy.replace(b'      mailstack-snappymail-edge:', b'      mailcow-network:', 1)
+legacy = re.sub(rb'(?m)^  mailstack-snappymail-edge:\n.*?(?=^  mailcow-network:)', b'', legacy, flags=re.S)
+if normalized(original) != normalized(legacy):
+    changes = difflib.SequenceMatcher(a=normalized(original).splitlines(), b=normalized(desired).splitlines())
+    summary = '; '.join(f'installed lines {a+1}-{b}, repository lines {c+1}-{d}' for tag,a,b,c,d in changes.get_opcodes() if tag != 'equal')
+    sys.exit(f'[edge] ERROR: custom SnappyMail compose {target}: {summary}; align its structure with {source} manually, then rerun update')
+replacement = image.search(original)
+if not replacement: sys.exit('[edge] ERROR: SnappyMail image line missing')
+updated = image.sub(lambda _: replacement[0], desired, count=1)
+fd, backup = tempfile.mkstemp(prefix=target.name+'.bak.'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'.', dir=target.parent)
+os.close(fd)
+shutil.copy2(target, backup)
+print('[edge] SnappyMail compose backup: '+backup, flush=True)
+fd, temporary = tempfile.mkstemp(prefix=target.name+'.tmp.', dir=target.parent)
+try:
+    with os.fdopen(fd,'wb') as stream: stream.write(updated)
+    shutil.copystat(target, temporary)
+    os.replace(temporary,target)
+finally:
+    if os.path.exists(temporary): os.unlink(temporary)
+PY
+}
+
+# Stage 1: all preflights and generated files precede any app container changes.
+edge_prepare_apps() {
+    local project="$1" webdir="$2" snappydir="$3" before="" after
+    EDGE_WEBMAIL_PIN_CHANGED=false
+    if [ "$WEBMAIL_ENABLE" = true ] || [ "$SNAPPYMAIL_ENABLE" = true ]; then
+        edge_log 'step 1: checking Docker/subnets and preparing app files'
+        edge_check_docker_version && edge_check_overlap || return 1
+    fi
+    if [ "$WEBMAIL_ENABLE" = true ]; then
+        mkdir -p "$webdir" || return 1
+        rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=mail-tls-pin.pem \
+            --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
+        if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then before=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || true; fi
+        webmail_ensure_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" \
+            && edge_generate_relay webmail "$webdir" || return 1
+        if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
+            after=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || return 1
+            [ "$before" = "$after" ] || EDGE_WEBMAIL_PIN_CHANGED=true
+        fi
+    elif docker inspect mailrelay-webmail >/dev/null 2>&1 || docker network inspect mailstack-webmail-edge >/dev/null 2>&1; then
+        edge_log 'WARNING: Webmail disabled; existing relay/network preserved; use the documented removal procedure'
+    fi
+    if [ "$SNAPPYMAIL_ENABLE" = true ]; then
+        edge_sync_snappymail_compose "$project/snappymail/docker-compose.yml" "$snappydir/docker-compose.yml" \
+            && edge_generate_relay snappymail "$snappydir" && edge_generate_override snappymail "$snappydir" || return 1
+    elif docker inspect mailrelay-snappymail >/dev/null 2>&1 || docker network inspect mailstack-snappymail-edge >/dev/null 2>&1; then
+        edge_log 'WARNING: SnappyMail disabled; existing relay/network preserved; use scripts/snappymail-remove.sh'
+    fi
+    edge_log 'step 1 complete: app files prepared; containers unchanged'
+}
+
+# Stage 2: only legacy app attachments require down; normal up is idempotent.
+edge_up_apps() {
+    local webdir="$1" snappydir="$2" app dir enabled networks
+    for app in webmail snappymail; do
+        if [ "$app" = webmail ]; then enabled="$WEBMAIL_ENABLE"; dir="$webdir"
+        else enabled="$SNAPPYMAIL_ENABLE"; dir="$snappydir"; fi
+        [ "$enabled" = true ] || continue
+        networks=$(docker inspect "$app" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
+        if ! python3 - "$networks" "mailstack-$app-edge" <<'PY'
+import json, sys
+networks = json.loads(sys.argv[1])
+sys.exit(0 if not networks or set(networks) == {sys.argv[2]} else 1)
+PY
+        then
+            edge_log "step 2: $app legacy attachments; taking project down (data preserved)"
+            (cd "$dir" && docker compose down --remove-orphans) || return 1
+        fi
+        if [ "$app" = webmail ]; then (cd "$dir" && docker compose build --pull webmail) || return 1; fi
+        if [ "$app" = webmail ] && [ "${EDGE_WEBMAIL_PIN_CHANGED:-false}" = true ]; then
+            (cd "$dir" && docker compose up -d mailrelay-webmail && docker compose up -d --force-recreate webmail) || return 1
+        else
+            (cd "$dir" && docker compose up -d) || return 1
+        fi
+        edge_log "step 2 complete: $app project up"
+    done
+}
+
+# Stage 3: force recreation only for a changed override or runtime attachments.
+edge_reconcile_npmplus() {
+    local dir="$1" before="" after networks
+    [ ! -f "$dir/docker-compose.override.yml" ] || before=$(sha256sum "$dir/docker-compose.override.yml")
+    edge_generate_npmplus_override "$dir" || return 1
+    after=$(sha256sum "$dir/docker-compose.override.yml") || return 1
+    networks=$(docker inspect npmplus --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
+    if [ "$before" = "$after" ] && python3 - "$networks" "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" <<'PY'
+import ipaddress, json, sys
+networks = json.loads(sys.argv[1])
+expected = {f'mailstack-{app}-edge': str(ipaddress.ip_network(subnet).network_address + 2) for app, enabled, subnet in zip(('webmail','snappymail'), sys.argv[2:4], sys.argv[4:6]) if enabled == 'true'}
+actual = set(networks).intersection({'mailstack-webmail-edge','mailstack-snappymail-edge'})
+sys.exit(0 if networks and actual == set(expected) and all(networks[name].get('IPAddress') == address for name,address in expected.items()) else 1)
+PY
+    then
+        (cd "$dir" && {
+            if declare -F _waf_npmplus_compose >/dev/null; then _waf_npmplus_compose up -d npmplus
+            else docker compose up -d npmplus; fi
+        }) || return 1
+        edge_log 'step 3: NPMplus edge attachments unchanged; recreation skipped'
+        return 0
+    fi
+    edge_log 'step 3: applying NPMplus edge override (brief web interruption)'
+    (cd "$dir" && {
+        if declare -F _waf_npmplus_compose >/dev/null; then _waf_npmplus_compose up -d --force-recreate npmplus
+        else docker compose up -d --force-recreate npmplus; fi
+    }) || return 1
+    edge_log 'step 3 complete: NPMplus override applied'
+}
+
+edge_apply_trust() {
+    local scripts="$1"
+    if [ "$WEBMAIL_ENABLE" = true ]; then
+        MAILCOW_DIR="$MAILCOW_DIR" bash "$scripts/apply-dovecot-webmail.sh" apply -y \
+            && MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$WEBMAIL_STACK_ENV" bash "$scripts/apply-webmail-dbuser.sh" apply || return 1
+    fi
+    if [ "$WEBMAIL_ENABLE" = true ] || [ "$SNAPPYMAIL_ENABLE" = true ]; then
+        MAILCOW_DIR="$MAILCOW_DIR" bash "$scripts/apply-postfix-edge.sh" apply -y || return 1
+    fi
+    edge_log 'step 4 complete: mailcow trust applied for enabled apps'
+}
+
+# Read-only probes run in the app's own network namespace, without helper images.
+edge_probe_tcp() {
+    local app="$1" host="$2" port="$3" expected="$4"
+    if [ "$app" = webmail ]; then
+        docker exec webmail node -e '
+const net = require("node:net");
+const [host, port, expected] = process.argv.slice(1);
+let finished = false;
+const socket = net.connect({host, port: Number(port)});
+function finish(open) { if (finished) return; finished = true; clearTimeout(timer); socket.destroy(); process.exit(open === (expected === "open") ? 0 : 1); }
+const timer = setTimeout(() => finish(false), 3000);
+socket.once("connect", () => finish(true)); socket.once("error", () => finish(false));
+' "$host" "$port" "$expected"
+    else
+        docker exec snappymail php -r '
+$socket = @stream_socket_client("tcp://".$argv[1].":".$argv[2], $errno, $errstr, 3);
+$open = $socket !== false; if ($open) fclose($socket);
+exit($open === ($argv[3] === "open") ? 0 : 1);
+' "$host" "$port" "$expected"
+    fi
+}
+
+edge_check_backend_dns() {
+    python3 - "$1" "$(webmail_mailcow_value IPV4_NETWORK).0/24" "${EDGE_IPV6_ENABLED:-false}" "${EDGE_IPV6_NETWORK:-}" <<'PY'
+import ipaddress, re, subprocess, sys
+app, network4, enabled6, network6 = sys.argv[1:]
+networks = [ipaddress.ip_network(network4)]
+if enabled6 == 'true': networks.append(ipaddress.ip_network(network6))
+aliases = ['dovecot', 'postfix'] + (['mysql', 'nginx'] if app == 'webmail' else [])
+for alias in aliases:
+    result = subprocess.run(['docker','exec','mailrelay-'+app,'busybox','nslookup',alias,'127.0.0.11'], capture_output=True, text=True, timeout=8)
+    if result.returncode: sys.exit(1)
+    addresses, answer = [], False
+    for line in result.stdout.splitlines():
+        if line.startswith('Name:'): answer = True
+        match = re.match(r'Address(?: \d+)?:\s+([^\s#]+)', line)
+        if answer and match: addresses.append(ipaddress.ip_address(match[1]))
+    if not addresses or any(not any(address in network for network in networks) for address in addresses): sys.exit(1)
+PY
+}
+
+edge_check_db_host() (
+    set +x
+    local DBROOT hosts
+    DBROOT=$(webmail_mailcow_value DBROOT)
+    [ -n "$DBROOT" ] || return 1
+    hosts=$(cd "$MAILCOW_DIR" && printf "SELECT Host FROM mysql.user WHERE User = 'webmail_ro';\n" \
+        | MYSQL_PWD="$DBROOT" docker compose exec -T -e MYSQL_PWD mysql-mailcow mysql --user=root --batch --raw --skip-column-names) || return 1
+    [ "$hosts" = "$WEBMAIL_RELAY_IPV4" ]
+)
+
+# Explicit SnappyMail removal: detach only its NPM attachment, preserving all
+# remaining override bytes. No Postfix changes and no volume deletion here.
+edge_remove_snappymail() {
+    local dir="$1" npm="$2" changed=0 attached=false networks file
+    for file in "$dir/haproxy.cfg" "$dir/docker-compose.override.yml"; do
+        if [ -f "$file" ] && ! head -n1 "$file" | grep -qFx '# Generated by scripts/lib/edge.sh'; then
+            edge_error "unmanaged $file; removal stopped"; return 1
+        fi
+    done
+    networks=$(docker inspect npmplus --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
+    if python3 - "$networks" <<'PY'
+import json, sys
+sys.exit(0 if 'mailstack-snappymail-edge' in json.loads(sys.argv[1]) else 1)
+PY
+    then attached=true; fi
+    if [ -f "$npm/docker-compose.override.yml" ]; then
+        changed=$(python3 - "$npm/docker-compose.override.yml" <<'PY'
+from pathlib import Path
+import os, re, sys, tempfile
+path = Path(sys.argv[1]); original = path.read_bytes()
+if not original.startswith(b'# Generated by scripts/lib/edge.sh\n'):
+    sys.exit('[edge] ERROR: unmanaged NPMplus override; removal stopped')
+updated = re.sub(rb'(?m)^      mailstack-snappymail-edge:\n        ipv4_address: [^\n]+\n', b'', original)
+updated = updated.replace(b'  mailstack-snappymail-edge:\n    external: true\n    name: mailstack-snappymail-edge\n', b'')
+if updated.endswith(b'\nnetworks:\n'): updated = updated[:-len(b'networks:\n')]
+if updated != original:
+    fd, temporary = tempfile.mkstemp(prefix=path.name+'.tmp.', dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as stream: stream.write(updated)
+        os.chmod(temporary, path.stat().st_mode & 0o777)
+        os.replace(temporary,path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+print(int(updated != original))
+PY
+        ) || return 1
+    elif [ "$attached" = true ]; then
+        edge_error 'SnappyMail attached to NPMplus but managed override missing; review manually'; return 1
+    fi
+    if [ "$changed" = 1 ] || [ "$attached" = true ]; then
+        (cd "$npm" && docker compose up -d --force-recreate npmplus) || return 1
+    fi
+    if docker network inspect mailstack-snappymail-edge >/dev/null 2>&1; then
+        docker network rm mailstack-snappymail-edge || return 1
+    fi
+    rm -f "$dir/haproxy.cfg" "$dir/docker-compose.override.yml"
+}

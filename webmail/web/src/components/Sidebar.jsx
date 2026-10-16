@@ -41,6 +41,7 @@ export default function Sidebar() {
       {[['filters','필터·규칙','funnel'],['storage','저장 공간','db'],['password','암호 변경','key'],['settings','보기 설정','palette']].map(([path,title,icon]) => <NavItem key={path} href={`#${path}`} title={title} icon={icon}/>)}
     </nav>
     <QuotaMeter/>
+    <div class="sidebar-keys hide-m"><a class="ib" href="#keys" aria-label="단축키 안내" title="단축키 안내"><Icon name="kbd" size="s"/></a></div>
     <a class="nv mobile-logout" href="#inbox" onClick={event=>{event.preventDefault();logout();}}>로그아웃</a>
   </>;
 }

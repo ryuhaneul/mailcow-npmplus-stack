@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { prefs, prefsSaving, updatePrefs } from '../state/prefs.js';
 import { WM_THEMES as themes, WM_THEME_ORDER as order } from '../theme/themes.js';
 import { WM_C } from '../theme/contrast.js';
@@ -55,4 +55,22 @@ export default function SettingsPage() {
       <section><h2>배치</h2><p>테마를 고르면 그 테마의 기본 배치가 따라옵니다. 여기서 직접 바꾸면 테마를 바꿔도 그 선택을 그대로 둡니다.</p>{Object.entries(layouts).map(([kind,rows])=><div class="opt-row"><span>{kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'}</span><div class="opts" role="radiogroup" aria-label={kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'}>{rows.map(([value,label,description])=><button class="optc" type="button" role="radio" aria-checked={layout[kind]===value} tabIndex={layout[kind]===value?0:-1} onClick={()=>updatePrefs({layout:{...(prefs.value.layout||themes[prefs.value.theme].layout),[kind]:value}})}><span class="dg" aria-hidden="true">{diagram(kind,value)}</span>{label}<small>{description}</small></button>)}</div></div>)}<div class="lstate">{state.layout?<><span>직접 바꾼 배치를 쓰는 중 (테마를 바꿔도 유지)</span><button class="btn sm" type="button" onClick={()=>updatePrefs({layout:null})}>테마 기본 배치로</button></>:<span>‘{theme.name}’ 테마의 기본 배치를 따르는 중</span>}</div></section>
     </div><Preview layout={layout}/></div><span class="sr" role="status">{prefsSaving.value?'설정을 저장하는 중…':''}</span></div></div>
   </section>;
+}
+
+export function LayoutPicker() {
+  const [open,setOpen]=useState(false),root=useRef(null),trigger=useRef(null),popup=useRef(null);
+  const state=prefs.value,layout=state.layout||themes[state.theme].layout;
+  function close(){setOpen(false);trigger.current.focus({preventScroll:true});}
+  useLayoutEffect(()=>{
+    if(!open)return;
+    popup.current.querySelector('select').focus({preventScroll:true});
+    const outside=event=>{if(!root.current.contains(event.target))setOpen(false);};
+    const escape=event=>{if(event.key==='Escape'){event.preventDefault();close();}};
+    document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape);
+    return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
+  },[open]);
+  return <div class="layout-control" ref={root}>
+    <button class="ib" type="button" ref={trigger} aria-label="보기 배치" title="보기 배치" aria-expanded={open} aria-haspopup="dialog" onClick={()=>setOpen(!open)}><Icon name="layers"/></button>
+    {open&&<section class="pop layout-menu" ref={popup} role="dialog" aria-label="보기 배치"><h5>보기 배치</h5>{Object.entries(layouts).map(([kind,rows])=><label key={kind}>{kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'}<select class="inp" aria-label={kind==='pane'?'읽기 창':kind==='density'?'목록 간격':'쓰기 창'} value={layout[kind]} onChange={event=>updatePrefs({layout:{...(prefs.value.layout||themes[prefs.value.theme].layout),[kind]:event.currentTarget.value}})}>{rows.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>)}</section>}
+  </div>;
 }

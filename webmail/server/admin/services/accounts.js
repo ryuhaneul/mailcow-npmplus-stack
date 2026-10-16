@@ -57,22 +57,28 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   }
   async function editAliasPreservingSenders(session, alias, body, changed = () => {}) {
     const addr = normalize(alias.address), destinations = targets(body.attr.goto);
-    const before = (await rows(session, 'mailbox/all')).filter(row => destinations.includes(normalize(row.username))).map(snapshot);
-    await aliasApi.edit(session, body);
-    changed();
-    const aliases = await rows(session, 'alias/all');
-    for (const original of before) await lock.run(original.address, async () => {
-      const current = snapshot(await box(session, original.address));
-      if (!isDeepStrictEqual(current.senderAcl, original.senderAcl) &&
-        !isDeepStrictEqual(current.senderAcl, original.senderAcl.filter(value => value !== addr))) assertUnchanged('conflict', {});
-      // mailcow omits explicit entries already allowed by a fixed sender alias.
-      const implicit = aliases.filter(row => !normalize(row.address).startsWith('@') && String(row.sender_allowed) === '1' && targets(row.goto).includes(original.address)).map(row => normalize(row.address));
-      const effective = values => [...new Set([...values, ...implicit])].sort();
-      if (!isDeepStrictEqual(effective(current.senderAcl), effective(original.senderAcl))) {
-        await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [original.address], attr: { sender_acl: original.senderAcl } });
+    // Every caller holds the alias address key already; never re-enter that key.
+    const mailboxKeys = [...new Set(destinations)].filter(value => value !== addr).sort();
+    const underLocks = index => index < mailboxKeys.length ? lock.run(mailboxKeys[index], () => underLocks(index + 1)) : preserve();
+    return underLocks(0);
+    async function preserve() {
+      const before = (await rows(session, 'mailbox/all')).filter(row => destinations.includes(normalize(row.username))).map(snapshot);
+      await aliasApi.edit(session, body);
+      changed();
+      const aliases = await rows(session, 'alias/all');
+      for (const original of before) {
+        const current = snapshot(await box(session, original.address));
+        if (!isDeepStrictEqual(current.senderAcl, original.senderAcl) &&
+          !isDeepStrictEqual(current.senderAcl, original.senderAcl.filter(value => value !== addr))) assertUnchanged('conflict', {});
+        // mailcow omits explicit entries already allowed by a fixed sender alias.
+        const implicit = aliases.filter(row => !normalize(row.address).startsWith('@') && String(row.sender_allowed) === '1' && targets(row.goto).includes(original.address)).map(row => normalize(row.address));
+        const effective = values => [...new Set([...values, ...implicit])].sort();
+        if (!isDeepStrictEqual(effective(current.senderAcl), effective(original.senderAcl))) {
+          await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [original.address], attr: { sender_acl: original.senderAcl } });
+        }
+        if (!isDeepStrictEqual(effective(snapshot(await box(session, original.address)).senderAcl), effective(original.senderAcl))) throw verifyFailed();
       }
-      if (!isDeepStrictEqual(effective(snapshot(await box(session, original.address)).senderAcl), effective(original.senderAcl))) throw verifyFailed();
-    });
+    }
   }
   async function domainActive(session, domain) {
     if (!(await rows(session, 'domain/all')).some(row => normalize(row.domain_name ?? row.domain) === domain && String(row.active) === '1')) {

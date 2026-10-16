@@ -579,6 +579,28 @@ NPM이 인증서를 자동 갱신하지만, Mailcow의 dovecot/postfix는 갱신
 setup·update는 cron이 없으면 설치하고, 스택의 옛 두 줄과 정확히 같으면 `.bak.<날짜시각>`으로 백업 후 교체합니다. 다른 사용자 내용은 보존하고 경고합니다. reload 도구는 실행 시 compose 서비스 라벨로 대상을 각각 하나씩 찾으며, 실패와 성공을 `logger -t mailcow-cert-reload`로 기록합니다. update는 로컬 993·465 중 하나라도 `cert.pem`과 만료일이 다른 것으로 확인되면 레포의 reload 도구를 한 번 자동 실행합니다(IMAP·POP 연결이 한 번 끊깁니다). 확인 불가인 포트는 경고하며, 불일치가 확인되지 않으면 자동 실행하지 않습니다. 그 밖에는 매일 04:00 cron으로 리로드합니다. verify는 대상의 개수와 로컬 993·465 인증서의 만료일이 `cert.pem`과 같은지 확인합니다.
 > nginx-mailcow은 심볼릭을 통해 매 요청 시 읽으므로 별도 리로드 불필요.
 
+### 7.1 옛 호스트별 SNI 인증서 정리
+
+`data/assets/ssl/<호스트>/`에 `domains`·`cert.pem`·`key.pem`이 모두 남아 있으면 Dovecot이 시작할 때 그 인증서를 SNI 설정에 넣습니다. 기본 `cert.pem`을 NPM 인증서로 바꾸거나 reload만 해서는 이 경로가 바뀌지 않아, update마다 reload가 반복될 수 있습니다. verify는 기본 인증서와 만료일이 다른 디렉터리를 FAIL로 표시하고, update는 경고만 합니다. 파일이 미완비인 디렉터리는 INFO로 표시하며 검사에서 제외합니다.
+
+검사에 표시된 디렉터리가 NPM 인증서로 대체할 옛 설정인지 확인한 뒤, 해당 디렉터리만 SSL 디렉터리 **밖으로** 백업 이동하고 두 서비스를 재시작합니다. 재시작 중 메일 연결이 끊길 수 있습니다. 백업에는 개인키가 있으므로 아래처럼 접근 권한이 제한된 위치를 사용합니다.
+
+```bash
+cd /home/mailcow-dockerized
+SNI_DIR=mail.example.com  # verify에 표시된 디렉터리 이름으로 변경
+backup_dir=$(mktemp -d /root/mailcow-sni-backup.XXXXXX)
+mv -- "data/assets/ssl/$SNI_DIR" "$backup_dir/"
+docker compose restart dovecot-mailcow postfix-mailcow
+
+# mailcow.conf의 MAILCOW_HOSTNAME을 사용해 두 포트를 확인
+source ./mailcow.conf
+openssl s_client -connect 127.0.0.1:993 -servername "$MAILCOW_HOSTNAME" </dev/null 2>/dev/null | openssl x509 -noout -enddate
+openssl s_client -connect 127.0.0.1:465 -servername "$MAILCOW_HOSTNAME" </dev/null 2>/dev/null | openssl x509 -noout -enddate
+docker compose exec -T dovecot-mailcow openssl x509 -in /etc/ssl/mail/cert.pem -noout -enddate
+```
+
+세 만료일이 같은지 확인하고 스택의 `scripts/verify.sh`를 다시 실행합니다. 되돌려야 하면 백업한 디렉터리를 원래 위치로 옮기고 같은 두 서비스를 재시작합니다. `domains`에 여러 이름이 있으면 해당 이름들의 SNI 응답도 각각 확인합니다. 스택은 이 디렉터리를 자동 이동하거나 인증서를 삭제하지 않습니다.
+
 ---
 
 ## 8. 트러블슈팅

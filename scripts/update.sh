@@ -374,7 +374,7 @@ fi
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     sync_toolkit_build_pins || die "Toolkit build pin preparation failed; build stopped"
     log "Building toolkit-mailcow (--pull)..."
-    if (cd "$MAILCOW_DIR" && docker compose build --pull toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -10); then
+    if (cd "$MAILCOW_DIR" && BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -10); then
         log "Bringing toolkit-mailcow up..."
         (cd "$MAILCOW_DIR" && docker compose up -d toolkit-mailcow 2>&1 | tee -a "$LOGFILE" | tail -5) \
             || warn "docker compose up -d toolkit-mailcow had issues"

@@ -814,6 +814,7 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 두 명령은 ① Docker 판·다른 Docker 망/호스트 경로와의 겹침 검사 및 앱 설정 생성 → ② 앱 프로젝트 전환 → ③ NPMplus 전용 망 연결 → ④ Dovecot·DB·Postfix 신뢰 변경 → ⑤ verify 순서로 처리합니다. 옛 mailcow 망에 붙은 앱만 처음 한 번 `compose down` 후 올라옵니다(볼륨 보존). 이미 전용 망 구조이면 내리지 않으며, 같은 생성 파일은 다시 쓰지 않습니다. 1~4단계 실패 시 중단하고 바뀐 단계와 재시도 안내를 출력하며, 5단계 verify 실패는 경고합니다.
 
 처음 전환할 때 웹메일·SnappyMail 재로그인이 필요하고, NPMplus 재생성과 Postfix 재시작으로 웹·SMTP가 각각 몇 초 끊길 수 있습니다. 반복 실행에서는 변경이 없는 앱·중계·NPMplus를 재생성하지 않고 Postfix 재시작·Dovecot reload도 하지 않습니다. 웹메일 DB 계정의 암호·권한은 매번 다시 맞춥니다(값이 같으면 결과는 그대로). 다만 기존 NPMplus DNS 캐시 초기화 재시작과 Toolkit의 php/nginx 재시작은 계속 실행됩니다. 프로그램·이미지·인증서가 실제로 바뀌면 해당 서비스는 다시 뜹니다.
+로컬 이미지 빌드의 기본 attestation을 끄는 변경을 처음 반영하면 이미지 ID가 한 번 바뀌어 웹메일·Toolkit 컨테이너가 1회 재생성될 수 있습니다.
 
 SnappyMail 런타임 compose가 옛 레포 구조이면 원본을 `docker-compose.yml.bak.<날짜>.*`로 백업하고 중계 구조로 바꿉니다. 운영자가 고정한 SnappyMail 이미지 값은 유지합니다. 다른 구조를 직접 편집한 파일이면 차이의 줄 범위를 출력하고 중단하므로 레포 구조에 맞춘 뒤 다시 실행합니다.
 

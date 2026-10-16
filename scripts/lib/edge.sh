@@ -319,7 +319,7 @@ PY
             edge_log "step 2: $app legacy attachments; taking project down (data preserved)"
             (cd "$dir" && docker compose down --remove-orphans) || return 1
         fi
-        if [ "$app" = webmail ]; then (cd "$dir" && docker compose build --pull webmail) || return 1; fi
+        if [ "$app" = webmail ]; then (cd "$dir" && BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull webmail) || return 1; fi
         if [ "$app" = webmail ] && [ "${EDGE_WEBMAIL_PIN_CHANGED:-false}" = true ]; then
             (cd "$dir" && docker compose up -d mailrelay-webmail && docker compose up -d --force-recreate webmail) || return 1
         else

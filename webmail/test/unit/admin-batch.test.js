@@ -289,3 +289,37 @@ for (const sourcePassword of ['ok', '1', 'example']) test(`CSV sync: short sourc
   const parent = (await f.history.list()).items.find(row => row.action === 'batch.syncjobs');
   assert.equal(parent.result, 'ok'); assert.equal(parent.detail.results[0].result, 'ok');
 });
+
+
+test('batch CSV parser: quoted padding is data; unquoted and outside padding is trimmed', () => {
+  assert.deepEqual(parseCsv('first,second,third\n  "  Synthetic 암호  "  ,  bare value  ,"  final  "  ')[1].fields, ['  Synthetic 암호  ', 'bare value', '  final  ']);
+});
+for (const target of ['new@example.com', 'existing@example.com']) test(`batch sync: quoted password padding reaches job and mailbox byte-for-byte for ${target}`, async t => {
+  const f = await fixture(t), secret = '  Synthetic, "암호"; padded! \t';
+  const cell = '"' + secret.replaceAll('"', '""') + '"';
+  const csv = `source,password,target,host\n"  Old.Case@EXAMPLE.NET  ",${cell},"  ${target}  ","  IMAP.EXAMPLE.NET  "`;
+  const result = await sync(f, { csv, action: 'run', lines: [2] });
+  assert.equal(result.result, 'ok');
+  const job = writes(f).find(row => row.path === '/api/v1/add/syncjob').body;
+  assert.equal(job.password1.length, secret.length); assert.deepEqual(Buffer.from(job.password1), Buffer.from(secret));
+  assert.equal(job.user1, 'Old.Case@EXAMPLE.NET'); assert.equal(job.username, target); assert.equal(job.host1, 'imap.example.net');
+  const mailbox = writes(f).find(row => row.path === '/api/v1/add/mailbox');
+  if (target === 'new@example.com') {
+    assert.equal(mailbox.body.password.length, secret.length); assert.deepEqual(Buffer.from(mailbox.body.password), Buffer.from(secret));
+  } else assert.equal(mailbox, undefined);
+  assert.ok(!JSON.stringify(result).includes(secret)); assert.ok(!JSON.stringify(await f.audit.read()).includes(secret));
+});
+test('batch sync: unquoted password and address padding remains trimmed', async t => {
+  const f = await fixture(t), csv = 'source,password,target,host\n  old@example.net  ,  SyntheticBare984  ,  existing@example.com  ,  IMAP.EXAMPLE.NET  ';
+  const result = await sync(f, { csv, action: 'run', lines: [2] }); assert.equal(result.result, 'ok');
+  const job = writes(f).find(row => row.path === '/api/v1/add/syncjob').body;
+  assert.equal(job.password1, 'SyntheticBare984'); assert.equal(job.user1, 'old@example.net'); assert.equal(job.username, 'existing@example.com'); assert.equal(job.host1, 'imap.example.net');
+});
+for (const [kind, csv, padded] of [
+  ['mailboxes', 'email,name,type,team\nnew@example.com,이름,개인,기획팀', '" email "," name "," type "," team "\n" new@example.com "," 이름 "," 개인 "," 기획팀 "'],
+  ['quotas', 'email,quota_gb\nexisting@example.com,20', '" email "," quota_gb "\n" existing@example.com "," 20 "'],
+  ['aliases', 'address,targets\nnew@example.com,existing@example.com', '" address "," targets "\n" new@example.com "," existing@example.com "'],
+]) test(`batch ${kind}: quoted padding keeps existing validation and normalized values`, async t => {
+  const f = await fixture(t);
+  assert.deepEqual(await run(f, { csv: padded }, kind), await run(f, { csv }, kind));
+});

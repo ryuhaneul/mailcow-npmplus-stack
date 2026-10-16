@@ -14,7 +14,7 @@ const meta = (address, goto) => ({ id: address, address, goto, active: '1', send
 const context = { session: {}, actor: 'admin', ip: '198.51.100.31' };
 async function fixture(t) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'webmail-a10-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const aliases = [meta(alias, first)], boxes = [{ username: first, sender_acl: [alias, unrelated] }, { username: second, sender_acl: [unrelated] }];
+  const aliases = [meta(alias, first)], boxes = [{ username: first, active: 1, sender_acl: [alias, unrelated] }, { username: second, active: '1', sender_acl: [unrelated] }];
   const primary = [{ domain_name: 'example.com', active: 1 }, { domain_name: 'inactive.example.com', active: 0 }];
   const aliasDomains = [{ alias_domain: 'alias.example.com', target_domain: 'example.com', active: 1 }, { alias_domain: 'off.example.com', target_domain: 'example.com', active: 0 }, { alias_domain: 'bad.example.com', target_domain: 'inactive.example.com', active: 1 }];
   const calls = [], options = {}; let sequence = 0;
@@ -156,9 +156,38 @@ test('aliases: checks report external, active and latent cycles, and catch-all',
   assert.equal(result.catchAll[0].address, '@example.com');
 });
 
-test('aliases: alias-domain target fallback participates in cycle detection', async t => {
-  const f = await fixture(t); f.aliases[0].goto = 'b@example.com'; f.aliases.push(meta('b@example.com', 'alias@alias.example.com'));
-  assert.equal((await f.service.checks({})).cycles[0].active, true);
+test('aliases: alias-domain catch-all delivers without falling back to the primary catch-all', async t => {
+  const f = await fixture(t); f.aliases.push(meta('@example.com', alias), meta('@alias.example.com', second));
+  const result = await edit(f, (await item(f)).etag, { targets: ['sales@alias.example.com'], mode: 'move' });
+  assert.deepEqual(result.targets, ['sales@alias.example.com']); assert.deepEqual((await f.service.checks({})).cycles, []);
+});
+
+for (const active of [0, '0']) test(`aliases: inactive mailbox (${JSON.stringify(active)}) falls through to catch-all and loops`, async t => {
+  const f = await fixture(t); f.boxes[1].active = active; f.aliases.push(meta('@example.com', alias));
+  await assert.rejects(edit(f, (await item(f)).etag, { targets: [second], mode: 'move' }), { statusCode: 409, code: 'ALIAS_LOOP' });
+  assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, first);
+  f.aliases[0].goto = second;
+  assert.deepEqual((await f.service.checks({})).cycles, [{ addresses: ['@example.com', alias], active: true }]);
+});
+
+for (const active of [2, '2']) for (const target of [second, 'second@alias.example.com']) test(`aliases: receive-only mailbox (${JSON.stringify(active)}) terminates ${target}`, async t => {
+  const f = await fixture(t); f.boxes[1].active = active; f.aliases.push(meta('@example.com', alias), meta('@alias.example.com', alias));
+  const result = await edit(f, (await item(f)).etag, { targets: [target], mode: 'move' });
+  assert.deepEqual(result.targets, [target]); assert.deepEqual((await f.service.checks({})).cycles, []);
+});
+
+for (const ownCatchAll of [false, true]) test(`aliases: alias-domain rewrite ignores primary aliases, own catch-all=${ownCatchAll}`, async t => {
+  const f = await fixture(t); f.aliases.push(meta('sales@example.com', alias), meta('@example.com', alias));
+  if (ownCatchAll) f.aliases.push(meta('@alias.example.com', alias));
+  const data = { targets: ['sales@alias.example.com'], mode: 'move' };
+  if (ownCatchAll) {
+    await assert.rejects(edit(f, (await item(f)).etag, data), { statusCode: 409, code: 'ALIAS_LOOP' });
+    assert.equal(writes(f).length, 0); f.aliases[0].goto = data.targets[0];
+    assert.deepEqual((await f.service.checks({})).cycles, [{ addresses: ['@alias.example.com', alias], active: true }]);
+  } else {
+    assert.deepEqual((await edit(f, (await item(f)).etag, data)).targets, data.targets);
+    assert.deepEqual((await f.service.checks({})).cycles, []);
+  }
 });
 
 test('aliases: failed intent prevents mutation and post-write mismatch returns 502', async t => {
@@ -235,7 +264,7 @@ test('aliases: catch-all loop through a missing address is rejected and reported
   f.aliases[0].goto = 'first@alias.example.com';
   assert.deepEqual((await f.service.checks({})).cycles, []);
   f.aliases[0].goto = 'missing@alias.example.com';
-  assert.deepEqual((await f.service.checks({})).cycles, [{ addresses: ['@example.com', alias], active: true }]);
+  assert.deepEqual((await f.service.checks({})).cycles, []);
   f.aliases.push(meta('missing@example.com', second));
   assert.deepEqual((await f.service.checks({})).cycles, []);
 });

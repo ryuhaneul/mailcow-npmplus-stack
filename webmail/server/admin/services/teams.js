@@ -145,6 +145,19 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       }, { prepare: ({ id }) => backups.write(id, '', source) });
     });
   }
+  async function deleteFilter({ session, actor, ip, filter }) {
+    const owner = normalize(filter.username);
+    return lock.run(owner, async () => {
+      return audit.run({ actor, ip, action: 'mailbox.convert.filter.delete', target: owner, kind: 'irreversible', revertible: false,
+        before: state(filter.script_data), after: state(''), ...hashFields(filter.script_data, '') }, async intent => {
+        const fresh = (await filters(session)).find(row => String(row.id) === String(filter.id));
+        assertUnchanged(etag(filter), fresh ?? {});
+        await mailcow.call(session, 'POST', '/api/v1/delete/filter', [String(filter.id)]);
+        if ((await filters(session)).some(row => String(row.id) === String(filter.id))) throw verifyFailed();
+        return { auditId: intent.id };
+      }, { prepare: ({ id }) => backups.write(id, filter.script_data, '') });
+    });
+  }
   async function renameFilter({ session, actor, ip, filter, oldAddress, newAddress }) {
     const owner = normalize(filter.username) === oldAddress ? newAddress : normalize(filter.username);
     const edited = renameMember(filter.script_data, oldAddress, newAddress);
@@ -182,13 +195,13 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const plan = await forwardPlan(session, normalize(team), normalize(member));
     return { etag: etag({ id: plan.original?.id ?? null, source: plan.before }) };
   }
-  async function forward({ session, actor, ip, team: rawTeam, member: rawMember, etag: expected }) {
+  async function forward({ session, actor, ip, team: rawTeam, member: rawMember, etag: expected, reversible = true }) {
     const team = normalize(rawTeam), member = normalize(rawMember);
     return lock.run(team, async () => {
       const plan = await forwardPlan(session, team, member);
       assertUnchanged(expected, { id: plan.original?.id ?? null, source: plan.before });
       if (plan.next === plan.before) return { unchanged: true, auditId: null };
-      return audit.run({ actor, ip, action: 'team.forward', target: team, kind: 'config', revertible: Boolean(plan.original),
+      return audit.run({ actor, ip, action: 'team.forward', target: team, kind: 'config', revertible: Boolean(plan.original) && reversible,
         before: state(plan.before), after: state(plan.next), ...hashFields(plan.before, plan.next) }, async intent => {
         if (plan.original) await save(session, team, plan.original, plan.next);
         else {
@@ -222,5 +235,5 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     },
   };
   history.register('team.member.add', adapter); history.register('team.member.remove', adapter); history.register('team.forward', adapter);
-  return { list, change, create, previewForward, forward, renameFilter };
+  return { list, change, create, previewForward, forward, renameFilter, deleteFilter };
 }

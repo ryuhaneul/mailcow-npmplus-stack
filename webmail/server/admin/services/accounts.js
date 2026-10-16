@@ -588,5 +588,211 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return result;
     }));
   }
-  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename };
+  const aliasBackup = row => ({ address: normalize(row.address), goto: String(row.goto ?? ''), active: String(row.active ?? '1'),
+    sogo_visible: String(row.sogo_visible ?? '0'), sender_allowed: String(row.sender_allowed ?? '0'),
+    public_comment: String(row.public_comment ?? ''), private_comment: String(row.private_comment ?? '') });
+  const notEmpty = () => new AppError(409, 'MAILBOX_NOT_EMPTY', '메일이 있는 메일함은 별칭으로 바꿀 수 없어요. 메일을 옮기거나 지워 주세요.');
+  const gapWarning = { code: 'CONVERSION_GAP', message: '같은 주소의 메일함과 별칭은 함께 있을 수 없어 전환 중 잠깐 메일을 받지 못할 수 있어요.' };
+  async function conversionPlan(session, addr, direction, options) {
+    const [boxes, aliases, filters] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all')]);
+    await domainActive(session, addr.split('@')[1]);
+    const internal = new Set(boxes.filter(row => String(row.active) === '1').map(row => normalize(row.username)));
+    const destinations = direction === 'mailbox-to-alias' ? options.targets : [options.copyTo, options.sendGrantTo].filter(Boolean);
+    if (destinations.some(destination => destination === addr || !internal.has(destination))) throw invalid();
+    const senders = boxes.filter(row => normalize(row.username) !== addr && (targets(row.sender_acl).includes(addr) || normalize(row.username) === options.sendGrantTo)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
+    const senderVersions = senders.map(row => ({ address: normalize(row.username), sha256: etag(row.sender_acl) }));
+    const senderRestore = senders.filter(row => targets(row.sender_acl).includes(addr));
+    if (direction === 'alias-to-mailbox') {
+      if (boxes.some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '이미 메일함이 있는 주소예요.');
+      const alias = aliases.find(row => normalize(row.address) === addr);
+      if (!alias) throw new AppError(404, 'NOT_FOUND', '전환할 별칭을 찾을 수 없어요.');
+      const ownFilters = filters.filter(row => normalize(row.username) === addr);
+      return { state: { direction, addr, options, alias: etag(alias), senders: senderVersions,
+        destinations: boxes.filter(row => destinations.includes(normalize(row.username))).map(snapshot).sort((a, b) => a.address.localeCompare(b.address)),
+        filters: ownFilters.map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })) },
+        alias, ownFilters, senders, senderRestore, warnings: [gapWarning], changes: { alias: aliasBackup(alias),
+          mailbox: { address: addr, name: addr.split('@')[0], kind: options.kind, quotaGb: options.quotaGb }, copyTo: options.copyTo, sendGrantTo: options.sendGrantTo,
+          senderRestore: senderRestore.map(row => ({ mailbox: normalize(row.username), senderAcl: snapshot(row).senderAcl })) } };
+    }
+    const mailbox = await box(session, addr);
+    if (Number(mailbox.messages) !== 0) throw notEmpty();
+    const relatedFilters = [];
+    for (const filter of filters.filter(row => ['prefilter', 'postfilter'].includes(row.filter_type))) {
+      try {
+        // Token recognition is shared with rename: no replacement is saved here.
+        const edited = renameMember(filter.script_data, addr, options.targets[0]);
+        if (edited.changed || normalize(filter.username) === addr) relatedFilters.push(filter);
+      } catch (error) {
+        if (!(error instanceof Refused)) throw error;
+        throw new AppError(409, error.code.toUpperCase(), `${normalize(filter.username)}의 필터를 해석할 수 없어요. 필터 화면에서 먼저 확인해 주세요.`);
+      }
+    }
+    const aclByOwner = new Map(), info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
+    if (info.warnings.some(row => row.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
+    const shares = [...aclByOwner].flatMap(([owner, acl]) => acl.filter(row => owner === addr || normalize(row.id) === addr).map(row => ({ owner, ...row })));
+    if (shares.some(row => !aclReadOnly(row))) throw new AppError(409, 'ACL_UNSUPPORTED', '관련 공유에 받은편지함 읽기 외 권한이 있어요. 공유를 먼저 확인해 주세요.');
+    const ownFilters = filters.filter(row => normalize(row.username) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const references = aliases.filter(row => targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
+    const jobs = (await rows(session, 'syncjobs/all/no_log')).filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const warnings = [gapWarning,
+      { code: 'SENDER_ADDRESS_RETAINED', message: '이 주소로 보내기 권한을 가진 사람은 계속 이 주소로 보낼 수 있어요(별칭이 됨).' },
+      { code: 'OWN_SENDER_RIGHTS_REMOVED', message: `이 메일함이 다른 주소로 보내던 권한 ${snapshot(mailbox).senderAcl.length}개는 없어져요` },
+      { code: 'OWN_SHARES_REMOVED', message: `이 메일함을 다른 사람에게 공유한 ${shares.filter(row => row.owner === addr).length}건은 없어져요` },
+      { code: 'INCOMING_SHARES_UNUSED', message: `다른 함에서 이 주소에 준 공유 ${shares.filter(row => row.owner !== addr).length}건은 남지만 로그인할 수 없어 쓰이지 않아요` },
+    ];
+    const state = { direction, addr, options, account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
+      filters: relatedFilters.map(row => ({ id: row.id, owner: normalize(row.username), sha256: scriptHash(row.script_data), active: row.active, type: row.filter_type })),
+      senders: senderVersions, acl: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
+      syncjobs: jobs.map(row => ({ id: row.id, sha256: etag(row) })),
+      destinations: boxes.filter(row => destinations.includes(normalize(row.username))).map(snapshot).sort((a, b) => a.address.localeCompare(b.address)) };
+    return { state, mailbox, references, ownFilters, jobs, senders, senderRestore, warnings,
+      changes: { mailbox: { address: addr, messages: 0 }, alias: { address: addr, targets: options.targets },
+        aliasesRestored: references.map(aliasBackup), filtersRemoved: ownFilters.map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })),
+        syncjobsRemoved: jobs.map(row => ({ id: row.id })), refs: info.refs, senderRestore: senderRestore.map(row => ({ mailbox: normalize(row.username), senderAcl: snapshot(row).senderAcl })) } };
+  }
+  async function convert({ session, actor, ip, direction, data }) {
+    const hasPassword = Object.hasOwn(data ?? {}, 'password');
+    const password = typeof data?.password === 'string' ? Buffer.from(data.password) : null;
+    if (data && typeof data === 'object') delete data.password;
+    try {
+      if (!data || !['preview', 'run'].includes(data.action) || !['mailbox-to-alias', 'alias-to-mailbox'].includes(direction) ||
+        data.action === 'preview' && hasPassword || direction === 'mailbox-to-alias' && hasPassword) throw invalid();
+      const addr = address(data.address);
+      let options;
+      if (direction === 'mailbox-to-alias') {
+        if (!Array.isArray(data.targets) || !data.targets.length) throw invalid();
+        options = { targets: [...new Set(data.targets.map(address))].sort() };
+      } else {
+        if (data.action === 'run' && !password?.length) throw invalid();
+        const kind = data.kind ?? 'personal'; if (!['personal', 'team', 'admin'].includes(kind)) throw invalid();
+        options = { kind, quotaGb: quota(data.quotaGb ?? { personal: 20, team: 50, admin: 3 }[kind]),
+          copyTo: data.copyTo ? address(data.copyTo) : null, sendGrantTo: data.sendGrantTo ? address(data.sendGrantTo) : null };
+      }
+      const initial = await conversionPlan(session, addr, direction, options);
+      if (data.action === 'preview') return { address: addr, direction, etag: etag(initial.state), changes: initial.changes, warnings: initial.warnings,
+        ...(direction === 'alias-to-mailbox' ? { passwordRequired: true, passwordNotice: '실행할 때 초기 암호가 필요해요' } : {}) };
+      return await lock.run(`flow:${addr}`, async () => {
+        const plan = await conversionPlan(session, addr, direction, options); assertUnchanged(data.etag, plan.state);
+        const kind = direction === 'mailbox-to-alias' ? 'irreversible' : 'config';
+        const steps = [], warnings = [...plan.warnings];
+        let touched = false, mailboxCreated = false, fatal, stage = 'verify';
+        const recovery = direction === 'mailbox-to-alias' ? [
+          { stage: 'syncjobs', message: '이미 지운 동기화는 변경 기록의 작업 번호를 확인하고 필요하면 새로 만들어 주세요. 원본 암호는 다시 입력해야 해요.' },
+          { stage: 'filters', message: '이미 지운 필터는 변경 기록의 원문 백업을 확인하고 필요하면 mailcow에서 다시 만들어 주세요.' },
+          { stage: 'mailbox', message: '메일함이 남아 있는지 확인해 주세요. 새 메일은 옮기거나 지운 뒤 전환해야 해요.' },
+          { stage: 'alias', message: `${addr} 별칭을 ${options.targets.join(', ')} 대상으로 만들어 메일 수신을 복구해 주세요.` },
+          { stage: 'references', message: '변경 기록의 원래 goto·활성 상태·공개 여부·보내기 권한·설명을 보고 참조 별칭을 다시 붙여 주세요.' },
+          { stage: 'senders', message: '변경 기록의 원래 목록을 보고 다른 사람의 보내기 권한을 복원해 주세요.' },
+        ] : [
+          { stage: 'alias', message: '변경 기록의 원래 별칭 대상과 설정을 확인해 주세요. 메일함을 만들지 못했다면 같은 주소의 별칭을 다시 만들 수 있어요.' },
+          { stage: 'mailbox', message: '별칭과 메일함은 같은 주소에 함께 있을 수 없어요. 변경 기록을 보고 별칭을 복원하거나 초기 암호를 정해 메일함을 만들어 주세요.' },
+          { stage: 'copy', message: 'mailcow에서 내부 대상으로 redirect :copy 사전 필터를 만들어 주세요.' },
+          { stage: 'senders', message: '변경 기록의 원래 목록을 보고 다른 사람의 보내기 권한을 복원해 주세요.' },
+          { stage: 'grant', message: '권한 화면에서 요청자의 보내기 권한 목록에 새 메일함 주소를 추가해 주세요.' },
+        ];
+        const mutate = async (path, body) => { const value = await mailcow.call(session, 'POST', path, body); touched = true; return value; };
+        const result = await audit.run({ actor, ip, action: `mailbox.convert.${direction}`, target: addr, kind, revertible: false,
+          before: plan.changes, after: { address: addr, direction, ...options, ...(direction === 'alias-to-mailbox' ? { password: 'set' } : {}) } }, async () => {
+          const step = async (name, target, before, after, operation) => {
+            stage = name;
+            return audit.run({ actor, ip, action: `mailbox.convert.${name}`, target, kind, revertible: false, before, after }, async intent => {
+              await operation(); steps.push({ stage: name, target, status: 'ok', auditId: intent.id });
+            });
+          };
+          const restoreSender = async (sender, grant = false) => {
+            const owner = normalize(sender.username);
+            await lock.run(owner, async () => {
+              const before = snapshot(await box(session, owner)), original = snapshot(sender).senderAcl;
+              const pruned = original.filter(value => value !== addr);
+              if (!isDeepStrictEqual(before.senderAcl, original) && !isDeepStrictEqual(before.senderAcl, pruned)) assertUnchanged('conflict', {});
+              const desired = [...new Set([...before.senderAcl, addr])].sort();
+              await step(grant ? 'grant' : 'senders', owner, { senderAcl: before.senderAcl }, { senderAcl: desired }, async () => {
+                await save(session, owner, before, { ...before, senderAcl: desired });
+                if (!isDeepStrictEqual(before.senderAcl, desired)) touched = true;
+              });
+            });
+          };
+          try {
+            assertUnchanged(data.etag, (await conversionPlan(session, addr, direction, options)).state);
+            if (direction === 'mailbox-to-alias') {
+              for (const job of plan.jobs) await lock.run(`syncjob:${job.id}`, () => step('syncjobs', String(job.id), { id: job.id, target: addr }, {}, async () => {
+                const current = (await rows(session, 'syncjobs/all/no_log')).find(row => String(row.id) === String(job.id)); assertUnchanged(etag(job), current ?? {});
+                await mutate('/api/v1/delete/syncjob', [String(job.id)]);
+                if ((await rows(session, 'syncjobs/all/no_log')).some(row => String(row.id) === String(job.id))) throw verifyFailed();
+              }));
+              for (const filter of plan.ownFilters) {
+                stage = 'filters'; const removed = await teams.deleteFilter({ session, actor, ip, filter }); touched = true;
+                steps.push({ stage, target: String(filter.id), status: 'ok', auditId: removed.auditId });
+              }
+              await lock.run(addr, () => step('mailbox', addr, { account: plan.state.account }, {}, async () => {
+                const fresh = await conversionPlan(session, addr, direction, options);
+                const expected = { ...plan.state, filters: plan.state.filters.filter(filter => filter.owner !== addr), syncjobs: [] };
+                assertUnchanged(etag(expected), fresh.state);
+                if ((await rows(session, 'filters/all')).some(row => normalize(row.username) === addr)) assertUnchanged('conflict', {});
+                if (Number((await box(session, addr)).messages) !== 0) throw notEmpty();
+                await mutate('/api/v1/delete/mailbox', [addr]);
+                if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
+              }));
+              await lock.run(addr, () => step('alias', addr, {}, { address: addr, targets: options.targets }, async () => {
+                if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '주소가 이미 사용 중이에요.');
+                await mutate('/api/v1/add/alias', { address: addr, goto: options.targets.join(','), active: '1', sogo_visible: '0', sender_allowed: '0', public_comment: '', private_comment: '' });
+                const checked = (await rows(session, 'alias/all')).find(row => normalize(row.address) === addr);
+                if (!checked || String(checked.active) !== '1' || !isDeepStrictEqual(targets(checked.goto).sort(), options.targets)) throw verifyFailed();
+              }));
+              for (const reference of plan.references) await lock.run(normalize(reference.address), () => step('references', normalize(reference.address), {}, aliasBackup(reference), async () => {
+                const original = aliasBackup(reference), remaining = targets(reference.goto).filter(value => value !== addr);
+                const current = (await rows(session, 'alias/all')).find(row => normalize(row.address) === original.address);
+                const pruned = { ...original, goto: remaining.join(',') };
+                if (current ? !isDeepStrictEqual(aliasBackup(current), original) && !isDeepStrictEqual(aliasBackup(current), pruned) : remaining.length > 0) assertUnchanged('conflict', {});
+                if (!current) await mutate('/api/v1/add/alias', original);
+                else if (!isDeepStrictEqual(aliasBackup(current), original)) {
+                  const { address: _address, ...attr } = original;
+                  await mutate('/api/v1/edit/alias', { items: [String(current.id)], attr });
+                }
+                const checked = (await rows(session, 'alias/all')).find(row => normalize(row.address) === original.address);
+                if (!checked || !isDeepStrictEqual(aliasBackup(checked), original)) throw verifyFailed();
+              }));
+              for (const sender of plan.senderRestore) await restoreSender(sender);
+            } else {
+              await lock.run(addr, () => step('alias', addr, aliasBackup(plan.alias), {}, async () => {
+                assertUnchanged(data.etag, (await conversionPlan(session, addr, direction, options)).state);
+                await mutate('/api/v1/delete/alias', [String(plan.alias.id)]);
+                if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr)) throw verifyFailed();
+              }));
+              await lock.run(addr, () => step('mailbox', addr, {}, { address: addr, quotaGb: options.quotaGb, password: 'set' }, async () => {
+                if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '주소가 이미 사용 중이에요.');
+                const body = { local_part: addr.split('@')[0], domain: addr.split('@')[1], name: addr.split('@')[0], quota: String(options.quotaGb * 1024), active: '1',
+                  force_pw_update: '0', tls_enforce_in: '1', tls_enforce_out: '1', password: password.toString(), password2: password.toString() };
+                try { await mutate('/api/v1/add/mailbox', body); mailboxCreated = true; } finally { delete body.password; delete body.password2; }
+                const checked = snapshot(await box(session, addr));
+                if (checked.address !== addr || checked.name !== addr.split('@')[0] || checked.quotaGb !== options.quotaGb || checked.active !== 1) throw verifyFailed();
+                const disabled = protocols.filter(key => !checked.protocols[key]); if (disabled.length) warnings.push({ code: 'PROTOCOL_DEFAULT_OFF', protocols: disabled });
+              }));
+              if (options.copyTo) {
+                stage = 'copy'; const expected = await teams.previewForward(session, addr, options.copyTo);
+                const applied = await teams.forward({ session, actor, ip, team: addr, member: options.copyTo, etag: expected.etag, reversible: false });
+                steps.push({ stage, target: addr, status: 'ok', auditId: applied.auditId });
+              }
+              for (const sender of plan.senderRestore) await restoreSender(sender);
+              if (options.sendGrantTo) {
+                const sender = plan.senders.find(row => normalize(row.username) === options.sendGrantTo);
+                await restoreSender(sender, true);
+              }
+            }
+            return { result: 'ok', address: addr, steps, warnings, recovery: [], detail: { steps }, ...(mailboxCreated ? { password: password.toString() } : {}) };
+          } catch (error) {
+            if (!touched) throw error;
+            if (error instanceof MailcowAuthLost) fatal = error;
+            const instruction = error.code === 'MAILBOX_NOT_EMPTY' ? '새로 도착한 메일이 있어 전환을 멈췄어요. 메일을 옮기거나 지운 뒤 다시 전환하세요. 이미 지운 동기화·필터는 변경 기록에서 확인하세요.' :
+              recovery.find(row => row.stage === stage)?.message ?? '변경 기록의 원래 설정과 완료 단계를 확인하고 남은 연결을 mailcow에서 직접 복구해 주세요.';
+            steps.push({ stage, status: 'failed', code: safeCode(error), recovery: instruction, auditId: null });
+            return { result: 'partial', address: addr, steps, warnings, recovery, detail: { steps, recovery }, ...(mailboxCreated ? { password: password.toString() } : {}) };
+          }
+        });
+        if (fatal) throw fatal;
+        return result;
+      });
+    } finally { password?.fill(0); }
+  }
+  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename, convert };
 }

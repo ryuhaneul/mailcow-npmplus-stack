@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import Icon from './Icon.jsx';
-import { folders } from '../state/folders.js';
+import { folders, folderColor } from '../state/folders.js';
 
 export function Condition({ condition: c }) {
   if (c.field === 'attachment') return <>첨부파일이 있으면</>;
@@ -13,8 +13,8 @@ export function RuleSummary({ rule }) {
   const a = rule.actions;
   const actions = [];
   if (a.move) {
-    const color = folders.value.folders.find(folder => folder.path === a.move)?.color;
-    actions.push(<><span class={`chip ${color ? `c${color}` : 'plain'}`}>{a.move}</span> 폴더로 옮기기</>);
+    const color = folderColor(folders.value.folders.find(folder => folder.path === a.move));
+    actions.push(<><span class={`chip ${color !== null ? `c${color}` : 'plain'}`}>{a.move}</span> 폴더로 옮기기</>);
   }
   if (a.trash) actions.push('삭제 (휴지통으로)');
   if (a.read) actions.push('읽음으로 표시');

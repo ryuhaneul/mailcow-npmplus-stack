@@ -1,12 +1,13 @@
 import { folderLabel } from '../format.js';
 import { cursor, runAction, acting } from '../state/list.js';
 import { selection, toggleSelection } from '../state/selection.js';
-import { folders } from '../state/folders.js';
+import { folders, folderColor } from '../state/folders.js';
 import { navigate } from '../router.js';
 import Icon from './Icon.jsx';
 export function FolderTag({item}) {
   const folder=folders.value.folders.find(value=>value.path===item.folder);
-  return folder?.color!==null&&folder?.color!==undefined?<span class={`chip c${folder.color}`}>{folderLabel(folder)}</span>:<span class="ftag"><Icon name={folder?.shared?'users':({INBOX:'inbox',Sent:'send',Archive:'archive',Drafts:'file',Junk:'spam',Trash:'trash'}[item.folder]||'folder')} size="xs"/>{folder?folderLabel(folder):item.folderName}</span>;
+  const color=folderColor(folder);
+  return color!==null?<span class={`chip c${color}`}>{folderLabel(folder)}</span>:<span class="ftag"><Icon name={folder?.shared?'users':({INBOX:'inbox',Sent:'send',Archive:'archive',Drafts:'file',Junk:'spam',Trash:'trash'}[item.folder]||'folder')} size="xs"/>{folder?folderLabel(folder):item.folderName}</span>;
 }
 export default function MailRow({item,mode}) {
   const selected=selection.value.has(item.ref),from=item.from.name||item.from.address;

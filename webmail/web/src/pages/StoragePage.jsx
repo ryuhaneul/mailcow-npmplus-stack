@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import { storage } from '../state/storage.js';
-import { folders } from '../state/folders.js';
+import { folders, folderColor } from '../state/folders.js';
 import { toast } from '../state/toast.js';
 import { formatBytes, quotaView } from '../format.js';
 import Icon from '../components/Icon.jsx';
@@ -31,7 +31,7 @@ export default function StoragePage() {
   const q = quotaView(data);
   const rows = data?.folders || [];
   const metadata = path => folders.value.folders.find(folder => folder.path === path);
-  const color = (folder, index) => metadata(folder.path)?.color ?? index % 8;
+  const color = (folder, index) => folderColor(metadata(folder.path)) ?? metadata(folder.path)?.color ?? index % 8;
   const total = data?.quota.limitBytes > 0 ? Math.max(data.quota.limitBytes, data.quota.usedBytes) : data?.quota.usedBytes || 1;
   return <section class="view account-view" aria-labelledby="page-title" data-page="storage" data-storage-level={q?.level}>
     <div class="set-head"><div class="crumb"><a href="#settings">설정</a><Icon name="right" size="xs"/>계정</div><h1 id="page-title">저장 공간</h1><SettingsTabs/></div>

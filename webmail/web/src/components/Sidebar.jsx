@@ -1,8 +1,7 @@
 import { Fragment } from 'preact';
 import { logout } from '../api.js';
-import { prefs } from '../state/prefs.js';
 import { folderDialog } from './FolderDialog.jsx';
-import { folders } from '../state/folders.js';
+import { folders, folderColor } from '../state/folders.js';
 import { route } from '../router.js';
 import Brand from './Brand.jsx';
 import Icon from './Icon.jsx';
@@ -15,7 +14,7 @@ function NavItem({ href, title, icon, folder }) {
   const current = route.value;
   const active = href === `#${current.name}` || current.name === 'f' && folder?.path === current.value;
   return <a href={href} class="nv" aria-current={active ? 'page' : undefined}>
-    {folder?.shared ? <span class="sh"><Icon name="users"/></span> : icon ? <Icon name={icon} size="s"/> : <span class={`dot c${prefs.value.folderColors?.[folder?.path] ?? folder?.color ?? 0}`}/>}
+    {folder?.shared ? <span class="sh"><Icon name="users"/></span> : icon ? <Icon name={icon} size="s"/> : <span class={`dot c${folderColor(folder)}`}/>}
     {title}{folder?.unseen > 0 && <span class="n u num">{folder.unseen}</span>}
   </a>;
 }

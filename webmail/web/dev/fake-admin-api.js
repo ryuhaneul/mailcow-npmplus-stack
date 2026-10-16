@@ -1,4 +1,5 @@
 import { sieveDisabledWarning } from '../../server/admin/messages.js';
+import { mergeSenderAcl } from '../../server/admin/services/senders.js';
 import { parseCsv } from '../../server/admin/services/batch.js';
 export function createFakeAdminApi() {
   const state = { session: { step: 'done', user: { username: '합성관리자' }, csrf: 'synthetic-admin-csrf', expiresAt: '2099-01-01T00:00:00Z' }, features: { cleanup: true, relay: true }, failure: null, auth: { mode: 'password', loginError: null, totpError: null }, requests: [] };
@@ -22,6 +23,16 @@ export function createFakeAdminApi() {
   ].map(row => ({ ...row, protocols: { ...accountProtocols }, senderAcl: [] })) };
   state.accountRefs = { aliases: [{ address: 'contact@example.com', targets: ['person@example.com'], active: 1, senderAllowed: false }], teams: [{ mailbox: 'team@example.com', filterId: 8, members: ['person@example.com', 'other@example.com'] }], senders: [{ mailbox: 'person@example.com', sendAs: 'team@example.com', direction: 'received' }], shares: [{ owner: 'team@example.com', grantee: 'person@example.com', rights: ['lookup', 'read'] }], syncjobs: [{ id: 9, target: 'person@example.com', active: 1 }] };
   const leaveWarnings = [{ code: 'LOGIN_BLOCK_DELAY', message: '로그인 차단은 최대 5분 안에 적용돼요' }, { code: 'REMOVE_DEVICE_ACCOUNT', message: '퇴사자 기기의 메일 계정 설정을 지워 주세요' }];
+  state.distribution = { readError: null, teamError: null, aliasError: null, senderError: null, flowError: null, flowResult: 'ok', flowBodies: [], version: 1,
+    items: [
+      { mailbox: 'team@example.com', members: [{address:'person@example.com',name:'합성 구성원'}, {address:'other@example.com',name:'합성 다른 구성원'}], distribution:'copy', editable:true, reason:'', etag:'team-1' },
+      { mailbox:'plan@example.com', members:[{address:'other@example.com',name:'합성 다른 구성원'}], distribution:'copy',editable:true,reason:'',etag:'plan-1' },
+      { mailbox:'readonly@example.com',members:[],distribution:'unknown',editable:false,reason:'unparseable',etag:'readonly-1' },
+    ], forwards:[{mailbox:'move@example.com',to:'person@example.com',distribution:'move',editable:false}],
+    mailboxes:[...state.accounts.items.map(row=>({address:row.address,name:row.address==='team@example.com'?'기획팀':row.name})),{address:'plan@example.com',name:'합성 새 팀'},{address:'other@example.com',name:'합성 다른 구성원'},{address:'readonly@example.com',name:'합성 읽기 전용 팀'}],
+  };
+  state.aliases={items:[{address:'contact@example.com',targets:['team@example.com'],discard:false,sendAllowed:false,active:true,etag:'alias-1'}, {address:'discard@example.com',targets:['null@localhost'],discard:true,sendAllowed:false,active:true,etag:'discard-1'}, {address:'@example.com',targets:['person@example.com'],discard:false,sendAllowed:false,active:true,etag:'catchall-1'}],checks:{external:[{address:'legacy@example.com',target:'old@outside.test',active:true}],cycles:[{addresses:['loop1@example.com','loop2@example.com'],active:false}],catchAll:[{address:'@example.com',targets:['person@example.com'],active:true}]}};
+  state.senders={senderAcl:['team@example.com','contact@example.com'],duplicates:['contact@example.com'],receiveOnlyAliases:[{address:'contact@example.com',active:'1'}],effective:{addresses:['person@example.com','team@example.com'],domainPatterns:[{pattern:'@example.com',except:['except@example.com']}],all:false},limits:['외부 주소 보내기 권한(external)은 API 로 읽을 수 없어 계산에서 빠짐','본인 주소 별칭(모든 메일함)은 메일함 값으로 되살려 계산(sender_allowed=1 가정)'],etag:'senders-1'};
   function inspectCsv(kind, text) {
     const records = parseCsv(text), header = records.shift().fields, seen = new Set();
     const items = records.map(record => {
@@ -79,7 +90,48 @@ export function createFakeAdminApi() {
       else { if (mode==='delete') { steps.push({stage:'mailbox',target:address,status:'ok'}); state.accounts.items=state.accounts.items.filter(item=>item!==row); } else { row.active=2; if(body.forwardTo) steps.push({stage:'forward',target:body.forwardTo,status:'ok'}); } }
       return send({result:state.accounts.result,steps,warnings:leaving?leaveWarnings:[],detail:{steps}});
     }
-    if (url.pathname === '/api/admin/teams') return response.end(JSON.stringify({ items: [{ mailbox: 'team@example.com', editable: true }], mailboxes: [{ address: 'team@example.com', name: '기획팀' }], total: 1, pageSize: 50 }));
+    if (url.pathname === '/api/admin/teams' && request.method==='GET') {
+      if(state.distribution.readError)return fail(state.distribution.readError);
+      const q=(url.searchParams.get('q')||'').toLowerCase(),page=Number(url.searchParams.get('page')||1),items=state.distribution.items.filter(row=>row.mailbox.includes(q));
+      return response.end(JSON.stringify({items:items.slice((page-1)*50,page*50),forwards:state.distribution.forwards,mailboxes:state.distribution.mailboxes,total:items.length,page,pageSize:50}));
+    }
+    const memberMatch=url.pathname.match(/^\/api\/admin\/teams\/([^/]+)\/members$/);
+    if(memberMatch){let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),row=state.distribution.items.find(row=>row.mailbox===decodeURIComponent(memberMatch[1]));if(state.distribution.teamError)return fail(state.distribution.teamError);if(!row||!row.editable)return fail({status:409,code:'UNPARSEABLE',message:'이 팀 분배 필터는 안전하게 바꿀 수 없어요.'});if(row.etag!==body.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.'});if(request.method==='DELETE'&&row.members.length===1)return fail({status:409,code:'LAST_MEMBER',message:'마지막 팀 구성원은 뺄 수 없어요.'});row.members=request.method==='POST'?[...row.members,{address:body.member,name:'합성 추가'}]:row.members.filter(row=>row.address!==body.member);row.etag=`team-${++state.distribution.version}`;return response.end(JSON.stringify({...row,auditId:'22222222222222222222222222222222'}));}
+    const aliasMatch=url.pathname.match(/^\/api\/admin\/aliases(?:\/([^/]+))?$/);
+    if(url.pathname==='/api/admin/checks/aliases')return response.end(JSON.stringify(state.aliases.checks));
+    if(aliasMatch){
+      if(request.method==='GET'){const q=(url.searchParams.get('q')||'').toLowerCase(),page=Number(url.searchParams.get('page')||1),items=state.aliases.items.filter(row=>row.address.includes(q));return response.end(JSON.stringify({items:items.slice((page-1)*50,page*50),total:items.length,page,pageSize:50}));}
+      let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),address=aliasMatch[1]?decodeURIComponent(aliasMatch[1]):body.address,row=state.aliases.items.find(row=>row.address===address);
+      if(state.distribution.aliasError)return fail(state.distribution.aliasError);
+      if(body.targets?.includes(address))return fail({status:409,code:'ALIAS_LOOP',message:'별칭이 서로 돌아가도록 연결돼요. 대상을 다시 확인해 주세요.'});
+      if(body.targets?.some(value=>!value.endsWith('@example.com')))return fail({status:422,code:'EXTERNAL_TARGET',message:'별칭 대상은 활성 사내 도메인만 쓸 수 있어요.'});
+      if(request.method==='POST'){if(row)return fail({status:409,code:'ADDRESS_IN_USE',message:'이미 별칭이 있는 주소예요.'});const created={address,targets:body.discard?['null@localhost']:body.targets,discard:body.discard===true,sendAllowed:false,active:true,etag:`alias-${++state.distribution.version}`};state.aliases.items.push(created);return response.end(JSON.stringify({...created,auditId:'22222222222222222222222222222222'}));}
+      if(!row)return fail({status:404,code:'NOT_FOUND',message:'별칭을 찾을 수 없어요.'});if(row.etag!==body.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.'});
+      if(request.method==='DELETE'){if(body.confirmAddress!==address)return fail({status:422,code:'INVALID_INPUT',message:'주소를 확인해 주세요.'});state.aliases.items=state.aliases.items.filter(item=>item!==row);return response.end(JSON.stringify({address,deleted:true,auditId:'22222222222222222222222222222222'}));}
+      if(body.targets){row.targets=body.mode==='both'?[...new Set([...row.targets,...body.targets])]:body.targets;row.discard=false;}if(body.active!==undefined)row.active=body.active;if(body.sendAllowed!==undefined)row.sendAllowed=body.sendAllowed;row.etag=`alias-${++state.distribution.version}`;return response.end(JSON.stringify({...row,auditId:'22222222222222222222222222222222'}));
+    }
+    const senderMatch=url.pathname.match(/^\/api\/admin\/senders\/([^/]+)(\/diff)?$/);
+    if(senderMatch){
+      if(request.method==='GET')return response.end(JSON.stringify(state.senders));let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),save=request.method==='PUT';
+      if(state.distribution.senderError&&state.distribution.senderError.stage===(save?'put':'diff'))return fail(state.distribution.senderError);
+      if(save&&body.etag!==state.senders.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.'});
+      let merged;try{merged=mergeSenderAcl(state.senders.senderAcl,{add:body.add,remove:body.remove});}catch(error){return fail({status:error.statusCode||422,code:error.code,message:error.message});}
+      const after=merged.after.filter(value=>!state.senders.duplicates.includes(value)),diff={...merged,after,added:after.filter(value=>!merged.before.includes(value)),removed:merged.before.filter(value=>!after.includes(value)),kept:merged.before.filter(value=>after.includes(value)),alreadyAllowedByAlias:merged.after.filter(value=>!after.includes(value)),removedAsAliasDuplicates:state.senders.senderAcl.filter(value=>state.senders.duplicates.includes(value))};if(diff.removedAsAliasDuplicates.length)diff.storageNotice='저장하면 목록에서 빠짐(별칭으로 이미 허용돼 보내기는 그대로 됨)';
+      if(save){state.senders.senderAcl=after;state.senders.etag=`senders-${++state.distribution.version}`;return response.end(JSON.stringify({...state.senders,diff,auditId:'22222222222222222222222222222222'}));}return response.end(JSON.stringify({...diff,etag:state.senders.etag,effective:state.senders.effective,limits:state.senders.limits}));
+    }
+    if(['/api/admin/flows/team-move','/api/admin/flows/alias'].includes(url.pathname)){
+      let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),team=url.pathname.endsWith('team-move');state.distribution.flowBodies.push(body);
+      if(state.distribution.flowError)return fail(state.distribution.flowError);
+      const params=Object.fromEntries(Object.entries(body).filter(([key])=>!['action','etags'].includes(key))),steps=[];
+      if(team&&body.distribution){for(const [target,add]of[[body.fromTeam,false],[body.toTeam,true]].filter(([target])=>target)){const row=state.distribution.items.find(row=>row.mailbox===target);if(row?.distribution==='unknown')return fail({status:409,code:'UNPARSEABLE',message:'이 팀 분배 필터는 안전하게 바꿀 수 없어요. 읽기 전용 사유를 확인해 주세요.'});const before=row?.members.map(row=>row.address)||[];steps.push({stage:add?'team.add':'team.remove',target,before,after:add?[...new Set([...before,body.member])]:before.filter(value=>value!==body.member)});}}
+      if(!team){steps.push({stage:'alias',target:body.alias,before:state.aliases.items.find(row=>row.address===body.alias)?.targets||[],after:[body.target]});for(const target of body.grantSendTo)steps.push({stage:'senders',target,before:['team@example.com'],after:['team@example.com',body.alias]});}else if(body.sendGrant)steps.push({stage:'senders',target:body.member,before:body.fromTeam?[body.fromTeam]:[],after:body.toTeam?[body.toTeam]:[]});
+      const etags={params:'synthetic-params',teams:Object.fromEntries(steps.filter(row=>row.stage.startsWith('team')).map(row=>[row.target,'synthetic-team'])),senders:{},...(team?{}:{alias:'synthetic-alias'})},changes=team?{distribution:steps.filter(row=>row.stage.startsWith('team')),senders:steps.find(row=>row.stage==='senders')||null}:{alias:body.alias,target:{before:steps[0].before,after:steps[0].after},senders:steps.filter(row=>row.stage==='senders'),existingPermissionsDeleted:'없음'};
+      if(body.action==='preview')return response.end(JSON.stringify({action:'preview',...params,etags,changes,steps}));
+      if(JSON.stringify(body.etags)!==JSON.stringify(etags))return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 미리보기를 다시 확인해 주세요.'});
+      const partial=state.distribution.flowResult==='partial',results=steps.map((row,index)=>({stage:row.stage,target:row.target,status:partial&&index===1?'failed':'ok',...(partial&&index===1?{code:'SYNTHETIC_STEP_FAILED',recovery:'완료 단계는 유지됐어요. 해당 화면과 변경 기록에서 남은 연결을 확인해 주세요.'}:{}),auditId:null})).slice(0,partial?2:undefined),recovery=partial?steps.map(row=>({stage:row.stage,target:row.target,message:`${row.target}에서 완료 단계의 변경 기록을 확인하고 이전 설정을 복구해 주세요.`})):[];
+      return response.end(JSON.stringify({result:partial?'partial':'ok',unchanged:false,steps:results,recovery,changes,auditId:'22222222222222222222222222222222'}));
+    }
+
     if (url.pathname === '/api/admin/mailboxes' && request.method === 'POST') {
       let raw = ''; for await (const part of request) raw += part; const body = JSON.parse(raw), steps = [{ stage: 'mailbox', status: 'ok' }];
       if (body.team) steps.push({ stage: 'team', status: state.flow.joinMode === 'partial' ? 'failed' : 'ok', ...(state.flow.joinMode === 'partial' ? { code: 'SYNTHETIC_TEAM_FAILED' } : {}) });

@@ -12,6 +12,11 @@ import Totp from './pages/Totp.jsx';
 import Home from './pages/Home.jsx';
 import Flow from './flows/Flow.jsx';
 import Accounts from './pages/Accounts.jsx';
+import Teams from './pages/Teams.jsx';
+import Aliases from './pages/Aliases.jsx';
+import Permissions from './pages/Permissions.jsx';
+import TeamMove from './flows/TeamMove.jsx';
+import Alias from './flows/Alias.jsx';
 import Leave from './flows/Leave.jsx';
 import DeleteMailbox from './flows/DeleteMailbox.jsx';
 import Overview from './pages/Overview.jsx';
@@ -36,6 +41,6 @@ export default function AdminApp({ theme }) {
   if (session?.step === 'totp') return <Totp session={session} busy={busy} error={authFailure.value} submit={body => submit('/api/admin/auth/totp', body)} cancel={() => { adminSession.value = null; authFailure.value = null; navigateAdmin('login'); }}/>;
   if (!session || adminRoute.value.name === 'login') return <Login busy={busy} error={authFailure.value} seconds={seconds} submit={body => submit('/api/admin/auth/login', body)}/>;
   const flow = adminRoute.value.parts[0], address = adminRoute.value.parts[1] || '';
-  const name = adminRoute.value.name, title = name === 'flow' && adminRoute.value.parts[0] === 'csv' ? 'CSV 일괄 만들기' : name === 'flow' && flow === 'delete' ? '메일함 지우기' : name === 'logs' ? '로그·큐' : name === 'home' ? '어떤 작업을 하시겠어요?' : adminNav.find(row => row[0] === name)?.[1] ?? homeTasks.find(task => task[1] === adminRoute.value.parts[0])?.[3] ?? '관리 작업';
-  return <><AdminIcons/><AdminShell theme={theme} title={title} header={!['home', 'overview', 'accounts', ...(name === 'flow' && ['join','csv','leave','delete'].includes(flow) ? ['flow'] : [])].includes(name)}>{name === 'accounts' ? <Accounts address={adminRoute.value.parts[0]}/> : name === 'flow' && flow === 'leave' ? <Leave key={`leave:${address}`} address={address}/> : name === 'flow' && flow === 'delete' ? <DeleteMailbox key={`delete:${address}`} address={address}/> : name === 'flow' && ['join','csv'].includes(adminRoute.value.parts[0]) ? <Flow key={adminRoute.value.parts[0]} flow={adminRoute.value.parts[0]}/> : name === 'home' ? <Home/> : name === 'overview' ? <Overview/> : <div data-admin-page={name}/>}</AdminShell></>;
+  const name = adminRoute.value.name, title = name === 'flow' && adminRoute.value.parts[0] === 'csv' ? 'CSV 일괄 만들기' : name === 'flow' && flow === 'alias' ? '별칭·보내기 권한 변경' : name === 'filters' ? '관리자 필터' : name === 'flow' && flow === 'delete' ? '메일함 지우기' : name === 'logs' ? '로그·큐' : name === 'home' ? '어떤 작업을 하시겠어요?' : adminNav.find(row => row[0] === name)?.[1] ?? homeTasks.find(task => task[1] === adminRoute.value.parts[0])?.[3] ?? '관리 작업';
+  return <><AdminIcons/><AdminShell theme={theme} title={title} header={!['home', 'overview', 'accounts', 'teams', 'aliases', 'permissions', ...(name === 'flow' && ['join','csv','leave','delete','team','alias'].includes(flow) ? ['flow'] : [])].includes(name)}>{name === 'teams' ? <Teams address={adminRoute.value.parts[0]}/> : name === 'aliases' ? <Aliases address={adminRoute.value.parts[0]}/> : name === 'permissions' ? <Permissions address={adminRoute.value.parts[0]}/> : name === 'flow' && flow === 'team' ? <TeamMove/> : name === 'flow' && flow === 'alias' ? <Alias/> : name === 'accounts' ? <Accounts address={adminRoute.value.parts[0]}/> : name === 'flow' && flow === 'leave' ? <Leave key={`leave:${address}`} address={address}/> : name === 'flow' && flow === 'delete' ? <DeleteMailbox key={`delete:${address}`} address={address}/> : name === 'flow' && ['join','csv'].includes(adminRoute.value.parts[0]) ? <Flow key={adminRoute.value.parts[0]} flow={adminRoute.value.parts[0]}/> : name === 'home' ? <Home/> : name === 'overview' ? <Overview/> : <div data-admin-page={name}/>}</AdminShell></>;
 }

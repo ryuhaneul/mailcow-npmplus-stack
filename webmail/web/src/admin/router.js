@@ -1,6 +1,6 @@
 import { signal } from '@preact/signals';
 import { adminNav } from './state/nav.js';
-const names = new Set(['home', 'login', 'flow', 'logs', ...adminNav.map(item => item[0])]);
+const names = new Set(['home', 'login', 'flow', 'logs', 'filters', ...adminNav.map(item => item[0])]);
 export function parseAdminRoute(hash = '') {
   try { const [name = 'home', ...parts] = (hash.replace(/^#/, '') || 'home').split('/'); return { name: names.has(name) ? name : 'home', parts: parts.map(decodeURIComponent) }; }
   catch { return { name: 'home', parts: [] }; }

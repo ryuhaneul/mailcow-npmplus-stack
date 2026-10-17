@@ -12,6 +12,21 @@ printf '# synthetic example.com postfix\n' > "${files[0]}"
 printf '# synthetic example.com rspamd\n' > "${files[1]}"
 command chmod 644 "${files[@]}"
 : > "$root/group"
+mkdir -p "$root/bin" "$root/no-commands"
+export RELAY_GROUP_FIXTURE_ROOT="$root"
+printf '2\n' > "$root/getent-status"
+cat > "$root/bin/getent" <<'GETENT'
+#!/bin/bash
+[ "$#" -eq 2 ] && [ "$1" = group ] && [ "$2" = 64250 ] || exit 1
+printf '%s\n' "$*" >> "$RELAY_GROUP_FIXTURE_ROOT/getent-calls"
+read -r status < "$RELAY_GROUP_FIXTURE_ROOT/getent-status"
+if [ "$status" -eq 0 ]; then
+    while IFS= read -r line; do printf '%s\n' "$line"; done < "$RELAY_GROUP_FIXTURE_ROOT/group"
+fi
+exit "$status"
+GETENT
+command chmod 755 "$root/bin/getent"
+export PATH="$root/bin:$PATH"
 : > "$root/calls"
 WEBMAIL_ADMIN_ENABLE=true
 WEBMAIL_ADMIN_DOVEADM_ENABLE=false
@@ -21,12 +36,6 @@ WEBMAIL_MAIL_TLS_MODE=verify
 WEBMAIL_EDGE_SUBNET=192.168.240.0/24
 WEBMAIL_RELAY_IPV4=192.168.241.240
 WEBMAIL_RELAY_IPV6=
-# Redirect only the host group lookup; do not read the actual host group database.
-grep() {
-    local args=("$@") last=$(($# - 1))
-    if [ "${args[$last]}" = /etc/group ]; then args[$last]="$root/group"; fi
-    command grep "${args[@]}"
-}
 chgrp() {
     [ "$#" -eq 2 ] && [ "$1" = 64250 ] || return 1
     [[ "$2" = "${files[0]}" || "$2" = "${files[1]}" ]] || return 1
@@ -81,11 +90,40 @@ case3() {
 case4() {
     WEBMAIL_ADMIN_RELAY_ENABLE=true
     WEBMAIL_ADMIN_RELAY_READY=true
-    printf 'synthetic:x:64250:example\n' > "$root/group"
+    local gid
+    printf '0\n' > "$root/getent-status"
+    # NSS lookup is mocked; libc parsing of these GID spellings is not exercised.
+    for gid in 64250 064250 +64250; do
+        printf 'synthetic:x:%s:example\n' "$gid" > "$root/group"
+        : > "$root/calls"
+        if reconcile > "$root/error" 2>&1; then return 1; fi
+        command grep -q '64250' "$root/error" || return 1
+        [ ! -s "$root/calls" ] || return 1
+        printf 'PASS getent collision %s, permission changes 0\n' "$gid"
+    done
+    : > "$root/group" # A group supplied by NSS outside /etc/group.
     : > "$root/calls"
     if reconcile > "$root/error" 2>&1; then return 1; fi
-    command grep -q '64250' "$root/error" || return 1
-    [ ! -s "$root/calls" ]
+    [ ! -s "$root/calls" ] || return 1
+    printf 'PASS getent NSS collision, permission changes 0\n'
+}
+case6() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=true
+    WEBMAIL_ADMIN_RELAY_READY=true
+    local status
+    for status in 1 3; do
+        printf '%s\n' "$status" > "$root/getent-status"
+        : > "$root/calls"
+        if reconcile > "$root/error" 2>&1; then return 1; fi
+        command grep -q '64250.*getent' "$root/error" || return 1
+        [ ! -s "$root/calls" ] || return 1
+        printf 'PASS getent failure %s, permission changes 0\n' "$status"
+    done
+    : > "$root/calls"
+    if (PATH="$root/no-commands"; reconcile) > "$root/error" 2>&1; then return 1; fi
+    command grep -q '64250.*getent' "$root/error" || return 1
+    [ ! -s "$root/calls" ] || return 1
+    printf 'PASS getent missing, permission changes 0\n'
 }
 case5() {
     local ready
@@ -101,7 +139,7 @@ case5() {
     done
 }
 failed=0
-for case_number in 1 2 3 4 5; do
+for case_number in 1 2 3 4 5 6; do
     if "case$case_number"; then printf 'PASS fixture %s\n' "$case_number"
     else printf 'FAIL fixture %s\n' "$case_number"; failed=1; fi
 done

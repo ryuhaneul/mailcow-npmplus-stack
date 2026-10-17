@@ -56,6 +56,17 @@ const expunges = f => f.requests.filter(row => row.command === 'expunge');
 for (const before of [undefined, '', '2026/10/01', '2026-02-30', '2026-13-01', '2027-01-01']) test(`cleanup date ${before}: 422 and no doveadm`, async t => {
   const f = await fixture(t); await assert.rejects(count(f, { ...input, before }), { statusCode: 422, code: 'DATE_REQUIRED' }); assert.equal(f.requests.length, 0);
 });
+for (const [before, timestamp] of [['2025-01-01', '1735657200'], ['2024-03-01', '1709218800']]) test(`cleanup: ${before} uses KST midnight for count and token execution`, async t => {
+  const f = await fixture(t), query = ['mailbox', 'INBOX', 'before', timestamp];
+  const preview = await count(f, { ...input, before });
+  assert.deepEqual(f.requests.find(row => row.command === 'search').args.query, query);
+  await run(f, preview.token);
+  const searches = f.requests.filter(row => row.command === 'search');
+  assert.equal(searches.length, 3); assert.equal(expunges(f).length, 1);
+  for (const request of [...searches, ...expunges(f)]) assert.deepEqual(request.args.query, query);
+  const rows = (await f.audit.read()).rows;
+  assert.equal(rows[0].before.before, before); assert.equal(rows[0].after.before, before);
+});
 for (const command of ['redirect', 'REDIRECT']) test(`cleanup: ${command} team confirmation required and preserved through execution`, async t => {
   const f = await fixture(t); f.state.team = true; f.state.teamScript = `${command} :copy "member@example.com";`;
   await assert.rejects(count(f), { statusCode: 422, code: 'TEAM_CONFIRM_REQUIRED' }); assert.equal(f.requests.length, 0); assert.equal(expunges(f).length, 0);
@@ -88,7 +99,7 @@ test('cleanup: count changed rejects without expunge or audit intent', async t =
 test('cleanup: one expunge, difference count, quota and irreversible result with no secrets', async t => {
   const f = await fixture(t), preview = await count(f); assert.equal(preview.count, 3); assert.equal(preview.usage.usedBytes, 11264);
   const result = await run(f, preview.token); assert.equal(result.deleted, 3); assert.equal(result.remaining, 0); assert.equal(result.after.usedBytes, 7168); assert.equal(expunges(f).length, 1);
-  assert.deepEqual(expunges(f)[0].args.query, ['mailbox', 'INBOX', 'before', '2026-10-01']);
+  assert.deepEqual(expunges(f)[0].args.query, ['mailbox', 'INBOX', 'before', '1790780400']);
   const rows = (await f.audit.read()).rows; assert.equal(rows[0].kind, 'irreversible'); assert.equal(rows[0].revertible, false); assert.equal(rows[1].detail.deleted, 3);
   for (const value of [secret, Buffer.from(secret).toString('base64'), preview.token]) assert.ok(!JSON.stringify({ rows, logs: f.logs, result }).includes(value));
   await assert.rejects(run(f, preview.token), { statusCode: 409 }); assert.equal(expunges(f).length, 1);

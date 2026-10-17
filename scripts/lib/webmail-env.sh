@@ -351,7 +351,7 @@ PYOVERRIDE
 )
 
 webmail_extract_tls_pin() (
-    local dest="$1" tmp override first
+    local dest="$1" tmp override first attempt
     override="$dest/docker-compose.override.yml"
     if [ -f "$override" ]; then
         IFS= read -r first < "$override" || true
@@ -366,13 +366,18 @@ webmail_extract_tls_pin() (
     if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
         # Fetch the live public leaf certificate inside mailcow's network. No
         # private-key file is ever read, copied, mounted or passed to OpenSSL.
-        (
-            set -o pipefail
-            cd "$MAILCOW_DIR" || exit 1
-            timeout 30s docker compose exec -T dovecot-mailcow openssl s_client \
-                -connect 127.0.0.1:993 -servername "$WEBMAIL_TLS_NAME" -showcerts < /dev/null 2>/dev/null \
-                | openssl x509 -outform PEM > "$tmp/cert.pem" 2>/dev/null
-        ) || { webmail_error "could not extract mail server public certificate"; return 1; }
+        for attempt in {1..15}; do
+            (
+                set -o pipefail
+                cd "$MAILCOW_DIR" || exit 1
+                timeout 30s docker compose exec -T dovecot-mailcow openssl s_client \
+                    -connect 127.0.0.1:993 -servername "$WEBMAIL_TLS_NAME" -showcerts < /dev/null 2>/dev/null \
+                    | openssl x509 -outform PEM > "$tmp/cert.pem" 2>/dev/null
+            ) && break
+            [ "$attempt" -lt 15 ] || { webmail_error "could not extract mail server public certificate"; return 1; }
+            # Wait for port 993 to become available again just after Dovecot reload.
+            sleep 2
+        done
         chmod 644 "$tmp/cert.pem" || return 1
     fi
     if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then

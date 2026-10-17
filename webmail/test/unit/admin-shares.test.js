@@ -173,8 +173,8 @@ test('shares: listing runs at most four ACL snapshots concurrently and preserves
   assert.deepEqual(calls, owners);
   assert.notDeepEqual(completed, owners);
   assert.deepEqual(result, {
-    items: owners.map(who => ({ owner: who, name: who, group: false, grantees: [grantee], etag: etag({ grants: [{ grantee, rights: ['lookup', 'read'] }] }) })),
-    total: owners.length, page: 1, pageSize: 50,
+    items: owners.map(who => ({ owner: who, name: who, group: false, grantees: [grantee], grants: [{ grantee, folders: [{ mailbox: 'INBOX', rights: ['lookup', 'read'] }], shared: true, residualFolders: 0, readOnly: true }], wholeMailbox: false, warnings: ['SUBFOLDER_ACL_UNCHECKED'], etag: etag({ version: 2, grants: [{ grantee, folders: [{ mailbox: 'INBOX', rights: ['lookup', 'read'] }] }] }) })),
+    total: owners.length, page: 1, pageSize: 50, wholeMailbox: false, warnings: ['SUBFOLDER_ACL_UNCHECKED'],
   });
 });
 
@@ -197,7 +197,7 @@ test('shares: grant and revoke create config records, preserve other ACLs and su
   let item = await ownerItem(f);
   const added = await change(f, item.etag); assert.equal(added.applied, true); assert.deepEqual(added.grantees, [other, grantee]);
   let records = (await f.history.list()).items; assert.equal(records.length, 1); assert.equal(records[0].action, 'share.grant'); assert.equal(records[0].kind, 'config'); assert.equal(records[0].canRevert, true);
-  assert.deepEqual(records[0].before.grants, [{ grantee: other, rights: ['admin', 'lookup', 'read'] }]);
+  assert.deepEqual(records[0].before.grants, [{ grantee: other, folders: [{ mailbox: 'INBOX', rights: ['admin', 'lookup', 'read'] }] }]);
   await f.history.revert(records[0].id, { confirm: true, session: {}, actor: 'admin', ip: '198.51.100.9' });
   assert.equal(f.acl.has(`${owner}|${grantee}`), false); assert.deepEqual(f.acl.get(`${owner}|${other}`), ['admin', 'lookup', 'read']);
   item = await ownerItem(f); await change(f, item.etag);
@@ -350,4 +350,25 @@ test('dockerapi: hanging request stops at the ten-second deadline', async t => {
 test('shares: empty mailbox object returns no shares', async t => {
   const f = await fixture(t, { mailboxes: {}, filters: {} });
   const result = await f.service.list({}); assert.deepEqual(result.items, []); assert.equal(result.total, 0);
+});
+
+test('dockerapi: folder arguments preserve quotes, spaces and Korean in both ACL commands', async t => {
+  const f = await fakeApi(t);
+  for (const mailbox of ['INBOX/프로젝트', 'Archive/한글 "폴더"', ' leading and trailing ']) {
+    await f.client.setAcl(owner, grantee, mailbox);
+    await f.client.deleteAcl(owner, grantee, mailbox);
+  }
+  assert.deepEqual(f.calls.filter(call => call.method === 'POST').map(call => [call.body.task, call.body.mailbox]), [
+    ['set_acl', 'INBOX/프로젝트'], ['delete_acl', 'INBOX/프로젝트'],
+    ['set_acl', 'Archive/한글 "폴더"'], ['delete_acl', 'Archive/한글 "폴더"'],
+    ['set_acl', ' leading and trailing '], ['delete_acl', ' leading and trailing '],
+  ]);
+});
+
+test('dockerapi: invalid folder arguments reject both commands before any HTTP', async t => {
+  const f = await fakeApi(t);
+  for (const mailbox of [null, 1, '', ' ', 'A\nB', 'A\rB', 'A\tB', 'A\0B', 'A\x7fB', 'A\x85B', '*', 'Archive/%', 'Shared', 'Shared/folder']) {
+    for (const method of ['setAcl', 'deleteAcl']) await assert.rejects(f.client[method](owner, grantee, mailbox), { statusCode: 422, code: 'INVALID_INPUT' });
+  }
+  assert.equal(f.calls.length, 0);
 });

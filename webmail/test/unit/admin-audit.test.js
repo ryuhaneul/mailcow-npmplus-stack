@@ -278,3 +278,23 @@ test('admin history: both adapter reads receive the original record for particip
   assert.equal(received.length, 2); assert.ok(received.every(record => record.id === original.id));
   assert.deepEqual(current, entry.before);
 });
+
+test('admin history: adapters without prepareRevert retain the existing result and intent contract', async t => {
+  const f = await fixture(t), original = await seed(f, {}, { detail: { skipped: ['legacy-step'] } });
+  let value = entry.after, reads = 0, preparedId;
+  f.history.register(entry.action, {
+    read({ record }) { reads++; assert.equal(record.id, original.id); return value; },
+    write(args) {
+      assert.deepEqual(Object.keys(args).sort(), ['expected', 'record', 'session', 'target', 'value']);
+      assert.deepEqual(args.expected, entry.after); value = args.value;
+      return { target: { ignored: true }, skipped: ['ignored'] };
+    },
+    prepare({ record, intent }) { assert.equal(record.id, original.id); preparedId = intent.id; },
+  });
+  assert.equal((await f.history.detail(original.id)).skipped, undefined);
+  const result = await f.history.revert(original.id, { confirm: true, actor: 'other-admin', ip: '203.0.113.7', session: {} });
+  assert.deepEqual(result, { id: preparedId, result: 'ok', detail: {} }); assert.equal(reads, 2);
+  const rows = (await f.audit.read()).rows;
+  assert.deepEqual(rows[2], { v: 1, id: preparedId, phase: 'intent', ts: '2026-10-16T17:00:00+09:00', actor: 'other-admin', ip: '203.0.113.7', action: entry.action, target: entry.target, kind: 'config', revertible: true, before: entry.after, after: entry.before, revertOf: original.id });
+  assert.deepEqual(rows[3].detail, {}); assert.equal((await f.history.detail(preparedId)).skipped, undefined);
+});

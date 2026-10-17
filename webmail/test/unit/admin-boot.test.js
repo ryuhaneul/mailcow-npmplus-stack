@@ -193,3 +193,10 @@ test('admin Starflow static assets permit only same-origin frames while root/API
     assert.equal(response.headers['content-security-policy'], csp, path);
   }
 });
+
+test('admin config: whole-mailbox sharing defaults false and only accepts literal booleans', () => {
+  assert.equal(loadAdminConfig(env).wholeMailbox, false);
+  assert.equal(loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: 'false' }).wholeMailbox, false);
+  assert.equal(loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: 'true' }).wholeMailbox, true);
+  for (const value of ['', 'TRUE', '1', 'yes', true]) assert.throws(() => loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: value }), /SHARE_WHOLE_MAILBOX/);
+});

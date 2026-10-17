@@ -3,13 +3,19 @@ import { AppError } from '../errors.js';
 
 const rejected = () => new AppError(502, 'DOCKERAPI_REJECTED', 'dockerapi가 요청을 거절했어요.');
 const unavailable = () => new AppError(503, 'DOCKERAPI_UNAVAILABLE', 'dockerapi에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
-const mailbox = value => typeof value === 'string' && /^[^\s@]+@[^\s@]+$/.test(value);
+const mailboxAddress = value => typeof value === 'string' && /^[^\s@]+@[^\s@]+$/.test(value);
 const tasks = Object.freeze({
   sieve_list: owner => ({ cmd: 'sieve', task: 'list', username: owner }),
   get_acl: owner => ({ cmd: 'doveadm', task: 'get_acl', id: owner }),
-  set_acl: (owner, grantee) => ({ cmd: 'doveadm', task: 'set_acl', user: owner, mailbox: 'INBOX', id: grantee, rights: ['lookup', 'read'] }),
-  delete_acl: (owner, grantee) => ({ cmd: 'doveadm', task: 'delete_acl', user: owner, mailbox: 'INBOX', id: grantee }),
+  set_acl: (owner, grantee, mailbox) => ({ cmd: 'doveadm', task: 'set_acl', user: owner, mailbox, id: grantee, rights: ['lookup', 'read'] }),
+  delete_acl: (owner, grantee, mailbox) => ({ cmd: 'doveadm', task: 'delete_acl', user: owner, mailbox, id: grantee }),
 });
+
+export function assertAclMailbox(value) {
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x1f\x7f-\x9f*%]/.test(value) || value === 'Shared' || value.startsWith('Shared/')) {
+    throw new AppError(422, 'INVALID_INPUT', '공유할 폴더 이름을 확인해 주세요.');
+  }
+}
 
 export function createDockerApi({ config, ca }) {
   async function request(method, path, body, format = 'json') {
@@ -62,11 +68,12 @@ export function createDockerApi({ config, ca }) {
     }
     throw rejected();
   }
-  async function call(task, owner, grantee) {
+  async function call(task, owner, grantee, mailbox = 'INBOX') {
     if (!Object.hasOwn(tasks, task)) throw new AppError(422, 'DOCKERAPI_TASK_NOT_ALLOWED', '허용되지 않은 dockerapi 작업이에요.');
-    if (!mailbox(owner) || (!['get_acl', 'sieve_list'].includes(task) && (!mailbox(grantee) || owner === grantee))) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
+    if (!mailboxAddress(owner) || (!['get_acl', 'sieve_list'].includes(task) && (!mailboxAddress(grantee) || owner === grantee))) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
+    if (['set_acl', 'delete_acl'].includes(task)) assertAclMailbox(mailbox);
     const container = await containerIdentity('dovecot-mailcow');
-    const data = await request('POST', `/containers/${container.id}/exec`, tasks[task](owner, grantee), task === 'sieve_list' ? 'text' : 'json');
+    const data = await request('POST', `/containers/${container.id}/exec`, tasks[task](owner, grantee, mailbox), task === 'sieve_list' ? 'text' : 'json');
     if (task === 'sieve_list') return data.split(/\r\n|\n|\r/).filter(line => line.trim()).map(line => {
       const active = / ACTIVE$/i.test(line), name = (active ? line.slice(0, -7) : line).trim();
       if (!name || name.length > 255 || /[\x00-\x1f\x7f/\\"]/.test(name)) throw rejected();
@@ -87,5 +94,5 @@ export function createDockerApi({ config, ca }) {
     if (!data || data.type !== 'success') throw rejected();
     return { type: 'success' };
   }
-  return { call, restart, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee) => call('set_acl', owner, grantee), deleteAcl: (owner, grantee) => call('delete_acl', owner, grantee) };
+  return { call, restart, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee, mailbox = 'INBOX') => call('set_acl', owner, grantee, mailbox), deleteAcl: (owner, grantee, mailbox = 'INBOX') => call('delete_acl', owner, grantee, mailbox) };
 }

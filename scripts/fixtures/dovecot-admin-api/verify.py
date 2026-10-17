@@ -50,7 +50,7 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     assert applied.startswith(original + b'\n')
     assert applied.count(b'# BEGIN mailstack-admin doveadm ') == 1
     assert applied.count(b'doveadm_api_key = ' + key.encode() + b'\n') == 1
-    assert b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list\n' in applied
+    assert b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n' in applied
     assert b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n' in applied
     stat = conf.stat()
     backups = list(conf.parent.glob('extra.conf.bak.*'))
@@ -65,6 +65,33 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     assert (root / 'calls').read_text() == 'reload\n'
     run('--revert')
     assert conf.read_bytes() == original
+
+    # An already-applied pre-ACL block upgrades in place and both versions revert exactly.
+    previous = applied.replace(b',mailbox list,acl get\n', b',mailbox list\n')
+    conf.write_bytes(previous)
+    inode = conf.stat().st_ino
+    calls_before = (root / 'calls').read_bytes()
+    run('--check', ok=False)
+    assert conf.read_bytes() == previous
+    run()
+    assert conf.read_bytes() == applied and conf.stat().st_ino == inode
+    assert (root / 'calls').read_bytes() == calls_before + b'reload\n'
+    run('--check')
+    run('--revert')
+    assert conf.read_bytes() == original
+    conf.write_bytes(previous)
+    run('--revert')
+    assert conf.read_bytes() == original
+
+    # Unknown block changes still fail closed without writing or reload.
+    unknown = applied.replace(b',acl get\n', b',acl set\n')
+    conf.write_bytes(unknown)
+    calls_before = (root / 'calls').read_bytes()
+    for mode in ('apply', '--check', '--revert'):
+        run(mode, ok=False)
+        assert conf.read_bytes() == unknown
+        assert (root / 'calls').read_bytes() == calls_before
+    conf.write_bytes(original)
 
     # Other scripts/operator edits outside our block survive revert.
     conf.write_bytes(original + b'\n')
@@ -92,4 +119,4 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     run(ok=False)
     assert conf.read_bytes() == b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
     assert all(key.encode() not in output for output in outputs)
-print('PASS: block/key/listener/allowlist; no-op; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')
+print('PASS: block/key/listener/allowlist; no-op; pre-ACL upgrade/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')

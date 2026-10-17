@@ -68,7 +68,7 @@ if mode != 'revert' and not re.fullmatch(r'[A-Za-z0-9_+/=.-]+', key):
 begin = b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
 end = b'# END mailstack-admin doveadm\n'
 separator = b'# mailstack-admin doveadm: added EOF newline\n'
-tail = (b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list\n'
+tail = (b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n'
         b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n')
 lines = data.splitlines(keepends=True)
 clean = []
@@ -90,7 +90,9 @@ while i < len(lines):
         added_newline = content.startswith(separator)
         if added_newline:
             content = content[len(separator):]
-        if not re.fullmatch(rb'doveadm_api_key = [A-Za-z0-9_+/=.-]+\n' + re.escape(tail), content):
+        # Accept the previous exact block so update can add ACL reads and revert can remove it.
+        allowed_tails = (tail, tail.replace(b',acl get\n', b'\n'))
+        if not any(re.fullmatch(rb'doveadm_api_key = [A-Za-z0-9_+/=.-]+\n' + re.escape(allowed_tail), content) for allowed_tail in allowed_tails):
             sys.exit('managed API block differs; refusing to remove unknown content')
         if added_newline:
             if not clean or not clean[-1].endswith(b'\n'):

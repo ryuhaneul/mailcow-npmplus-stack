@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { adminNav, navGroups } from '../../web/src/admin/state/nav.js';
 import { parseAdminRoute } from '../../web/src/admin/router.js';
+import { adminSession, authFailure, returnTo } from '../../web/src/admin/state/session.js';
 import { createAdminApi } from '../../web/src/admin/api.js';
 import { adminMode, resolvedAdminMode, initAdminTheme } from '../../web/src/admin/theme.js';
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/admin-nav.json', import.meta.url), 'utf8'));
@@ -16,8 +17,31 @@ test('admin nav IDs/titles/icons/order and three groups match approved fixture',
 for (const hash of ['#home','#logs','#accounts/person%40example.com','#teams/team%40example.com','#aliases/a%40example.com','#permissions/p%40example.com','#sync/12','#history/abcd','#flow/team-move']) test(`admin route ${hash}`, () => { const value = parseAdminRoute(hash); assert.equal(value.name, hash.slice(1).split('/')[0]); assert.ok(!value.parts.join('').includes('%40')); });
 test('admin invalid routes default home', () => { assert.equal(parseAdminRoute('#accounts/%GG').name, 'home'); assert.equal(parseAdminRoute('#missing').name, 'home'); });
 test('admin API gets server csrf and sends same-origin JSON custom header', async () => { const calls = []; let current; const api = createAdminApi({ fetchImpl: async (path, options) => { calls.push({ path, options }); return response(200, path.endsWith('/session') ? { user: { username: 'synthetic' }, csrf: 'synthetic-csrf', step: 'done' } : { ok: true }); }, getCsrf: () => current?.csrf, onSession: value => { current = value; } }); await api('/api/admin/auth/session'); await api('/api/admin/aliases', { method: 'PATCH', body: { active: false } }); assert.equal(calls[1].options.headers['X-Mailadmin-CSRF'], 'synthetic-csrf'); assert.equal(calls[1].options.headers['Content-Type'], 'application/json'); assert.equal(calls[1].options.credentials, 'same-origin'); assert.equal(calls[1].options.body, '{"active":false}'); assert.deepEqual(calls[0].options.headers, {}); });
-for (const code of ['SESSION_EXPIRED','ADMIN_PENDING_ACTION','MAILCOW_UNAVAILABLE']) test(`admin 403 preserves ${code}`, async () => { let seen; const api = createAdminApi({ fetchImpl: async () => response(403, { error: { code, message: '합성 오류', restart: true } }), onForbidden: error => { seen = error; } }); await assert.rejects(api('/api/admin/status'), { status: 403, code, restart: true }); assert.equal(seen.code, code); });
-test('admin invalid JSON403 forwards forbidden; other errors stay with caller', async () => { let count = 0; const api = createAdminApi({ fetchImpl: async () => ({ status: 403, ok: false, json: async () => { throw new Error(); } }), onForbidden: () => count++ }); await assert.rejects(api('/api/admin/status'), { status: 403 }); const failed = createAdminApi({ fetchImpl: async () => response(502, { error: { code: 'SYNTHETIC_FAILED' } }), onForbidden: () => count++ }); await assert.rejects(failed('/api/admin/status'), { code: 'SYNTHETIC_FAILED' }); assert.equal(count, 1); });
+for (const code of ['NO_SESSION', 'SESSION_EXPIRED', 'MAILCOW_SESSION_LOST', 'BAD_ORIGIN', 'CSRF', 'FORBIDDEN', 'INVALID_RESPONSE']) test(`admin forbidden ${code} only ends a lost session`, async () => {
+ const dom = new JSDOM('', { url: 'https://admin.example.com/#domains' }), previous = globalThis.location;
+ const session = { step: 'done', csrf: 'synthetic-csrf', user: { username: 'synthetic' } };
+ globalThis.location = dom.window.location; adminSession.value = session; authFailure.value = null; returnTo.value = 'home';
+ const api = createAdminApi({ fetchImpl: async () => code === 'INVALID_RESPONSE' ? { status: 403, ok: false, json: async () => { throw new SyntaxError('HTML response'); } } : response(403, { error: { code, message: '합성 오류' } }) });
+ try {
+  await assert.rejects(api('/api/admin/domains'), { status: 403, code });
+  if (['NO_SESSION', 'SESSION_EXPIRED', 'MAILCOW_SESSION_LOST'].includes(code)) {
+   assert.equal(adminSession.value, null); assert.equal(location.hash, '#login'); assert.equal(authFailure.value.code, code); assert.equal(returnTo.value, 'domains');
+  } else {
+   assert.equal(adminSession.value, session); assert.equal(location.hash, '#domains'); assert.equal(authFailure.value, null); assert.equal(returnTo.value, 'home');
+  }
+ } finally { globalThis.location = previous; adminSession.value = null; authFailure.value = null; returnTo.value = 'home'; dom.window.close(); }
+});
+for (const code of ['AUTH_FAILED', 'ADMIN_PENDING_ACTION']) test(`admin login ${code} remains available to the login caller`, async () => {
+ let count = 0;
+ const api = createAdminApi({ fetchImpl: async () => response(403, { error: { code, message: '합성 오류', restart: true } }), onForbidden: () => count++ });
+ await assert.rejects(api('/api/admin/auth/login', { method: 'POST', body: { username: 'synthetic', password: 'synthetic-only' } }), { status: 403, code, restart: true });
+ assert.equal(count, 0);
+});
+test('admin other errors stay with caller', async () => {
+ let count = 0;
+ const api = createAdminApi({ fetchImpl: async () => response(502, { error: { code: 'SYNTHETIC_FAILED' } }), onForbidden: () => count++ });
+ await assert.rejects(api('/api/admin/status'), { code: 'SYNTHETIC_FAILED' }); assert.equal(count, 0);
+});
 test('admin rejects public API paths and handles204', async () => { const api = createAdminApi({ fetchImpl: async () => response(204) }); await assert.rejects(api('/api/config')); assert.equal(await api('/api/admin/auth/logout', { method: 'POST' }), null); });
 test('admin theme is independent, follows system and manual mode', () => { const dom = new JSDOM('<html/>'), previous = { document: globalThis.document, matchMedia: globalThis.matchMedia }; let changed; const media = { matches: false, addEventListener(_event, fn) { changed = fn; }, removeEventListener() {} }; globalThis.document = dom.window.document; globalThis.matchMedia = () => media; adminMode.value = 'system'; const theme = initAdminTheme(); try { assert.equal(resolvedAdminMode.value, 'light'); media.matches = true; changed(); assert.equal(resolvedAdminMode.value, 'dark'); theme.toggle(); assert.equal(resolvedAdminMode.value, 'light'); assert.equal(adminMode.value, 'light'); } finally { theme.stop(); dom.window.close(); Object.assign(globalThis, previous); } });
 

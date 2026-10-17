@@ -38,6 +38,7 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 | `SNAPPYMAIL_ENABLE` | `true` | SnappyMail 설치·업데이트·기동·검증 |
 | `WEBMAIL_ADMIN_ENABLE` | `false` | 웹메일 관리 화면. `WEBMAIL_ENABLE=true`와 관리자 IP 접근 목록 필요 |
 | `TOOLKIT_ENABLE` | `true` | Toolkit 설치·업데이트. false로 바꿔도 기존 컨테이너는 자동 삭제하지 않음 |
+| `MAIL_SHARE_WHOLE_MAILBOX` | `false` | 받은편지함 공유를 메일함 전체로 확장. 켜기 전 기존 공유 목록 확인. 끄면 설정만 되돌리고 복사된 폴더 권한은 남음 |
 | `MAIL_AUTOEXPUNGE_ENABLE` | `false` | 모든 메일 프로그램의 Junk·Trash 자동 삭제. `MAIL_AUTOEXPUNGE_DAYS=30`(1~365일) |
 
 관리 주소는 `WEBMAIL_ADMIN_HOSTNAME`(기본 `mailadmin.${DOMAIN}`), 세션 기본값은 유휴 60분·최대 8시간입니다. `ADMIN_ACCESS_LIST`가 비면 관리 프록시를 만들지 않습니다. 기존 서버의 켜기·DNS·검증·끄기는 [관리 화면 안내](docs/guide.md#12-관리-화면)를 따르세요.
@@ -303,6 +304,8 @@ CrowdSec request filtering and local log-based IP bans are enabled by default (`
 | SMTP/IMAP | Direct exposure, bypasses reverse proxy |
 | Snappymail | Connects to Dovecot/Postfix via Docker internal network (no DNS required) |
 | Webmail administration | Optional `webmail-admin:8080`, mailcow administrator login, IP access restriction, audit history and branding |
+
+Whole-mailbox sharing defaults to off (`MAIL_SHARE_WHOLE_MAILBOX=false`). Review existing shares before enabling: existing INBOX shares immediately expand to every folder. Disabling removes only the setting; copied folder ACLs remain. Dovecot reload disconnects active IMAP/POP connections once; mail clients reconnect.
 
 Webmail administration defaults to off (`WEBMAIL_ADMIN_ENABLE=false`) and requires Webmail plus an IP-only `ADMIN_ACCESS_LIST`. The default hostname is `mailadmin.${DOMAIN}`. `TOOLKIT_ENABLE` defaults to true; disabling it preserves existing Toolkit containers. See the [administration guide](docs/guide.md#12-관리-화면).
 

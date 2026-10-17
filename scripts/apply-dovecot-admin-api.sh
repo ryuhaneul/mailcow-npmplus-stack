@@ -82,6 +82,8 @@ tail = (
 lines = data.splitlines(keepends=True)
 clean = []
 managed = False
+insert_at = None
+owned_separator = False
 i = 0
 while i < len(lines):
     line = lines[i]
@@ -89,6 +91,7 @@ while i < len(lines):
         if managed:
             sys.exit('duplicate managed API block')
         managed = True
+        insert_at = len(clean)
         start = i
         i += 1
         while i < len(lines) and lines[i] != end:
@@ -103,6 +106,7 @@ while i < len(lines):
         allowed_tails = (tail, legacy_tail, legacy_tail.replace(b',acl get\n', b'\n'))
         if not any(re.fullmatch(rb'doveadm_api_key = [A-Za-z0-9_+/=.-]+\n' + re.escape(allowed_tail), content) for allowed_tail in allowed_tails):
             sys.exit('managed API block differs; refusing to remove unknown content')
+        owned_separator = added_newline
         if added_newline:
             if not clean or not clean[-1].endswith(b'\n'):
                 sys.exit('managed API separator differs')
@@ -115,11 +119,16 @@ while i < len(lines):
     i += 1
 data = b''.join(clean)
 if mode != 'revert':
-    # Record the separator we own so even a missing original EOF newline reverts exactly.
-    needs_newline = bool(data) and not data.endswith(b'\n')
-    data += (b'\n' if needs_newline else b'') + begin
-    data += separator if needs_newline else b''
-    data += b'doveadm_api_key = ' + key.encode('ascii') + b'\n' + tail + end
+    # Keep an existing block in its original position, including its EOF separator.
+    needs_newline = owned_separator if managed else bool(data) and not data.endswith(b'\n')
+    block = begin + (separator if needs_newline else b'')
+    block += b'doveadm_api_key = ' + key.encode('ascii') + b'\n' + tail + end
+    if managed:
+        prefix = b''.join(clean[:insert_at])
+        suffix = b''.join(clean[insert_at:])
+        data = prefix + (b'\n' if needs_newline else b'') + block + suffix
+    else:
+        data += (b'\n' if needs_newline else b'') + block
 Path(dest).write_bytes(data)
 PY
 protect_extra_conf() {
@@ -165,6 +174,7 @@ fi
 cat "$WORK/next" > "$EXTRA_CONF"
 dove_reload() { (cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveadm reload) >/dev/null 2>&1; }
 # Do not forward Docker output: configuration diagnostics can include the API key.
+log "Dovecot 설정을 다시 읽어 열린 IMAP·POP 연결이 한 번 끊깁니다"
 if ! dove_reload; then
     restore_extra_conf
     PENDING=0

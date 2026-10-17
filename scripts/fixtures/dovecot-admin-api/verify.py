@@ -234,6 +234,27 @@ sys.exit(subprocess.call([{real_stat!r}] + args))
     run('--revert')
     assert conf.read_bytes() == before + original + b'\n' + after
 
+    # Other managed blocks and operator lines after this block must not move it.
+    other = (b'# BEGIN mailstack share-mode (apply-dovecot-share-mode.sh)\n'
+             b'plugin {\n  acl_defaults_from_inbox = yes\n}\n# END mailstack share-mode\n'
+             b'# operator tail without newline')
+    for original_prefix in (b'# operator prefix\n', original):
+        conf.write_bytes(original_prefix)
+        run()
+        conf.write_bytes(conf.read_bytes() + other)
+        before = conf.read_bytes()
+        protected = metadata()
+        calls_before = (root / 'calls').read_bytes()
+        backups = list(conf.parent.glob('extra.conf.bak.*'))
+        run('--check')
+        run()
+        run()
+        assert conf.read_bytes() == before and metadata() == protected
+        assert list(conf.parent.glob('extra.conf.bak.*')) == backups
+        assert (root / 'calls').read_bytes() == calls_before
+        run('--revert')
+        assert conf.read_bytes() == original_prefix + other
+
     # Key comes from .env; absent/unsafe values fail without writing or reload.
     snapshot = conf.read_bytes()
     calls = (root / 'calls').read_bytes()

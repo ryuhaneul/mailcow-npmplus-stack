@@ -13,7 +13,7 @@ const config = {
   imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com',
   defaultTheme: 'olive', defaultMode: 'dark',
 };
-const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, imageAllow: [], signatures: {}, defaultFrom: null });
+const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null });
 class PrefsImap extends EventEmitter {
   constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.calls = []; }
   async connect() { this.usable = true; }
@@ -141,4 +141,58 @@ test('prefs: tolerant GET discards invalid fields, retains valid fields and neve
 test('prefs: server failure is 503, cached preferences unchanged', async t => {
   const f = await fixture(t); await f.request('GET'); const before = f.session.prefs; f.client.fail = true;
   for (const method of ['GET', 'PUT']) { const response = await f.request(method, method === 'PUT' ? defaults() : undefined); status(response, 503); assert.ok(!response.body.includes('synthetic-private-value')); assert.strictEqual(f.session.prefs, before); }
+});
+
+test('prefs sharedView: round trip, owner normalization, deduplication and account session storage', async t => {
+  const f = await fixture(t);
+  const sharedView = { ' Sales@EXAMPLE.COM ': { mode: 'custom', folders: ['Shared/sales@example.com/Archive', 'Shared/sales@example.com/Archive', 'Shared/sales@example.com/거래처/2026'], hidden: true } };
+  status(await f.request('PUT', { ...defaults(), sharedView }), 204);
+  const expected = { 'sales@example.com': { mode: 'custom', folders: ['Shared/sales@example.com/Archive', 'Shared/sales@example.com/거래처/2026'], hidden: true } };
+  assert.deepEqual(JSON.parse(f.client.value).sharedView, expected);
+  const response = await f.request('GET'); status(response, 200); assert.deepEqual(response.json().sharedView, expected); assert.deepEqual(f.session.prefs.sharedView, expected);
+});
+for (const mode of ['inbox', 'all', 'custom']) test(`prefs sharedView: ${mode} accepted`, async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { ...defaults(), sharedView: { 'sales@example.com': { mode, folders: [], hidden: false } } }), 204);
+});
+const ownerView = patch => ({ 'sales@example.com': { mode: 'custom', folders: [], hidden: false, ...patch } });
+for (const [label, sharedView] of [
+  ['null', null], ['array', []], ['invalid owner', { invalid: { mode: 'all', folders: [], hidden: false } }],
+  ['invalid mode', ownerView({ mode: 'other' })], ['hidden type', ownerView({ hidden: 1 })], ['folders type', ownerView({ folders: {} })],
+  ['extra property', ownerView({ extra: true })], ['missing property', { 'sales@example.com': { mode: 'all', folders: [] } }],
+  ['another owner path', ownerView({ folders: ['Shared/support@example.com/INBOX'] })],
+  ['owner prefix collision', ownerView({ folders: ['Shared/sales@example.com.evil/INBOX'] })],
+  ['personal path', ownerView({ folders: ['INBOX'] })], ['owner root', ownerView({ folders: ['Shared/sales@example.com'] })],
+  ['empty relative path', ownerView({ folders: ['Shared/sales@example.com/'] })], ['path type', ownerView({ folders: [42] })],
+  ['path control character', ownerView({ folders: ['Shared/sales@example.com/a\n'] })],
+  ['path length 1025', ownerView({ folders: ['Shared/sales@example.com/' + 'x'.repeat(1025 - 'Shared/sales@example.com/'.length)] })],
+  ['501 paths', ownerView({ folders: Array.from({ length: 501 }, (_, i) => `Shared/sales@example.com/${i}`) })],
+  ['101 owners', Object.fromEntries(Array.from({ length: 101 }, (_, i) => [`u${i}@example.com`, { mode: 'inbox', folders: [], hidden: false }]))],
+]) test(`prefs sharedView: rejects ${label} without METADATA write`, async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { ...defaults(), sharedView }), 422);
+  assert.equal(f.client.calls.length, 0); assert.equal(f.session.prefs, undefined);
+});
+test('prefs sharedView: count/length caps accepted at 100 owners, 500 paths, 1024 chars', async t => {
+  const f = await fixture(t);
+  for (const sharedView of [
+    Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`u${i}@example.com`, { mode: 'inbox', folders: [], hidden: false }])),
+    ownerView({ folders: Array.from({ length: 500 }, (_, i) => `Shared/sales@example.com/${i}`) }),
+    ownerView({ folders: ['Shared/sales@example.com/' + 'x'.repeat(1024 - 'Shared/sales@example.com/'.length)] }),
+  ]) status(await f.request('PUT', { ...defaults(), sharedView }), 204);
+});
+test('prefs sharedView: total 64KB cap still applies below individual caps', async t => {
+  const f = await fixture(t);
+  const folders = Array.from({ length: 70 }, (_, i) => `Shared/sales@example.com/${i}${'x'.repeat(990)}`);
+  status(await f.request('PUT', { ...defaults(), sharedView: ownerView({ folders }) }), 413);
+  assert.equal(f.client.calls.length, 0);
+});
+test('prefs sharedView: old document without field loads defaults; invalid field discarded like other fields', async t => {
+  const f = await fixture(t);
+  const old = defaults(); delete old.sharedView;
+  f.client.value = JSON.stringify(old);
+  let response = await f.request('GET'); status(response, 200); assert.deepEqual(response.json(), defaults());
+  f.client.value = JSON.stringify({ ...defaults(), theme: 'amber', sharedView: ownerView({ folders: ['Shared/other@example.com/INBOX'] }) });
+  response = await f.request('GET'); status(response, 200);
+  assert.deepEqual(response.json(), { ...defaults(), theme: 'amber' });
 });

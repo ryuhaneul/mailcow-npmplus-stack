@@ -224,3 +224,23 @@ test('folder empty: next list query immediately reflects empty total', async t =
   assert.equal(refreshed.statusCode, 200);
   assert.equal(refreshed.json().total, 0); assert.deepEqual(refreshed.json().items, []);
 });
+
+test('folders: first path wins; selectable shared owner root, virtual and Noselect rows excluded', async t => {
+  const f = await fixture(t);
+  f.client.rows.push({ ...f.client.rows.find(row => row.path === 'Shared/team@example.com/INBOX'), name: 'duplicate' });
+  for (const path of ['Shared/team@example.com', 'NotSelectable', 'WebmailVirtual', 'Shared/team@example.com/Archive']) {
+    f.client.rows.push({ path, name: path.split('/').at(-1), flags: new Set(path === 'NotSelectable' ? ['\\Noselect'] : []) });
+    f.client.stats.set(path, { messages: 7, size: 999999 });
+  }
+  const response = await f.request('GET', '/api/folders'); assert.equal(response.statusCode, 200);
+  const rows = response.json().folders;
+  assert.equal(rows.filter(row => row.path === 'Shared/team@example.com/INBOX').length, 1);
+  assert.equal(rows.find(row => row.path === 'Shared/team@example.com/INBOX').name, 'INBOX');
+  assert.ok(!rows.some(row => ['Shared/team@example.com', 'NotSelectable', 'WebmailVirtual', 'WebmailVirtual/AllMail'].includes(row.path)));
+  assert.ok(rows.some(row => row.path === 'Shared/team@example.com/Archive'));
+  assert.equal(f.client.calls.filter(call => call.command === 'MYRIGHTS' && decodePath(f.client, call.args[0].value) === 'Shared/team@example.com/INBOX').length, 1);
+  f.client.getQuota = async () => ({ path: 'INBOX' });
+  const storage = await f.request('GET', '/api/storage'); assert.equal(storage.statusCode, 200);
+  assert.equal(storage.json().quota.usedBytes, 2800);
+  assert.equal(storage.json().folders.length, 8);
+});

@@ -33,7 +33,12 @@ async function mailCall(operation) {
 async function list(client) {
   const result = await mailCall(() => client.list({ statusQuery: { messages: true, unseen: true } }));
   if (!Array.isArray(result)) throw unavailable();
-  return result.filter(folder => !virtual(folder.path) && !folder.flags?.has('\\Noselect'));
+  const seen = new Set();
+  return result.filter(folder => {
+    if (seen.has(folder.path)) return false;
+    seen.add(folder.path);
+    return !virtual(folder.path) && !/^Shared\/[^/]+$/.test(folder.path) && !folder.flags?.has('\\Noselect');
+  });
 }
 async function rights(client, path) {
   let value;

@@ -45,6 +45,19 @@ const fields = {
     if (!key || /[\0\r\n]/.test(key) || !Number.isInteger(item) || item < 0 || item > 7) throw invalid();
     return [key, item];
   }),
+  sharedView: value => {
+    if (!object(value) || Object.keys(value).length > 100) throw invalid();
+    return map(value, (key, item) => {
+      const owner = address(key);
+      exact(item, ['mode', 'folders', 'hidden']);
+      if (typeof item.hidden !== 'boolean' || !Array.isArray(item.folders) || item.folders.length > 500) throw invalid();
+      const folders = item.folders.map(path => {
+        if (typeof path !== 'string' || path.length > 1024 || !path.startsWith(`Shared/${owner}/`) || path.length === `Shared/${owner}/`.length || /[\x00-\x1f\x7f]/.test(path)) throw invalid();
+        return path;
+      });
+      return [owner, { mode: choice(item.mode, ['inbox', 'all', 'custom']), folders: [...new Set(folders)], hidden: item.hidden }];
+    });
+  },
   imageAllow: value => {
     if (!Array.isArray(value) || value.length > 500) throw invalid();
     return [...new Set(value.map(address))];
@@ -57,7 +70,7 @@ const fields = {
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
-  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, imageAllow: [], signatures: {}, defaultFrom: null };
+  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
   exact(doc, Object.keys(fields));

@@ -178,6 +178,8 @@ export function createFakeAdminApi() {
     }
     if (url.pathname === '/api/admin/status') return response.end(JSON.stringify(state.status));
     if (url.pathname === '/api/admin/queue') return response.end(JSON.stringify(state.queue));
+    if (url.pathname === '/api/admin/admins') return response.end(JSON.stringify({ items: [{ username: 'admin-example', active: true, tfaActive: true, created: '2026-10-16 03:04:05', forceTfa: false, forcePwUpdate: false }] }));
+    if (url.pathname === '/api/admin/autoexpunge') return response.end(JSON.stringify({ days: 30 }));
     if (url.pathname === '/api/admin/compat-usage') return response.end(JSON.stringify(state.compat));
     if (url.pathname === '/api/admin/history') return response.end(JSON.stringify({ items: state.history.slice(0, Number(url.searchParams.get('limit') ?? 50)) }));
     if (url.pathname === '/api/admin/auth/logout' && request.method === 'POST') { state.session = null; response.statusCode = 204; return response.end(); }

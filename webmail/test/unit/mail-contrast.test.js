@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { WM_C as C } from '../../web/src/theme/contrast.js';
-import { parseMailColor, effectiveMailBackground, brightenMailText, adjustMailContrast, DARK_SURFACE_THRESHOLD } from '../../web/src/theme/mail-contrast.js';
+import { parseMailColor, effectiveMailBackground, brightenMailText, adjustMailContrast, restoreMailColors, DARK_SURFACE_THRESHOLD } from '../../web/src/theme/mail-contrast.js';
 import { messageDocument } from '../../web/src/reader.js';
 
 const dark=[24,26,30];
@@ -51,7 +51,7 @@ test('DOM adjustment handles links, preserves light descendants and leaves image
   for(const selector of ['div','a'])assert.ok(C.ratio(parseMailColor(view.getComputedStyle(doc.querySelector(selector)).color).slice(0,3),dark)>=7);
   assert.deepEqual(parseMailColor(view.getComputedStyle(doc.querySelector('td')).color).slice(0,3),[32,33,36]);
   assert.equal(image.outerHTML,imageBefore);assert.equal(table.getAttribute('style'),'background:#fff');
-  assert.equal(adjustMailContrast(doc,dark),0);
+  assert.equal(adjustMailContrast(doc,dark),2);
   assert.ok(tableBefore.includes('black on white'));dom.window.close();
 });
 test('unmodified mail returns zero adjustments and preserves inline styles',()=>{
@@ -72,4 +72,24 @@ test('unparsed Color 4 foregrounds do not throw or change source styles',()=>{
     const doc=dom.window.document,before=doc.body.innerHTML;
     assert.equal(adjustMailContrast(doc,dark),0);assert.equal(doc.body.innerHTML,before);dom.window.close();
   }
+});
+
+test('unknown or non-solid backgrounds stop lookup and preserve text including descendants',()=>{
+  for(const background of ['background:color(srgb 1 1 1)','background-image:linear-gradient(white,white)','background:rgba(255,255,255,.5)']){
+    const dom=new JSDOM(`<body style="background:#181a1e"><div style="${background};color:#202124">direct<p>descendant</p></div></body>`);
+    const doc=dom.window.document,before=doc.body.innerHTML;
+    assert.equal(effectiveMailBackground(doc.querySelector('p'),dark),null);
+    assert.equal(adjustMailContrast(doc,dark),0);assert.equal(doc.body.innerHTML,before);dom.window.close();
+  }
+});
+test('restoring and recalculating preserve original inline color values and priorities',()=>{
+  const dom=new JSDOM('<body style="background:#181a1e;color:#202124"><div>inherited<p style="color:#202124!important">important</p></div></body>');
+  const doc=dom.window.document,div=doc.querySelector('div'),p=doc.querySelector('p');
+  assert.equal(adjustMailContrast(doc,dark),2);
+  restoreMailColors(doc);
+  assert.equal(div.hasAttribute('style'),false);assert.equal(p.style.color,'rgb(32, 33, 36)');assert.equal(p.style.getPropertyPriority('color'),'important');
+  assert.equal(adjustMailContrast(doc,dark),2);
+  div.style.backgroundColor='#fff';
+  assert.equal(adjustMailContrast(doc,dark),0);assert.equal(div.style.color,'');assert.equal(p.style.color,'rgb(32, 33, 36)');assert.equal(p.style.getPropertyPriority('color'),'important');
+  dom.window.close();
 });

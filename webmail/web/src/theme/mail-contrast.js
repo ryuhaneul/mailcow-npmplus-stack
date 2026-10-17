@@ -14,11 +14,28 @@ export function parseMailColor(value) {
   return parts.map((part, index) => part.endsWith('%') ? parseFloat(part) / 100 * (index < 3 ? 255 : 1) : Number(part)).concat(parts.length === 3 ? [1] : []);
 }
 
+const originalMailColors = new WeakMap();
+
+export function restoreMailColors(document) {
+  const originals = originalMailColors.get(document);
+  if (!originals) return;
+  for (const [element, {value, priority, hadStyle}] of originals) {
+    if (value) element.style.setProperty('color', value, priority);
+    else element.style.removeProperty('color');
+    if (!hadStyle && !element.style.cssText) element.removeAttribute('style');
+  }
+  originalMailColors.delete(document);
+}
+
 export function effectiveMailBackground(element, fallback) {
   const view = element.ownerDocument.defaultView;
   for (let current = element; current; current = current.parentElement) {
-    const color = parseMailColor(view.getComputedStyle(current).backgroundColor);
-    if (color && color[3] === 1) return color.slice(0, 3);
+    const style = view.getComputedStyle(current);
+    if (style.backgroundImage && style.backgroundImage !== 'none') return null;
+    const value = style.backgroundColor, color = parseMailColor(value);
+    if (value === 'transparent' || color?.[3] === 0) continue;
+    if (!color || color[3] !== 1) return null;
+    return color.slice(0, 3);
   }
   return fallback;
 }
@@ -46,6 +63,8 @@ export function brightenMailText(color, background, alpha = 1) {
 }
 
 export function adjustMailContrast(document, fallback) {
+  restoreMailColors(document);
+  const originals = new Map();
   const view = document.defaultView;
   // Snapshot before writing: a parent override must not change a child's source color.
   const entries = [document.body, ...document.body.querySelectorAll('*')]
@@ -54,11 +73,16 @@ export function adjustMailContrast(document, fallback) {
       const original = view.getComputedStyle(element).color, color = parseMailColor(original);
       const background = effectiveMailBackground(element, fallback);
       // Keep transparent text transparent; it can be intentional hidden content.
-      const next = color && color[3] > 0 ? brightenMailText(color.slice(0, 3), background, color[3]) : null;
-      return {element, original, alpha:color?.[3], next, changed: next && next.some((value, index) => value !== color[index])};
+      const next = background && color && color[3] > 0 ? brightenMailText(color.slice(0, 3), background, color[3]) : null;
+      return {element, original, inline:{value:element.style.getPropertyValue('color'),priority:element.style.getPropertyPriority('color'),hadStyle:element.hasAttribute('style')}, alpha:color?.[3], next, changed: next && next.some((value, index) => value !== color[index])};
     });
-  for (const entry of entries) if (entry.changed) entry.element.style.setProperty('color', entry.alpha === 1 ? C.toHex(entry.next) : `rgba(${entry.next.join(',')},${entry.alpha})`, 'important');
+  function write(entry, value) {
+    originals.set(entry.element, entry.inline);
+    entry.element.style.setProperty('color', value, 'important');
+  }
+  for (const entry of entries) if (entry.changed) write(entry, entry.alpha === 1 ? C.toHex(entry.next) : `rgba(${entry.next.join(',')},${entry.alpha})`);
   // Preserve inherited source colors inside light blocks when an ancestor was adjusted.
-  for (const entry of entries) if (!entry.changed && view.getComputedStyle(entry.element).color !== entry.original) entry.element.style.setProperty('color', entry.original, 'important');
+  for (const entry of entries) if (!entry.changed && view.getComputedStyle(entry.element).color !== entry.original) write(entry, entry.original);
+  originalMailColors.set(document, originals);
   return entries.filter(entry => entry.changed).length;
 }

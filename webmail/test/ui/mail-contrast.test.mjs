@@ -57,7 +57,9 @@ await test('HTML mail dark contrast and per-message original colors',async t=>{
   });
   await t.test('original colors use a white light document and adjustment can be restored',async()=>{
     const page=await open();try{
+      await page.locator('.message-frame').evaluate(frame=>window._originalDocument=frame.contentDocument);
       await page.getByRole('button',{name:'원래 색으로 보기',exact:true}).click();
+      assert.equal(await page.evaluate(()=>window._originalDocument.querySelector('a').style.getPropertyPriority('color')),'');
       await expect.poll(async()=>(await colors(page)).background).toBe('rgb(255, 255, 255)');
       assert.equal((await colors(page)).color,'rgb(32, 33, 36)');assert.equal((await colors(page)).scheme,'light');
       const box=page.locator('.body > div');
@@ -130,6 +132,91 @@ await test('HTML mail dark contrast and per-message original colors',async t=>{
         await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toHaveCount(0);
       }finally{await page.close();delete fake.state.readerHtml;}
     }
+  });
+  await t.test('unknown Color 4 or image backgrounds keep black text and inherited descendants unchanged',async()=>{
+    for(const html of [
+      '<p style="color:#202124;background:color(srgb 1 1 1);padding:20px">이메일 주소 인증 EVAL black on white Color4</p>',
+      '<div style="background:color(srgb 1 1 1)"><p style="color:#202124">이메일 주소 인증 inherited Color4</p></div>',
+      '<div style="background-image:linear-gradient(white,white)"><p style="color:#202124">이메일 주소 인증 image background</p></div>',
+    ]){
+      fake.state.readerHtml=html;
+      const page=await open();try{
+        await expect(body(page).locator('p')).toHaveCSS('color','rgb(32, 33, 36)');
+        assert.equal(await body(page).locator('p').evaluate(element=>element.style.getPropertyPriority('color')),'');
+        assert.ok(C.ratio([32,33,36],[255,255,255])>=4.5);
+        await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toHaveCount(0);
+      }finally{await page.close();delete fake.state.readerHtml;}
+    }
+  });
+  await t.test('responsive mail backgrounds restore source colors and reapply only after widening',async()=>{
+    fake.state.readerHtml='<style>@media(max-width:600px){p{background:#ffffff;color:#202124}}</style><p style="color:#202124">이메일 주소 인증 EVAL responsive background</p>';
+    const page=await open();try{
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      await page.locator('.message-frame').evaluate(frame=>frame._sameDocument=frame.contentDocument);
+      await page.setViewportSize({width:375,height:900});
+      await expect(body(page).locator('p')).toHaveCSS('background-color','rgb(255, 255, 255)');
+      await expect(body(page).locator('p')).toHaveCSS('color','rgb(32, 33, 36)');
+      assert.equal(await body(page).locator('p').evaluate(element=>element.style.getPropertyPriority('color')),'');
+      assert.ok(C.ratio(rgb((await colors(page)).color),[255,255,255])>=4.5);
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toHaveCount(0);
+      await page.setViewportSize({width:1280,height:900});
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      const text=await colors(page);assert.ok(C.ratio(rgb(text.color),rgb(text.background))>=7);
+      assert.equal(await page.locator('.message-frame').evaluate(frame=>frame.contentDocument===frame._sameDocument),true);
+      await expect.poll(async()=>Number.parseFloat(await page.locator('.message-frame').evaluate(frame=>frame.style.height))).toBeGreaterThanOrEqual(Math.ceil(text.height));
+    }finally{await page.close();delete fake.state.readerHtml;}
+  });
+  await t.test('print media and beforeprint/afterprint restore exact source colors then reapply',async()=>{
+    fake.state.readerHtml='<style>@media print{p{background:#ffffff;color:#202124!important}}</style><p style="color:#202124">이메일 주소 인증 EVAL printable email</p>';
+    const page=await open();try{
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      await body(page).evaluate(body=>body.ownerDocument.defaultView.dispatchEvent(new Event('beforeprint')));
+      assert.equal(await body(page).locator('p').evaluate(element=>element.style.color),'rgb(32, 33, 36)');
+      assert.equal(await body(page).locator('p').evaluate(element=>element.style.getPropertyPriority('color')),'');
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toHaveCount(0);
+      await body(page).evaluate(body=>body.ownerDocument.defaultView.dispatchEvent(new Event('afterprint')));
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      await page.emulateMedia({media:'print'});
+      await expect(body(page).locator('p')).toHaveCSS('background-color','rgb(255, 255, 255)');
+      await expect(body(page).locator('p')).toHaveCSS('color','rgb(32, 33, 36)');
+      assert.equal(await body(page).locator('p').evaluate(element=>element.style.getPropertyPriority('color')),'');
+      assert.ok(C.ratio(rgb((await colors(page)).color),[255,255,255])>=4.5);
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toHaveCount(0);
+      await page.emulateMedia({media:'screen'});
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      const text=await colors(page);assert.ok(C.ratio(rgb(text.color),rgb(text.background))>=7);
+    }finally{await page.close();delete fake.state.readerHtml;}
+  });
+  await t.test('five thousand paragraphs measure contrast calculation time',async()=>{
+    const page=await open();try{
+      await expect(page.getByRole('button',{name:'원래 색으로 보기',exact:true})).toBeVisible();
+      const result=await page.evaluate(async()=>{
+        const {adjustMailContrast}=await import('/src/theme/mail-contrast.js');
+        const document=window.document.querySelector('.message-frame').contentDocument;
+        document.body.innerHTML='<div style="color:#202124">'+Array.from({length:5000},(_,index)=>`<p>EVAL ${index}</p>`).join('')+'</div>';
+        const start=performance.now(),count=adjustMailContrast(document,[24,26,30]);
+        return {paragraphs:5000,count,ms:performance.now()-start};
+      });
+      assert.equal(result.count,5000);t.diagnostic(`5000 paragraphs: ${result.ms.toFixed(1)}ms`);
+      await page.evaluate(()=>{
+        window._resizeMeasure={passes:0,records:0,startedAt:performance.now()};
+        window._resizeObserver=new MutationObserver(records=>{window._resizeMeasure.passes++;window._resizeMeasure.records+=records.length;window._resizeMeasure.completedMs=performance.now()-window._resizeMeasure.startedAt;});
+        window._resizeObserver.observe(document.querySelector('.message-frame').contentDocument.body,{attributes:true,attributeFilter:['style'],subtree:true});
+      });
+      const started=performance.now();
+      for(let index=0;index<20;index++){
+        await page.setViewportSize({width:1000-index*8,height:900});
+        await page.waitForTimeout(35);
+      }
+      const eventsMs=performance.now()-started;
+      await expect.poll(()=>page.evaluate(()=>window._resizeMeasure.passes)).toBe(1);
+      // Leave a full debounce interval to catch any height-triggered extra pass.
+      await page.waitForTimeout(200);
+      const resize=await page.evaluate(()=>{window._resizeObserver.disconnect();return window._resizeMeasure;});
+      resize.events=20;resize.eventsMs=eventsMs;resize.totalMs=performance.now()-started;
+      assert.equal(resize.passes,1);t.diagnostic(`continuous resize: ${resize.events} events in ${resize.eventsMs.toFixed(1)}ms, ${resize.passes} pass, ${resize.totalMs.toFixed(1)}ms total`);
+      if(captures)await writeFile(`${captures}/gated-performance.json`,JSON.stringify({...result,resize},null,2));
+    }finally{await page.close();}
   });
   await t.test('tablet and mobile toggle stay usable without horizontal overflow',async()=>{
     for(const width of [768,375]){

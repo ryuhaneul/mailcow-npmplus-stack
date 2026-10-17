@@ -73,7 +73,7 @@ export function createF2bService({ mailcow, audit, lock, history }) {
     });
   }
   async function action({ session, actor, ip, data }) {
-    input(data, ['network', 'action']); if (!['unban', 'whitelist', 'blacklist'].includes(data.action)) throw invalid();
+    input(data, ['network', 'action']); if (!['unban', 'whitelist', 'blacklist', 'unwhitelist'].includes(data.action)) throw invalid();
     const name = network(data.network), operation = data.action;
     return lock.run(target, async () => {
       const current = await read(session);
@@ -87,11 +87,15 @@ export function createF2bService({ mailcow, audit, lock, history }) {
           return { network: name, action: operation, auditId: intent.id, notice: '해제 요청됨 — 몇 초 안에 풀려요' };
         });
       }
-      const before = membership(current, name), after = { network: name, whitelist: operation === 'whitelist', blacklist: operation === 'blacklist' };
+      if (operation === 'unwhitelist' && !current.whitelist.includes(name)) throw new AppError(404, 'NOT_FOUND', '차단 안 함 목록에 없는 주소예요.');
+      const before = membership(current, name), after = { network: name, whitelist: operation === 'whitelist', blacklist: operation === 'unwhitelist' ? before.blacklist : operation === 'blacklist' };
       if (isDeepStrictEqual(before, after)) return { ...after, unchanged: true };
       return audit.run({ actor, ip, action: 'fail2ban.membership', target, kind: 'config', revertible: true, before, after }, async intent => {
-        assertUnchanged(etag(before), membership(await read(session), name));
-        await mailcow.call(session, 'POST', '/api/v1/edit/fail2ban', { items: [name], attr: { action: operation } });
+        if (operation === 'unwhitelist') await applyMembership(session, before, after);
+        else {
+          assertUnchanged(etag(before), membership(await read(session), name));
+          await mailcow.call(session, 'POST', '/api/v1/edit/fail2ban', { items: [name], attr: { action: operation } });
+        }
         if (!isDeepStrictEqual(membership(await read(session), name), after)) throw failed();
         return { ...after, auditId: intent.id, ...(operation === 'whitelist' ? { notice: queueNotice, detail: { notice: queueNotice } } : {}) };
       });

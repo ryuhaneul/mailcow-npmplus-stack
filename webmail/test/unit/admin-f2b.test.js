@@ -77,6 +77,33 @@ test('f2b HTTP: guard403, GET self, actions/PUT contracts and health smoke', asy
   const f = await fixture(t), logs = [], app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['198.51.100.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: join(f.dir, 'http-audit') }, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close()); assert.equal((await app.inject('/api/admin/fail2ban')).statusCode, 403);
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', remoteAddress: ctx.ip, headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic-f2b-password' } }); assert.equal(login.statusCode, 200, login.body); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   const listed = await app.inject({ url: '/api/admin/fail2ban', remoteAddress: ctx.ip, headers }); assert.equal(listed.statusCode, 200); assert.equal(listed.json().activeBans[0].self, true); assert.equal((await app.inject({ method: 'POST', url: '/api/admin/fail2ban/actions', headers, payload: { network: '192.0.2.24', action: 'reset-regex' } })).statusCode, 422);
-  for (const payload of [{ network: '192.0.2.24', action: 'whitelist' }, { network: '198.51.100.0/24', action: 'unban' }]) { const result = await app.inject({ method: 'POST', url: '/api/admin/fail2ban/actions', headers, payload }); assert.equal(result.statusCode, 200, result.body); }
+  for (const payload of [{ network: '192.0.2.24', action: 'whitelist' }, { network: '198.51.100.0/24', action: 'unban' }, { network: '192.0.2.24', action: 'unwhitelist' }]) { const result = await app.inject({ method: 'POST', url: '/api/admin/fail2ban/actions', headers, payload }); assert.equal(result.statusCode, 200, result.body); }
   const changed = await app.inject({ method: 'PUT', url: '/api/admin/fail2ban/settings', headers, payload: { etag: listed.json().etag, max_attempts: 12 } }); assert.equal(changed.statusCode, 200, changed.body); assert.equal((await app.inject('/healthz')).json().ok, true); assert.ok(!logs.join('').includes('synthetic-f2b-password')); assert.ok(!JSON.stringify(await app.audit.read()).includes('synthetic-regex-excluded'));
+});
+
+for (const blacklisted of [false, true]) test(`f2b unwhitelist preserves settings and blacklist, undo restores membership (blacklisted=${blacklisted})`, async t => {
+  const f = await fixture(t), name = '192.0.2.10';
+  f.value.whitelist += '\n2001:db8::/32';
+  if (blacklisted) f.value.blacklist += '\n' + name;
+  const initial = await f.service.get({}), result = await action(f, name, 'unwhitelist');
+  assert.deepEqual(result, { network: name, whitelist: false, blacklist: blacklisted, auditId: result.auditId });
+  assert.deepEqual(writes(f)[0].body, { items: [], attr: { ...initial.settings, ban_time_increment: '1', manage_external: '1', whitelist: '2001:db8::/32', blacklist: initial.blacklist.join('\n') } });
+  const after = await f.service.get({});
+  assert.deepEqual(after.settings, initial.settings); assert.deepEqual(after.blacklist, initial.blacklist); assert.deepEqual(after.whitelist, ['2001:db8::/32']);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.action, 'fail2ban.membership'); assert.equal(record.kind, 'config'); assert.equal(record.revertible, true); assert.equal(record.canRevert, true);
+  assert.deepEqual(record.before, { network: name, whitelist: true, blacklist: blacklisted }); assert.deepEqual(record.after, { network: name, whitelist: false, blacklist: blacklisted });
+  await revert(f, result.auditId);
+  const restored = await f.service.get({}); assert.deepEqual(restored.whitelist, initial.whitelist); assert.deepEqual(restored.blacklist, initial.blacklist); assert.deepEqual(restored.settings, initial.settings);
+});
+test('f2b unwhitelist absent404 has exact message and sends no edit', async t => {
+  const f = await fixture(t);
+  await assert.rejects(action(f, '192.0.2.99', 'unwhitelist'), { statusCode: 404, code: 'NOT_FOUND', message: '차단 안 함 목록에 없는 주소예요.' });
+  assert.equal(writes(f).length, 0); assert.deepEqual((await f.audit.read()).rows, []);
+});
+test('f2b unwhitelist validates network and verifies write', async t => {
+  const f = await fixture(t);
+  await assert.rejects(action(f, 'invalid', 'unwhitelist'), { statusCode: 422 }); assert.equal(f.calls.length, 0);
+  f.options.ignoreWrites = true;
+  await assert.rejects(action(f, '192.0.2.10', 'unwhitelist'), { statusCode: 502, code: 'WRITE_VERIFY_FAILED' });
 });

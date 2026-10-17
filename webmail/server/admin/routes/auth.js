@@ -74,8 +74,8 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
     catch (error) {
       if (error.code === 'TOTP_FAILED') {
         error.remainingAttempts = rateLimiter.remaining(request.ip, session.username);
-        error.restart = true;
       } else release();
+      error.restart = true;
       clear(reply);
       await sessions.destroy(session);
       throw error;

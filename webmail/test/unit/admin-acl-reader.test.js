@@ -164,7 +164,7 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
   assert.equal(shares.statusCode, 200, shares.body);
   const preview = await app.inject({ method: 'POST', url: `/api/admin/mailboxes/${grantee}/delete-preview`, headers, payload: {} });
   assert.equal(preview.statusCode, 200, preview.body);
-  assert.deepEqual((await app.accounts.detail({}, owner)).refs.shares, [{ owner, grantee, rights: ['lookup', 'read'] }]);
+  assert.deepEqual((await app.accounts.detail({}, owner)).refs.shares, [{ owner, grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
   await change(false); assert.deepEqual((await item()).grantees, []);
   assert.equal(calls.filter(call => call === 'docker-set').length, 1); assert.equal(calls.filter(call => call === 'docker-delete').length, 1);
   assert.equal(calls.includes('docker-read'), !on); assert.equal(calls.includes('aclGet'), on);

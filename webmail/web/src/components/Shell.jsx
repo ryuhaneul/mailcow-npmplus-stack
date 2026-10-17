@@ -9,7 +9,7 @@ import MailView from './MailView.jsx';
 import Composer from './Composer.jsx';
 import { route, navigate, keysOpen } from '../router.js';
 import { api } from '../api.js';
-import { initStars } from '../theme/stars.js';
+import Starflow from './Starflow.jsx';
 import FiltersPage from './FiltersPage.jsx';
 import RuleBuilder from './RuleBuilder.jsx';
 import Sidebar from './Sidebar.jsx';
@@ -23,11 +23,7 @@ import SettingsPage from '../pages/SettingsPage.jsx';
 import KeysDialog from './KeysDialog.jsx';
 import FolderDialog, { folderDialog } from './FolderDialog.jsx';
 
-export function Starflow() {
-  const frame = useRef(null);
-  useEffect(() => initStars(frame.current), []);
-  return <iframe ref={frame} id="starflow-background" src="/starflow/index.html" tabIndex={-1} aria-hidden="true" title="장식용 별 배경" />;
-}
+export { default as Starflow } from './Starflow.jsx';
 export function useMode() {
   const [mode, setMode] = useState(document.documentElement.dataset.mode);
   useEffect(() => {

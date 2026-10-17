@@ -7,6 +7,6 @@ export default defineConfig({
     const { createFakeAdminApi } = await import(new URL('./dev/fake-admin-api.js', import.meta.url).href);
     server.middlewares.use(createFakeAdminApi().middleware);
   } }],
-  publicDir: false,
+  publicDir: 'public',
   build: { outDir: 'dist-admin', emptyOutDir: true, rollupOptions: { input: fileURLToPath(new URL('./admin.html', import.meta.url)) } },
 });

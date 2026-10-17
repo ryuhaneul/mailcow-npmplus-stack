@@ -82,6 +82,11 @@
       "search"
     ],
     [
+      "settings",
+      "보기 설정",
+      "palette"
+    ],
+    [
       "logo",
       "웹메일 로고",
       "logo"
@@ -95,6 +100,6 @@
   "groups": {
     "accounts": "메일 관리",
     "cleanup": "운영 · 보안",
-    "logo": "설정 · 기록"
+    "settings": "설정 · 기록"
   }
 }

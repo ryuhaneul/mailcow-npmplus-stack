@@ -78,3 +78,70 @@ test('KST display accepts epoch seconds, milliseconds and ISO with identical app
  assert.equal(kst('2026-10-16T14:58:00+09:00'),expected);
  assert.equal(kst('invalid'),'invalid');assert.equal(kst(undefined),'—');assert.equal(kst(''),'—');
 });
+
+test('shared ACL loading guidance follows pending list, preview and run requests', async t => {
+ const { createServer } = await import('vite'), { fileURLToPath } = await import('node:url');
+ const { h, render } = await import('preact'), { act } = await import('preact/test-utils');
+ const dom = new JSDOM('<div id="root"></div>', { url: 'https://admin.example.com/' });
+ const keys = ['window', 'document', 'location', 'addEventListener', 'removeEventListener', 'fetch'];
+ const previous = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
+ const root = dom.window.document.getElementById('root');
+ const message = '공유 정보를 모든 메일함에서 확인하고 있어요. 메일함 수에 따라 몇 분 걸릴 수 있어요.';
+ const address = 'person@example.com', other = 'other@example.com';
+ const items = [{ address, name: '시험 계정', active: 1, messages: 0 }, { address: other, active: 1 }];
+ const list = { items, total: items.length, pageSize: 50, mailboxes: items };
+ let pending = [], delayList = false;
+ Object.assign(globalThis, { window: dom.window, document: dom.window.document, location: dom.window.location, addEventListener: dom.window.addEventListener.bind(dom.window), removeEventListener: dom.window.removeEventListener.bind(dom.window), fetch: (path, options) => {
+  if (options.method !== 'GET' || delayList && path.startsWith('/api/admin/shares?')) return new Promise(resolve => pending.push({ path, options, resolve: value => resolve(response(200, value)) }));
+  return Promise.resolve(response(200, path.startsWith('/api/admin/mailboxes/') ? items[0] : list));
+ } });
+ const server = await createServer({ root: fileURLToPath(new URL('../../web', import.meta.url)), configFile: fileURLToPath(new URL('../../web/vite.admin.config.js', import.meta.url)), server: { middlewareMode: true, watch: null }, appType: 'custom' });
+ const settle = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+ const waitLoading = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+ const mount = async (Component, props = {}) => { act(() => render(null, root)); act(() => render(h(Component, props), root)); await settle(); };
+ const submit = async () => { act(() => root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }))); await settle(); };
+ const input = async (selector, value) => { act(() => { const node = root.querySelector(selector); node.value = value; node.dispatchEvent(new dom.window.Event('input', { bubbles: true })); }); await settle(); };
+ const finish = async value => { assert.equal(pending.length, 1); act(() => pending.shift().resolve(value)); await settle(); assert.ok(!root.textContent.includes(message)); };
+ try {
+  const { default: Loading } = await server.ssrLoadModule('/src/admin/components/Loading.jsx');
+  const { default: Shares } = await server.ssrLoadModule('/src/admin/pages/Shares.jsx');
+  const { default: Leave } = await server.ssrLoadModule('/src/admin/flows/Leave.jsx');
+  const { default: DeleteMailbox } = await server.ssrLoadModule('/src/admin/flows/DeleteMailbox.jsx');
+  const { default: AccountTransition } = await server.ssrLoadModule('/src/admin/flows/AccountTransition.jsx');
+  await t.test('Loading retains its default copy', async () => {
+   await mount(Loading); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중…');
+  });
+  await t.test('shares list guidance disappears after delayed response', async () => {
+   delayList = true; await mount(Shares); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+   await finish({ items: [], total: 0, pageSize: 50 }); delayList = false;
+  });
+  for (const mode of ['leave', 'delete', 'rename', 'toAlias', 'toMailbox']) await t.test(`${mode} guidance appears during both preview and run`, async () => {
+   const lifecycle = mode === 'leave' || mode === 'delete';
+   await mount(mode === 'leave' ? Leave : mode === 'delete' ? DeleteMailbox : AccountTransition, { address, mode });
+   if (mode === 'rename') await input('#transition-new-address', 'new@example.com');
+   if (mode === 'toAlias') {
+    act(() => { const select = root.querySelector('#transition-targets'); select.options[0].selected = true; select.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }); await settle();
+   }
+   assert.equal(root.querySelector('button[type="submit"]').disabled, false);
+   assert.ok(!root.textContent.includes(message));
+   await submit(); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+   assert.equal(pending[0].options.method, 'POST');
+   const refs = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
+   const plan = lifecycle ? { address, mode: mode === 'delete' ? 'delete' : 'disable', cleanRefs: true, refs, etag: 'synthetic', confirmAddress: address, confirmation: '합성 확인', messages: 0, usedBytes: 0 } : {
+    address, newAddress: 'new@example.com', etag: 'synthetic', direction: mode === 'toMailbox' ? 'alias-to-mailbox' : 'mailbox-to-alias', changes: mode === 'rename' ? { mailbox: [], teamFilters: [], aliases: [], senderAs: [], senderGrants: [], shares: [], syncjobs: [], oldAlias: [] } : {
+     mailbox: { address, messages: 0, kind: 'personal', quotaGb: 20 }, alias: { address, targets: [other], goto: other }, refs, aliasesRestored: [], filtersRemoved: [], syncjobsRemoved: [], senderRestore: []
+    }
+   };
+   await finish(plan);
+   await submit(); assert.equal(pending.length, 0); assert.ok(!root.textContent.includes(message));
+   if (mode !== 'leave') await input('#confirm-address', address);
+   act(() => { const checkbox = root.querySelector('input[type="checkbox"]:not([disabled])'); checkbox.checked = true; checkbox.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }); await settle();
+   assert.equal(root.querySelector('button[type="submit"]').disabled, false);
+   await submit(); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+   assert.equal(pending[0].options.method, mode === 'delete' ? 'DELETE' : 'POST');
+   await finish({ address, result: 'ok', steps: [], warnings: [] });
+  });
+ } finally {
+  act(() => render(null, root)); await server.close(); dom.window.close(); Object.assign(globalThis, previous);
+ }
+});

@@ -139,6 +139,9 @@ YAML
 _waf_admin_crs_exclusions() {
     local band=$1
     cat <<YAML
+  - filter: Is${band}Band == true && req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && req.URL.Path startsWith "/api/admin/"
+    apply:
+      - Remove${band}BandRuleByID(920440)
   - filter: Is${band}Band == true && req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && ((req.Method == "PUT" && req.URL.Path matches "^/api/admin/filters/[^/]+/[^/]+$") || (req.Method == "POST" && (req.URL.Path matches "^/api/admin/filters/[^/]+$" || req.URL.Path == "/api/admin/teams")))
     apply:
       - Remove${band}BandRuleByTag("attack-rce")

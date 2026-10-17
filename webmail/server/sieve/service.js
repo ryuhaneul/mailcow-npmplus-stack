@@ -80,7 +80,14 @@ export function createRulesService({ config, imap, directory, connect = connectM
   async function perform(session, currentClient, operation) {
     // Never acquire an IMAP lock while holding the per-account Sieve lock.
     const policy = await context(session, currentClient);
-    return serial(session, () => withClient(session, async client => operation(client, await read(client, policy), policy)));
+    try {
+      return await serial(session, () => withClient(session, async client => operation(client, await read(client, policy), policy)));
+    } catch (error) {
+      if (error.authenticationFailed !== true) throw error;
+      // Recheck credentials on a fresh connection after releasing the Sieve lock.
+      await imap.verifySessionLogin(session);
+      throw new AppError(409, 'SIEVE_DISABLED', '이 계정은 메일 필터 기능이 꺼져 있어요. 관리자에게 켜 달라고 요청해 주세요.');
+    }
   }
   async function get(session) {
     return perform(session, null, async (client, current, policy) => {

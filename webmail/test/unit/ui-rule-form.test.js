@@ -32,3 +32,89 @@ test('rule validation blocks unsafe conditions, missing folders, empty actions a
   assert.ok(ruleProblem({...rule,actions:{}},[folder],[],''));
   assert.ok(ruleProblem({...rule,actions:{forward:['user@external.example.org']}},[folder],['example.com'],'user@external.example.org'));
 });
+
+// Exercise the actual JSX screens with the shared API/session handling.
+test('disabled Sieve shows existing filter notices and leaves composing and the session usable', async t => {
+  const { registerHooks } = await import('node:module');
+  const { readFileSync } = await import('node:fs');
+  const { transformSync } = await import('@babel/core');
+  const { default: jsx } = await import('@babel/plugin-transform-react-jsx');
+  const { JSDOM } = await import('jsdom');
+  const hooks = registerHooks({
+    load(url, context, next) {
+      if (url.endsWith('.css')) return { format: 'module', source: '', shortCircuit: true };
+      if (url.endsWith('.jsx')) return { format: 'module', source: transformSync(readFileSync(new URL(url), 'utf8'), {
+        filename: new URL(url).pathname, configFile: false, babelrc: false,
+        plugins: [[jsx, { runtime: 'automatic', importSource: 'preact' }]],
+      }).code, shortCircuit: true };
+      return next(url, context);
+    },
+  });
+  const dom = new JSDOM('<!doctype html><html><body><main></main></body></html>', { url: 'https://newmail.example.com/#filters', pretendToBeVisual: true });
+  const names = ['window', 'document', 'location', 'getComputedStyle', 'MutationObserver', 'requestAnimationFrame', 'cancelAnimationFrame', 'EventSource'];
+  const originals = new Map(names.map(name => [name, globalThis[name]]));
+  for (const name of names) globalThis[name] = typeof dom.window[name] === 'function' ? dom.window[name].bind(dom.window) : dom.window[name];
+  globalThis.EventSource = class { addEventListener() {} close() {} };
+  const oldFetch = globalThis.fetch;
+  const { h, render } = await import('preact');
+  const { act } = await import('preact/test-utils');
+  const { session } = await import('../../web/src/state/session.js');
+  const { config } = await import('../../web/src/state/config.js');
+  const { prefs } = await import('../../web/src/state/prefs.js');
+  const { route } = await import('../../web/src/router.js');
+  const { default: FiltersPage } = await import('../../web/src/components/FiltersPage.jsx');
+  const { default: RuleBuilder } = await import('../../web/src/components/RuleBuilder.jsx');
+  const { default: Composer } = await import('../../web/src/components/Composer.jsx');
+  const { default: Shell } = await import('../../web/src/components/Shell.jsx');
+  const { toast } = await import('../../web/src/state/toast.js');
+  const { vacation } = await import('../../web/src/components/OooBadge.jsx');
+  const root = document.querySelector('main'), requests = [];
+  const owner = { user: { email: 'user@example.com' }, csrf: 'synthetic-csrf' };
+  const message = '이 계정은 메일 필터 기능이 꺼져 있어요. 관리자에게 켜 달라고 요청해 주세요.';
+  const previous = { session: session.value, config: config.value, prefs: prefs.value, route: route.value, toast: toast.value, vacation: vacation.value };
+  t.after(() => {
+    render(null, root); hooks.deregister(); dom.window.close(); globalThis.fetch = oldFetch;
+    for (const [name, value] of originals) globalThis[name] = value;
+    session.value = previous.session; config.value = previous.config; prefs.value = previous.prefs; route.value = previous.route; toast.value = previous.toast; vacation.value = previous.vacation;
+  });
+  session.value = owner;
+  config.value = { contactsEnabled: false, attachMaxMb: 25 };
+  prefs.value = { signatures: {}, defaultFrom: 'user@example.com' };
+  globalThis.fetch = async path => {
+    requests.push(path);
+    if (path === '/api/folders') return Response.json({ folders: [], virtualAllMail: null });
+    if (path === '/api/storage?quotaOnly=1') return Response.json({ quota: null });
+    if (path === '/api/rules') return Response.json({ error: { code: 'SIEVE_DISABLED', message } }, { status: 409 });
+    if (path === '/api/compose/identities') return Response.json({ identities: [{ address: 'user@example.com', kind: 'self' }], defaultFrom: 'user@example.com', anyAtDomains: [], anyAddress: false });
+    assert.fail(`unexpected API request: ${path}`);
+  };
+  for (const [name, Component] of [['filters', FiltersPage], ['rule', RuleBuilder], ['compose', Composer]]) {
+    await act(async () => { render(null, root); route.value = { name, value: '' }; render(h(Component, {}), root); });
+    await act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(session.value, owner, name);
+    if (name === 'compose') {
+      assert.ok(root.querySelector('#compose-to'), 'recipient entry remains available');
+      assert.ok(root.querySelector('#compose-subject'), 'subject entry remains available');
+      assert.equal(root.querySelector('#compose-to').disabled, false);
+      assert.equal(root.querySelector('#compose-to').placeholder, '이름이나 주소');
+      assert.equal(root.querySelector('.compose-alert'), null);
+    } else {
+      assert.equal(root.querySelector('[role=alert]').textContent.includes(message), true, name);
+      assert.equal(root.querySelector('a[href="#rule"]'), null);
+      assert.equal(root.querySelector('form'), null);
+    }
+  }
+  assert.equal(requests.filter(path => path === '/api/rules').length, 3);
+  assert.equal(requests.some(path => path.includes('/auth/')), false);
+  await t.test('Shell suppresses the disabled-Sieve toast and clears the vacation badge', async () => {
+    prefs.value = { ...prefs.value, theme: 'ink', folderColors: {} };
+    toast.value = null; vacation.value = { enabled: true };
+    await act(async () => { render(null, root); route.value = { name: 'keys', value: '', title: '단축키' }; render(h(Shell, {}), root); });
+    await act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(session.value, owner);
+    assert.equal(vacation.value, null);
+    assert.equal(toast.value, null);
+    assert.equal(root.querySelector('.toast'), null);
+    assert.equal(requests.filter(path => path === '/api/rules').length, 4);
+  });
+});

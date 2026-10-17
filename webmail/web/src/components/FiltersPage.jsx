@@ -42,6 +42,7 @@ export default function FiltersPage() {
     } catch (e) {if (live.current) setError(e);return false;}
     finally {if (live.current) setBusy(false);}
   }
+  const sieveDisabled = error?.code === 'SIEVE_DISABLED';
   const editable = data && ['ok', 'none'].includes(data.state) && !error;
   const reloadNeeded = ['RULES_CONFLICT', 'RULES_STATE', 'IMPORT_SOURCE_CHANGED'].includes(error?.code);
   return <section class="view filters-view" aria-labelledby="filters-title" aria-busy={busy}>
@@ -52,7 +53,7 @@ export default function FiltersPage() {
     <div class="scroll"><div class="set-body">
       {!identityTab && error && <div class="banner rules-error" role="alert"><div>{error.code === 'RULES_CONFLICT' ? '필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.' : error.code === 'IMPORT_SOURCE_CHANGED' ? '가져올 필터가 바뀌었어요. 다시 불러온 뒤 확인해 주세요.' : error.code === 'RULES_INVALID' ? `필터 요청을 확인해 주세요. ${error.path ?? ''} ${error.reason ?? ''}` : error.message}</div><button class="btn" type="button" disabled={busy} onClick={load}>다시 불러오기</button></div>}
       {!identityTab && !data && !error && <p role="status">필터를 불러오는 중이에요.</p>}
-      {!tab && data && <>
+      {!tab && data && !sieveDisabled && <>
         <RulesBanner data={data} busy={busy || reloadNeeded} onAction={setConfirmation}/>
         {['ok', 'none'].includes(data.state) && <div class="lead"><p>받은 메일은 위에서부터 차례로 규칙에 맞춰 봅니다. 맞는 규칙이 여러 개면 모두 적용되고, ‘이후 규칙 멈춤’이 붙은 규칙에서 멈춥니다. 손잡이를 끌거나 화살표로 순서를 바꾸세요.</p>{editable && !busy && <a class="btn pri" href="#rule"><Icon name="plus" size="s"/>새 규칙</a>}</div>}
         {data.doc && <>{data.doc.rules.length ? <RuleList rules={data.doc.rules} editable={editable} busy={busy} missingFolders={data.missingFolders} onChange={rules => mutate('', {baseRev: data.rev, doc: {...data.doc, rules}}, 'PUT')}/> : <p>아직 규칙이 없어요.</p>}</>}
@@ -60,7 +61,7 @@ export default function FiltersPage() {
         <div class="hint"><Icon name="funnel" size="s"/>회사 정책상 회사 밖 주소로 자동 전달하는 규칙은 만들 수 없습니다. 사내 주소{data.internalDomains?.length > 0 && `(@${data.internalDomains[0]}${data.internalDomains.length > 1 ? ' 등' : ''})`}로만 전달됩니다. 전달은 앞으로 오는 메일에만 해요.</div>
       </>}
       {identityTab && <IdentityTabs key={tab} tab={tab}/>}
-      {['vacation','blocked'].includes(tab) && data && <>
+      {['vacation','blocked'].includes(tab) && data && !sieveDisabled && <>
         {!['ok','none'].includes(data.state) && <p role="status">현재 필터 상태에서는 저장할 수 없어요. <a href="#filters">필터 상태 확인</a></p>}
         {saved && <p role="status">저장했어요.</p>}
         {data.doc && (tab === 'vacation' ? <VacationTab value={data.doc.vacation} disabled={!editable || busy} onSave={value => mutate('', {baseRev:data.rev,doc:{...data.doc,vacation:value}}, 'PUT')}/> : <BlockedTab blocked={data.doc.blocked} disabled={!editable || busy} days={config.value.autoexpungeDays} onSave={blocked => mutate('', {baseRev:data.rev,doc:{...data.doc,blocked}}, 'PUT')}/>)}

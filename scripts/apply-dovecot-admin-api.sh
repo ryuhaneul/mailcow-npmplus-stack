@@ -68,8 +68,17 @@ if mode != 'revert' and not re.fullmatch(r'[A-Za-z0-9_+/=.-]+', key):
 begin = b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
 end = b'# END mailstack-admin doveadm\n'
 separator = b'# mailstack-admin doveadm: added EOF newline\n'
-tail = (b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n'
+legacy_tail = (b'doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n'
         b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n')
+tail = (
+    b'# Restrict only IP (TCP/HTTP) doveadm clients; unix-socket clients (replicator) keep the default.\n'
+    b'# remote 0.0.0.0/0 would equal a global setting (Dovecot 2.3 ignores 0-bit masks), so use two /1 halves per family.\n'
+    b'remote 0.0.0.0/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
+    b'remote 128.0.0.0/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
+    b'remote ::/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
+    b'remote 8000::/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
+    b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n'
+)
 lines = data.splitlines(keepends=True)
 clean = []
 managed = False
@@ -90,8 +99,8 @@ while i < len(lines):
         added_newline = content.startswith(separator)
         if added_newline:
             content = content[len(separator):]
-        # Accept the previous exact block so update can add ACL reads and revert can remove it.
-        allowed_tails = (tail, tail.replace(b',acl get\n', b'\n'))
+        # Accept both previous global allowlists for upgrade and byte-exact revert.
+        allowed_tails = (tail, legacy_tail, legacy_tail.replace(b',acl get\n', b'\n'))
         if not any(re.fullmatch(rb'doveadm_api_key = [A-Za-z0-9_+/=.-]+\n' + re.escape(allowed_tail), content) for allowed_tail in allowed_tails):
             sys.exit('managed API block differs; refusing to remove unknown content')
         if added_newline:

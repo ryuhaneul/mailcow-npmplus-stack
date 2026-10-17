@@ -1118,7 +1118,7 @@ sudo bash scripts/verify.sh
 
 `webmail_prepare`는 필요한 키만 생성하고 `apply-dovecot-admin-api.sh apply -y` 또는 `--revert -y`를 실행한 뒤 env·override를 만듭니다. setup·update도 같은 준비를 합니다. 같은 Dovecot 블록이면 파일 쓰기·reload가 없습니다. 키와 선택값이 없는 기존 `.env`에서는 2단계 작업을 하지 않습니다.
 
-관리 env의 `DOVEADM_URL`은 `http://dovecot:12346`이며 `dovecot`은 mailcow 내부망의 서비스 별칭입니다. 클라이언트가 `/doveadm/v1`을 붙입니다. 허용 명령은 `search,expunge,quota get,quota recalc,mailbox list,acl get`입니다. 포트12346은 호스트에 게시하지 않습니다. `DOVEADM_KEY`는 관리 env에만 넣고 공개 웹메일에는 전달하지 않습니다.
+관리 env의 `DOVEADM_URL`은 `http://dovecot:12346`이며 `dovecot`은 mailcow 내부망의 서비스 별칭입니다. 클라이언트가 `/doveadm/v1`을 붙입니다. 허용 명령은 `search,expunge,quota get,quota recalc,mailbox list,acl get`입니다. `extra.conf` 관리 블록은 키와 HTTP 리스너를 두고, 허용 목록은 `remote 0.0.0.0/1`·`remote 128.0.0.0/1`·`remote ::/1`·`remote 8000::/1` 네 블록 안에 각각 설정합니다. IP로 들어오는 doveadm 연결에만 허용 목록을 적용해 mailcow replicator의 unix 소켓 연결은 그대로 둡니다. 기존 전역 허용 목록 블록은 적용 시 키를 유지한 새 형식으로 갱신하고 reload하며, `--check`는 새 형식만 통과합니다. 포트12346은 호스트에 게시하지 않습니다. `DOVEADM_KEY`는 관리 env에만 넣고 공개 웹메일에는 전달하지 않습니다.
 
 릴레이는 `/home/mailcow-dockerized/data/conf/postfix/extra.cf`와 `data/conf/rspamd/local.d/options.inc`가 모두 있을 때만 연결합니다. 특히 mailcow 기본 상태에서 `options.inc`가 없으면 빈 파일을 만들지 않고 두 마운트와 `RELAY_FILES`를 비운 뒤 경고합니다. 기능은 `RELAY_DISABLED`로 꺼지고 verify의 파일 검사는 실패로 표시됩니다. 설정을 검토해 두 파일을 준비하거나 선택값을 false로 되돌립니다.
 

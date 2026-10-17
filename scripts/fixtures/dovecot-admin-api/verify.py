@@ -41,6 +41,29 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
         assert key.encode() not in output, 'secret leaked'
         return output
 
+    begin = b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
+    end = b'# END mailstack-admin doveadm\n'
+    separator = b'# mailstack-admin doveadm: added EOF newline\n'
+    allowlist = b'search,expunge,quota get,quota recalc,mailbox list,acl get'
+    listener = b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n'
+    tail = (
+        b'# Restrict only IP (TCP/HTTP) doveadm clients; unix-socket clients (replicator) keep the default.\n'
+        b'# remote 0.0.0.0/0 would equal a global setting (Dovecot 2.3 ignores 0-bit masks), so use two /1 halves per family.\n'
+        + b''.join(b'remote ' + remote + b' {\n  doveadm_allowed_commands = ' + allowlist + b'\n}\n'
+                   for remote in (b'0.0.0.0/1', b'128.0.0.0/1', b'::/1', b'8000::/1'))
+        + listener
+    )
+    block = begin + b'doveadm_api_key = ' + key.encode() + b'\n' + tail + end
+    conf.write_bytes(b'')
+    run()
+    assert conf.read_bytes() == block, 'empty extra.conf must match the IP-only block byte for byte'
+    run('--check')
+    run('--revert')
+    assert conf.read_bytes() == b''
+    for backup in conf.parent.glob('extra.conf.bak.*'):
+        backup.unlink()
+    (root / 'calls').write_bytes(b'')
+
     original = b'# operator content\r\nmail_location = maildir:~/Maildir\n# literal \\ preserved'
     conf.write_bytes(original)
     run('--check', ok=False)
@@ -66,22 +89,31 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     run('--revert')
     assert conf.read_bytes() == original
 
-    # An already-applied pre-ACL block upgrades in place and both versions revert exactly.
-    previous = applied.replace(b',mailbox list,acl get\n', b',mailbox list\n')
-    conf.write_bytes(previous)
-    inode = conf.stat().st_ino
-    calls_before = (root / 'calls').read_bytes()
-    run('--check', ok=False)
-    assert conf.read_bytes() == previous
-    run()
-    assert conf.read_bytes() == applied and conf.stat().st_ino == inode
-    assert (root / 'calls').read_bytes() == calls_before + b'reload\n'
-    run('--check')
-    run('--revert')
-    assert conf.read_bytes() == original
-    conf.write_bytes(previous)
-    run('--revert')
-    assert conf.read_bytes() == original
+    # Both global allowlist versions upgrade, preserve the key, and revert exactly.
+    for commands in (allowlist.replace(b',acl get', b''), allowlist):
+        previous = (original + b'\n' + begin + separator + b'doveadm_api_key = ' + key.encode()
+                    + b'\ndoveadm_allowed_commands = ' + commands + b'\n' + listener + end)
+        conf.write_bytes(previous)
+        inode = conf.stat().st_ino
+        calls_before = (root / 'calls').read_bytes()
+        run('--check', ok=False)
+        assert conf.read_bytes() == previous
+        run()
+        assert conf.read_bytes() == applied and conf.stat().st_ino == inode
+        assert (root / 'calls').read_bytes() == calls_before + b'reload\n'
+        stat = conf.stat()
+        backups = list(conf.parent.glob('extra.conf.bak.*'))
+        run()
+        run('--check')
+        assert conf.read_bytes() == applied and conf.stat().st_mtime_ns == stat.st_mtime_ns
+        assert conf.stat().st_ino == inode
+        assert list(conf.parent.glob('extra.conf.bak.*')) == backups
+        assert (root / 'calls').read_bytes() == calls_before + b'reload\n'
+        run('--revert')
+        assert conf.read_bytes() == original
+        conf.write_bytes(previous)
+        run('--revert')
+        assert conf.read_bytes() == original
 
     # Unknown block changes still fail closed without writing or reload.
     unknown = applied.replace(b',acl get\n', b',acl set\n')
@@ -119,4 +151,4 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     run(ok=False)
     assert conf.read_bytes() == b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
     assert all(key.encode() not in output for output in outputs)
-print('PASS: block/key/listener/allowlist; no-op; pre-ACL upgrade/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')
+print('PASS: byte-exact IP-only block/key/listener/allowlist; no-op; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')

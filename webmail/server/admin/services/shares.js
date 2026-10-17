@@ -93,7 +93,7 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     });
   }
   const adapter = {
-    label: '받은편지함 읽기 공유를 바꿨어요',
+    label: '읽기 공유를 바꿨어요',
     read: ({ target }) => snapshot(target),
     async prepareRevert({ target, record }) {
       // Re-read the folder list inside the owner lock before comparing either state.

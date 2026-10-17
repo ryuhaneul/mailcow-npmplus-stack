@@ -23,7 +23,8 @@ export default function DeleteMailbox({ leave = false, address = '' }) {
     event.preventDefault(); if (busy) return;
     if (step === 1) { setStep(2); setAck(false); setTyped(''); return; }
     if (step === 2 && (!ack || deleting && typed !== preview.confirmAddress || error?.status === 409)) return;
-    const body = { ...draft, address: draft.address.trim().toLowerCase(), forwardTo: draft.forwardTo || null, ...(step === 2 ? { etag: preview.etag, ...(deleting ? { confirmAddress: typed } : {}) } : {}), ...(leave ? { action: step === 0 ? 'preview' : 'run' } : {}) };
+    const { forwardTo, ...fields } = draft;
+    const body = { ...fields, address: draft.address.trim().toLowerCase(), ...(forwardTo ? { forwardTo } : {}), ...(step === 2 ? { etag: preview.etag, ...(deleting ? { confirmAddress: typed } : {}) } : {}), ...(leave ? { action: step === 0 ? 'preview' : 'run' } : {}) };
     setBusy(true); setError(null);
     try {
       const response = await adminApi(leave ? '/api/admin/flows/leave' : `/api/admin/mailboxes/${encodeURIComponent(body.address)}${step === 0 ? '/delete-preview' : ''}`, { method: leave || step === 0 ? 'POST' : 'DELETE', body });

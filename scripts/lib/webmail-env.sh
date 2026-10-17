@@ -212,11 +212,21 @@ webmail_ensure_admin_key() {
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
-    local scripts="$1" file group mode
+    local scripts="$1" file group mode group_status
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then
-        if grep -qE '^[^:]*:[^:]*:64250:' /etc/group; then
+        if ! command -v getent >/dev/null 2>&1; then
+            webmail_error "host group 64250 lookup unavailable (getent missing); refusing relay file access"
+            return 1
+        fi
+        if getent group 64250 >/dev/null 2>&1; then
             webmail_error "host group 64250 already exists; refusing relay file access"
             return 1
+        else
+            group_status=$?
+            if [ "$group_status" -ne 2 ]; then
+                webmail_error "host group 64250 lookup failed (getent exit $group_status); refusing relay file access"
+                return 1
+            fi
         fi
         for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
             group=$(stat -c %g "$file") || return 1

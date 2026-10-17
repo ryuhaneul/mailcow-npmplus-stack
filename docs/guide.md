@@ -274,6 +274,7 @@ ln -s /npm-data/tls/certbot/live/npm-{CERT_ID}/privkey.pem key.pem
 ### 2.4 Mailcow 업데이트 시 주의
 
 mailcow 업데이트 뒤 `update.sh`가 mailcow 망 NAT(`iptables -t nat -C POSTROUTING ! -o br-mailcow -s <IPV4_NETWORK>.0/24 -j MASQUERADE`, `<IPV4_NETWORK>`는 `mailcow.conf` 값)와 mailcow 컨테이너 기동을 확인하고, NAT가 빠졌으면 같은 규칙을 `-A`로 다시 넣습니다.
+업데이트 중에도 NAT를 1초마다 확인해 누락 시 즉시 복구하며, 감시 종료 뒤 동일한 MASQUERADE 규칙이 중복됐으면 하나만 남깁니다.
 
 `update.sh`가 `cert.pem`/`key.pem`에 `cp`를 시도하는데, dangling symlink에는
 쓸 수 없어서 경고가 뜬다 (`cp: not writing through dangling symlink`).

@@ -38,21 +38,71 @@ set -eu
 r=$MAILCOW_HEALTH_FIXTURE_ROOT
 printf 'iptables %s\n' "$*" >> "$r/calls"
 case "$3" in
-    -C) [ -f "$r/nat" ] ;;
-    -A) [ ! -f "$r/nat-add-fail" ] && : > "$r/nat" ;;
+    -C)
+        if [ -f "$r/nat" ]; then exit 0; fi
+        printf 'Bad rule (synthetic missing NAT)\n' >&2
+        exit 1 ;;
+    -S)
+        n=0; if [ -f "$r/nat" ]; then read -r n < "$r/nat" || n=1; fi
+        for ((i=0; i<n; i++)); do printf '%s\n' '-A POSTROUTING -s 192.0.2.0/24 ! -o br-mailcow -j MASQUERADE'; done
+        printf '%s\n' '-A POSTROUTING -s 198.51.100.0/24 ! -o br-mailcow -j MASQUERADE'
+        ;;
+    -D) read -r n < "$r/nat"; printf '%s\n' "$((n-1))" > "$r/nat" ;;
+    -A)
+        [ ! -f "$r/nat-add-fail" ] || exit 1
+        printf '1\n' > "$r/nat"
+        if [ -f "$r/deleted-at" ]; then
+            read -r tick < "$r/tick"
+            printf '%s\n' "$tick" > "$r/restored-at"
+        fi
+        ;;
     *) exit 2 ;;
 esac
 IPTABLES
 cat > "$root/bin/sleep" <<'SLEEP'
 #!/bin/bash
-[ "$*" = 5 ] || exit 2
-printf 'sleep %s\n' "$*" >> "$MAILCOW_HEALTH_FIXTURE_ROOT/calls"
+r=$MAILCOW_HEALTH_FIXTURE_ROOT
+printf 'sleep %s\n' "$*" >> "$r/calls"
+case "$*" in
+    5) : ;;
+    1)
+        printf '%s\n' "$PPID" >> "$r/watch-pids"
+        tick=0; if [ -f "$r/tick" ]; then read -r tick < "$r/tick"; fi
+        tick=$((tick+1)); printf '%s\n' "$tick" > "$r/tick"
+        if [ -f "$r/watch-delete" ] && [ ! -f "$r/deleted-at" ]; then
+            /bin/rm -f "$r/nat"
+            printf '%s\n' "$tick" > "$r/deleted-at"
+        fi
+        exec /bin/sleep 0.01
+        ;;
+    *) exit 2 ;;
+esac
 SLEEP
 cat > "$root/mailcow/update.sh" <<'UPDATE'
 #!/bin/bash
 [ "$*" = -f ] || exit 2
 printf 'update\n' >> "$MAILCOW_HEALTH_FIXTURE_ROOT/calls"
-exit "$(< "$MAILCOW_HEALTH_FIXTURE_ROOT/update-rc")"
+r=$MAILCOW_HEALTH_FIXTURE_ROOT
+if [ -f "$r/watch-hold" ]; then
+    for ((i=0; i<200; i++)); do
+        [ ! -f "$r/restored-at" ] || break
+        /bin/sleep 0.01
+    done
+    [ -f "$r/restored-at" ] || exit 2
+fi
+if [ -f "$r/watch-fail-hold" ]; then
+    for ((i=0; i<200; i++)); do
+        tick=0; if [ -s "$r/tick" ]; then read -r tick < "$r/tick"; fi
+        [ "$tick" -lt 21 ] || break
+        /bin/sleep 0.01
+    done
+    [ "$tick" -ge 21 ] || exit 2
+fi
+if [ -f "$r/update-signal" ]; then
+    read -r signal < "$r/update-signal"
+    kill -s "$signal" "$(< "$r/phase-pid")"
+fi
+exit "$(< "$r/update-rc")"
 UPDATE
 chmod 755 "$root/bin/"* "$root/mailcow/update.sh"
 # Only the real Phase 3 is executed, isolated from every other update phase.
@@ -66,8 +116,10 @@ chmod 755 "$root/bin/"* "$root/mailcow/update.sh"
     cat <<'HARNESS'
 MAILCOW_DIR="$MAILCOW_HEALTH_FIXTURE_ROOT/mailcow"
 LOGFILE="$MAILCOW_HEALTH_FIXTURE_ROOT/update.log"
+printf '%s\n' "$$" > "$MAILCOW_HEALTH_FIXTURE_ROOT/phase-pid"
+trap 'die "synthetic die while watcher active"' USR1
 log() { printf '%s\n' "$*"; }
-warn() { printf 'WARN %s\n' "$*"; }
+warn() { printf 'WARN %s\n' "$*"; printf 'WARN %s\n' "$*" >> "$LOGFILE"; }
 die() { printf 'DIE %s\n' "$*"; exit 1; }
 header() { :; }
 confirm() { return 0; }
@@ -75,7 +127,7 @@ HARNESS
     sed -n '/^header "Phase 3:/,/^# Phase 4:/p' "$repo/scripts/update.sh" | sed '$d'
 } > "$root/run.sh"
 reset_case() {
-    rm -f "$root/nat" "$root/created" "$root/unbound-unhealthy" "$root/nat-add-fail" "$root/bad-final"
+    rm -f "$root/nat" "$root/created" "$root/unbound-unhealthy" "$root/nat-add-fail" "$root/bad-final" "$root/watch-delete" "$root/watch-hold" "$root/watch-pids" "$root/tick" "$root/deleted-at" "$root/restored-at" "$root/update-signal" "$root/update.log" "$root/watch-fail-hold"
     : > "$root/calls"
     printf '0\n' > "$root/update-rc"
     printf 'IPV4_NETWORK="192.0.2"\n' > "$root/mailcow/mailcow.conf"
@@ -144,9 +196,61 @@ case_default_network() {
     : > "$root/mailcow/mailcow.conf"
     run_phase 0 && [ "$(count 'iptables -t nat -A POSTROUTING ! -o br-mailcow -s 172.22.1.0/24 -j MASQUERADE')" = 1 ]
 }
+# Each real watcher and its sleep child inherit this unique temporary path.
+no_watchers() {
+    local pid
+    if [ -f "$root/watch-pids" ]; then
+        while read -r pid; do ! kill -0 "$pid" 2>/dev/null || return 1; done < "$root/watch-pids"
+    fi
+    ! pgrep -f "$root/(run.sh|bin/sleep)" >/dev/null
+}
+watch_case() {
+    reset_case
+    printf '1\n' > "$root/nat"
+    : > "$root/watch-delete"
+    : > "$root/watch-hold"
+}
+case9() {
+    watch_case
+    run_phase 0 && [ "$(count 'iptables -t nat -A')" = 1 ] &&
+        [ "$(( $(< "$root/restored-at") - $(< "$root/deleted-at") ))" -le 2 ] &&
+        grep -Eq 'WARN.*[0-9]{4}-[0-9]{2}-[0-9]{2}.*MASQUERADE' "$root/update.log" && no_watchers
+}
+case10() { watch_case; run_phase 0 && [ -s "$root/watch-pids" ] && no_watchers; }
+case11() {
+    watch_case
+    printf 'USR1\n' > "$root/update-signal"
+    run_phase 1 && grep -q 'DIE synthetic die' "$root/output" && no_watchers
+}
+case12() { reset_case; SKIP_MAILCOW_UPDATE=true; run_phase 0 && [ ! -e "$root/watch-pids" ] && [ ! -s "$root/calls" ] && no_watchers; }
+case13() {
+    reset_case
+    printf '3\n' > "$root/nat"
+    run_phase 0 && [ "$(count 'iptables -t nat -D POSTROUTING ! -o br-mailcow -s 192.0.2.0/24 -j MASQUERADE')" = 2 ] &&
+        [ "$(< "$root/nat")" = 1 ] && grep -q 'duplicate.*2' "$root/output" && no_watchers
+}
+case14() {
+    watch_case
+    run_phase 0 && ! grep -q 'Bad rule' "$root/output" "$root/update.log" && no_watchers
+}
+case_watch_add_failure() {
+    reset_case
+    : > "$root/nat-add-fail"
+    : > "$root/watch-fail-hold"
+    run_phase 1 && [ "$(grep -c 'NAT watch recovery failed' "$root/update.log")" = 3 ] &&
+        grep -q '1 consecutive attempts' "$root/update.log" &&
+        grep -q '10 consecutive attempts' "$root/update.log" &&
+        grep -q '20 consecutive attempts' "$root/update.log" && no_watchers
+}
+case_signal_cleanup() {
+    watch_case
+    printf 'TERM\n' > "$root/update-signal"
+    run_phase 143 && [ -s "$root/watch-pids" ] && no_watchers
+}
 failed=0
-for name in 1 1b 2 3 4 5 6 7 8 _add_failure _final_timeout _default_network; do
+for name in 1 1b 2 3 4 5 6 7 8 _add_failure _final_timeout _default_network 9 10 11 12 13 14 _signal_cleanup _watch_add_failure; do
     if "case$name"; then printf 'PASS fixture %s\n' "$name"
     else printf 'FAIL fixture %s\n' "$name"; failed=1; fi
 done
+if ! no_watchers; then printf 'FAIL watcher processes remain\n'; failed=1; fi
 exit "$failed"

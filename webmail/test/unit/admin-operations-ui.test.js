@@ -13,3 +13,28 @@ test('sync selection intersects refreshed jobs after deletion, including no rema
  assert.deepEqual(selectedSyncIds(selected,[]),[]);
  assert.deepEqual(selected,['1','2','gone']);
 });
+
+
+test('overview administrator rows, automatic emptying copy and independent load errors follow the contract', async () => {
+ const { createServer } = await import('vite');
+ const { fileURLToPath } = await import('node:url');
+ const server = await createServer({ root: fileURLToPath(new URL('../../web', import.meta.url)), configFile: fileURLToPath(new URL('../../web/vite.admin.config.js', import.meta.url)), server: { middlewareMode: true, watch: null }, appType: 'custom' });
+ try {
+  const { administratorRow, autoexpungeMessage, Result } = await server.ssrLoadModule('/src/admin/pages/Overview.jsx');
+  const created = '2026-10-16 03:04:05';
+  for (const active of [false, true]) for (const tfaActive of [false, true]) for (const forceTfa of [false, true]) for (const forcePwUpdate of [false, true]) {
+   assert.deepEqual(administratorRow({ username: 'admin-example', active, tfaActive, forceTfa, forcePwUpdate, created }), ['admin-example', active ? '사용' : '꺼짐', tfaActive ? '사용' : '안 씀', [forceTfa && '2단계 등록 필요', forcePwUpdate && '암호 변경 필요'].filter(Boolean).join(' · ') || '없음', created]);
+  }
+  for (const days of [1, 30, 365]) assert.equal(autoexpungeMessage(days), `스팸·휴지통에서 ${days}일 지난 메일을 자동으로 지웁니다`);
+  assert.equal(autoexpungeMessage(null), '꺼져 있습니다');
+  for (const code of ['ADMINS_FAILED', 'AUTOEXPUNGE_FAILED']) {
+   const error = { code }, reload = () => {};
+   const result = Result({ resource: { loading: false, error, reload }, children: '성공' });
+   assert.equal(result.type.name, 'LoadError');
+   assert.equal(result.props.error, error);
+   assert.equal(result.props.retry, reload);
+  }
+  assert.equal(Result({ resource: { loading: false, error: null }, children: '성공' }), '성공');
+  assert.equal(Result({ resource: { loading: true } }).type.name, 'Loading');
+ } finally { await server.close(); }
+});

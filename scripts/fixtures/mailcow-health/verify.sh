@@ -49,6 +49,10 @@ case "$3" in
         ;;
     -D) read -r n < "$r/nat"; printf '%s\n' "$((n-1))" > "$r/nat" ;;
     -A)
+        # Count only watcher attempts, excluding the final foreground recovery.
+        if [ -f "$r/watch-fail-hold" ] && [ "$PPID" != "$(< "$r/phase-pid")" ]; then
+            printf 'attempt\n' >> "$r/watch-attempts"
+        fi
         [ ! -f "$r/nat-add-fail" ] || exit 1
         printf '1\n' > "$r/nat"
         if [ -f "$r/deleted-at" ]; then
@@ -92,11 +96,11 @@ if [ -f "$r/watch-hold" ]; then
 fi
 if [ -f "$r/watch-fail-hold" ]; then
     for ((i=0; i<200; i++)); do
-        tick=0; if [ -s "$r/tick" ]; then read -r tick < "$r/tick"; fi
-        [ "$tick" -lt 21 ] || break
+        mapfile -t attempts < "$r/watch-attempts"
+        [ "${#attempts[@]}" -lt 25 ] || break
         /bin/sleep 0.01
     done
-    [ "$tick" -ge 21 ] || exit 2
+    [ "${#attempts[@]}" -ge 25 ] || exit 2
 fi
 if [ -f "$r/update-signal" ]; then
     read -r signal < "$r/update-signal"
@@ -127,7 +131,7 @@ HARNESS
     sed -n '/^header "Phase 3:/,/^# Phase 4:/p' "$repo/scripts/update.sh" | sed '$d'
 } > "$root/run.sh"
 reset_case() {
-    rm -f "$root/nat" "$root/created" "$root/unbound-unhealthy" "$root/nat-add-fail" "$root/bad-final" "$root/watch-delete" "$root/watch-hold" "$root/watch-pids" "$root/tick" "$root/deleted-at" "$root/restored-at" "$root/update-signal" "$root/update.log" "$root/watch-fail-hold"
+    rm -f "$root/nat" "$root/created" "$root/unbound-unhealthy" "$root/nat-add-fail" "$root/bad-final" "$root/watch-delete" "$root/watch-hold" "$root/watch-pids" "$root/tick" "$root/deleted-at" "$root/restored-at" "$root/update-signal" "$root/update.log" "$root/watch-fail-hold" "$root/watch-attempts"
     : > "$root/calls"
     printf '0\n' > "$root/update-rc"
     printf 'IPV4_NETWORK="192.0.2"\n' > "$root/mailcow/mailcow.conf"
@@ -237,7 +241,14 @@ case_watch_add_failure() {
     reset_case
     : > "$root/nat-add-fail"
     : > "$root/watch-fail-hold"
-    run_phase 1 && [ "$(grep -c 'NAT watch recovery failed' "$root/update.log")" = 3 ] &&
+    : > "$root/watch-attempts"
+    run_phase 1 || return 1
+    local -a attempts
+    local expected
+    mapfile -t attempts < "$root/watch-attempts"
+    [ "${#attempts[@]}" -ge 25 ] || return 1
+    expected=$((1 + ${#attempts[@]} / 10))
+    [ "$(grep -c 'NAT watch recovery failed' "$root/update.log")" = "$expected" ] &&
         grep -q '1 consecutive attempts' "$root/update.log" &&
         grep -q '10 consecutive attempts' "$root/update.log" &&
         grep -q '20 consecutive attempts' "$root/update.log" && no_watchers

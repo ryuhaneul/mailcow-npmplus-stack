@@ -33,6 +33,34 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     env = dict(os.environ, FIXTURE_ROOT=str(root), PATH=str(root / 'bin') + ':' + os.environ['PATH'])
     outputs = []
 
+    def metadata():
+        st = conf.stat()
+        owner_record = root / 'root-owner'
+        owner_mtime = owner_record.stat().st_mtime_ns if owner_record.exists() else None
+        return st.st_mode, st.st_uid, st.st_gid, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, owner_mtime
+
+    # Unprivileged fixtures simulate root ownership; mode/inode/timestamps are real.
+    if os.geteuid() != 0:
+        real_stat = shutil.which('stat')
+        (root / 'bin/chown').write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+assert sys.argv[1:] == ['root:root', str(pathlib.Path(os.environ['FIXTURE_ROOT']) / 'mailcow/data/conf/dovecot/extra.conf')]
+(pathlib.Path(os.environ['FIXTURE_ROOT']) / 'root-owner').touch()
+''')
+        (root / 'bin/chown').chmod(0o755)
+        (root / 'bin/stat').write_text(f'''#!/usr/bin/env python3
+import os, pathlib, subprocess, sys
+args = sys.argv[1:]
+if (pathlib.Path(os.environ['FIXTURE_ROOT']) / 'root-owner').exists():
+    if args[:2] == ['-c', '%u:%g']:
+        print('0:0'); sys.exit(0)
+    if args[:2] == ['-c', '%a:%u:%g']:
+        mode = pathlib.Path(args[2]).stat().st_mode & 0o7777
+        print(f'{{mode:o}}:0:0'); sys.exit(0)
+sys.exit(subprocess.call([{real_stat!r}] + args))
+''')
+        (root / 'bin/stat').chmod(0o755)
+
     def run(mode='apply', ok=True, **overrides):
         result = subprocess.run(['bash', str(script), mode, '-y'], env=env | overrides, capture_output=True)
         output = result.stdout + result.stderr
@@ -55,11 +83,41 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     )
     block = begin + b'doveadm_api_key = ' + key.encode() + b'\n' + tail + end
     conf.write_bytes(b'')
+    conf.chmod(0o644)
     run()
+    assert conf.stat().st_mode & 0o777 == 0o600, 'apply must protect an existing 644 file'
     assert conf.read_bytes() == block, 'empty extra.conf must match the IP-only block byte for byte'
     run('--check')
+    conf.chmod(0o644)
+    insecure = conf.stat()
+    insecure_metadata = metadata()
+    run('--check', ok=False)
+    assert metadata() == insecure_metadata, 'check must not change metadata'
+    run()  # Equal bytes still repair permissions, without reload or backup.
+    assert conf.stat().st_mode & 0o777 == 0o600
+    assert conf.stat().st_mtime_ns == insecure.st_mtime_ns
+    assert (root / 'calls').read_text() == 'reload\n'
+    if os.geteuid() == 0:
+        assert (conf.stat().st_uid, conf.stat().st_gid) == (0, 0)
+    else:
+        assert (root / 'root-owner').exists(), 'root:root chown must be requested'
+    protected = metadata()
+    run()
+    run('--check')
+    assert metadata() == protected, '600 and equal bytes must perform no writes/chmod/chown'
+    # Correct an owner mismatch even when the content and mode already match.
+    if os.geteuid() == 0:
+        os.chown(conf, 1, 1)
+    else:
+        (root / 'root-owner').unlink()
+    run('--check', ok=False)
+    run()
+    run('--check')
+    assert conf.stat().st_mtime_ns == insecure.st_mtime_ns
+    assert (root / 'calls').read_text() == 'reload\n'
     run('--revert')
     assert conf.read_bytes() == b''
+    assert conf.stat().st_mode & 0o777 == 0o600, 'revert keeps permissions'
     for backup in conf.parent.glob('extra.conf.bak.*'):
         backup.unlink()
     (root / 'calls').write_bytes(b'')
@@ -88,6 +146,7 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     assert (root / 'calls').read_text() == 'reload\n'
     run('--revert')
     assert conf.read_bytes() == original
+    assert conf.stat().st_mode & 0o777 == 0o600
 
     # Both global allowlist versions upgrade, preserve the key, and revert exactly.
     for commands in (allowlist.replace(b',acl get', b''), allowlist):
@@ -151,4 +210,4 @@ sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
     run(ok=False)
     assert conf.read_bytes() == b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
     assert all(key.encode() not in output for output in outputs)
-print('PASS: byte-exact IP-only block/key/listener/allowlist; no-op; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')
+print('PASS: byte-exact IP-only block/key/listener/allowlist; 644 apply to 600; equal-block permission repair; check permissions; no-op metadata; revert keeps 600; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')

@@ -47,6 +47,18 @@ test('ACL reader: owned rows match dockerapi, excluding Shared/ with sequential 
   assert.deepEqual(calls, [{ command: 'mailboxList', args: { user: owner } }, ...folders.filter(mailbox => !mailbox.startsWith('Shared/')).map(mailbox => ({ command: 'aclGet', args: { user: owner, mailbox } }))]);
 });
 
+test('ACL reader: received namespace root and descendants are skipped, user folders remain', async () => {
+  const calls = [];
+  const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command, args) {
+    if (command === 'mailboxList') return ['INBOX', 'Shared', 'Shared/other@example.com', 'Shared/other@example.com/INBOX', 'MySharedDocs'].map(mailbox => ({ mailbox }));
+    calls.push(args.mailbox);
+    if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
+    return [];
+  } } });
+  assert.deepEqual(await reader.getAcl(grantee), []);
+  assert.deepEqual(calls, ['INBOX', 'MySharedDocs']);
+});
+
 for (const config of [{}, { doveadmUrl: enabled.doveadmUrl }, { doveadmKey: enabled.doveadmKey }]) {
   test(`ACL reader: incomplete config ${Object.keys(config)} calls only dockerapi and returns it unchanged`, async () => {
     let calls = 0;
@@ -133,17 +145,25 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
   };
   const doveadm = { async call(command, args) {
     assert.ok(on); calls.push(command);
-    if (command === 'mailboxList') return [{ mailbox: 'INBOX' }];
+    if (command === 'mailboxList') return (args.user === grantee && grants.has(owner) ? ['INBOX', 'Shared', `Shared/${owner}`, `Shared/${owner}/INBOX`] : ['INBOX']).map(mailbox => ({ mailbox }));
     assert.equal(command, 'aclGet');
+    if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
     return grants.has(args.user) ? [{ id: `user=${grantee}`, global: '', rights: 'lookup read' }] : [];
   } };
-  const app = await createAdminApp({ config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], auditDir: dir }, logger: false, auth: { client: mailcowFixture() }, dockerapi, doveadm });
+  const app = await createAdminApp({ config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: dir }, logger: false, auth: { client: { ...mailcowFixture(), async login({ username }) { return { username, state: 'ready' }; } } }, dockerapi, doveadm });
   t.after(() => app.close());
   assert.equal((await app.inject('/healthz')).statusCode, 200);
   const denied = await app.inject('/api/admin/shares'); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
   const item = async () => (await app.shares.list({})).items.find(row => row.owner === owner);
   const change = async grant => app.shares.change({ session: {}, actor: 'admin', ip: '192.0.2.1', owner, grantee, grant, etag: (await item()).etag });
   await change(true);
+  const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
+  assert.equal(login.statusCode, 200, login.body);
+  const headers = { origin: 'https://mailadmin.example.com', cookie: login.headers['set-cookie'].split(';')[0], 'x-mailadmin-csrf': login.json().csrf };
+  const shares = await app.inject({ url: '/api/admin/shares', headers });
+  assert.equal(shares.statusCode, 200, shares.body);
+  const preview = await app.inject({ method: 'POST', url: `/api/admin/mailboxes/${grantee}/delete-preview`, headers, payload: {} });
+  assert.equal(preview.statusCode, 200, preview.body);
   assert.deepEqual((await app.accounts.detail({}, owner)).refs.shares, [{ owner, grantee, rights: ['lookup', 'read'] }]);
   await change(false); assert.deepEqual((await item()).grantees, []);
   assert.equal(calls.filter(call => call === 'docker-set').length, 1); assert.equal(calls.filter(call => call === 'docker-delete').length, 1);

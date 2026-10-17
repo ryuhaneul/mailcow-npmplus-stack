@@ -59,7 +59,7 @@ export function createCleanupService({ mailcow, doveadm, quota, audit, lock, now
       return audit.run({ actor, ip, action: 'cleanup.run', target: preview.mailbox, kind: 'irreversible', revertible: false, before: { ...conditions, count, usage }, after: { ...conditions, count: 0 } }, async intent => {
         await doveadm.call('expunge', { user: preview.mailbox, query: preview.query });
         const remaining = await search(preview.mailbox, preview.query), after = await quota.usage(preview.mailbox);
-        const detail = { ...conditions, deleted: count - remaining, remaining, before: usage, after };
+        const detail = { ...conditions, beforeDate: preview.before, deleted: count - remaining, remaining, before: usage, after };
         return { ...detail, auditId: intent.id, ...(remaining ? { result: 'partial', recovery: '남은 메일 수를 다시 확인한 뒤 정리해 주세요.' } : {}), detail };
       });
     });

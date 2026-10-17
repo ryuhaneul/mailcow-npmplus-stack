@@ -25,7 +25,22 @@ if [ "$status" -eq 0 ]; then
 fi
 exit "$status"
 GETENT
-command chmod 755 "$root/bin/getent"
+cat > "$root/bin/getfacl" <<'GETFACL'
+#!/bin/bash
+[ "$#" -eq 2 ] && [ "$1" = -n ] || exit 1
+if [ -f "$2.acl" ]; then printf 'group:64250:rw-\n'; fi
+GETFACL
+cat > "$root/bin/setfacl" <<'SETFACL'
+#!/bin/bash
+[ "$#" -eq 3 ] || exit 1
+printf 'setfacl %s %s %s\n' "$1" "$2" "$3" >> "$RELAY_GROUP_FIXTURE_ROOT/calls"
+case "$1 $2" in
+    '-m g:64250:rw') : > "$3.acl" ;;
+    '-x g:64250') /bin/rm "$3.acl" ;;
+    *) exit 1 ;;
+esac
+SETFACL
+command chmod 755 "$root/bin/getent" "$root/bin/getfacl" "$root/bin/setfacl"
 export PATH="$root/bin:$PATH"
 : > "$root/calls"
 WEBMAIL_ADMIN_ENABLE=true
@@ -138,8 +153,76 @@ case5() {
         fi
     done
 }
+case7() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=true
+    WEBMAIL_ADMIN_RELAY_READY=true
+    printf '2\n' > "$root/getent-status"
+    rm -f "${files[0]}.acl" "${files[1]}.acl"
+    : > "$root/calls"
+    reconcile || return 1
+    local file
+    for file in "${files[@]}"; do
+        [ "$(command grep -cFx "setfacl -m g:64250:rw $file" "$root/calls")" = 1 ] || return 1
+        [ -f "$file.acl" ] || return 1
+    done
+    : > "$root/calls"
+    reconcile || return 1
+    [ ! -s "$root/calls" ]
+}
+case8() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=true
+    WEBMAIL_ADMIN_RELAY_READY=true
+    printf '2\n' > "$root/getent-status"
+    local missing tool
+    for missing in setfacl getfacl; do
+        mkdir -p "$root/missing-$missing"
+        for tool in getent getfacl setfacl; do
+            if [ "$tool" != "$missing" ]; then ln -s "$root/bin/$tool" "$root/missing-$missing/$tool"; fi
+        done
+        : > "$root/calls"
+        if (PATH="$root/missing-$missing"; reconcile) > "$root/error" 2>&1; then return 1; fi
+        command grep -q "64250.*$missing" "$root/error" || return 1
+        [ ! -s "$root/calls" ] || return 1
+        printf 'PASS %s missing, permission changes 0\n' "$missing"
+    done
+}
+case9() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=false
+    WEBMAIL_ADMIN_RELAY_READY=false
+    # A restart may already have changed the owning group; ACL still needs removal.
+    : > "${files[0]}.acl"
+    : > "${files[1]}.acl"
+    : > "$root/groups"
+    : > "$root/calls"
+    reconcile || return 1
+    local file
+    for file in "${files[@]}"; do
+        [ "$(command grep -cFx "setfacl -x g:64250 $file" "$root/calls")" = 1 ] || return 1
+        [ ! -f "$file.acl" ] || return 1
+    done
+    : > "$root/calls"
+    reconcile || return 1
+    [ ! -s "$root/calls" ]
+}
+case10() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=false
+    WEBMAIL_ADMIN_RELAY_READY=false
+    command chmod 644 "${files[@]}"
+    : > "$root/groups"
+    mkdir -p "$root/missing-both"
+    local missing tool
+    for missing in both setfacl getfacl; do
+        for tool in id stat grep; do
+            ln -s "$(type -P "$tool")" "$root/missing-$missing/$tool"
+        done
+        : > "$root/calls"
+        if ! (PATH="$root/missing-$missing"; reconcile) > "$root/output" 2>&1; then return 1; fi
+        [ ! -s "$root/calls" ] || return 1
+        [ ! -s "$root/output" ] || return 1
+    done
+}
 failed=0
-for case_number in 1 2 3 4 5 6; do
+for case_number in 1 2 3 4 5 6 7 8 9 10; do
     if "case$case_number"; then printf 'PASS fixture %s\n' "$case_number"
     else printf 'FAIL fixture %s\n' "$case_number"; failed=1; fi
 done

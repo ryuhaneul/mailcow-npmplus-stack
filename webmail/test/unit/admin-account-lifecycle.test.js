@@ -63,12 +63,20 @@ async function fixture(t, populated = true) {
   } };
   const dockerapi = {
     async getAcl(owner) { aclCalls.push(owner); if (options.aclFailure === owner) throw new Error(secret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); },
-    async deleteAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee } }); if (!options.ignoreAclWrites) acl.set(owner, (acl.get(owner) ?? []).filter(row => row.mailbox !== 'INBOX' || row.id !== grantee)); },
+    async deleteAcl(owner, grantee, mailbox = 'INBOX') { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee, mailbox } }); if (!options.ignoreAclWrites) acl.set(owner, (acl.get(owner) ?? []).filter(row => row.mailbox !== mailbox || row.id !== grantee)); },
   };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, audit, lock, history, service };
+  const aclFolders = {
+    enabled: true,
+    async readOwned(owner) { return (await dockerapi.getAcl(owner)).filter(row => row.user === owner && (aclFolders.enabled || row.mailbox === 'INBOX')); },
+    async assertExist(owner, mailboxes) {
+      calls.push({ method: 'CHECK', path: 'acl-folders/assert', body: { owner, mailboxes } });
+      if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
+    },
+  };
+  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
+  return { dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
 }
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
@@ -296,7 +304,7 @@ for (const active of [0, 1, 2]) test(`lifecycle regression: incoming shares from
   const f = await fixture(t, false); f.boxes[2].active = active;
   f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
   const initial = await preview(f);
-  assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, rights: ['lookup', 'read'] }]);
+  assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
   const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'ok');
   assert.deepEqual(f.acl.get(other), []); assert.ok(!f.boxes.some(row => row.username === user));
 });
@@ -379,4 +387,72 @@ test('lifecycle regression: concurrent deletes never lock a goto alias as a mail
     assert.equal(f.aliases.find(row => row.address === x).goto, `${mailbox},${z}`);
     assert.equal(f.aliases.find(row => row.address === z).goto, mailbox);
   } finally { clearTimeout(timer); }
+});
+
+for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} previews and removes owned and received rows in every folder`, async t => {
+  const f = await fixture(t, false), folders = ['INBOX', 'Sent', '거래처 "봄"/2026'];
+  for (const [owner, grantee] of [[user, other], [team, user]]) f.acl.set(owner, folders.map(mailbox => ({ user: owner, id: grantee, mailbox, rights: ['lookup', 'read'] })));
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  assert.equal(initial.refs.shares.length, 6);
+  assert.deepEqual(new Set(initial.refs.shares.map(row => row.mailbox)), new Set(folders));
+  const result = await f.service.remove({ ...context, addr: user, mode, data: confirmed(initial.etag) });
+  assert.equal(result.result, 'ok');
+  assert.equal([...f.acl.values()].flat().length, 0);
+  assert.equal(result.detail.cleaned.shares.length, 6);
+  const deletes = writes(f).filter(call => call.path === 'dockerapi/delete_acl');
+  assert.equal(deletes.length, 6);
+  for (const owner of [user, team]) {
+    const check = f.calls.findIndex(call => call.path === 'acl-folders/assert' && call.body.owner === owner);
+    const firstWrite = f.calls.findIndex(call => call.path === 'dockerapi/delete_acl' && call.body.owner === owner);
+    assert.ok(check >= 0 && check < firstWrite);
+    assert.deepEqual(f.calls[check].body.mailboxes, folders.slice().sort((a, b) => a.localeCompare(b)));
+  }
+});
+
+for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} refuses success when a new folder grant appears during cleanup`, async t => {
+  const f = await fixture(t, false);
+  f.acl.set(team, [{ user: team, id: user, mailbox: 'Sent', rights: ['lookup', 'read'] }]);
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  const removeAcl = f.dockerapi.deleteAcl;
+  f.dockerapi.deleteAcl = async (...args) => {
+    await removeAcl(...args);
+    f.acl.get(team).push({ user: team, id: user, mailbox: 'Late', rights: ['lookup', 'read'] });
+  };
+  const result = await f.service.remove({ ...context, addr: user, mode, data: confirmed(initial.etag) });
+  assert.equal(result.result, 'partial');
+  assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+  assert.ok(f.boxes.some(row => row.username === user));
+  assert.ok(!writes(f).some(call => call.path === '/api/v1/delete/mailbox'));
+});
+
+test('account folder ACL: leave detects new owner reference after the shares stage', async t => {
+  const f = await fixture(t, false);
+  f.jobs.push({ id: 8, user2: user, active: 1 });
+  const initial = await leave(f, { action: 'preview', cleanRefs: true });
+  f.options.onCall = ({ path }) => {
+    if (path === '/api/v1/delete/syncjob') f.acl.set(other, [{ user: other, id: user, mailbox: 'Late', rights: ['lookup', 'read'] }]);
+  };
+  const result = await leave(f, { action: 'run', cleanRefs: true, etag: initial.etag });
+  assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+});
+
+test('account folder ACL: missing folder prevents all ACL deletes for that owner', async t => {
+  const f = await fixture(t, false);
+  f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: user, mailbox, rights: ['lookup', 'read'] })));
+  const initial = await preview(f); f.options.missingFolder = 'Sent';
+  await assert.rejects(remove(f, confirmed(initial.etag)), { statusCode: 409, code: 'CONFLICT' });
+  assert.equal(writes(f).length, 0);
+});
+
+test('account folder ACL: disabled doveadm retains INBOX behavior and warns on detail, delete and leave', async t => {
+  const f = await fixture(t, false); f.aclFolders.enabled = false;
+  f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: user, mailbox, rights: ['lookup', 'read'] })));
+  const info = await f.service.detail({}, user, { allShares: true }), initial = await preview(f);
+  for (const result of [info, initial, await leave(f, { action: 'preview', cleanRefs: true })]) {
+    assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
+    assert.deepEqual(result.refs.shares.map(row => row.mailbox), ['INBOX']);
+  }
+  const result = await remove(f, confirmed(initial.etag));
+  assert.equal(result.result, 'ok'); assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
+  assert.deepEqual(f.acl.get(team).map(row => row.mailbox), ['Sent']);
 });

@@ -252,12 +252,21 @@ else
         || die "Could not record running Mailcow services before update"
     MAILCOW_UPDATE_RC=0
     log "Running Mailcow official update..."
+    MAILCOW_NAT_NETWORK=$(webmail_mailcow_value IPV4_NETWORK)
+    MAILCOW_NAT_NETWORK="${MAILCOW_NAT_NETWORK:-172.22.1}.0/24"
+    trap 'mailcow_nat_watch_stop' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
     # -f: force yes, skip interactive prompts inside mailcow update.sh.
+    mailcow_nat_watch_start "$MAILCOW_NAT_NETWORK"
     if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
         :
     else
         MAILCOW_UPDATE_RC=$?
     fi
+    mailcow_nat_watch_stop
+    trap - EXIT INT TERM HUP
     mailcow_after_update "$MAILCOW_DIR" "$MAILCOW_RUNNING_BEFORE"
     [ "$MAILCOW_UPDATE_RC" -eq 0 ] || die "Mailcow official update failed — see $LOGFILE"
     log "Mailcow update: done"

@@ -41,12 +41,12 @@ function Popup({ group, anchor, onClose }) {
       const top=innerWidth<761?r.bottom+6:r.top-8;
       node.style.top=`${Math.max(12,Math.min(top,innerHeight-12-node.offsetHeight))}px`;
     }
-    position();const resize=new ResizeObserver(position);resize.observe(node);node.querySelector('button').focus({preventScroll:true});
+    position();const resize=new ResizeObserver(position);resize.observe(node);node.querySelector('[role=radio][aria-checked=true]').focus({preventScroll:true});
     const outside=event=>{if(!node.contains(event.target)&&!anchor.current.contains(event.target)){event.preventDefault();onClose();}};
     const key=event=>{
       if(event.key==='Escape'){event.preventDefault();event.stopPropagation();onClose();}
       if(event.key==='Tab'){
-        const items=[...node.querySelectorAll('button:not(:disabled):not([tabindex="-1"]),input:not(:disabled),a[href]')];
+        const items=[...node.querySelectorAll('button,input,a[href]')].filter(item=>!item.disabled&&item.tabIndex>=0);
         if(event.shiftKey&&document.activeElement===items[0]){event.preventDefault();items.at(-1).focus();}
         else if(!event.shiftKey&&document.activeElement===items.at(-1)){event.preventDefault();items[0].focus();}
       }

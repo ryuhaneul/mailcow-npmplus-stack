@@ -18,7 +18,7 @@ function registeredShortcut(event, editing) {
 }
 export function initShortcuts(handle) {
   const onKey = event => {
-    if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
+    if (event.defaultPrevented || document.querySelector('dialog[open],.sp-popover[role=dialog]')) return;
     const editing = Boolean(event.target.closest('input,textarea,select,[contenteditable]'));
     if (registeredShortcut(event, editing) || editing) return;
     handle?.(event);

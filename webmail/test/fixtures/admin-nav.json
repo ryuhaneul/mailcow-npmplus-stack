@@ -2,9 +2,14 @@
   "source": "승인 시안 admin-ac(A + C 첫 화면)의 navs",
   "nav": [
     [
+      "home",
+      "처음 화면",
+      "home"
+    ],
+    [
       "overview",
       "운영 현황",
-      "home"
+      "status"
     ],
     [
       "accounts",

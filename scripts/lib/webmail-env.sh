@@ -212,7 +212,7 @@ webmail_ensure_admin_key() {
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
-    local scripts="$1" file group mode group_status
+    local scripts="$1" file group mode group_status tool acl
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then
         if ! command -v getent >/dev/null 2>&1; then
             webmail_error "host group 64250 lookup unavailable (getent missing); refusing relay file access"
@@ -228,15 +228,27 @@ webmail_reconcile_admin_api() {
                 return 1
             fi
         fi
+        for tool in getfacl setfacl; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+                webmail_error "host group 64250 ACL unavailable ($tool missing); refusing relay file access"
+                return 1
+            fi
+        done
         for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
             group=$(stat -c %g "$file") || return 1
             if [ "$group" != 64250 ]; then chgrp 64250 "$file" || return 1; fi
             mode=$(stat -c %a "$file") || return 1
             if (( (8#$mode & 0020) == 0 )); then chmod g+w "$file" || return 1; fi
+            acl=$(getfacl -n "$file") || return 1
+            if ! grep -qFx 'group:64250:rw-' <<< "$acl"; then setfacl -m g:64250:rw "$file" || return 1; fi
         done
     elif [ "$WEBMAIL_ADMIN_RELAY_ENABLE" != true ]; then
         for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
             [ -f "$file" ] || continue
+            if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+                acl=$(getfacl -n "$file") || return 1
+                if grep -q '^group:64250:' <<< "$acl"; then setfacl -x g:64250 "$file" || return 1; fi
+            fi
             group=$(stat -c %g "$file") || return 1
             if [ "$group" = 64250 ]; then
                 mode=$(stat -c %a "$file") || return 1

@@ -11,7 +11,8 @@ export function groupMailboxAddresses(filters) {
 }
 export function createSharesService({ mailcow, dockerapi, audit, lock, history }) {
   async function mailboxes(session) {
-    const rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    let rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    if (rows && typeof rows === 'object' && !Object.keys(rows).length) rows = [];
     if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '메일함 목록을 읽을 수 없어요.');
     return rows.filter(row => typeof row?.username === 'string' && String(row.active) === '1').map(row => ({ owner: row.username.toLowerCase(), name: typeof row.name === 'string' ? row.name : '' }));
   }
@@ -31,7 +32,8 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
   async function list(session, { q = '', page = '1' } = {}) {
     if (typeof q !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
     const boxes = await mailboxes(session);
-    const filters = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    let filters = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    if (filters && typeof filters === 'object' && !Object.keys(filters).length) filters = [];
     if (!Array.isArray(filters)) throw new AppError(502, 'MAILCOW_REJECTED', '팀 목록을 읽을 수 없어요.');
     const groups = groupMailboxAddresses(filters);
     const search = q.trim().toLowerCase();
@@ -60,13 +62,13 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
       const response = state => ({ owner, grantee, grantees: state.grants.map(row => row.grantee), etag: etag(state), applied: true });
       if (Boolean(existing) === grant) return { ...response(before), unchanged: true };
       const after = { grants: (grant ? [...before.grants, { grantee, rights: ['lookup', 'read'] }] : before.grants.filter(row => row.grantee !== grantee)).sort((a, b) => a.grantee.localeCompare(b.grantee)) };
-      return audit.run({ actor, ip, action: grant ? 'share.grant' : 'share.revoke', target: owner, kind: 'config', revertible: true, before, after }, async () => {
+      return audit.run({ actor, ip, action: grant ? 'share.grant' : 'share.revoke', target: owner, kind: 'config', revertible: true, before, after }, async intent => {
         assertUnchanged(expected, await snapshot(owner));
         if (grant) await dockerapi.setAcl(owner, grantee);
         else await dockerapi.deleteAcl(owner, grantee);
         const applied = await snapshot(owner);
         if (!isDeepStrictEqual(applied, after)) throw new AppError(502, 'WRITE_VERIFY_FAILED', '공유 설정이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
-        return response(applied);
+        return { ...response(applied), auditId: intent.id };
       });
     });
   }

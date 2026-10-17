@@ -11,7 +11,8 @@ export function createCleanupService({ mailcow, doveadm, quota, audit, lock, now
   const previews = new Map();
   function sweep() { for (const [token, value] of previews) if (value.expires <= now()) previews.delete(token); }
   async function teamCheck(session, mailbox, confirmed) {
-    const filters = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    let filters = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    if (filters && typeof filters === 'object' && !Object.keys(filters).length) filters = [];
     if (!Array.isArray(filters)) throw new AppError(502, 'MAILCOW_REJECTED', '팀 목록을 읽을 수 없어요.');
     if (groupMailboxAddresses(filters).has(mailbox) && confirmed !== true) throw new AppError(422, 'TEAM_CONFIRM_REQUIRED', '팀 메일함의 메일을 정리하는지 확인해 주세요.');
   }

@@ -212,7 +212,7 @@ webmail_ensure_admin_key() {
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
-    local scripts="$1" file group mode group_status tool acl
+    local scripts="$1" file group mode group_status tool acl acl_entry
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then
         if ! command -v getent >/dev/null 2>&1; then
             webmail_error "host group 64250 lookup unavailable (getent missing); refusing relay file access"
@@ -234,6 +234,18 @@ webmail_reconcile_admin_api() {
                 return 1
             fi
         done
+        # Check both files before changing ownership, modes or ACL masks.
+        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
+            acl=$(getfacl -n "$file") || return 1
+            while IFS= read -r acl_entry; do
+                case "$acl_entry" in
+                    group:64250:*) ;;
+                    user:?*:*|group:?*:*)
+                        webmail_error "host group 64250 ACL contains other named entries; refusing relay file access"
+                        return 1 ;;
+                esac
+            done <<< "$acl"
+        done
         for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
             group=$(stat -c %g "$file") || return 1
             if [ "$group" != 64250 ]; then chgrp 64250 "$file" || return 1; fi
@@ -247,7 +259,7 @@ webmail_reconcile_admin_api() {
             [ -f "$file" ] || continue
             if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
                 acl=$(getfacl -n "$file") || return 1
-                if grep -q '^group:64250:' <<< "$acl"; then setfacl -x g:64250 "$file" || return 1; fi
+                if grep -q '^group:64250:' <<< "$acl"; then setfacl -n -x g:64250 "$file" || return 1; fi
             fi
             group=$(stat -c %g "$file") || return 1
             if [ "$group" = 64250 ]; then

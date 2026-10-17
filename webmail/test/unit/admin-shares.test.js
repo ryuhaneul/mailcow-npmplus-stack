@@ -152,6 +152,46 @@ test('shares: active mailbox listing, group flags, pagination and search project
   assert.ok(!JSON.stringify(list).includes(secret)); assert.ok(!JSON.stringify(list).includes('Env'));
 });
 
+test('shares: listing runs at most four ACL snapshots concurrently and preserves sorted items', async () => {
+  const owners = Array.from({ length: 9 }, (_, i) => `mailbox${i}@example.com`);
+  let active = 0, peak = 0;
+  const calls = [], completed = [];
+  const dockerapi = { async getAcl(who) {
+    calls.push(who); active++; peak = Math.max(peak, active);
+    try {
+      await new Promise(resolve => setTimeout(resolve, who === owners[0] ? 40 : 5));
+      completed.push(who);
+      return [{ user: who, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }];
+    } finally { active--; }
+  } };
+  const mailcow = { async call(_session, _method, path) {
+    return path.endsWith('mailbox/all') ? [...owners].reverse().map(username => ({ username, name: username, active: 1 })) : [];
+  } };
+  const service = createSharesService({ mailcow, dockerapi, history: { register() {} } });
+  const result = await service.list({});
+  assert.equal(peak, 4); assert.equal(active, 0);
+  assert.deepEqual(calls, owners);
+  assert.notDeepEqual(completed, owners);
+  assert.deepEqual(result, {
+    items: owners.map(who => ({ owner: who, name: who, group: false, grantees: [grantee], etag: etag({ grants: [{ grantee, rights: ['lookup', 'read'] }] }) })),
+    total: owners.length, page: 1, pageSize: 50,
+  });
+});
+
+test('shares: listing propagates the original ACL snapshot error without partial results', async () => {
+  const failure = new AppError(503, 'DOCKERAPI_UNAVAILABLE', '공유 정보를 읽을 수 없어요.');
+  const dockerapi = { async getAcl(who) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    if (who === owner) throw failure;
+    return [];
+  } };
+  const mailcow = { async call(_session, _method, path) {
+    return path.endsWith('mailbox/all') ? [owner, grantee, other].map(username => ({ username, active: 1 })) : [];
+  } };
+  const service = createSharesService({ mailcow, dockerapi, history: { register() {} } });
+  await assert.rejects(service.list({}), error => error === failure);
+});
+
 test('shares: grant and revoke create config records, preserve other ACLs and support reverts', async t => {
   const f = await fixture(t); f.acl.set(`${owner}|${other}`, ['admin', 'lookup', 'read']);
   let item = await ownerItem(f);

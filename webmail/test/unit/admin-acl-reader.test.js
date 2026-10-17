@@ -23,10 +23,10 @@ const acl = {
 };
 const owned = [
   { user: owner, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] },
-  { user: owner, id: 'anyone', mailbox: 'INBOX', rights: ['lookup'] },
+  { user: owner, id: 'anyone', mailbox: 'INBOX', rights: ['global', 'lookup'] },
   { user: owner, id: 'staff=mail', mailbox: 'Archive', rights: ['lookup', 'read', '-write'] },
   { user: owner, id: 'authenticated', mailbox: 'Archive/2026', rights: [] },
-  { user: owner, id: grantee, mailbox: 'MySharedNotes', rights: ['read'] },
+  { user: owner, id: grantee, mailbox: 'MySharedNotes', rights: ['global', 'read'] },
 ];
 
 test('ACL reader: owned rows match dockerapi, excluding Shared/ with sequential folders and global rows retained', async () => {
@@ -148,4 +148,40 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
   await change(false); assert.deepEqual((await item()).grantees, []);
   assert.equal(calls.filter(call => call === 'docker-set').length, 1); assert.equal(calls.filter(call => call === 'docker-delete').length, 1);
   assert.equal(calls.includes('docker-read'), !on); assert.equal(calls.includes('aclGet'), on);
+});
+
+for (const on of [false, true]) test(`global INBOX ACL: ${on ? 'doveadm' : 'dockerapi'} rename preview rejects with 409 and zero writes`, async () => {
+  let writes = 0;
+  const globalAcl = { user: owner, id: grantee, mailbox: 'INBOX', rights: ['global', 'lookup', 'read'] };
+  const dockerapi = {
+    async getAcl(who) { return who === owner ? [globalAcl] : []; },
+    async setAcl() { writes++; },
+    async deleteAcl() { writes++; },
+  };
+  const doveadm = { async call(command, args) {
+    if (command === 'mailboxList') return [{ mailbox: 'INBOX' }];
+    assert.equal(command, 'aclGet');
+    return args.user === owner ? [{ id: `user=${grantee}`, global: 'global', rights: 'lookup read' }] : [];
+  } };
+  const reader = createAclReader({ config: on ? enabled : {}, dockerapi, doveadm });
+  const original = mailcowFixture();
+  const mailcow = { async call(session, method, path, body) {
+    if (method !== 'GET') writes++;
+    return original.call(session, method, path, body);
+  } };
+  const accounts = createAccountsService({ mailcow, dockerapi: { ...dockerapi, getAcl: reader.getAcl }, history: { register() {} }, teams: {} });
+  await assert.rejects(accounts.rename({ session: {}, actor: 'admin', ip: '192.0.2.1', addr: grantee, data: { action: 'preview', newLocal: 'new', keepOldAsAlias: true } }), { statusCode: 409, code: 'ACL_UNSUPPORTED' });
+  assert.equal(writes, 0);
+  assert.deepEqual(await reader.getAcl(owner), [globalAcl]);
+});
+
+test('ACL reader: missing or non-string global rejects the whole result after a valid row', async () => {
+  for (const global of [undefined, null, false, 0, {}, []]) {
+    const row = { id: `user=${grantee}`, rights: 'lookup read' };
+    if (global !== undefined) row.global = global;
+    const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command) {
+      return command === 'mailboxList' ? [{ mailbox: 'INBOX' }] : [acl.INBOX[0], row];
+    } } });
+    await assert.rejects(reader.getAcl(owner), { statusCode: 502, code: 'DOVEADM_REJECTED' });
+  }
 });

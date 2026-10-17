@@ -63,13 +63,21 @@ async function fixture(t, populated = true) {
   } };
   const dockerapi = {
     async getAcl(owner) { if (options.aclFailure === owner) throw new Error(secret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); },
-    async setAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/set_acl', body: { owner, grantee } }); acl.set(owner, [...(acl.get(owner) ?? []), { user: owner, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }]); },
-    async deleteAcl(owner, grantee) { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee } }); acl.set(owner, (acl.get(owner) ?? []).filter(row => row.id !== grantee || row.mailbox !== 'INBOX')); },
+    async setAcl(owner, grantee, mailbox = 'INBOX') { calls.push({ method: 'POST', path: 'dockerapi/set_acl', body: { owner, grantee, mailbox } }); acl.set(owner, [...(acl.get(owner) ?? []), { user: owner, id: grantee, mailbox, rights: ['lookup', 'read'] }]); },
+    async deleteAcl(owner, grantee, mailbox = 'INBOX') { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee, mailbox } }); acl.set(owner, (acl.get(owner) ?? []).filter(row => row.id !== grantee || row.mailbox !== mailbox)); },
   };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, service, audit, history };
+  const aclFolders = {
+    enabled: true,
+    async readOwned(owner) { return (await dockerapi.getAcl(owner)).filter(row => row.user === owner && (aclFolders.enabled || row.mailbox === 'INBOX')); },
+    async assertExist(owner, mailboxes) {
+      calls.push({ method: 'CHECK', path: 'acl-folders/assert', body: { owner, mailboxes } });
+      if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
+    },
+  };
+  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
+  return { dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, aclFolders, service, audit, history };
 }
 const rename = (f, data) => f.service.rename({ ...context, addr: old, data: { newLocal: 'new', keepOldAsAlias: true, ...data } });
 const preview = f => rename(f, { action: 'preview' });
@@ -148,7 +156,7 @@ for (const [script, type, active] of [[`redirect "${old}";\n`, 'prefilter', 1], 
   await assert.rejects(preview(f), error => error.statusCode === 409 && error.message.includes(team) && !error.message.includes('redirect')); assert.equal(writes(f).length, 0);
 });
 
-for (const extra of [{ rights: ['lookup', 'read', 'write'] }, { mailbox: 'Sent' }]) test('rename: unsupported related ACL prevents any rename', async t => {
+for (const extra of [{ rights: ['lookup', 'read', 'write'] }, { mailbox: 'Sent', rights: ['lookup', 'write'] }]) test('rename: unsupported related ACL prevents any rename', async t => {
   const f = await fixture(t); Object.assign(f.acl.get(team)[0], extra);
   await assert.rejects(preview(f), { code: 'ACL_UNSUPPORTED', statusCode: 409 }); assert.equal(writes(f).length, 0);
 });
@@ -227,6 +235,55 @@ test('rename regression: mixed owned/received ACL responses use the real owner a
   const initial = await preview(f);
   assert.deepEqual(initial.changes.shares, [{ owner: other, grantee: old, mailbox: 'INBOX', rights: ['lookup', 'read'], newOwner: other, newGrantee: next }]);
   const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
-  assert.deepEqual(writes(f).filter(row => row.path === 'dockerapi/set_acl').map(row => row.body), [{ owner: other, grantee: next }]);
+  assert.deepEqual(writes(f).filter(row => row.path === 'dockerapi/set_acl').map(row => row.body), [{ owner: other, grantee: next, mailbox: 'INBOX' }]);
   assert.ok(!f.acl.has(next));
+});
+
+for (const direction of ['grantee', 'owner']) test(`account folder ACL: rename ${direction} preserves every original folder`, async t => {
+  const f = await fixture(t, false), owner = direction === 'owner' ? old : team, grantee = direction === 'owner' ? other : old;
+  const folders = ['INBOX', 'Sent', '거래처 "봄"/2026'];
+  f.acl.set(owner, folders.map(mailbox => ({ user: owner, id: grantee, mailbox, rights: ['lookup', 'read'] })));
+  const initial = await preview(f);
+  assert.equal(initial.changes.shares.length, 3);
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  const newOwner = direction === 'owner' ? next : owner, newGrantee = direction === 'owner' ? grantee : next;
+  assert.deepEqual(f.acl.get(newOwner).map(row => ({ ...row })).sort((a, b) => a.mailbox.localeCompare(b.mailbox)),
+    folders.map(mailbox => ({ user: newOwner, id: newGrantee, mailbox, rights: ['lookup', 'read'] })).sort((a, b) => a.mailbox.localeCompare(b.mailbox)));
+  assert.ok(![...f.acl.values()].flat().some(row => row.user === old || row.id === old));
+  const check = f.calls.find(call => call.path === 'acl-folders/assert');
+  assert.deepEqual(new Set(check.body.mailboxes), new Set(folders)); assert.equal(check.body.owner, newOwner);
+  if (direction === 'grantee') for (const mailbox of folders) {
+    const set = f.calls.findIndex(call => call.path === 'dockerapi/set_acl' && call.body.mailbox === mailbox);
+    const del = f.calls.findIndex(call => call.path === 'dockerapi/delete_acl' && call.body.mailbox === mailbox);
+    assert.ok(f.calls.indexOf(check) < set && set < del);
+  }
+});
+
+test('account folder ACL: rename validates every folder before first ACL write', async t => {
+  const f = await fixture(t, false);
+  f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: old, mailbox, rights: ['lookup', 'read'] })));
+  const initial = await preview(f); f.options.missingFolder = 'Sent';
+  const result = await run(f, initial.etag);
+  assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'CONFLICT'); assert.equal(result.steps.at(-1).stage, 'shares');
+  assert.ok(!writes(f).some(call => call.path.startsWith('dockerapi/')));
+});
+
+test('account folder ACL: another folder cannot mask a failed folder grant on rename', async t => {
+  const f = await fixture(t, false);
+  f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: old, mailbox, rights: ['lookup', 'read'] })));
+  const originalSet = f.dockerapi.setAcl;
+  f.dockerapi.setAcl = async (owner, grantee, mailbox) => { if (mailbox !== 'Sent') await originalSet(owner, grantee, mailbox); };
+  const result = await run(f, (await preview(f)).etag);
+  assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
+  assert.ok(!writes(f).some(call => call.path === '/api/v1/add/alias'));
+});
+
+test('account folder ACL: rename disabled doveadm warns and only migrates INBOX', async t => {
+  const f = await fixture(t, false); f.aclFolders.enabled = false;
+  f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: old, mailbox, rights: ['lookup', 'read'] })));
+  const initial = await preview(f); assert.deepEqual(initial.changes.shares.map(row => row.mailbox), ['INBOX']);
+  assert.ok(initial.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
+  assert.ok(f.acl.get(team).some(row => row.mailbox === 'Sent' && row.id === old));
 });

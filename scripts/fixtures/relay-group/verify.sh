@@ -28,12 +28,19 @@ GETENT
 cat > "$root/bin/getfacl" <<'GETFACL'
 #!/bin/bash
 [ "$#" -eq 2 ] && [ "$1" = -n ] || exit 1
+printf 'user::rw-\ngroup::r--\nother::r--\n'
 if [ -f "$2.acl" ]; then printf 'group:64250:rw-\n'; fi
+if [ -f "$2.other-acl" ]; then
+    while IFS= read -r line; do printf '%s\n' "$line"; done < "$2.other-acl"
+fi
 GETFACL
 cat > "$root/bin/setfacl" <<'SETFACL'
 #!/bin/bash
+printf 'setfacl' >> "$RELAY_GROUP_FIXTURE_ROOT/calls"
+printf ' %s' "$@" >> "$RELAY_GROUP_FIXTURE_ROOT/calls"
+printf '\n' >> "$RELAY_GROUP_FIXTURE_ROOT/calls"
+if [ "$#" -eq 4 ] && [ "$1 $2 $3" = '-n -x g:64250' ]; then shift; fi
 [ "$#" -eq 3 ] || exit 1
-printf 'setfacl %s %s %s\n' "$1" "$2" "$3" >> "$RELAY_GROUP_FIXTURE_ROOT/calls"
 case "$1 $2" in
     '-m g:64250:rw') : > "$3.acl" ;;
     '-x g:64250') /bin/rm "$3.acl" ;;
@@ -197,7 +204,7 @@ case9() {
     reconcile || return 1
     local file
     for file in "${files[@]}"; do
-        [ "$(command grep -cFx "setfacl -x g:64250 $file" "$root/calls")" = 1 ] || return 1
+        [ "$(command grep -cFx "setfacl -n -x g:64250 $file" "$root/calls")" = 1 ] || return 1
         [ ! -f "$file.acl" ] || return 1
     done
     : > "$root/calls"
@@ -221,8 +228,39 @@ case10() {
         [ ! -s "$root/output" ] || return 1
     done
 }
+case11() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=true
+    WEBMAIL_ADMIN_RELAY_READY=true
+    printf '2\n' > "$root/getent-status"
+    local file entry
+    rm -f "${files[0]}.acl" "${files[1]}.acl"
+    for file in "${files[@]}"; do
+        for entry in group:12345:r-- user:12345:r-- user:64250:r--; do
+            printf '%s\nmask::-w-\n' "$entry" > "$file.other-acl"
+            : > "$root/calls"
+            if reconcile > "$root/error" 2>&1; then return 1; fi
+            command grep -q '64250.*ACL' "$root/error" || return 1
+            [ ! -s "$root/calls" ] || return 1
+            rm "$file.other-acl"
+        done
+    done
+}
+case12() {
+    WEBMAIL_ADMIN_RELAY_ENABLE=false
+    WEBMAIL_ADMIN_RELAY_READY=false
+    rm -f "${files[0]}.other-acl" "${files[1]}.other-acl"
+    : > "${files[0]}.acl"
+    : > "${files[1]}.acl"
+    : > "$root/calls"
+    reconcile || return 1
+    local file
+    for file in "${files[@]}"; do
+        [ "$(command grep -cFx "setfacl -n -x g:64250 $file" "$root/calls")" = 1 ] || return 1
+        [ ! -f "$file.acl" ] || return 1
+    done
+}
 failed=0
-for case_number in 1 2 3 4 5 6 7 8 9 10; do
+for case_number in 1 2 3 4 5 6 7 8 9 10 11 12; do
     if "case$case_number"; then printf 'PASS fixture %s\n' "$case_number"
     else printf 'FAIL fixture %s\n' "$case_number"; failed=1; fi
 done

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, cp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,7 +18,7 @@ const env = {
   MAILCOW_IPV4_NETWORK: '192.0.2', MAILCOW_IPV6_NETWORK: '2001:db8::/64', AUTOEXPUNGE_DAYS: '30',
   LOGO_DIR: '/brand', AUDIT_DIR: '/data/audit', LOG_LEVEL: 'silent',
 };
-const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
+const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 async function fixture(t, options = {}) {
   const app = await createAdminApp({ config: loadAdminConfig(env), logger: false, staticDir: '/nonexistent-admin-fixture', ...options });
   t.after(() => app.close());
@@ -123,6 +123,7 @@ test('public routes: no registered admin paths and admin session is JSON 404', a
   const response = await app.inject('/api/admin/auth/session');
   assert.equal(response.statusCode, 404);
   assert.equal(response.json().error.code, 'NOT_FOUND');
+  assert.equal(response.headers['content-security-policy'], "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
 });
 
 test('admin config: fixed paths, hostname, URL and network formats rejected', () => {
@@ -174,3 +175,21 @@ test('admin config: existing mail connection environment names are retained for 
 });
 
 test('admin config: empty LOGO_DIR disables logo management', () => { assert.equal(loadAdminConfig({ ...env, LOGO_DIR: '' }).logoDir, ''); });
+
+test('admin Starflow static assets permit only same-origin frames while root/API/assets keep ancestry blocked', async t => {
+  const staticDir = await mkdtemp(join(tmpdir(), 'webmail-admin-starflow-'));
+  t.after(() => rm(staticDir, { recursive: true, force: true }));
+  await writeFile(join(staticDir, 'admin.html'), '<title>synthetic admin</title>');
+  await cp(new URL('../../web/public/starflow/', import.meta.url), join(staticDir, 'starflow'), { recursive: true });
+  const app = await fixture(t, { staticDir });
+  for (const file of ['index.html', 'stars.js', 'stars.css']) {
+    const response = await app.inject(`/starflow/${file}?v=synthetic`);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body, await readFile(new URL(`../../web/public/starflow/${file}`, import.meta.url), 'utf8'));
+    assert.equal(response.headers['content-security-policy'], csp.replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
+  }
+  for (const path of ['/', '/api/admin/auth/session', '/assets/synthetic.js', '/starflow-other/index.html', '/api/admin/missing?next=/starflow/index.html', '/starflow/../api/admin/auth/session', '/starflow/%2e%2e/api/admin/auth/session', '/starflow/%2e%2e%2fapi/admin/auth/session', '/starflow/%3f%2f..%2f..%2fapi/admin/auth/session']) {
+    const response = await app.inject(path);
+    assert.equal(response.headers['content-security-policy'], csp, path);
+  }
+});

@@ -1,14 +1,18 @@
-import { signal } from '@preact/signals';
-import { WM_THEMES } from '../theme/themes.js';
-export const adminMode = signal('system'), resolvedAdminMode = signal('light');
+import { signal, effect } from '@preact/signals';
+import { applyAppearance } from '../theme/values.js';
+import { adminPrefs, readAdminPrefs, updateAdminPrefs } from './state/prefs.js';
+export const adminMode = { get value() { return adminPrefs.value.mode; }, set value(mode) { updateAdminPrefs({ mode }); } };
+export const resolvedAdminMode = signal('light');
 export function initAdminTheme() {
+  adminPrefs.value = readAdminPrefs();
   const media = matchMedia('(prefers-color-scheme: dark)');
-  const apply = () => { const mode = adminMode.value === 'system' ? media.matches ? 'dark' : 'light' : adminMode.value, theme = WM_THEMES.ink;
-    const vars = { ...theme.shape, ...theme[mode], '--accent': theme.swatches[0][mode === 'dark' ? 2 : 1], '--on-accent': theme[mode]['--ink'] === '#141416' ? '#FFFFFF' : '#141416' };
-    vars['--accent-ui'] = vars['--accent']; vars['--focus'] = vars['--accent'];
-    for (const [key, value] of Object.entries(vars)) document.documentElement.style.setProperty(key, value);
-    resolvedAdminMode.value = mode; document.documentElement.dataset.theme = 'ink'; document.documentElement.dataset.mode = mode; document.documentElement.style.colorScheme = mode;
+  const apply = () => {
+    const state = adminPrefs.value, mode = state.mode === 'system' ? media.matches ? 'dark' : 'light' : state.mode;
+    const detail = applyAppearance(state, mode);
+    resolvedAdminMode.value = mode;
+    document.dispatchEvent(new (document.defaultView.CustomEvent)('webmail:apply', { detail }));
   };
-  media.addEventListener('change', apply); apply();
-  return { apply, toggle() { adminMode.value = document.documentElement.dataset.mode === 'dark' ? 'light' : 'dark'; apply(); }, stop() { media.removeEventListener('change', apply); } };
+  media.addEventListener('change', apply);
+  const stop = effect(apply);
+  return { apply, toggle() { updateAdminPrefs({ mode: resolvedAdminMode.value === 'dark' ? 'light' : 'dark' }); }, stop() { stop(); media.removeEventListener('change', apply); } };
 }

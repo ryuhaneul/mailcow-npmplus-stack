@@ -55,7 +55,7 @@ import { logOptions } from '../log.js';
 import { installErrors, errorBody } from '../errors.js';
 import { installHeaders, installClientIp } from '../security/headers.js';
 
-export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
+export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
 export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm } = {}) {
   if (logger !== false) {
@@ -70,7 +70,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   installHeaders(app);
   installClientIp(app);
   app.addHook('onSend', async (request, reply, payload) => {
-    reply.header('content-security-policy', adminCsp);
+    let normalizedPath = '';
+    try { const url = new URL(request.url, 'http://localhost'); url.pathname = decodeURIComponent(url.pathname); normalizedPath = url.pathname; } catch {}
+    reply.header('content-security-policy', normalizedPath.startsWith('/starflow/') ? adminCsp.replace("frame-ancestors 'none'", "frame-ancestors 'self'") : adminCsp);
     const pathname = request.url.split('?')[0];
     if (pathname === '/api' || pathname.startsWith('/api/')) reply.header('cache-control', 'no-store');
     return payload;

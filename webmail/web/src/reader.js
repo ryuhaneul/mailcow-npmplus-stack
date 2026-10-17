@@ -13,6 +13,7 @@ export function allowSender(document, address) {
 function escape(value) {return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 // HTML is sanitized by the read API. Plain text is escaped before entering srcdoc.
 export function messageDocument(message, style) {
+  if (style.original) style = {...style,mode:'light',surface:'#ffffff',ink:'#202124',link:'#1a73e8',sunken:'#f5f5f5',line:'#dadce0',muted:'#5f6368'};
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>
 @font-face{font-family:Pretendard;src:url('/fonts/PretendardVariable.woff2') format('woff2');font-weight:45 920;font-display:swap}
 html{color-scheme:${style.mode}}body{display:flow-root;margin:0;font-family:Pretendard,sans-serif;font-size:${style.fontSize};line-height:1.75;color:${style.ink};background:${style.surface};overflow-wrap:anywhere}p{margin:0 0 14px}img{max-width:100%;height:auto}table{max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:${style.link}}

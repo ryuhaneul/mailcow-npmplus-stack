@@ -29,12 +29,18 @@ function fakeMessage(folder,index) {
   return {ref:Buffer.from(JSON.stringify([folder,1,uid])).toString('base64url'),folder,folderName:folder.split('/').at(-1),from:{name:['김민수 · 예시상사','박지수 · 디자인팀','a 담당자','예시 안내'][index%4],address:index%3===0?'a@example.com':`sender${uid}@example.com`},to:[{name:'이서윤',address:'user@example.com'}],subject:['견적서 송부드립니다','b 검토 요청','프로젝트 회의 안내','월간 소식'][index%4],preview:'안녕하세요. 검토할 내용을 보내 드립니다.',date:new Date(Date.UTC(2026,9,15-index%4,14-index%8,30)).toISOString(),size:1024*(index+1),seen:index%4===3,flagged:index%3===0,answered:false,hasAttachment:index%2===0};
 }
 function fixtureMail(){const personal = [['INBOX',12],['Sent',3],['Archive',2],['거래처',3],['하늘 프로젝트',2],['Junk',3],['Trash',2]].flatMap(([folder,count])=>Array.from({length:count},(_,index)=>fakeMessage(folder,index))).sort((a,b)=>b.date.localeCompare(a.date));const paths=new Set();return personal.concat(fixtureFolders.filter(folder=>folder.shared&&folder.path.split('/').length>2&&!paths.has(folder.path)&&paths.add(folder.path)).flatMap(folder=>Array.from({length:folder.unseen},(_,index)=>({...fakeMessage(folder.path,index),seen:false}))));}
+export const mailContrastFixtures = [
+  {subject:'이메일 주소 인증',readerHtml:'<div style="color:#202124"><h2>이메일 주소 인증</h2><p>안녕하세요. 이메일 주소를 인증해 주세요.</p><p><a href="https://example.com/verify" style="color:#202124">이메일 주소 인증하기</a></p><p>이 메일을 요청하지 않았다면 무시하셔도 됩니다.</p></div>'},
+  {subject:'흰 표 바탕 안내',readerHtml:'<table bgcolor="#ffffff"><tr><td style="color:#202124;padding:24px">흰 표 위의 검은 글씨는 그대로 유지합니다.</td></tr></table>'},
+  {subject:'대비가 맞는 안내',readerHtml:'<p style="color:#ffffff">어두운 화면에서 이미 잘 보이는 글씨입니다.</p>'},
+];
 const messages = {
   EMAIL_FORMAT: '메일 주소를 확인해 주세요.', AUTH_FAILED: '메일 주소나 암호가 맞지 않아요.', RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤 다시 시도해 주세요.', MAIL_UNAVAILABLE: '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.', NO_SESSION: '로그인이 필요해요.', SESSION_EXPIRED: '로그인이 만료됐어요. 다시 로그인해 주세요.', CSRF: '요청을 확인할 수 없어요.',
 };
-export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
+export function createFakeApi({ variant = 'a', authenticated = false, contrastMessages = false } = {}) {
   const streams=new Set();
   const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], identities: structuredClone(exampleIdentities), prefs: {...structuredClone(examplePrefs),sharedView:{'sales@example.com':{mode:'custom',folders:['Shared/sales@example.com/거래처','Shared/sales@example.com/거래처/2026','Shared/sales@example.com/견적'],hidden:false}},theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode}, prefsError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
+  if(contrastMessages)state.mail.unshift(...mailContrastFixtures.map((fixture,index)=>({...fakeMessage('INBOX',index),...fixture,hasAttachment:false})));
   function emit(type,value){for(const response of streams)response.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);}
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {

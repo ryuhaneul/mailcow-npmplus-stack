@@ -81,7 +81,8 @@ export function createFlowsService({ mailcow, teams, aliases, senders, audit, lo
   }
   async function aliasPlan(session, params) {
     const edit = await aliases.previewEdit(session, params.alias, { targets: [params.target], mode: 'move' });
-    const boxes = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    let boxes = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    if (boxes && typeof boxes === 'object' && !Object.keys(boxes).length) boxes = [];
     if (!Array.isArray(boxes)) throw new AppError(502, 'MAILCOW_REJECTED', '메일함 목록을 읽을 수 없어요.');
     if (params.grantSendTo.some(addr => !boxes.some(row => normalize(row.username) === addr))) throw invalid();
     const etags = { params: etag(params), teams: {}, senders: {}, alias: edit.etag };

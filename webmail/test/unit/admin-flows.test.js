@@ -199,3 +199,13 @@ for (const reason of ['multiple_prefilters', 'unparseable']) test(`team flow: un
 test('team flow: disabled selected team is rejected before any distribution or grant is written', async t => {
   const f = await fixture(t); f.boxes.find(row => row.username === newTeam).active = '0'; await assert.rejects(teamPreview(f), { statusCode: 422 }); assert.equal(writes(f).length, 0);
 });
+
+
+test('alias flow: empty mailbox object preserves 422 for a requested send grantee', async t => {
+  const f = await fixture(t), call = f.mailcow.call;
+  f.mailcow.call = (...args) => args[2] === '/api/v1/get/mailbox/all' ? {} : call(...args);
+  // Isolate the mailbox-list validation after the alias preview succeeds.
+  const flows = createFlowsService({ mailcow: f.mailcow, aliases: { async previewEdit() { return {}; } } });
+  await assert.rejects(flows.alias({ ...ctx, data: { ...aliasData, action: 'preview' } }), { statusCode: 422, code: 'INVALID_INPUT' });
+  assert.equal(writes(f).length, 0);
+});

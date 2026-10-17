@@ -19,8 +19,8 @@ async function fixture(t, source = script) {
   const mailcow = { async call(_session, method, path, body) {
     calls.push({ method, path, body });
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
-    if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
-    if (path === '/api/v1/get/filters/all') { reads++; options.onRead?.(reads, rows); return structuredClone(rows); }
+    if (path === '/api/v1/get/mailbox/all') return structuredClone(Object.hasOwn(options, 'mailboxes') ? options.mailboxes : boxes);
+    if (path === '/api/v1/get/filters/all') { reads++; options.onRead?.(reads, rows); return structuredClone(Object.hasOwn(options, 'filters') ? options.filters : rows.length ? rows : {}); }
     if (path === '/api/v1/edit/filter') {
       if (!options.ignoreWrites) Object.assign(rows.find(row => String(row.id) === body.items[0]), body.attr);
       return [{ type: 'success', msg: 'filter_modified' }];
@@ -215,4 +215,16 @@ test('teams HTTP: authentication, CSRF, list and member editing use the existing
 test('teams: duplicate member display preserves the first original spelling like Toolkit', async t => {
   const f = await fixture(t, 'redirect :copy "FIRST@EXAMPLE.COM";\nredirect :copy "first@example.com";\nredirect :copy "second@example.com";\n');
   assert.deepEqual((await item(f)).members.map(row => row.address), ['FIRST@EXAMPLE.COM', second]);
+});
+
+
+test('teams: empty mailbox object is an empty list and malformed lists still return 502', async t => {
+  const f = await fixture(t, null); f.options.mailboxes = {};
+  assert.deepEqual(await f.service.list({}), { items: [], forwards: [], mailboxes: [], total: 0, page: 1, pageSize: 50 });
+  for (const value of [null, false, '', { unexpected: true }]) {
+    f.options.mailboxes = value;
+    await assert.rejects(f.service.list({}), { statusCode: 502, code: 'MAILCOW_REJECTED' });
+    f.options.mailboxes = []; f.options.filters = value;
+    await assert.rejects(f.service.list({}), { statusCode: 502, code: 'MAILCOW_REJECTED' });
+  }
 });

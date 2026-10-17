@@ -47,12 +47,14 @@ export function createFilterBackups({ dir }) {
 export function createTeamsService({ mailcow, audit, lock, history, auditDir }) {
   const backups = createFilterBackups({ dir: auditDir });
   async function filters(session) {
-    const rows = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    let rows = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
+    if (rows && typeof rows === 'object' && !Object.keys(rows).length) rows = [];
     if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '필터 목록을 읽을 수 없어요.');
     return rows.filter(row => row && typeof row === 'object');
   }
   async function mailboxes(session) {
-    const rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    let rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+    if (rows && typeof rows === 'object' && !Object.keys(rows).length) rows = [];
     if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '메일함 목록을 읽을 수 없어요.');
     return rows.filter(row => typeof row?.username === 'string' && String(row.active) === '1').map(row => ({ address: normalize(row.username), name: typeof row.name === 'string' ? row.name : '' }));
   }

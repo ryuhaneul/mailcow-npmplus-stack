@@ -64,8 +64,8 @@ async function fixture(t, options = {}) {
   const filters = [{ username: owner, filter_type: 'prefilter', active: 1, script_data: 'redirect :copy "user@example.com";' }];
   const mailcow = { async call(_session, method, path) {
     mailCalls.push({ method, path });
-    if (path === '/api/v1/get/mailbox/all') return boxes;
-    if (path === '/api/v1/get/filters/all') return filters;
+    if (path === '/api/v1/get/mailbox/all') return options.mailboxes ?? boxes;
+    if (path === '/api/v1/get/filters/all') return options.filters ?? filters;
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     throw new Error('Unexpected mailcow path');
   } };
@@ -317,7 +317,7 @@ test('shares: revert adapter rechecks expected snapshot and only changes the rec
 });
 
 test('shares HTTP: common guard, CSRF, add/revoke and history operate without leaking Env', async t => {
-  const f = await fixture(t); let logs = '';
+  const f = await fixture(t, { filters: {} }); let logs = '';
   const stream = new Writable({ write(chunk, _encoding, done) { logs += chunk.toString(); done(); } });
   const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir },
     logger: { ...logOptions('info'), stream }, dockerapi: f.client, auth: { client: { ...f.mailcow, async login({ username }) { return { state: 'ready', username }; }, async logout() {} } } });
@@ -327,10 +327,13 @@ test('shares HTTP: common guard, CSRF, add/revoke and history operate without le
   const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
   let response = await app.inject({ url: '/api/admin/shares', headers }); assert.equal(response.statusCode, 200);
   const item = response.json().items.find(row => row.owner === owner);
+  assert.equal(item.group, false);
   const url = `/api/admin/shares/${owner}`;
   assert.equal((await app.inject({ method: 'POST', url, headers: { ...headers, 'x-mailadmin-csrf': 'bad' }, payload: { grantee, etag: item.etag } })).statusCode, 403);
   response = await app.inject({ method: 'POST', url, headers, payload: { grantee, etag: item.etag } }); assert.equal(response.statusCode, 200, response.body);
+  const grantAuditId = response.json().auditId; assert.match(grantAuditId, /^[a-f0-9]{32}$/);
   response = await app.inject({ method: 'DELETE', url, headers, payload: { grantee, etag: response.json().etag } }); assert.equal(response.statusCode, 200, response.body);
+  assert.match(response.json().auditId, /^[a-f0-9]{32}$/); assert.notEqual(response.json().auditId, grantAuditId);
   const history = await app.inject({ url: '/api/admin/history', headers }); assert.equal(history.json().total, 2);
   for (const value of [response.body, history.body, logs]) { assert.ok(!value.includes(secret)); assert.ok(!value.includes('Env')); }
   assert.equal(response.headers['www-authenticate'], undefined); assert.equal(response.headers['cache-control'], 'no-store');
@@ -341,4 +344,10 @@ test('dockerapi: hanging request stops at the ten-second deadline', async t => {
   const f = await fakeApi(t, { hang: true }); const started = Date.now();
   await assert.rejects(f.client.getAcl(owner), { statusCode: 503, code: 'DOCKERAPI_UNAVAILABLE' });
   assert.ok(Date.now() - started >= 9500 && Date.now() - started < 12_000);
+});
+
+
+test('shares: empty mailbox object returns no shares', async t => {
+  const f = await fixture(t, { mailboxes: {}, filters: {} });
+  const result = await f.service.list({}); assert.deepEqual(result.items, []); assert.equal(result.total, 0);
 });

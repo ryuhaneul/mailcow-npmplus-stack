@@ -42,6 +42,7 @@ async function fixture(t) {
     mailcowRequests.push({ method: _method, path });
     if (state.authLost) throw new MailcowAuthLost();
     if (path.endsWith('/status/version')) return { version: '2026-09a' };
+    if (path.endsWith('/filters/all') && state.emptyFilters) return {};
     if (path.endsWith('/filters/all')) return state.team ? [{ username: mailbox, active: '1', filter_type: 'prefilter', script_data: state.teamScript ?? 'redirect :copy "member@example.com";' }] : [];
     throw new Error('unexpected mailcow path');
   }, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
@@ -144,4 +145,12 @@ test('cleanup routes: guard, disabled feature, health, date contract, execution 
   assert.equal((await post('/api/admin/quota-recheck', { mailbox })).statusCode, 200);
   f.state.authLost = true; const lost = await post('/api/admin/quota-recheck', { mailbox }); assert.equal(lost.statusCode, 403); assert.equal(lost.json().error.code, 'MAILCOW_SESSION_LOST');
   for (const marker of [secret, Buffer.from(secret).toString('base64')]) assert.ok(!logs.join('').includes(marker));
+});
+
+
+test('cleanup: empty filter object counts mail without team confirmation', async t => {
+  const f = await fixture(t); f.state.emptyFilters = true;
+  const result = await count(f);
+  assert.equal(result.count, 3); assert.match(result.token, /^[a-f0-9]{64}$/);
+  assert.equal(expunges(f).length, 0);
 });

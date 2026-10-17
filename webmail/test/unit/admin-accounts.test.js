@@ -32,7 +32,7 @@ async function fixture(t) {
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});
-    if (path === '/api/v1/get/filters/all') return structuredClone(filters);
+    if (path === '/api/v1/get/filters/all') return structuredClone(filters.length ? filters : {});
     if (path === '/api/v1/get/domain/all') return structuredClone(domains);
     if (path === '/api/v1/get/alias/all') return structuredClone(aliases);
     if (path === '/api/v1/get/syncjobs/all/no_log') return structuredClone(jobs);
@@ -51,6 +51,7 @@ async function fixture(t) {
         }
       }
     } else if (path === '/api/v1/edit/filter') Object.assign(filters.find(row => String(row.id) === body.items[0]), body.attr);
+    else if (path === '/api/v1/add/filter') filters.push({ id: filters.length + 1, ...body });
     else if (path === '/api/v1/add/alias') aliases.push({ id: aliases.length + 1, ...body });
     else assert.fail(path);
     return [{ type: 'success' }];
@@ -59,7 +60,7 @@ async function fixture(t) {
   const audit = createAudit({ dir, logger: { info(data) { logs.push(data); } } }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
   const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, service };
+  return { dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, teams, service };
 }
 const context = { session: {}, actor: 'admin', ip: '198.51.100.17' };
 const writes = f => f.calls.filter(call => call.method === 'POST');
@@ -310,4 +311,13 @@ test('accounts HTTP: auth loss in later create stage clears local session, retur
   assert.equal((await app.inject({ url: '/api/admin/auth/session', headers })).statusCode, 403);
   const flow = (await app.adminHistory.list()).items.find(row => row.action === 'mailbox.create.flow'); assert.equal(flow.result, 'partial');
   assert.ok(!result.body.includes(secret)); assert.ok(!lines.join('').includes(secret));
+});
+
+
+test('accounts: join team stage succeeds after creating the first team on an empty-filter server', async t => {
+  const f = await fixture(t); f.filters.length = 0;
+  await f.teams.create({ ...context, teamAddress: team, members: [user] });
+  const response = await create(f, { team });
+  assert.equal(response.result, 'ok');
+  assert.deepEqual(response.steps.map(row => [row.stage, row.status]), [['mailbox', 'ok'], ['team', 'ok']]);
 });

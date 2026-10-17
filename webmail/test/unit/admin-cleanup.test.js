@@ -60,12 +60,16 @@ for (const [before, timestamp] of [['2025-01-01', '1735657200'], ['2024-03-01', 
   const f = await fixture(t), query = ['mailbox', 'INBOX', 'before', timestamp];
   const preview = await count(f, { ...input, before });
   assert.deepEqual(f.requests.find(row => row.command === 'search').args.query, query);
-  await run(f, preview.token);
+  const result = await run(f, preview.token);
+  assert.equal(result.beforeDate, before); assert.equal(result.detail.beforeDate, before);
   const searches = f.requests.filter(row => row.command === 'search');
   assert.equal(searches.length, 3); assert.equal(expunges(f).length, 1);
   for (const request of [...searches, ...expunges(f)]) assert.deepEqual(request.args.query, query);
   const rows = (await f.audit.read()).rows;
   assert.equal(rows[0].before.before, before); assert.equal(rows[0].after.before, before);
+  assert.equal(rows[1].detail.beforeDate, before);
+  assert.equal(result.before.usedKiB, '11'); assert.equal(result.after.usedKiB, '7');
+  assert.deepEqual(rows[1].detail.before, result.before); assert.deepEqual(rows[1].detail.after, result.after);
 });
 for (const command of ['redirect', 'REDIRECT']) test(`cleanup: ${command} team confirmation required and preserved through execution`, async t => {
   const f = await fixture(t); f.state.team = true; f.state.teamScript = `${command} :copy "member@example.com";`;
@@ -153,6 +157,10 @@ test('cleanup routes: guard, disabled feature, health, date contract, execution 
   assert.equal((await post('/api/admin/cleanup/count', { ...input, before: '' })).statusCode, 422);
   const preview = await post('/api/admin/cleanup/count', input); assert.equal(preview.statusCode, 200, preview.body);
   const result = await post('/api/admin/cleanup/run', { token: preview.json().token, confirmAddress: mailbox }); assert.equal(result.statusCode, 200, result.body); assert.equal(result.json().deleted, 3);
+  assert.equal(result.json().beforeDate, input.before); assert.equal(result.json().detail.beforeDate, input.before);
+  assert.equal(result.json().before.usedKiB, '11'); assert.equal(result.json().after.usedKiB, '7');
+  const recorded = (await app.audit.read()).rows.find(row => row.phase === 'result');
+  assert.equal(recorded.detail.beforeDate, input.before);
   assert.equal((await post('/api/admin/quota-recheck', { mailbox })).statusCode, 200);
   f.state.authLost = true; const lost = await post('/api/admin/quota-recheck', { mailbox }); assert.equal(lost.statusCode, 403); assert.equal(lost.json().error.code, 'MAILCOW_SESSION_LOST');
   for (const marker of [secret, Buffer.from(secret).toString('base64')]) assert.ok(!logs.join('').includes(marker));

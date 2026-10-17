@@ -14,5 +14,9 @@ export function quotaView(value) {
 
 export function folderLabel(folder) {
   const names={INBOX:'받은편지함',Sent:'보낸편지함',Drafts:'임시보관함',Archive:'보관함',Junk:'스팸',Trash:'휴지통'};
+  if (folder.shared && folder.owner) {
+    const relative=folder.path.slice(`Shared/${folder.owner}/`.length);
+    return relative==='INBOX'?folder.owner:`${folder.owner} · ${relative.split('/').map(part=>names[part]||part).join(' / ')}`;
+  }
   return folder.name===folder.path?(names[folder.path]||folder.name):folder.name;
 }

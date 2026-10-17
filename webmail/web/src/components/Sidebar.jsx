@@ -1,4 +1,5 @@
 import { Fragment } from 'preact';
+import { folderLabel } from '../format.js';
 import { logout } from '../api.js';
 import { folderDialog } from './FolderDialog.jsx';
 import { folders, folderColor } from '../state/folders.js';
@@ -13,9 +14,9 @@ const special = [
 function NavItem({ href, title, icon, folder }) {
   const current = route.value;
   const active = href === `#${current.name}` || current.name === 'f' && folder?.path === current.value;
-  return <a href={href} class="nv" aria-current={active ? 'page' : undefined}>
+  return <a href={href} class="nv" title={folder?.shared ? title : undefined} aria-current={active ? 'page' : undefined}>
     {folder?.shared ? <span class="sh"><Icon name="users"/></span> : icon ? <Icon name={icon} size="s"/> : <span class={`dot c${folderColor(folder)}`}/>}
-    {title}{folder?.unseen > 0 && <span class="n u num">{folder.unseen}</span>}
+    {folder?.shared ? <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{title}</span> : title}{folder?.unseen > 0 && <span class="n u num">{folder.unseen}</span>}
   </a>;
 }
 export default function Sidebar() {
@@ -35,7 +36,7 @@ export default function Sidebar() {
       })}
       <h3>내 폴더 <button type="button" aria-label="폴더 만들기" onClick={()=>{folderDialog.value={folder:null};}}><Icon name="plus" size="xs"/></button></h3>
       {privateRows.map(folder=><div class="folder-row" key={folder.path}><NavItem href={`#f/${encodeURIComponent(folder.path)}`} title={folder.name} folder={folder}/><button class="ib" type="button" aria-label={`${folder.name} 폴더 관리`} onClick={()=>{folderDialog.value={folder};}}><Icon name="more" size="s"/></button></div>)}
-      {sharedRows.length > 0 && <><h3>팀·공유 메일함</h3>{sharedRows.map(folder => <NavItem key={folder.path} href={`#f/${encodeURIComponent(folder.path)}`} title={folder.name} folder={folder}/>)}</>}
+      {sharedRows.length > 0 && <><h3>팀·공유 메일함</h3>{sharedRows.map(folder => <NavItem key={folder.path} href={`#f/${encodeURIComponent(folder.path)}`} title={folderLabel(folder)} folder={folder}/>)}</>}
       <h3>설정</h3>
       {[['filters','필터·규칙','funnel'],['storage','저장 공간','db'],['password','암호 변경','key'],['settings','보기 설정','palette']].map(([path,title,icon]) => <NavItem key={path} href={`#${path}`} title={title} icon={icon}/>)}
     </nav>

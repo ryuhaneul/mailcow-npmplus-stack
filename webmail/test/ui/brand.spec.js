@@ -2,14 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer } from 'vite';
 import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import { createFakeApi } from '../../web/dev/fake-api.js';
-const captures = process.env.A17B_CAPTURE_DIR || '/ductor/workspace/design-pipeline/screenshots/a17b';
+const captures = process.env.A17B_CAPTURE_DIR || join(tmpdir(), 'webmail-brand-captures');
 await test('Brand actual browser approved placement, theme variants, dimensions and text fallbacks', async t => {
   const fake = createFakeApi(), server = await createServer({ configFile: false, root: fileURLToPath(new URL('../../web', import.meta.url)), logLevel: 'error', plugins: [preact(), { name: 'brand-test-api', configureServer(server) { server.middlewares.use(fake.middleware); } }], server: { host: '127.0.0.1', port: 0 } }); await server.listen(); t.after(() => server.close());
-  const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || '/ductor/opt/ms-playwright/chromium-1228/chrome-linux64/chrome', args: ['--no-sandbox'] }); t.after(() => browser.close()); await mkdir(captures, { recursive: true });
+  const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}), args: ['--no-sandbox'] }); t.after(() => browser.close()); await mkdir(captures, { recursive: true });
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   async function pageFor({ mode = 'light', system = 'light', shape = 'wide', authenticated = false, width = 1280, broken = false, noLogo = false, noDark = false } = {}) {
     fake.state.authenticated = authenticated; fake.state.prefs.mode = mode; fake.state.config.logo = noLogo ? null : { light: '/brand/logo/light?v=synthetic', dark: noDark ? null : '/brand/logo/dark?v=synthetic' };

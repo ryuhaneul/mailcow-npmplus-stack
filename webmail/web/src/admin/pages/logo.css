@@ -15,7 +15,7 @@
 .logo-mock-input{padding:7px 10px;border:1px solid var(--line-2);border-radius:6px;text-align:left;font-size:12px;margin:8px auto;max-width:230px;color:inherit}
 .logo-mock-button{display:block;border-radius:6px;padding:6px;margin:12px auto 0;max-width:230px;background:var(--accent);color:var(--on-accent);font-size:12px}
 .logo-dark{background:#141416;color:#ededf0}.logo-dark .logo-mini-login,.logo-dark .logo-mini-sidebar{background:#1c1c1f;border-color:#57575b}.logo-dark .logo-mock-input{border-color:#57575b}
-.logo-light{background:#f4f4f5;color:#141416}.logo-light .logo-mini-login,.logo-light .logo-mini-sidebar{background:#fff;border-color:#b5b5ba}.logo-light .logo-mock-input{border-color:#b5b5ba}
+.logo-light{--ink-3:#66666D;background:#f4f4f5;color:#141416}.logo-light .logo-mini-login,.logo-light .logo-mini-sidebar{background:#fff;border-color:#b5b5ba}.logo-light .logo-mock-input{border-color:#b5b5ba}
 .logo-page .ac-aside-note .logo-preview-section h2{font-size:15px}.logo-page .ac-result{margin-bottom:24px}
 .logo-page :disabled{cursor:default;opacity:.55}
 @media(max-width:1050px){.logo-settings-grid{grid-template-columns:minmax(0,1fr)}.logo-preview-section{min-width:0}}

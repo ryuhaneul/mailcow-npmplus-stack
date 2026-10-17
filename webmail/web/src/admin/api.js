@@ -6,7 +6,7 @@ export function createAdminApi({ fetchImpl = globalThis.fetch, getCsrf = () => a
     const changing = method !== 'GET', headers = changing ? { 'Content-Type': 'application/json', 'X-Mailadmin-CSRF': getCsrf() ?? '' } : {};
     const response = await fetchImpl(path, { method, headers, credentials: 'same-origin', signal, ...(changing ? { body: JSON.stringify(body ?? {}) } : {}) });
     let value = null; if (response.status !== 204) { try { value = await response.json(); } catch { if (response.ok) throw Object.assign(new Error('응답을 읽을 수 없어요.'), { code: 'INVALID_RESPONSE', status: response.status }); value = { error: { code: 'INVALID_RESPONSE', message: '응답을 읽을 수 없어요.' } }; } }
-    if (!response.ok) { const failure = Object.assign(new Error(value?.error?.message ?? '요청을 처리하지 못했어요.'), value?.error ?? {}, { status: response.status }); if (response.status === 403) onForbidden(failure); throw failure; }
+    if (!response.ok) { const failure = Object.assign(new Error(value?.error?.message ?? '요청을 처리하지 못했어요.'), value?.error ?? {}, { status: response.status }); if (response.status === 403 && ['NO_SESSION', 'SESSION_EXPIRED', 'MAILCOW_SESSION_LOST'].includes(failure.code)) onForbidden(failure); throw failure; }
     if (value?.csrf && value?.user) onSession(value);
     return value;
   };

@@ -15,6 +15,7 @@ ENV_FILE="${PROJECT_DIR}/.env"
 WEBMAIL_ENABLE=false
 SNAPPYMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
+MAIL_SHARE_WHOLE_MAILBOX=false
 set -a; source "$ENV_FILE"; set +a
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
@@ -206,6 +207,9 @@ check "IMAP (993 SSL)" sh -c "echo '1 LOGOUT' | timeout 10 openssl s_client -con
 echo ""
 
 # --- Server policy and Webmail ---
+if [ "$MAIL_SHARE_WHOLE_MAILBOX" = true ]; then
+    check "Whole-mailbox share policy (block + doveconf)" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-share-mode.sh" --check
+fi
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
     echo "[Mail]"
     check "Junk/Trash autoexpunge policy" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" --check

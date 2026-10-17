@@ -77,8 +77,16 @@ async function fixture(t, direction = 'mailbox-to-alias') {
   const dockerapi = { async getAcl(owner) { if (options.aclFailure === owner) throw new Error(syncSecret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); } };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, aliases, filters, jobs, acl, calls, options, mailcow, dockerapi, audit, history, service, direction };
+  const aclFolders = {
+    enabled: true,
+    async readOwned(owner) { return (await dockerapi.getAcl(owner)).filter(row => row.user === owner && (aclFolders.enabled || row.mailbox === 'INBOX')); },
+    async assertExist(owner, mailboxes) {
+      calls.push({ method: 'CHECK', path: 'acl-folders/assert', body: { owner, mailboxes } });
+      if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
+    },
+  };
+  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
+  return { dir, boxes, aliases, filters, jobs, acl, calls, options, mailcow, dockerapi, aclFolders, audit, history, service, direction };
 }
 const convert = (f, data) => f.service.convert({ ...context, direction: f.direction, data: { address: addr, ...(f.direction === 'mailbox-to-alias' ? { targets: [team] } : {}), ...data } });
 const preview = (f, data = {}) => convert(f, { action: 'preview', ...data });
@@ -282,4 +290,35 @@ test('convert regression: a received share is counted once as incoming and never
   assert.equal(result.changes.refs.shares.length, 1);
   assert.equal(result.warnings.find(row => row.code === 'OWN_SHARES_REMOVED').message, '이 메일함을 다른 사람에게 공유한 0건은 없어져요');
   assert.equal(result.warnings.find(row => row.code === 'INCOMING_SHARES_UNUSED').message, '다른 함에서 이 주소에 준 공유 1건은 남지만 로그인할 수 없어 쓰이지 않아요');
+});
+
+test('account folder ACL: mailbox conversion previews all folders and retains incoming permissions', async t => {
+  const f = await fixture(t), folders = ['Sent', 'INBOX/거래처 "봄"'];
+  for (const mailbox of folders) {
+    f.acl.get(addr).push({ user: addr, id: other, mailbox, rights: ['lookup', 'read'] });
+    f.acl.get(team).push({ user: team, id: addr, mailbox, rights: ['lookup', 'read'] });
+  }
+  const initial = await preview(f);
+  assert.equal(initial.changes.refs.shares.length, 6);
+  assert.ok(initial.warnings.find(row => row.code === 'INCOMING_SHARES_UNUSED').message.includes('3건'));
+  const incoming = structuredClone(f.acl.get(team));
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  assert.deepEqual(f.acl.get(team), incoming);
+});
+
+test('account folder ACL: mailbox conversion refuses write rights on a subfolder', async t => {
+  const f = await fixture(t);
+  f.acl.get(team).push({ user: team, id: addr, mailbox: 'Sent', rights: ['lookup', 'read', 'write'] });
+  await assert.rejects(preview(f), { statusCode: 409, code: 'ACL_UNSUPPORTED' });
+  assert.equal(writes(f).length, 0);
+});
+
+for (const direction of ['mailbox-to-alias', 'alias-to-mailbox']) test(`account folder ACL: ${direction} warns when doveadm is disabled`, async t => {
+  const f = await fixture(t, direction); f.aclFolders.enabled = false;
+  if (direction === 'mailbox-to-alias') f.acl.get(team).push({ user: team, id: addr, mailbox: 'Sent', rights: ['lookup', 'read'] });
+  const initial = await preview(f);
+  assert.ok(initial.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
+  if (direction === 'mailbox-to-alias') assert.ok(initial.changes.refs.shares.every(row => row.mailbox === 'INBOX'));
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
 });

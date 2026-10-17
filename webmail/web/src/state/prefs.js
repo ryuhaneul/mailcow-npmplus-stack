@@ -4,13 +4,13 @@ import { signal } from '@preact/signals';
 import { toast } from './toast.js';
 import { WM_THEMES } from '../theme/themes.js';
 
-export const prefs = signal({ theme: 'ink', mode: 'system', accent: {}, layout: null });
+export const prefs = signal({ theme: 'ink', mode: 'system', accent: {}, layout: null, sharedView: {} });
 
 // This is a first-paint copy. Server preferences remain authoritative.
 export function loadPrefs(config) {
   let copy = {};
   try { copy = JSON.parse(localStorage.getItem('webmail-prefs') || '{}') || {}; } catch {}
-  const next = { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, ...copy };
+  const next = { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, sharedView: {}, ...copy };
   if (!WM_THEMES[next.theme]) next.theme = config.defaultTheme;
   if (!['light', 'dark', 'system'].includes(next.mode)) next.mode = config.defaultMode;
   prefs.value = next;
@@ -60,4 +60,8 @@ async function savePrefs() {
       clearTimeout(saveTimer); saveTimer = setTimeout(savePrefs, 500);
     }
   }
+}
+
+export function updateSharedView(sharedView) {
+  updatePrefs({ sharedView });
 }

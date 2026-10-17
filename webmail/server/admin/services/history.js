@@ -2,6 +2,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { AppError } from '../../errors.js';
 
 const notRevertible = () => new AppError(409, 'NOT_REVERTIBLE', '이 변경은 되돌릴 수 없어요.');
+const oldShareMessage = '이 공유 기록은 이전 형식이라 되돌릴 수 없어요. 공유 화면에서 직접 바꿔 주세요.';
+const isOldShare = record => ['share.grant', 'share.revoke'].includes(record.action) && (record.before?.version !== 2 || record.after?.version !== 2);
 const changed = () => new AppError(409, 'CHANGED_ELSEWHERE', '다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.');
 export function createHistoryService({ audit, lock }) {
   const adapters = new Map();
@@ -9,10 +11,10 @@ export function createHistoryService({ audit, lock }) {
   function decorate(record) {
     const adapter = adapters.get(record.action);
     // 목록 시점의 가능 여부이며 실행 직전 현재 값이 바뀌면 409로 멈춘다.
-    const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter);
+    const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter) && !isOldShare(record);
     const label = adapter?.label ?? '설정을 바꿨어요';
     const suffix = !record.result ? ' (결과 확인 안 됨)' : record.result === 'failed' ? ' (실패)' : record.result === 'partial' ? ' (일부 적용)' : record.kind === 'irreversible' ? ' (되돌리기 불가)' : '';
-    return { ...record, canRevert, summary: `${record.actor}님이 ${record.target} ${label}${suffix}` };
+    return { ...record, ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.target} ${label}${suffix}` };
   }
   async function records() {
     const entries = new Map();
@@ -47,20 +49,24 @@ export function createHistoryService({ audit, lock }) {
   async function revert(id, { confirm, actor, ip, session }) {
     if (confirm !== true) throw new AppError(422, 'INVALID_INPUT', '되돌리기를 확인해 주세요.');
     const record = await detail(id);
+    if (isOldShare(record)) throw new AppError(409, 'RECORD_FORMAT_OLD', oldShareMessage);
     if (!record.canRevert) throw notRevertible();
     const adapter = adapters.get(record.action);
     const runLocked = adapter.runLocked ?? ((target, operation) => lock.run(target, operation));
     return runLocked(record.target, async () => {
+      const prepared = adapter.prepareRevert ? await adapter.prepareRevert({ session, target: record.target, record }) : undefined;
+      const expected = prepared ? prepared.expected : record.after;
+      const target = prepared ? prepared.target : record.before;
       const current = await adapter.read({ session, target: record.target, record });
-      if (!isDeepStrictEqual(current, record.after)) throw changed();
+      if (!isDeepStrictEqual(current, expected)) throw changed();
       return audit.run({ actor, ip, action: record.action, target: record.target, kind: 'config', revertible: true,
-        before: record.after, after: record.before, revertOf: record.id,
+        before: expected, after: target, revertOf: record.id,
         scriptSha256Before: record.scriptSha256After, scriptSha256After: record.scriptSha256Before,
         bytesBefore: record.bytesAfter, bytesAfter: record.bytesBefore }, async intent => {
-        await adapter.write({ session, target: record.target, value: record.before, expected: record.after, record });
+        const written = await adapter.write({ session, target: record.target, value: target, expected, record, ...(prepared ? { skipped: prepared.skipped } : {}) });
         const applied = await adapter.read({ session, target: record.target, record });
-        if (!isDeepStrictEqual(applied, record.before)) throw new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 값이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
-        return { id: intent.id, result: 'ok', detail: {} };
+        if (!isDeepStrictEqual(applied, prepared ? written.target : record.before)) throw new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 값이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
+        return { id: intent.id, result: 'ok', detail: prepared ? { skipped: written.skipped } : {}, ...(prepared ? { skipped: written.skipped } : {}) };
       }, { prepare: adapter.prepare ? intent => adapter.prepare({ record, intent }) : undefined });
     });
   }

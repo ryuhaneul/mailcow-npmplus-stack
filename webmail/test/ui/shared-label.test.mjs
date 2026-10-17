@@ -9,6 +9,8 @@ import { createFakeApi } from '../../web/dev/fake-api.js';
 
 await test('shared mailbox navigation and list titles identify the owner with server-shaped fixtures',async t=>{
   const fake=createFakeApi({authenticated:true});
+  fake.state.prefs.sharedView['support@example.com']={mode:'all',folders:[],hidden:false};
+  fake.state.folders.push({...fake.state.folders.find(folder=>folder.path==='Shared/support@example.com/INBOX'),path:'Shared/support@example.com/INBOX/처리 완료',name:'처리 완료',parent:'Shared/support@example.com/INBOX',unseen:0});
   const server=await createServer({configFile:false,root:fileURLToPath(new URL('../../web',import.meta.url)),logLevel:'error',plugins:[preact(),{name:'shared-label-test-api',configureServer(server){server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
   await server.listen();t.after(()=>server.close());t.after(()=>fake.close());
   const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});
@@ -27,11 +29,11 @@ await test('shared mailbox navigation and list titles identify the owner with se
       const open=page.getByRole('button',{name:'메일함 열기'});
       if(await open.isVisible())await open.click();
       const shared=page.locator(`.nav a[href="#f/${encodeURIComponent(path)}"]`);
-      await expect(shared).toBeVisible();await expect(shared).toHaveText(owner);await expect(shared).toHaveAttribute('title',owner);
+      await expect(shared).toBeVisible();await expect(shared.locator('.sp-ell')).toHaveText(owner);await expect(shared).toHaveAttribute('title',owner);
       const child=page.locator(`.nav a[href="#f/${encodeURIComponent(path+'/처리 완료')}"]`);
-      await expect(child).toHaveText(`${owner} · 받은편지함 / 처리 완료`);
-      await expect(child).toHaveAttribute('title',`${owner} · 받은편지함 / 처리 완료`);
-      assert.equal(await child.locator('span').nth(1).evaluate(el=>getComputedStyle(el).textOverflow),'ellipsis');
+      await expect(child).toHaveText('처리 완료');
+      await expect(child).toHaveAttribute('title','처리 완료');
+      assert.equal(await child.locator('.sp-ell').evaluate(el=>getComputedStyle(el).textOverflow),'ellipsis');
       if(captures&&[1280,390].includes(width))await page.screenshot({animations:'disabled',path:`${captures}/inbox-light-${width}.png`});
       await shared.click();
       await expect(page.locator('#page-title')).toHaveText(owner);await expect(shared).toHaveAttribute('aria-current','page');

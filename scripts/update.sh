@@ -76,6 +76,7 @@ ENV_FILE="${PROJECT_DIR}/.env"
 WEBMAIL_ENABLE=false
 SNAPPYMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
+MAIL_SHARE_WHOLE_MAILBOX=false
 TOOLKIT_ENABLE=true
 set -a
 # shellcheck disable=SC1090
@@ -322,6 +323,8 @@ else
     warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
+webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
+
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
     warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" apply -y
@@ -428,7 +431,7 @@ fi
 # ============================================================
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
-webmail_reconcile_admin_api "$SCRIPT_DIR" || die "Webmail admin API reconciliation failed"
+webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"

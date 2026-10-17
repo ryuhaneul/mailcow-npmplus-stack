@@ -1099,6 +1099,14 @@ sudo bash scripts/verify.sh
 
 mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON API, dockerapi 공유·필터 읽기, 실제 IP 전달, 공개 웹메일 격리를 시험 VM에서 확인합니다. 로고·변경 기록 볼륨도 별도로 백업합니다.
 
+### 메일함 전체 읽기 공유
+
+`MAIL_SHARE_WHOLE_MAILBOX=false`가 기본값입니다. 서버 `.env`에서 `true`로 켜면 setup·update가 `extra.conf`에 `plugin { acl_defaults_from_inbox = yes }` 관리 블록을 넣습니다. **켜는 순간 기존 받은편지함 공유도 소유자의 메일함 전체로 넓어지므로, 켜기 전에 기존 공유 목록을 확인하세요.** 웹메일·관리 화면 설치 여부와 무관한 Dovecot 설정입니다.
+
+`bash scripts/apply-dovecot-share-mode.sh apply -y`로 적용하고 `--check`로 관리 블록과 `doveconf -n`의 값을 확인합니다. 내용이 같으면 쓰기·reload가 없으며, 변경 전 백업과 설정 검사 실패 시 원복을 지원합니다. `extra.conf`는 `0600 root:root`로 유지합니다. 실제 reload는 열린 IMAP·POP 연결을 한 번 끊고 메일 프로그램이 다시 연결합니다.
+
+끄려면 `.env`를 `MAIL_SHARE_WHOLE_MAILBOX=false`로 바꾸고 update 또는 `bash scripts/apply-dovecot-share-mode.sh --revert -y`를 실행합니다. **설정만 되돌아가며, 켜져 있던 동안 새 폴더에 복사된 자체 권한은 남습니다.** 관리 화면의 공유 빼기·남은 권한 정리로 제거하세요. 키가 없는 기존 `.env`에는 새 적용 단계를 추가하지 않습니다.
+
 ### 2단계: 메일 정리·용량 재확인·릴레이 허용 IP
 
 두 기능은 각각 선택하며 기본 꺼짐입니다. `WEBMAIL_ADMIN_ENABLE=true`가 필수이고, 관리 끔 상태에서 아래 선택값만 켜면 설정 오류로 멈춥니다.
@@ -1109,7 +1117,7 @@ mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON 
 | `WEBMAIL_ADMIN_DOVEADM_KEY` | 빈 값 | 위 기능이 켜졌을 때만 64자리 hex 키를 생성해 스택 `.env`에 권한600으로 저장. 출력·커밋 금지 |
 | `WEBMAIL_ADMIN_RELAY_ENABLE` | `false` | Postfix/Rspamd 릴레이 파일 두 개 연결 |
 
-사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 기존 IMAP·POP 접속을 끊지 않습니다. 릴레이 목록 변경은 Postfix·Rspamd를 재시작하므로 짧은 SMTP 중단이 있습니다. 운영 반영은 시간대를 정해 진행합니다.
+사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 열린 IMAP·POP 연결을 한 번 끊습니다(`Server shutting down.`). 메일 프로그램은 다시 연결합니다. 릴레이 목록 변경은 Postfix·Rspamd를 재시작하므로 짧은 SMTP 중단이 있습니다. 운영 반영은 시간대를 정해 진행합니다.
 
 `.env`에서 원하는 선택값을 true로 바꾼 뒤 저장소 루트에서 실행합니다. 관리 컨테이너는 같은 이미지이며 서버 코드를 새로 반영했다면 먼저 이미지를 빌드합니다.
 

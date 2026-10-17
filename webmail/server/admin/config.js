@@ -68,6 +68,8 @@ export function loadAdminConfig(env = process.env) {
     if (!match || Number(match[1]) > 65535) invalid('DOVEADM_URL');
     if (!doveadmKey.trim()) invalid('DOVEADM_KEY');
   } else if (doveadmKey !== '') invalid('DOVEADM_URL');
+  const shareWholeMailbox = env.SHARE_WHOLE_MAILBOX ?? 'false';
+  if (!['true', 'false'].includes(shareWholeMailbox)) invalid('SHARE_WHOLE_MAILBOX');
   const relayRaw = choice('RELAY_FILES', ['', '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc']);
   const mailcowIpv4Network = value('MAILCOW_IPV4_NETWORK');
   if (mailcowIpv4Network.split('.').length !== 3 || isIP(`${mailcowIpv4Network}.0`) !== 4) invalid('MAILCOW_IPV4_NETWORK');
@@ -84,6 +86,6 @@ export function loadAdminConfig(env = process.env) {
     adminHostname, sessionIdleMin, sessionMaxHours, mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
-    autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel,
+    wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel,
   });
 }

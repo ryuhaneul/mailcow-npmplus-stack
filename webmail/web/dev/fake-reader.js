@@ -22,7 +22,7 @@ export async function fakeReader(request,response,state,send) {
   }
   if(state.readerGate)await state.readerGate;
   const senderAlwaysShow=state.prefs.imageAllow.some(address=>address.toLowerCase()===item.from.address.toLowerCase());
-  const source=state.readerHtml??`<script>parent.__messageScriptExecuted=true</script><p>서윤 님, 안녕하세요.</p><p>프로젝트 2차 시안이 나왔습니다. 지난 회의에서 나온 의견을 반영했어요.</p><img src="https://images.example.com/review.png" alt="시안 이미지"><p>목요일 오후 2시나 금요일 오전 중 편하신 시간 알려 주시면 회의실 잡겠습니다. 시안 파일과 변경 내역은 아래 첨부를 봐 주세요.</p><p><a href="https://example.com/review" onclick="alert(1)">검토 자료 보기</a></p><p>감사합니다.<br>예시 담당자 드림</p>`;
+  const source=state.readerHtml??item.readerHtml??`<script>parent.__messageScriptExecuted=true</script><p>서윤 님, 안녕하세요.</p><p>프로젝트 2차 시안이 나왔습니다. 지난 회의에서 나온 의견을 반영했어요.</p><img src="https://images.example.com/review.png" alt="시안 이미지"><p>목요일 오후 2시나 금요일 오전 중 편하신 시간 알려 주시면 회의실 잡겠습니다. 시안 파일과 변경 내역은 아래 첨부를 봐 주세요.</p><p><a href="https://example.com/review" onclick="alert(1)">검토 자료 보기</a></p><p>감사합니다.<br>예시 담당자 드림</p>`;
   const sanitized=sanitizeHtml(source,{ref,cidParts:new Map([['example-image','3']]),images:url.searchParams.get('images')==='1'||senderAlwaysShow});
   item.seen=true;
   send(response,200,{ref,folder:item.folder,subject:item.subject,from:[item.from],to:item.to,cc:[],replyTo:[],date:item.date,messageId:'<example-message@example.com>',inReplyTo:null,references:'',attachments:item.hasAttachment?[

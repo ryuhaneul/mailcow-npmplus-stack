@@ -146,3 +146,10 @@ test('shared ACL loading guidance follows pending list, preview and run requests
   act(() => render(null, root)); await server.close(); dom.window.close(); Object.assign(globalThis, previous);
  }
 });
+
+test('shares subfolder warning matches the account service warning text', async () => {
+ const { subfolderAclWarning } = await import('../../web/src/admin/pages/accounts.js');
+ const source = readFileSync(new URL('../../server/admin/services/accounts.js', import.meta.url), 'utf8');
+ const [, message] = source.match(/code: 'SUBFOLDER_ACL_UNCHECKED', message: '([^']+)'/);
+ assert.equal(subfolderAclWarning, message);
+});

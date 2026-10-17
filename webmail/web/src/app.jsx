@@ -1,3 +1,4 @@
+import './styles/shared.css';
 import { session, sessionReady } from './state/session.js';
 import { prefs } from './state/prefs.js';
 import { Icons } from './components/Icon.jsx';

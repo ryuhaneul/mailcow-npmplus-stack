@@ -1,5 +1,7 @@
 import { Fragment } from 'preact';
-import { folderLabel } from '../format.js';
+import { prefs } from '../state/prefs.js';
+import { sharedViewGroups } from '../state/shared-view.js';
+import SharedGroup from './SharedGroup.jsx';
 import { logout } from '../api.js';
 import { folderDialog } from './FolderDialog.jsx';
 import { folders, folderColor } from '../state/folders.js';
@@ -22,7 +24,7 @@ function NavItem({ href, title, icon, folder }) {
 export default function Sidebar() {
   const rows = folders.value.folders;
   const privateRows = rows.filter(folder => !folder.specialUse && !folder.shared);
-  const sharedRows = rows.filter(folder => folder.shared);
+  const {groups,hiddenOwnerCount} = sharedViewGroups(rows,prefs.value.sharedView);
   return <>
     <Brand/>
     <a class="compose-btn" href="#compose"><Icon name="pen" size="s"/>메일 쓰기<span class="kbd">C</span></a>
@@ -36,9 +38,9 @@ export default function Sidebar() {
       })}
       <h3>내 폴더 <button type="button" aria-label="폴더 만들기" onClick={()=>{folderDialog.value={folder:null};}}><Icon name="plus" size="xs"/></button></h3>
       {privateRows.map(folder=><div class="folder-row" key={folder.path}><NavItem href={`#f/${encodeURIComponent(folder.path)}`} title={folder.name} folder={folder}/><button class="ib" type="button" aria-label={`${folder.name} 폴더 관리`} onClick={()=>{folderDialog.value={folder};}}><Icon name="more" size="s"/></button></div>)}
-      {sharedRows.length > 0 && <><h3>팀·공유 메일함</h3>{sharedRows.map(folder => <NavItem key={folder.path} href={`#f/${encodeURIComponent(folder.path)}`} title={folderLabel(folder)} folder={folder}/>)}</>}
+      {groups.length > 0 && <div id="sp-shared"><h3>팀·공유 메일함</h3>{groups.filter(group=>!group.hidden).map(group=><SharedGroup key={group.owner} group={group}/>)}{hiddenOwnerCount>0&&<a class="sp-hidden" href="#shared">숨긴 사람 {hiddenOwnerCount}명 · 설정에서 보기</a>}</div>}
       <h3>설정</h3>
-      {[['filters','필터·규칙','funnel'],['storage','저장 공간','db'],['password','암호 변경','key'],['settings','보기 설정','palette']].map(([path,title,icon]) => <NavItem key={path} href={`#${path}`} title={title} icon={icon}/>)}
+      {[['shared','공유 메일함','users'],['filters','필터·규칙','funnel'],['storage','저장 공간','db'],['password','암호 변경','key'],['settings','보기 설정','palette']].map(([path,title,icon]) => <NavItem key={path} href={`#${path}`} title={title} icon={icon}/>)}
     </nav>
     <QuotaMeter/>
     <a class="nv mobile-logout" href="#inbox" onClick={event=>{event.preventDefault();logout();}}>로그아웃</a>

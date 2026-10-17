@@ -14,19 +14,27 @@ const fixtureFolders = [
   ['INBOX','받은편지함','\\Inbox',9],['Sent','보낸편지함','\\Sent',0],['Drafts','임시보관함','\\Drafts',1],['Archive','보관함','\\Archive',0],['Junk','스팸','\\Junk',3],['Trash','휴지통','\\Trash',0],
 ].map(([path,name,specialUse,unseen])=>({path,name,parent:null,specialUse,shared:false,rights,unseen,total:20,color:null}));
 for(const [i,name] of ['거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰'].entries())fixtureFolders.push({path:name,name,parent:null,specialUse:null,shared:false,rights,unseen:i===1?1:0,total:10,color:i+1});
-for(const path of ['Shared/sales@example.com/INBOX','Shared/support@example.com/INBOX','Shared/support@example.com/INBOX/처리 완료'])fixtureFolders.push({path,name:path.split('/').at(-1),parent:path.slice(0,path.lastIndexOf('/')),specialUse:null,shared:true,owner:path.split('/')[1],rights:{write:false,delete:false,insert:false,seen:true},unseen:2,total:10,color:null});
+for(const [owner,items] of [
+  ['sales@example.com',[['INBOX',4],['Sent',0],['Drafts',0],['Trash',0],['Junk',2],['거래처',3],['거래처/2026',1],['견적',2]]],
+  ['support@example.com',[['INBOX',5],['Sent',0],['Trash',0],['처리 완료',0],['보류',2]]],
+]) {
+  for(const [relative,unseen] of [['',0],...items,['INBOX',99]]) {
+    const path=`Shared/${owner}${relative?'/'+relative:''}`;
+    fixtureFolders.push({path,name:relative.split('/').at(-1),parent:path.slice(0,path.lastIndexOf('/')),specialUse:null,shared:true,owner,rights:{write:false,delete:false,insert:false,seen:false},unseen,total:10,color:null});
+  }
+}
 let fixtureUid=0;
 function fakeMessage(folder,index) {
   const uid=++fixtureUid;
   return {ref:Buffer.from(JSON.stringify([folder,1,uid])).toString('base64url'),folder,folderName:folder.split('/').at(-1),from:{name:['김민수 · 예시상사','박지수 · 디자인팀','a 담당자','예시 안내'][index%4],address:index%3===0?'a@example.com':`sender${uid}@example.com`},to:[{name:'이서윤',address:'user@example.com'}],subject:['견적서 송부드립니다','b 검토 요청','프로젝트 회의 안내','월간 소식'][index%4],preview:'안녕하세요. 검토할 내용을 보내 드립니다.',date:new Date(Date.UTC(2026,9,15-index%4,14-index%8,30)).toISOString(),size:1024*(index+1),seen:index%4===3,flagged:index%3===0,answered:false,hasAttachment:index%2===0};
 }
-function fixtureMail(){return [['INBOX',12],['Sent',3],['Archive',2],['거래처',3],['하늘 프로젝트',2],['Junk',3],['Trash',2]].flatMap(([folder,count])=>Array.from({length:count},(_,index)=>fakeMessage(folder,index))).sort((a,b)=>b.date.localeCompare(a.date));}
+function fixtureMail(){const personal = [['INBOX',12],['Sent',3],['Archive',2],['거래처',3],['하늘 프로젝트',2],['Junk',3],['Trash',2]].flatMap(([folder,count])=>Array.from({length:count},(_,index)=>fakeMessage(folder,index))).sort((a,b)=>b.date.localeCompare(a.date));const paths=new Set();return personal.concat(fixtureFolders.filter(folder=>folder.shared&&folder.path.split('/').length>2&&!paths.has(folder.path)&&paths.add(folder.path)).flatMap(folder=>Array.from({length:folder.unseen},(_,index)=>({...fakeMessage(folder.path,index),seen:false}))));}
 const messages = {
   EMAIL_FORMAT: '메일 주소를 확인해 주세요.', AUTH_FAILED: '메일 주소나 암호가 맞지 않아요.', RATE_LIMITED: '시도가 너무 많아요. 잠시 뒤 다시 시도해 주세요.', MAIL_UNAVAILABLE: '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.', NO_SESSION: '로그인이 필요해요.', SESSION_EXPIRED: '로그인이 만료됐어요. 다시 로그인해 주세요.', CSRF: '요청을 확인할 수 없어요.',
 };
 export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
   const streams=new Set();
-  const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], identities: structuredClone(exampleIdentities), prefs: {...structuredClone(examplePrefs),theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode}, prefsError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
+  const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], identities: structuredClone(exampleIdentities), prefs: {...structuredClone(examplePrefs),sharedView:{'sales@example.com':{mode:'custom',folders:['Shared/sales@example.com/거래처','Shared/sales@example.com/거래처/2026','Shared/sales@example.com/견적'],hidden:false}},theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode}, prefsError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
   function emit(type,value){for(const response of streams)response.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);}
   const publicSession = () => ({user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
@@ -54,6 +62,16 @@ export function createFakeApi({ variant = 'a', authenticated = false } = {}) {
     if(path==='/api/auth/logout'){state.authenticated=false;state.compose?.attachments.clear();return send(response,204);}
     if(await fakeCompose(request,response,state,send,recorded))return;
     if(await fakeReader(request,response,state,send))return;
+    if(path==='/api/prefs'&&request.method==='PUT') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      let body;try{body=JSON.parse(raw);}catch{return send(response,422,{error:{code:'PREFS_INVALID',message:'설정 형식을 확인해 주세요.'}});}
+      recorded.body=body;
+      if(Buffer.byteLength(raw)>65536)return send(response,413,{error:{code:'PREFS_TOO_LARGE',message:'설정은 64KB까지 저장할 수 있어요.'}});
+      const fields=[...Object.keys(examplePrefs),'sharedView'];
+      if(!body||Object.keys(body).length!==fields.length||fields.some(key=>!Object.hasOwn(body,key)))return send(response,422,{error:{code:'PREFS_INVALID',message:'설정 형식을 확인해 주세요.'}});
+      if(state.prefsError)return send(response,503,{error:{code:state.prefsError,message:'설정을 저장할 수 없어요. 잠시 뒤 다시 시도해 주세요.'}});
+      state.prefs=structuredClone(body);return send(response,204);
+    }
     if(await fakeSettings(request,response,state,send,recorded))return;
     if(path==='/api/prefs'&&request.method==='GET')return send(response,200,state.prefs);
     if(path==='/api/events'){

@@ -122,7 +122,19 @@ if mode != 'revert':
     data += b'doveadm_api_key = ' + key.encode('ascii') + b'\n' + tail + end
 Path(dest).write_bytes(data)
 PY
-if cmp -s "$WORK/original" "$WORK/next"; then log "already $MODE; no changes"; exit 0; fi
+protect_extra_conf() {
+    [ "$(stat -c '%a' "$EXTRA_CONF")" = 600 ] || chmod 600 "$EXTRA_CONF"
+    [ "$(stat -c '%u:%g' "$EXTRA_CONF")" = 0:0 ] || chown root:root "$EXTRA_CONF"
+}
+if cmp -s "$WORK/original" "$WORK/next"; then
+    if [ "$MODE" = check ]; then
+        [ "$(stat -c '%a:%u:%g' "$EXTRA_CONF")" = 600:0:0 ] || die "extra.conf permissions/owner differ; update required"
+    elif [ "$MODE" = apply ]; then
+        protect_extra_conf
+    fi
+    log "already $MODE; no changes"
+    exit 0
+fi
 if [ "$MODE" = check ]; then die "managed API block differs"; fi
 command -v docker >/dev/null 2>&1 || die "docker not found; nothing changed"
 if [ "$YES" -eq 0 ]; then
@@ -134,6 +146,10 @@ BACKUP=$(mktemp "$EXTRA_CONF.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")
 cp "$WORK/original" "$BACKUP"
 log "backup: $BACKUP"
 PENDING=1
+if [ "$MODE" = apply ]; then
+    [ -f "$EXTRA_CONF" ] || : > "$EXTRA_CONF"
+    protect_extra_conf
+fi
 cat "$WORK/next" > "$EXTRA_CONF"
 dove_reload() { (cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveadm reload) >/dev/null 2>&1; }
 # Do not forward Docker output: configuration diagnostics can include the API key.

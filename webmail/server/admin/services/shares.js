@@ -36,11 +36,16 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history }
     const groups = groupMailboxAddresses(filters);
     const search = q.trim().toLowerCase();
     const selected = boxes.filter(box => `${box.owner} ${box.name}`.toLowerCase().includes(search)).sort((a, b) => a.owner.localeCompare(b.owner));
-    const items = [];
-    for (const box of selected.slice((Number(page) - 1) * 50, Number(page) * 50)) {
-      const state = await snapshot(box.owner);
-      items.push({ ...box, group: groups.has(box.owner), grantees: state.grants.map(row => row.grantee), etag: etag(state) });
-    }
+    const pageBoxes = selected.slice((Number(page) - 1) * 50, Number(page) * 50);
+    const items = new Array(pageBoxes.length);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(4, pageBoxes.length) }, async () => {
+      while (cursor < pageBoxes.length) {
+        const index = cursor++, box = pageBoxes[index];
+        const state = await snapshot(box.owner);
+        items[index] = { ...box, group: groups.has(box.owner), grantees: state.grants.map(row => row.grantee), etag: etag(state) };
+      }
+    }));
     return { items, total: selected.length, page: Number(page), pageSize: 50 };
   }
   async function change({ session, actor, ip, owner: rawOwner, grantee: rawGrantee, etag: expected, grant }) {

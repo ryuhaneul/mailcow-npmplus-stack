@@ -39,8 +39,8 @@ await test('shared folder picker and grouped sidebar',async t=>{
   });
   await t.test('popover radio keys, custom restore, checkbox focus, Esc and outside focus return',async()=>{
     const {page,context}=await start();try{
-      await more(page).click();const pop=page.getByRole('dialog',{name:`${sales} 폴더 고르기`});await expect(more(page)).toHaveAttribute('aria-expanded','true');await expect(pop.getByRole('radio',{name:'받은편지함만',exact:true})).toBeFocused();
-      await page.keyboard.press('ArrowRight');await expect(pop.getByRole('radio',{name:'전부',exact:true})).toHaveAttribute('aria-checked','true');
+      await more(page).click();const pop=page.getByRole('dialog',{name:`${sales} 폴더 고르기`});await expect(more(page)).toHaveAttribute('aria-expanded','true');await expect(pop.getByRole('radio',{name:'직접 고름',exact:true})).toBeFocused();
+      await page.keyboard.press('ArrowLeft');await expect(pop.getByRole('radio',{name:'전부',exact:true})).toHaveAttribute('aria-checked','true');
       const sent=checkbox(pop,sales,'보낸편지함');await expect(sent).toBeChecked();await sent.focus();await sent.press('Space');await expect(sent).toBeFocused();await expect(pop.getByRole('radio',{name:'직접 고름',exact:true})).toHaveAttribute('aria-checked','true');await saved(sales,'custom');
       await pop.getByRole('radio',{name:'받은편지함만',exact:true}).click();await expect(group(page,sales).locator('.sp-kid')).toHaveCount(0);await pop.getByRole('radio',{name:'직접 고름',exact:true}).click();await expect(sent).not.toBeChecked();await expect(checkbox(pop,sales,'임시보관함')).toBeChecked();
       await page.keyboard.press('Escape');await expect(pop).toHaveCount(0);await expect(more(page)).toBeFocused();await expect(more(page)).toHaveAttribute('aria-expanded','false');
@@ -48,6 +48,39 @@ await test('shared folder picker and grouped sidebar',async t=>{
       await more(page).click();await pop.getByRole('radio',{name:'직접 고름',exact:true}).focus();await page.keyboard.press('Shift+Tab');await expect(pop.getByRole('link',{name:'설정에서 전부 보기'})).toBeFocused();await page.keyboard.press('Tab');await expect(pop.getByRole('radio',{name:'직접 고름',exact:true})).toBeFocused();
     }finally{await context.close();}
   });
+  for(const width of [1280,390])for(const [mode,label] of [['inbox','받은편지함만'],['all','전부'],['custom','직접 고름']]){
+    await t.test(`popup shortcut isolation ${mode} ${width}`,async()=>{
+      const {page,context}=await start({width,setup(){fake.state.prefs.sharedView[sales].mode=mode;}});try{
+        await expect(page.locator('.list .m')).toHaveCount(12);await page.locator('.list .m').first().focus();await menu(page);await more(page).scrollIntoViewIfNeeded();await more(page).click();
+        const pop=page.getByRole('dialog',{name:`${sales} 폴더 고르기`});await expect(pop.getByRole('radio',{name:label,exact:true})).toBeFocused();
+        const before=await page.locator('.list .m').evaluateAll(rows=>rows.map(row=>({id:row.id,className:row.className,text:row.textContent,checked:[...row.querySelectorAll('[aria-checked]')].map(el=>el.getAttribute('aria-checked'))})));
+        const mailBefore=structuredClone(fake.state.mail),requestStart=fake.state.requests.length,hash=await page.evaluate(()=>location.hash),requests=[];
+        page.on('request',request=>{if(new URL(request.url()).pathname.startsWith('/api/message'))requests.push(request.method()+' '+new URL(request.url()).pathname);});
+        for(const key of ['#','e','j','s','k','x','!','g','i','g','s','c','/','?','u','Enter']){
+          await page.keyboard.press(key);await expect(pop.getByRole('radio',{name:label,exact:true})).toBeFocused();assert.equal(await page.evaluate(()=>location.hash),hash);
+        }
+        assert.deepEqual(requests,[]);assert.deepEqual(fake.state.requests.slice(requestStart).filter(request=>request.path.startsWith('/api/message')),[]);assert.deepEqual(fake.state.mail,mailBefore);
+        assert.deepEqual(await page.locator('.list .m').evaluateAll(rows=>rows.map(row=>({id:row.id,className:row.className,text:row.textContent,checked:[...row.querySelectorAll('[aria-checked]')].map(el=>el.getAttribute('aria-checked'))}))),before);
+        await page.keyboard.press('Escape');await expect(pop).toHaveCount(0);await expect(more(page)).toBeFocused();
+      }finally{await context.close();}
+    });
+    await t.test(`initial popup focus cycle ${mode} ${width}`,async()=>{
+      const {page,context}=await start({width,setup(){fake.state.prefs.sharedView[sales].mode=mode;}});try{
+        await menu(page);await more(page).scrollIntoViewIfNeeded();await more(page).click();const pop=page.getByRole('dialog',{name:`${sales} 폴더 고르기`}),selected=pop.getByRole('radio',{name:label,exact:true});
+        await expect(selected).toBeFocused();await expect(selected).toHaveJSProperty('tabIndex',0);
+        for(const radio of await pop.getByRole('radio').all())if(await radio.getAttribute('aria-checked')==='false')await expect(radio).toHaveJSProperty('tabIndex',-1);
+        await page.keyboard.press('Shift+Tab');await expect(pop.getByRole('link',{name:'설정에서 전부 보기'})).toBeFocused();await page.keyboard.press('Tab');await expect(selected).toBeFocused();
+        const count=await pop.evaluate(node=>[...node.querySelectorAll('button,input,a[href]')].filter(el=>!el.disabled&&el.tabIndex>=0).length);
+        for(const key of ['Tab','Shift+Tab']){
+          for(let index=0;index<count*2;index++){await page.keyboard.press(key);assert.equal(await pop.evaluate(node=>node.contains(document.activeElement)),true);}
+          await expect(selected).toBeFocused();
+        }
+        await page.keyboard.press('ArrowRight');await expect(pop.locator('[role=radio][aria-checked=true]')).toBeFocused();await expect(pop.locator('[role=radio][tabindex="0"]')).toHaveCount(1);
+        const sent=checkbox(pop,sales,'보낸편지함');await sent.focus();await sent.press('Space');await expect(sent).toBeFocused();
+        await page.keyboard.press('Escape');await expect(pop).toHaveCount(0);await expect(more(page)).toBeFocused();await expect(more(page)).toHaveAttribute('aria-expanded','false');
+      }finally{await context.close();}
+    });
+  }
   await t.test('hide current folder and owner keeps view; settings restores selection across reload',async()=>{
     const {page,context}=await start();try{
       await group(page,sales).getByRole('link',{name:'견적',exact:false}).click();await expect(page.locator('#page-title')).toHaveText(`${sales} · 견적`);const hash=await page.evaluate(()=>location.hash);

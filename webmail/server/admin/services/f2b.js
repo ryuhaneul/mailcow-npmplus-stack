@@ -74,9 +74,9 @@ export function createF2bService({ mailcow, audit, lock, history }) {
   }
   async function action({ session, actor, ip, data }) {
     input(data, ['network', 'action']); if (!['unban', 'whitelist', 'blacklist', 'unwhitelist'].includes(data.action)) throw invalid();
-    const name = network(data.network), operation = data.action;
+    const normalized = network(data.network), operation = data.action;
     return lock.run(target, async () => {
-      const current = await read(session);
+      const current = await read(session), name = operation === 'unwhitelist' ? current.whitelist.find(item => item.toLowerCase() === normalized) : normalized;
       if (operation === 'unban') {
         if (current.permanentBans.some(row => row.network === name)) throw new AppError(409, 'PERM_BAN', '차단 목록(blacklist)에서 온 영구 차단이라 풀기로는 풀리지 않음');
         const row = current.activeBans.find(row => row.network === name); if (!row) throw new AppError(404, 'NOT_FOUND', '현재 차단 목록에 없는 주소예요.');

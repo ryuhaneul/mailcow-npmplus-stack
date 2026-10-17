@@ -34,7 +34,8 @@ export function createCleanupService({ mailcow, doveadm, quota, audit, lock, now
         const rows = await doveadm.call('mailboxList', { user: mailbox });
         if (!rows.some(row => row?.mailbox === folder)) throw new AppError(404, 'NOT_FOUND', '메일 폴더를 찾을 수 없어요.');
       }
-      const query = ['mailbox', folder, 'before', before];
+      // Dovecot 2.3.21: mail-storage.c:3150-3153 + mail-search-register-human.c:44-47 set UTC; index/index-search.c:371-382 compares received time < UNIX seconds.
+      const query = ['mailbox', folder, 'before', String(Date.parse(`${before}T00:00:00+09:00`) / 1000)];
       const count = await search(mailbox, query), usage = await quota.usage(mailbox);
       const token = randomBytes(32).toString('hex');
       previews.set(token, { session, mailbox, folder: data.folder, before, query, count, usage, confirmTeam: data.confirmTeam === true, expires: now() + 600_000 });

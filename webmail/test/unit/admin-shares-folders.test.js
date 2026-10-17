@@ -54,6 +54,13 @@ async function fixture(t, initial = [], options = {}) {
   return Object.assign(f, { dir, aclFolders, audit, history, service, item, change });
 }
 
+for (const wholeMailbox of [false, true]) test(`shares: history title is mode independent wholeMailbox=${wholeMailbox}`, async t => {
+  const f = await fixture(t, [], { wholeMailbox });
+  await f.change(true);
+  const record = (await f.history.list()).items[0];
+  assert.equal(record.summary, `admin님이 ${owner} 읽기 공유를 바꿨어요`);
+});
+
 test('ACL folders: list preserves exact names and excludes only the received namespace', async t => {
   const f = await fixture(t);
   for (const name of [' 한글 "폴더" ', 'MySharedNotes', 'Archive/Shared', 'Sharedness']) f.folders.add(name);

@@ -27,6 +27,18 @@ print(os.environ.get('WEBMAIL_ADMIN_DOVEADM_KEY', ''), file=sys.stderr)
 sys.exit(1 if os.environ.get('FAIL_RELOAD') else 0)
 ''')
     docker.chmod(0o755)
+    real_cat = shutil.which('cat')
+    (root / 'bin/cat').write_text(f'''#!/usr/bin/env python3
+import os, pathlib, subprocess, sys
+if os.environ.get('FAIL_WRITE') and pathlib.Path(sys.argv[1]).name == 'next':
+    sys.stdout.buffer.write(b'# interrupted write\\n')
+    sys.exit(1)
+if os.environ.get('RESTORE_WITH_KEY') and pathlib.Path(sys.argv[1]).name == 'original':
+    conf = pathlib.Path(os.environ['FIXTURE_ROOT']) / 'mailcow/data/conf/dovecot/extra.conf'
+    assert conf.stat().st_mode & 0o777 == 0o600, 'restore must never write the key to a 644 file'
+sys.exit(subprocess.call([{real_cat!r}] + sys.argv[1:]))
+''')
+    (root / 'bin/cat').chmod(0o755)
     key = 'synthetic-doveadm-key-example.com'
     envfile = root / '.env'
     envfile.write_text(f'MAILCOW_DIR={conf.parents[3]}\nWEBMAIL_ADMIN_DOVEADM_KEY={key}\n')
@@ -174,6 +186,36 @@ sys.exit(subprocess.call([{real_stat!r}] + args))
         run('--revert')
         assert conf.read_bytes() == original
 
+    # Reload failure and EXIT trap restore both legacy key blocks securely.
+    rollback_modes = []
+    for commands in (allowlist.replace(b',acl get', b''), allowlist):
+        previous = (original + b'\n' + begin + separator + b'doveadm_api_key = ' + key.encode()
+                    + b'\ndoveadm_allowed_commands = ' + commands + b'\n' + listener + end)
+        for failure in ('FAIL_RELOAD', 'FAIL_WRITE'):
+            conf.write_bytes(previous)
+            conf.chmod(0o644)
+            inode = conf.stat().st_ino
+            run(ok=False, **{failure: '1', 'RESTORE_WITH_KEY': '1'})
+            assert conf.read_bytes() == previous, f'{failure}: original key block bytes must be restored'
+            rollback_modes.append((len(commands.split(b',')), failure, conf.stat().st_mode & 0o777))
+            assert conf.stat().st_ino == inode
+            if os.geteuid() == 0:
+                assert (conf.stat().st_uid, conf.stat().st_gid) == (0, 0)
+            else:
+                assert (root / 'root-owner').exists()
+
+    assert all(mode == 0o600 for _, _, mode in rollback_modes), rollback_modes
+
+    # Restoring a file without the managed key retains its original permissions.
+    for failure in ('FAIL_RELOAD', 'FAIL_WRITE'):
+        conf.write_bytes(original)
+        conf.chmod(0o644)
+        st = conf.stat()
+        run(ok=False, **{failure: '1'})
+        assert conf.read_bytes() == original
+        restored = conf.stat()
+        assert (restored.st_mode, restored.st_uid, restored.st_gid, restored.st_ino) == (st.st_mode, st.st_uid, st.st_gid, st.st_ino)
+
     # Unknown block changes still fail closed without writing or reload.
     unknown = applied.replace(b',acl get\n', b',acl set\n')
     conf.write_bytes(unknown)
@@ -210,4 +252,4 @@ sys.exit(subprocess.call([{real_stat!r}] + args))
     run(ok=False)
     assert conf.read_bytes() == b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
     assert all(key.encode() not in output for output in outputs)
-print('PASS: byte-exact IP-only block/key/listener/allowlist; 644 apply to 600; equal-block permission repair; check permissions; no-op metadata; revert keeps 600; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload rollback; malformed marker rejection; output secret occurrences=0')
+print('PASS: byte-exact IP-only block/key/listener/allowlist; 644 apply to 600; equal-block permission repair; check permissions; no-op metadata; revert keeps 600; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload/EXIT rollback preserves legacy key block bytes and 600; keyless rollback preserves original permissions; malformed marker rejection; output secret occurrences=0')

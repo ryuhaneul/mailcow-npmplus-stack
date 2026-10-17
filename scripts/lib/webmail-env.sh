@@ -212,7 +212,28 @@ webmail_ensure_admin_key() {
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
-    local scripts="$1"
+    local scripts="$1" file group mode
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then
+        if grep -qE '^[^:]*:[^:]*:64250:' /etc/group; then
+            webmail_error "host group 64250 already exists; refusing relay file access"
+            return 1
+        fi
+        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
+            group=$(stat -c %g "$file") || return 1
+            if [ "$group" != 64250 ]; then chgrp 64250 "$file" || return 1; fi
+            mode=$(stat -c %a "$file") || return 1
+            if (( (8#$mode & 0020) == 0 )); then chmod g+w "$file" || return 1; fi
+        done
+    elif [ "$WEBMAIL_ADMIN_RELAY_ENABLE" != true ]; then
+        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
+            [ -f "$file" ] || continue
+            group=$(stat -c %g "$file") || return 1
+            if [ "$group" = 64250 ]; then
+                mode=$(stat -c %a "$file") || return 1
+                if (( (8#$mode & 0020) != 0 )); then chmod g-w "$file" || return 1; fi
+            fi
+        done
+    fi
     if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
         WEBMAIL_ADMIN_DOVEADM_KEY="$WEBMAIL_ADMIN_DOVEADM_KEY" MAILCOW_DIR="$MAILCOW_DIR" \
             bash "$scripts/apply-dovecot-admin-api.sh" apply -y || return 1
@@ -344,7 +365,9 @@ if relay_ready == 'true':
     mounts.extend([f'{mailcow}/data/conf/postfix:/run/relay/postfix:z',
                    f'{mailcow}/data/conf/rspamd/local.d:/run/relay/rspamd:z'])
 if mode == 'pin': mounts.append(f'{dest}/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z')
-admin = '  webmail-admin:\n    volumes:\n' + ''.join('      - ' + json.dumps(m.replace('$', '$$')) + '\n' for m in mounts)
+admin = '  webmail-admin:\n'
+if relay_ready == 'true': admin += '    group_add: ["64250"]\n'
+admin += '    volumes:\n' + ''.join('      - ' + json.dumps(m.replace('$', '$$')) + '\n' for m in mounts)
 text = text.replace('\nnetworks:\n', '\n' + admin + 'networks:\n', 1)
 sys.stdout.write(text)
 PYOVERRIDE

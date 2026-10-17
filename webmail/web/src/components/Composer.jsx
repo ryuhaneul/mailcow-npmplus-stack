@@ -48,7 +48,7 @@ export default function Composer() {
     (async()=>{
       try{
         if(current.current){await saveDraft();if(cancelled||!active())return;await releaseAttachments();}
-        const [identities,rules]=await Promise.all([api('/api/compose/identities'),api('/api/rules')]);if(cancelled||!active())return;
+        const [identities,rules]=await Promise.all([api('/api/compose/identities'),api('/api/rules').catch(error=>{if(error.code==='SIEVE_DISABLED')return {};throw error;})]);if(cancelled||!active())return;
         reset();setIdentity(identities);setDomain(rules.internalDomains?.[0]||'');
         const value=initialComposition(seed,identities,prefs.value,owner.current.user.email);current.current=value;setModel(value);setShowCc(value.cc.length>0);setShowBcc(false);composeSeed.value=null;
         if(seed){version.current=1;editedAt.current=Date.now();schedule();}

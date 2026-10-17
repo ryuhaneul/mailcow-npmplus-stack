@@ -249,3 +249,102 @@ test('without webmail-rules, folder deletion is not blocked by import states', a
     assert.deepEqual(f.imapCalls, [['DELETE', 'Empty']]); assert.deepEqual(mutating(f.server.commands), []); assert.equal(f.server.activeName, active);
   }
 });
+
+async function imapVerification(t, f, failure) {
+  const { EventEmitter } = await import('node:events');
+  const { createImapPool } = await import('../../server/mail/imap-pool.js');
+  const clients = [];
+  const pool = createImapPool({ config: { mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    clientFactory: options => {
+      const fresh = clients.length > 0;
+      const client = Object.assign(new EventEmitter(), f.client, {
+        usable: true, checks: 0, acquisitions: 0, logins: 0, logouts: 0,
+        async connect() {
+          this.logins++;
+          assert.equal(options.auth.user, 'user@example.com');
+          assert.equal(options.auth.pass, 'synthetic-sieve-password');
+          if (fresh && failure) throw failure;
+        },
+        close() { this.usable = false; },
+        async logout() { this.logouts++; this.close(); },
+        async noop() { this.checks++; }, // An old authenticated connection survives a password change.
+        async getMailboxLock() {
+          this.acquisitions++;
+          const previous = this.tail ?? Promise.resolve();
+          let release; this.tail = new Promise(resolve => { release = resolve; });
+          await previous;
+          return { release };
+        },
+      });
+      clients.push(client);
+      return client;
+    }, destroySession: (session, code) => f.app.sessions.destroy(session, code) });
+  const session = await f.app.sessions.get(f.headers.cookie.split('=')[1]);
+  session.connection = (await pool.verifyLogin(session)).connection;
+  f.app.imap.withMailbox = pool.withMailbox;
+  f.app.imap.verifySessionLogin = pool.verifySessionLogin;
+  return { client: clients[0], clients, session };
+}
+
+for (const mode of ['valid', 'rejected', 'unavailable', 'normal']) {
+  test(`ManageSieve AUTHENTICATE NO rechecks session credentials with one fresh IMAP login (${mode})`, async t => {
+    const f = await fixture(t, 'none');
+    const failure = mode === 'rejected' ? Object.assign(new Error('synthetic IMAP rejection'), { authenticationFailed: true })
+      : mode === 'unavailable' ? new Error('synthetic connection error') : null;
+    const { client, clients, session } = await imapVerification(t, f, failure);
+    if (mode === 'rejected') { await client.noop(); assert.equal(client.usable, true); }
+    if (mode !== 'normal') f.server.reject = { command: 'AUTHENTICATE' };
+    const response = await f.request('GET', '/api/rules');
+    status(response, mode === 'normal' ? 200 : mode === 'valid' ? 409 : mode === 'rejected' ? 403 : 503,
+      mode === 'normal' ? undefined : mode === 'valid' ? 'SIEVE_DISABLED' : mode === 'rejected' ? 'SESSION_EXPIRED' : 'MAIL_UNAVAILABLE');
+    assert.equal(client.checks, mode === 'rejected' ? 1 : 0);
+    assert.equal(clients.length, mode === 'normal' ? 1 : 2);
+    if (mode !== 'normal') {
+      assert.equal(clients[1].logins, 1);
+      assert.equal(clients[1].usable, false);
+      assert.equal(clients[1].logouts, mode === 'valid' ? 1 : 0);
+    }
+    assert.equal(f.server.commands.filter(row => row.command === 'AUTHENTICATE').length, 1);
+    if (mode === 'valid') assert.equal(response.json().error.message, '이 계정은 메일 필터 기능이 꺼져 있어요. 관리자에게 켜 달라고 요청해 주세요.');
+    status(await f.request('GET', '/api/auth/session'), mode === 'rejected' ? 403 : 200);
+    assert.equal(session.connection === null, mode === 'rejected');
+    assert.equal(session.password.every(byte => byte === 0), mode === 'rejected');
+  });
+}
+
+test('Sieve rejection in a folder operation rechecks credentials without reacquiring its IMAP lock', async t => {
+  const f = await fixture(t);
+  const { client, clients } = await imapVerification(t, f);
+  f.server.reject = { command: 'AUTHENTICATE' };
+  status(await f.request('PATCH', '/api/folders/Projects', { name: 'Renamed' }), 409, 'SIEVE_DISABLED');
+  assert.equal(client.checks, 0); assert.equal(client.acquisitions, 1);
+  assert.equal(clients.length, 2); assert.equal(clients[1].logouts, 1);
+  assert.deepEqual(f.imapCalls, []);
+  status(await f.request('GET', '/api/auth/session'), 200);
+});
+
+test('overlapping rules and folder requests release Sieve before IMAP verification without deadlock', { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  const { client, clients } = await imapVerification(t, f);
+  let connecting, release;
+  const entered = new Promise(resolve => { connecting = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const { createRulesService } = await import('../../server/sieve/service.js');
+  const rejected = Object.assign(new Error('synthetic Sieve AUTHENTICATE NO'), { authenticationFailed: true });
+  let connections = 0;
+  const service = createRulesService({ config: {}, imap: f.app.imap, directory: f.app.directory,
+    connect: async () => { if (++connections === 1) { connecting(); await gate; } throw rejected; } });
+  const session = await f.app.sessions.get(f.headers.cookie.split('=')[1]);
+  const rules = service.get(session);
+  await entered;
+  let held;
+  const folderHeld = new Promise(resolve => { held = resolve; });
+  const folder = f.app.imap.withMailbox(session, 'INBOX', current => { held(); return service.getState(session, current); });
+  await folderHeld;
+  release();
+  const results = await Promise.allSettled([rules, folder]);
+  assert.deepEqual(results.map(row => [row.status, row.reason.statusCode, row.reason.code]), [['rejected', 409, 'SIEVE_DISABLED'], ['rejected', 409, 'SIEVE_DISABLED']]);
+  assert.equal(client.checks, 0); assert.equal(connections, 2);
+  assert.equal(clients.length, 3);
+  assert.ok(clients.slice(1).every(value => value.logins === 1 && value.logouts === 1 && !value.usable));
+});

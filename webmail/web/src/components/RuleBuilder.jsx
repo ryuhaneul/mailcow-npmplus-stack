@@ -100,7 +100,7 @@ export default function RuleBuilder({ id, query }) {
     <div class="scroll"><div class="set-body">
       {error && <div class="banner rule-error" role="alert"><div>{error.code === 'RULES_CONFLICT' ? '필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.' : error.code === 'FORWARD_EXTERNAL' ? '회사 밖 주소로는 자동 전달할 수 없습니다(회사 정책). 받는 쪽이 사내 주소인지 확인해 주세요.' : error.code === 'RULES_INVALID' ? `규칙을 확인해 주세요. ${error.path ?? ''} ${error.reason ?? ''}` : error.message}</div><button class="btn" type="button" disabled={busy} onClick={load}>다시 불러오기</button><a class="btn" href="#filters">필터 목록</a></div>}
       {!draft && !error && <p role="status">규칙을 불러오는 중이에요.</p>}
-      {rule && <div class="builder"><form onSubmit={save}>
+      {rule && error?.code !== 'SIEVE_DISABLED' && <div class="builder"><form onSubmit={save}>
         <div class="summary"><small>이렇게 동작합니다</small><RuleSummary rule={rule}/></div>
         <fieldset class="rule-fields" disabled={busy || Boolean(error)}>
           <div class="step"><h2><i aria-hidden="true">1</i>어떤 메일에<span class="seg" role="group" aria-label="조건 결합">{[['all','모두 맞을 때'],['any','하나라도 맞을 때']].map(([value,label]) => <button type="button" aria-pressed={rule.match === value} onClick={() => setDraft({...draft,match:value})}>{label}</button>)}</span></h2>

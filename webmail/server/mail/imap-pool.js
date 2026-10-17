@@ -100,6 +100,15 @@ export function createImapPool({ config, destroySession, clientFactory = options
     }
     throw unavailable();
   }
+  async function verifySessionLogin(session) {
+    let verified;
+    try {
+      verified = await verifyLogin({ email: session.email, password: session.password, ip: session.ip });
+    } catch (error) {
+      return connectionFailure(error, session);
+    }
+    await verified.connection.logout();
+  }
   async function workFor(session, state) {
     if (state.work?.usable) return state.work;
     if (!state.workPending) {
@@ -198,5 +207,5 @@ export function createImapPool({ config, destroySession, clientFactory = options
       }
     };
   }
-  return { verifyLogin, withMailbox, withRef, watch };
+  return { verifyLogin, verifySessionLogin, withMailbox, withRef, watch };
 }

@@ -18,7 +18,8 @@ export async function rulesServer(t, { certificate, privateKey, scripts = [], ac
         const encoded = /^AUTHENTICATE "PLAIN" "([A-Za-z0-9+/=]+)"$/.exec(line)?.[1];
         authenticated = encoded && Buffer.from(encoded, 'base64').toString() === '\0user@example.com\0synthetic-sieve-password';
         assert.ok(socket.encrypted); assert.ok(authenticated);
-        state.commands.push({ command: verb }); send('OK\r\n'); return;
+        state.commands.push({ command: verb });
+        send(state.reject?.command === verb ? 'NO "synthetic rejection"\r\n' : 'OK\r\n'); return;
       }
       const name = /^\w+ "((?:[^"\\]|\\["\\])*)"/.exec(line)?.[1].replace(/\\(["\\])/g, '$1');
       state.commands.push({ command: verb, ...(name === undefined ? {} : { name }), ...(literal === undefined ? {} : { script: literal }) });

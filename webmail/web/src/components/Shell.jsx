@@ -48,7 +48,7 @@ export default function Shell() {
     folders.value = { folders: [], virtualAllMail: null }; storage.value = null; vacation.value = null;
     api('/api/folders').then(value => {if(active) {folders.value=value;stopEvents=connectMailboxEvents();}}).catch(error => {if(active) onError(error);});
     api('/api/storage?quotaOnly=1').then(value => {if(active) storage.value=value;}).catch(error => {if(active) onError(error);});
-    api('/api/rules').then(value => {if(active) vacation.value=value.doc?.vacation ?? null;}).catch(error => {if(active) onError(error);});
+    api('/api/rules').then(value => {if(active) vacation.value=value.doc?.vacation ?? null;}).catch(error => {if(active) {if(error.code === 'SIEVE_DISABLED') vacation.value=null; else onError(error);}});
     return () => {active=false;stopEvents?.();};
   }, []);
   useEffect(() => {

@@ -180,6 +180,19 @@ test('admin auth: TOTP failure immediately revokes session, returns restart and 
   const next = await login(f, { username: 'other' }); failure(next, 403, 'AUTH_FAILED'); assert.equal(next.json().error.remainingAttempts, 3);
 });
 
+for (const [status, code] of [[403, 'NOT_ADMIN'], [403, 'ADMIN_PENDING_ACTION'], [502, 'MAILCOW_REJECTED']]) test(`admin auth: TOTP ${code} revokes session and returns restart`, async t => {
+  const f = await fixture(t, { state: 'totp' }); const headers = credentials(await login(f));
+  f.options.totpError = () => new AppError(status, code, '처리 실패');
+  const response = await write(f, '/api/admin/auth/totp', headers, { code: '123456' });
+  failure(response, status, code); assert.equal(response.json().error.restart, true);
+  assert.equal(response.json().error.message, '처리 실패');
+  assert.equal(response.json().error.remainingAttempts, undefined);
+  assert.equal(f.app.adminRateLimiter.remaining('198.51.100.9', 'admin'), 5);
+  assert.equal(count(f, 'totp'), 1); assert.equal(count(f, 'logout'), 1);
+  assert.match(response.headers['set-cookie'], /Max-Age=0/);
+  failure(await f.app.inject({ url: '/api/admin/auth/session', headers }), 403, 'SESSION_EXPIRED');
+});
+
 test('admin auth: five malformed TOTP attempts revoke pending session without submitting to mailcow', async t => {
   const f = await fixture(t, { state: 'totp' }); const headers = credentials(await login(f));
   for (let i = 0; i < 5; i++) {

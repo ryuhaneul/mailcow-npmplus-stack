@@ -14,7 +14,7 @@ const fixtureFolders = [
   ['INBOX','받은편지함','\\Inbox',9],['Sent','보낸편지함','\\Sent',0],['Drafts','임시보관함','\\Drafts',1],['Archive','보관함','\\Archive',0],['Junk','스팸','\\Junk',3],['Trash','휴지통','\\Trash',0],
 ].map(([path,name,specialUse,unseen])=>({path,name,parent:null,specialUse,shared:false,rights,unseen,total:20,color:null}));
 for(const [i,name] of ['거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰'].entries())fixtureFolders.push({path:name,name,parent:null,specialUse:null,shared:false,rights,unseen:i===1?1:0,total:10,color:i+1});
-for(const [path,name] of [['Shared/sales@example.com/INBOX','영업팀'],['Shared/support@example.com/INBOX','고객지원']])fixtureFolders.push({path,name,parent:'Shared',specialUse:null,shared:true,owner:path.split('/')[1],rights:{write:false,delete:false,insert:false,seen:true},unseen:2,total:10,color:null});
+for(const path of ['Shared/sales@example.com/INBOX','Shared/support@example.com/INBOX','Shared/support@example.com/INBOX/처리 완료'])fixtureFolders.push({path,name:path.split('/').at(-1),parent:path.slice(0,path.lastIndexOf('/')),specialUse:null,shared:true,owner:path.split('/')[1],rights:{write:false,delete:false,insert:false,seen:true},unseen:2,total:10,color:null});
 let fixtureUid=0;
 function fakeMessage(folder,index) {
   const uid=++fixtureUid;

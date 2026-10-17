@@ -93,6 +93,17 @@ test('standard IMAP names use approved Korean labels while custom folder names a
   assert.equal(folderLabel({path:'Archive',name:'보관 문서'}),'보관 문서');
 });
 
+test('shared folder labels identify owners and translate each relative path segment',async()=>{
+  const {folderLabel}=await import('../../web/src/format.js');
+  const shared=path=>({path:`Shared/support@example.com/${path}`,name:path.split('/').at(-1),shared:true,owner:'support@example.com'});
+  assert.equal(folderLabel(shared('INBOX')),'support@example.com');
+  assert.equal(folderLabel(shared('INBOX/처리 완료')),'support@example.com · 받은편지함 / 처리 완료');
+  assert.equal(folderLabel(shared('Sent')),'support@example.com · 보낸편지함');
+  assert.equal(folderLabel(shared('Archive/Trash/Drafts/Junk')),'support@example.com · 보관함 / 휴지통 / 임시보관함 / 스팸');
+  assert.equal(folderLabel({path:'Shared',name:'Shared',shared:true}),'Shared');
+  assert.equal(folderLabel({path:'Shared/INBOX',name:'INBOX',shared:true}),'INBOX');
+});
+
 test('SEARCH_SLOW stays in the list and retry preserves the same search parameters', async t => {
   const paths = [];
   setup(t, async path => {

@@ -244,13 +244,23 @@ else
         die "Mailcow update aborted by user"
     fi
 
+    # Keep the pre-update running set: intentionally stopped services are optional.
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=lib/mailcow-health.sh
+    source "$SCRIPT_DIR/lib/mailcow-health.sh"
+    MAILCOW_RUNNING_BEFORE=$(cd "$MAILCOW_DIR" && docker compose ps --status running --services) \
+        || die "Could not record running Mailcow services before update"
+    MAILCOW_UPDATE_RC=0
     log "Running Mailcow official update..."
     # -f: force yes, skip interactive prompts inside mailcow update.sh.
     if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
-        log "Mailcow update: done"
+        :
     else
-        die "Mailcow official update failed — see $LOGFILE"
+        MAILCOW_UPDATE_RC=$?
     fi
+    mailcow_after_update "$MAILCOW_DIR" "$MAILCOW_RUNNING_BEFORE"
+    [ "$MAILCOW_UPDATE_RC" -eq 0 ] || die "Mailcow official update failed — see $LOGFILE"
+    log "Mailcow update: done"
 fi
 
 # ============================================================

@@ -281,10 +281,10 @@ edge_prepare_apps() {
     fi
     if [ "$WEBMAIL_ENABLE" = true ]; then
         mkdir -p "$webdir" || return 1
-        rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=mail-tls-pin.pem \
+        rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
             --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then before=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || true; fi
-        webmail_ensure_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" \
+        webmail_ensure_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" && webmail_generate_admin_env "$webdir" \
             && edge_generate_relay webmail "$webdir" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
             after=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || return 1
@@ -321,7 +321,13 @@ PY
         fi
         if [ "$app" = webmail ]; then (cd "$dir" && BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull webmail) || return 1; fi
         if [ "$app" = webmail ] && [ "${EDGE_WEBMAIL_PIN_CHANGED:-false}" = true ]; then
-            (cd "$dir" && docker compose up -d mailrelay-webmail && docker compose up -d --force-recreate webmail) || return 1
+            (cd "$dir" && docker compose up -d mailrelay-webmail && {
+                if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
+                    docker compose --profile admin up -d --force-recreate webmail webmail-admin
+                else
+                    docker compose up -d --force-recreate webmail
+                fi
+            }) || return 1
         else
             (cd "$dir" && docker compose up -d) || return 1
         fi

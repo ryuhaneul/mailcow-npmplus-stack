@@ -7,4 +7,5 @@ node_modules
 *.key
 npm-debug.log*
 web/dist
+web/dist-admin
 web/src/dev

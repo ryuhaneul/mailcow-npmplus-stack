@@ -16,7 +16,10 @@ scan() {
 sources=(server)
 [[ ! -d web/src ]] || sources+=(web/src)
 scan '\b401\b|WWW-Authenticate' "${sources[@]}"
-scan "headers[[:space:]]*(\.[[:space:]]*[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|\[[[:space:]]*['\"][aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN])" server/routes server/security
+ingress=(server/routes server/security)
+[[ ! -d server/admin/routes ]] || ingress+=(server/admin/routes)
+[[ ! -f server/admin/guard.js ]] || ingress+=(server/admin/guard.js)
+scan "headers[[:space:]]*(\.[[:space:]]*[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|\[[[:space:]]*['\"][aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN])" "${ingress[@]}"
 if (( violations )); then
   echo 'R-NPM: 위반 발견' >&2
   exit 1

@@ -1,0 +1,22 @@
+import { useState } from 'preact/hooks';
+import { useAdminData } from '../hooks/useAdminData.js';
+import Loading from '../components/Loading.jsx';
+import LoadError from '../components/LoadError.jsx';
+import { adminApi } from '../api.js';
+import ManagementPage from '../components/ManagementPage.jsx';
+import ManagementDialog from '../components/ManagementDialog.jsx';
+import MutationError from '../components/MutationError.jsx';
+import Notice from '../components/Notice.jsx';
+import Empty from '../components/Empty.jsx';
+import RecordNotice from '../components/RecordNotice.jsx';
+function GranteeSelect({owner,value,onChange}) {
+ const [q,setQ]=useState(''),[page,setPage]=useState(1),result=useAdminData(`/api/admin/mailboxes?${new URLSearchParams({q,page})}`);
+ const candidates=result.data?.items.filter(row=>String(row.active)==='1'&&row.address!==owner)||[];
+ return <><div class="field"><label for="share-search">공유받을 사람 검색</label><input id="share-search" value={q} onInput={e=>{setQ(e.currentTarget.value);setPage(1);onChange('');}}/></div>{result.loading?<Loading/>:result.error?<LoadError error={result.error} retry={result.reload}/>:<><div class="field"><label for="share-grantee">공유받을 사람</label><select id="share-grantee" required value={value} onChange={e=>onChange(e.currentTarget.value)}><option value="">공유받을 사람 선택</option>{candidates.map(row=><option key={row.address} value={row.address}>{row.name} · {row.address}</option>)}</select></div>{!candidates.length&&<Empty>이 쪽에 공유할 수 있는 활성 메일함이 없어요.</Empty>}<div class="account-pages"><button class="btn" type="button" disabled={page===1} onClick={()=>{setPage(page-1);onChange('');}}>이전 쪽</button><span>{page} / {Math.max(1,Math.ceil(result.data.total/result.data.pageSize))}</span><button class="btn" type="button" disabled={page*result.data.pageSize>=result.data.total} onClick={()=>{setPage(page+1);onChange('');}}>다음 쪽</button></div></>}</>;
+}
+function ShareDetail({row,reload}) {
+ const [dialog,setDialog]=useState(null),[grantee,setGrantee]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(null),[saved,setSaved]=useState(null);
+ async function submit(event){event.preventDefault();if(busy||!grantee||error?.status===409)return;setBusy(true);setError(null);try{setSaved(await adminApi(`/api/admin/shares/${encodeURIComponent(row.owner)}`,{method:dialog==='add'?'POST':'DELETE',body:{grantee,etag:row.etag}}));setDialog(null);reload();}catch(failure){setError(failure);}finally{setBusy(false);}}
+ return <><div class="detail-head"><div><h2>{row.name||row.owner}</h2><p>{row.owner}</p></div><span class="chip">받은편지함 · 읽기 전용</span></div><div class="section-title"><h3>공유받은 사람</h3><button class="btn pri" onClick={()=>{setDialog('add');setGrantee('');setError(null);}}>읽기 공유 주기</button></div>{row.grantees.length?row.grantees.map(value=><div class="mini-row" key={value}><span>{value}</span><button class="btn ghost" onClick={()=>{setGrantee(value);setDialog('remove');setError(null);}}>빼기</button></div>):<Empty>아직 공유한 사람이 없습니다</Empty>}<Notice><strong>공유 범위</strong><p>받은편지함을 읽을 수 있습니다. 메일 수정·삭제·보내기 권한은 주지 않습니다.</p></Notice>{saved&&<><Notice>{saved.unchanged?'바뀐 내용이 없어요.':'읽기 공유를 저장했습니다.'}</Notice><RecordNotice steps={[saved]}/></>}{dialog&&<ManagementDialog title={dialog==='add'?'읽기 공유 주기':'읽기 공유 빼기'} busy={busy} close={()=>setDialog(null)}><form onSubmit={submit}><fieldset class="flow-fields" disabled={busy}>{dialog==='add'?<GranteeSelect owner={row.owner} value={grantee} onChange={setGrantee}/>:<p>{grantee}의 받은편지함 읽기 권한을 뺍니다.</p>}</fieldset><MutationError error={error} reload={()=>{setDialog(null);reload();}}/><div class="footer-actions"><button class="btn" type="button" disabled={busy} onClick={()=>setDialog(null)}>취소</button><button class="btn pri" disabled={busy||!grantee||error?.status===409}>{dialog==='add'?'읽기 공유 추가':'공유 빼기'}</button></div></form></ManagementDialog>}</>;
+}
+export default function Shares({address}){return <ManagementPage title="공유" description="팀 받은편지함을 읽기 전용으로 공유합니다." loadingMessage="공유 정보를 모든 메일함에서 확인하고 있어요. 메일함 수에 따라 몇 분 걸릴 수 있어요." resource="shares" hash="shares" address={address}>{({data,address,reload})=>{const row=data.items.find(value=>value.owner===address);return row?<ShareDetail key={row.owner} row={row} reload={reload}/>:<Empty>이 쪽에 메일함이 없어요.</Empty>;}}</ManagementPage>;}

@@ -1,0 +1,5 @@
+.history-page .list-tools select{width:100%;padding:8px 10px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface)}
+.history-page pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12px;margin:7px 0 0;word-break:break-word}
+.history-page .log-diff{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:12px;padding:16px;border:1px solid var(--line);border-radius:10px}
+.history-page .chip{align-self:flex-start}.history-page .chip.danger{color:var(--danger);background:var(--danger-bg)}
+@media(max-width:700px){.history-page .log-diff{grid-template-columns:minmax(0,1fr)}}

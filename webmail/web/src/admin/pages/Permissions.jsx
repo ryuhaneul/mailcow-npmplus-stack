@@ -1,0 +1,24 @@
+import { useEffect, useState } from 'preact/hooks';
+import { adminApi } from '../api.js';
+import { useAdminData } from '../hooks/useAdminData.js';
+import ManagementPage from '../components/ManagementPage.jsx';
+import Loading from '../components/Loading.jsx';
+import LoadError from '../components/LoadError.jsx';
+import Notice from '../components/Notice.jsx';
+import MutationError from '../components/MutationError.jsx';
+import RecordNotice from '../components/RecordNotice.jsx';
+import { addressList, senderDiffRows } from './permissions.js';
+export function EffectiveSenders({ effective, limits = [], receiveOnlyAliases = [], title = '실제로 보낼 수 있는 주소' }) { return <><section class="detail-section"><h3>{title}</h3><ul class="management-values">{effective.addresses.map(value => <li key={value}>{value}</li>)}</ul>{effective.domainPatterns.map(row => <p key={row.pattern}>{row.pattern}{row.except.length > 0 && <small> · 제외 {row.except.join(', ')}</small>}</p>)}{effective.all && <Notice tone="warn">전체 허용(*)이 있어요.</Notice>}</section>{receiveOnlyAliases.length > 0 && <section class="detail-section"><h3>받기 전용 별칭</h3>{receiveOnlyAliases.map(row => <p key={row.address}>{row.address} · {row.active === '1' || row.active === true ? '사용 중' : '비활성'}</p>)}</section>}<div class="hint">{limits.map(value => <p key={value}>{value}</p>)}</div></>; }
+export function SenderDiff({ value }) { return <section class="detail-section"><h3>변경 차이</h3><div class="table-wrap"><table aria-label="보내기 권한 차이"><thead><tr><th>항목</th><th>주소</th></tr></thead><tbody>{senderDiffRows(value).map(([name, values]) => <tr key={name}><td>{name}</td><td>{values.join(', ') || '없음'}</td></tr>)}</tbody></table></div>{value.storageNotice && <Notice tone="warn">{value.storageNotice}<p>별칭으로 이미 허용된 중복 저장 항목은 되돌릴 수 없습니다.</p></Notice>}</section>; }
+function PermissionDetail({ address }) {
+  const result = useAdminData(`/api/admin/senders/${encodeURIComponent(address)}`), [add, setAdd] = useState(''), [remove, setRemove] = useState(''), [preview, setPreview] = useState(null), [error, setError] = useState(null), [busy, setBusy] = useState(false), [saved, setSaved] = useState(null);
+  useEffect(() => { setPreview(null); setError(null); }, [result.data]);
+  function reread() { setPreview(null); setError(null); result.reload(); }
+  async function submit(event, save = false) { event.preventDefault(); if (busy || save && !preview || error?.status === 409) return; setBusy(true); setError(null); const body = save ? { ...preview.params, etag: preview.value.etag } : { add: addressList(add), remove: addressList(remove) };
+    try { const response = await adminApi(`/api/admin/senders/${encodeURIComponent(address)}${save ? '' : '/diff'}`, { method: save ? 'PUT' : 'POST', body }); if (save) { setSaved(response); setPreview(null); result.reload(); } else setPreview({ value: response, params: body }); }
+    catch (failure) { setPreview(null); setError(failure); } finally { setBusy(false); } }
+  if (result.loading) return <Loading/>; if (result.error) return <LoadError error={result.error} retry={result.reload}/>;
+  const row = result.data;
+  return <><div class="detail-head"><div><h2>{address}</h2><p>기존 목록 유지</p></div></div><section class="detail-section"><h3>현재 저장된 권한</h3><ul class="management-values">{row.senderAcl.map(value => <li key={value}>{value}</li>)}</ul></section><EffectiveSenders effective={row.effective} limits={row.limits} receiveOnlyAliases={row.receiveOnlyAliases}/><MutationError error={error} reload={reread}/><form onSubmit={event => submit(event)}><fieldset class="flow-fields" disabled={busy}><div class="form-grid"><div class="field"><label for="permission-add">더할 주소</label><textarea id="permission-add" value={add} onInput={event => { setAdd(event.currentTarget.value); setPreview(null); }}/></div><div class="field"><label for="permission-remove">뺄 주소</label><textarea id="permission-remove" value={remove} onInput={event => { setRemove(event.currentTarget.value); setPreview(null); }}/></div></div><p class="hint">주소는 줄바꿈 또는 쉼표로 구분합니다. *는 더할 수 없습니다.</p><button class="btn" type="submit" disabled={error?.status === 409}>차이 미리보기</button></fieldset></form>{preview && <><SenderDiff value={preview.value}/><EffectiveSenders title="저장 후 보낼 수 있는 주소" effective={preview.value.effective}/></>}<div class="footer-actions"><a class="btn" href="#flow/alias">별칭·보내기 권한 변경</a><button class="btn pri" type="button" disabled={busy || !preview || error?.status === 409} onClick={event => submit(event, true)}>변경 저장</button></div>{saved && <><Notice>{saved.unchanged ? '바뀐 내용이 없어요.' : '보내기 권한을 저장했습니다.'}</Notice><RecordNotice steps={[{ auditId: saved.auditId }]}/></>}</>;
+}
+export default function Permissions({ address }) { return <ManagementPage title="보내기 권한" description="기존 목록을 보존하며 더할 주소와 뺄 주소를 미리 확인합니다." resource="mailboxes" hash="permissions" address={address}>{({ address }) => <PermissionDetail key={address} address={address}/>}</ManagementPage>; }

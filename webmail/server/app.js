@@ -7,6 +7,7 @@ import { loadConfig } from './config.js';
 import { logOptions } from './log.js';
 import { installErrors, errorBody } from './errors.js';
 import { installHeaders, installClientIp } from './security/headers.js';
+import brandRoutes from './routes/brand.js';
 import healthRoutes from './routes/health.js';
 import { installAuth } from './routes/auth.js';
 import configRoutes from './routes/config.js';
@@ -47,12 +48,13 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });
+  await app.register(brandRoutes, { config });
   const root = resolve(staticDir);
   const hasStatic = existsSync(root) && statSync(root).isDirectory();
   if (hasStatic) await app.register(fastifyStatic, { root, wildcard: false, index: ['index.html'] });
   app.setNotFoundHandler((request, reply) => {
     const pathname = request.url.split('?')[0];
-    const isApi = pathname === '/api' || pathname.startsWith('/api/');
+    const isApi = pathname === '/api' || pathname.startsWith('/api/') || pathname === '/brand' || pathname.startsWith('/brand/');
     if (hasStatic && !isApi && ['GET', 'HEAD'].includes(request.method) && existsSync(resolve(root, 'index.html'))) {
       return reply.sendFile('index.html');
     }

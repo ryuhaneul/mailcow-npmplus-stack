@@ -111,7 +111,7 @@ test('public config: exact allowlist, no secrets or internal addresses', async t
   const response = await app.inject('/api/config');
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), {
-    brandName: '메일', orgName: '', brandMark: '', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, contactsEnabled: true, version: '0.1.0',
+    brandName: '메일', orgName: '', brandMark: '', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30, contactsEnabled: true, version: '0.1.0', logo: null,
   });
   assert.equal(response.headers['cache-control'], 'no-store');
   for (const privateValue of [env.DB_PASSWORD, env.DB_HOST, env.IMAP_HOST, env.MAILCOW_UI_URL, env.PUBLIC_HOSTNAMES]) assert.ok(!response.body.includes(privateValue));
@@ -122,7 +122,7 @@ test('public config: branding and disabled retention follow supplied environment
   const config = loadConfig({ ...env, BRAND_NAME: '테스트 메일', ORG_NAME: '예제 조직', BRAND_MARK: '예', DEFAULT_THEME: 'olive', DEFAULT_MODE: 'dark', ATTACH_MAX_MB: '10', AUTOEXPUNGE_DAYS: '', CONTACTS_ENABLE: 'false' });
   const app = await fixture(t, { config });
   const response = await app.inject('/api/config');
-  assert.deepEqual(response.json(), { brandName: '테스트 메일', orgName: '예제 조직', brandMark: '예', defaultTheme: 'olive', defaultMode: 'dark', attachMaxMb: 10, autoexpungeDays: null, contactsEnabled: false, version: '0.1.0' });
+  assert.deepEqual(response.json(), { brandName: '테스트 메일', orgName: '예제 조직', brandMark: '예', defaultTheme: 'olive', defaultMode: 'dark', attachMaxMb: 10, autoexpungeDays: null, contactsEnabled: false, version: '0.1.0', logo: null });
   const login = app.sessions.create({ email: 'user@example.com', password: Buffer.from('synthetic-user-password'), connection: { logout: async () => {} }, ip: '198.51.100.8' });
   const contacts = await app.inject({ method: 'GET', url: '/api/contacts?q=example.com', headers: { cookie: `webmail_sid=${login.token}` } });
   assert.equal(contacts.statusCode, 200);
@@ -241,4 +241,10 @@ test('config: contacts default on, accept only true or false, and reject invalid
   for (const value of ['', 'TRUE', 'False', '0', '1', ' true ', true, null]) {
     assert.throws(() => loadConfig({ ...env, CONTACTS_ENABLE: value }), /CONTACTS_ENABLE/);
   }
+});
+
+test('config: legacy public environment without LOGO_DIR starts, optional absolute logo path validated', async t => {
+  assert.equal(Object.hasOwn(env, 'LOGO_DIR'), false); const app = await fixture(t); assert.equal((await app.inject('/api/config')).json().logo, null);
+  assert.equal(loadConfig(env).logoDir, ''); assert.equal(loadConfig({ ...env, LOGO_DIR: '' }).logoDir, ''); assert.equal(loadConfig({ ...env, LOGO_DIR: '/brand' }).logoDir, '/brand');
+  for (const value of ['relative', '/bad\0path', 7]) assert.throws(() => loadConfig({ ...env, LOGO_DIR: value }), /LOGO_DIR/);
 });

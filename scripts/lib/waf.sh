@@ -50,10 +50,10 @@ CONF
 }
 
 _waf_webmail_exempt() {
-    local host=$1 id=$2 method=$3 path=$4 ctl=$5
+    local host=$1 id=$2 method=$3 path=$4 ctl=$5 operator=${6:-streq}
     printf 'SecRule REQUEST_HEADERS:Host "@rx %s" "id:%s,phase:1,pass,nolog,t:none,t:lowercase,chain"\n' "$host" "$id"
     printf '  SecRule REQUEST_METHOD "@streq %s" "t:none,chain"\n' "$method"
-    printf '    SecRule REQUEST_FILENAME "@streq %s" "t:none,%s"\n' "$path" "$ctl"
+    printf '    SecRule REQUEST_FILENAME "@%s %s" "t:none,%s"\n' "$operator" "$path" "$ctl"
 }
 
 waf_render_crs_after_conf() (
@@ -75,6 +75,13 @@ waf_render_crs_after_conf() (
         _waf_webmail_exempt "$host" "$((base+30))" POST /api/password 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.current,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.next,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.next2'
         base=$((base+100))
     done
+    if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+        host="^${WEBMAIL_ADMIN_HOSTNAME//./\\.}(?::[0-9]+)?\$"
+        _waf_webmail_exempt "$host" 9600200 PUT '^/api/admin/filters/[^/]+/[^/]+$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.script' rx
+        _waf_webmail_exempt "$host" 9600201 POST '^/api/admin/filters/[^/]+$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.script' rx
+        _waf_webmail_exempt "$host" 9600202 POST /api/admin/teams 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.script'
+        _waf_webmail_exempt "$host" 9600203 POST /api/admin/auth/login 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.password'
+    fi
 )
 
 WAF_WEBMAIL_CRS_RCE_RULE_IDS=(
@@ -129,6 +136,22 @@ _waf_mailcow_crs_exclusions() {
 YAML
 }
 
+_waf_admin_crs_exclusions() {
+    local band=$1
+    cat <<YAML
+  - filter: Is${band}Band == true && req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && req.URL.Path startsWith "/api/admin/"
+    apply:
+      - Remove${band}BandRuleByID(920440)
+  - filter: Is${band}Band == true && req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && ((req.Method == "PUT" && req.URL.Path matches "^/api/admin/filters/[^/]+/[^/]+$") || (req.Method == "POST" && (req.URL.Path matches "^/api/admin/filters/[^/]+$" || req.URL.Path == "/api/admin/teams")))
+    apply:
+      - Remove${band}BandRuleByTag("attack-rce")
+      - Remove${band}BandRuleByTag("attack-lfi")
+  - filter: req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && req.Method == "POST" && req.URL.Path == "/api/admin/logo/preview"
+    apply:
+      - DisableBodyInspection()
+YAML
+}
+
 waf_render_appsec_config() (
     waf_options || return 1
     local band=In rules=inband_rules domain
@@ -173,6 +196,9 @@ YAML
     if [ "$WEBMAIL_ENABLE" = true ]; then
         IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
         for domain in "${hosts[@]}"; do _waf_webmail_crs_exclusions "$band" "$domain"; done
+    fi
+    if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+        _waf_admin_crs_exclusions "$band"
     fi
     if [ "$WAF_MODE" = detect ]; then
         cat <<'YAML'

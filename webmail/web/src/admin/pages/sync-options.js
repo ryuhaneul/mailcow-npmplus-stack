@@ -1,0 +1,6 @@
+export const syncOptionLabels={maxage:'가져올 최대 일수 (maxage)',mins_interval:'실행 주기 (분)',delete2duplicates:'중복 메일 정리',delete1:'원본에서 지우기 (delete1)',delete2:'원본에서 없어진 메일을 대상에서도 삭제 (삭제 맞추기)',custom_params:'추가 옵션 (imapsync 추가 인자)'};
+export const syncBoolean=value=>value===true||value===1||value==='1';
+export const syncOptions=row=>Object.fromEntries(Object.keys(syncOptionLabels).map(key=>[key,['delete1','delete2','delete2duplicates'].includes(key)?syncBoolean(row[key]):key==='custom_params'?String(row[key]??''):Number(row[key])]));
+export const syncOptionRows=(jobs,options)=>jobs.flatMap(job=>Object.entries(syncOptionLabels).map(([key,label])=>{const text=value=>typeof value==='boolean'?(value?'켬':'끔'):value===''||value==null?'없음':String(value);return [`${job.user2} · ${label}`,text(syncOptions(job)[key]),text(options[key])];}));
+
+export const selectedSyncIds = (selected, jobs) => selected.filter(id => jobs.some(row => String(row.id) === id));

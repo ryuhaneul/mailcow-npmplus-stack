@@ -84,12 +84,14 @@ export function loadConfig(env = process.env) {
     if (!family || extra.length || (bits !== undefined && (!/^\d+$/.test(bits) || Number(bits) > (family === 4 ? 32 : 128)))) invalid('TRUST_PROXY');
     return raw;
   });
+  const logoDir = env.LOGO_DIR ?? '';
+  if (typeof logoDir !== 'string' || logoDir !== '' && (!isAbsolute(logoDir) || logoDir.includes('\0'))) invalid('LOGO_DIR');
   const logLevel = choice('LOG_LEVEL', levels);
   return Object.freeze({
     publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
     internalDomains, contactsEnabled, attachMaxMb, sessionIdleMin, sessionMaxHours, autoexpungeDays,
     imapHost, imapPort: 993, sieveHost, sievePort: 4190, smtpHost, smtpPort: 587,
     mailTlsServername, mailTlsMode, mailTlsPinFile, dbHost, dbName, dbUser, dbPassword,
-    mailcowUiUrl, mailcowUiServername, mailcowPublicUrl, trustProxy, logLevel,
+    mailcowUiUrl, mailcowUiServername, mailcowPublicUrl, trustProxy, logoDir, logLevel,
   });
 }

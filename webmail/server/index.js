@@ -1,8 +1,12 @@
-import { createApp } from './app.js';
-
 let app;
 try {
-  app = await createApp();
+  if (process.env.ADMIN_MODE === 'true') {
+    const { createAdminApp } = await import('./admin/app.js');
+    app = await createAdminApp();
+  } else {
+    const { createApp } = await import('./app.js');
+    app = await createApp();
+  }
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.once(signal, async () => {
       await app.close();

@@ -273,6 +273,9 @@ ln -s /npm-data/tls/certbot/live/npm-{CERT_ID}/privkey.pem key.pem
 
 ### 2.4 Mailcow 업데이트 시 주의
 
+mailcow 업데이트 뒤 `update.sh`가 mailcow 망 NAT(`iptables -t nat -C POSTROUTING ! -o br-mailcow -s <IPV4_NETWORK>.0/24 -j MASQUERADE`, `<IPV4_NETWORK>`는 `mailcow.conf` 값)와 mailcow 컨테이너 기동을 확인하고, NAT가 빠졌으면 같은 규칙을 `-A`로 다시 넣습니다.
+업데이트 중에도 NAT를 1초마다 확인해 누락 시 즉시 복구하며, 감시 종료 뒤 동일한 MASQUERADE 규칙이 중복됐으면 하나만 남깁니다.
+
 `update.sh`가 `cert.pem`/`key.pem`에 `cp`를 시도하는데, dangling symlink에는
 쓸 수 없어서 경고가 뜬다 (`cp: not writing through dangling symlink`).
 **이 경고는 무시해도 된다** — 심볼릭 자체는 유지되고 컨테이너 안에서 정상 동작한다.
@@ -958,3 +961,178 @@ bash scripts/snappymail-remove.sh remove
 `MAIL_AUTOEXPUNGE_ENABLE=false`, `MAIL_AUTOEXPUNGE_DAYS=30`이 기본값입니다. 새 기능은 기본 꺼짐이며 선택값 키가 없는 서버에서는 관련 단계를 건너뜁니다. 웹메일 설치 여부와 무관하게 Dovecot의 실제 `Junk`·`Trash` 폴더에 적용되어 Outlook·휴대폰 등 **모든 메일 프로그램**에 영향을 줍니다. 1~365일만 허용하며 이미 삭제된 메일은 복원되지 않습니다.
 
 **기존 서버는 update만으로 자동 삭제가 켜지지 않습니다.** 적용하려면 사용자에게 시각과 일수를 공지한 뒤 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 명시하세요. 보존 기간 축소 전에도 공지해야 합니다. 끄려면 `.env`에서 `MAIL_AUTOEXPUNGE_ENABLE=false`로 바꾸고 `bash scripts/apply-dovecot-autoexpunge.sh --revert -y`를 실행합니다. 이미 삭제된 메일은 돌아오지 않습니다. `apply-dovecot-autoexpunge.sh --check`로 켜진 정책을 확인할 수 있습니다.
+
+
+## 12. 관리 화면
+
+`WEBMAIL_ADMIN_ENABLE=true`로 켜는 별도 `webmail-admin` 컨테이너입니다. 공개 웹메일과 같은 이미지를 쓰고 mailcow 내부망에서 관리자 로그인·계정·팀·별칭·보내기 권한·필터·동기화·운영 상태·변경 기록·웹메일 로고를 관리합니다. 공개 웹메일은 관리 API를 등록하지 않으며 관리 컨테이너에 연결할 수 없습니다.
+
+mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다. 2단계 인증은 인증 앱의 6자리 TOTP를 지원합니다. 도메인 관리자와 보안 키만 사용하는 계정은 지원하지 않습니다. 암호 변경·2단계 등록 대기 상태이면 mailcow 관리 화면에서 먼저 완료합니다. 암호·mailcow 세션·API 키를 디스크에 저장하지 않으며 재시작하면 관리자는 다시 로그인합니다.
+
+### 설정값과 DNS
+
+| 변수 | 기본값 | 의미 |
+|---|---|---|
+| `WEBMAIL_ADMIN_ENABLE` | `false` | 관리 기능 선택. `WEBMAIL_ENABLE=true`가 필수 |
+| `WEBMAIL_ADMIN_HOSTNAME` | `mailadmin.${DOMAIN}` | 관리 주소 한 개. mail/mailcow/mail-npm 및 공개 웹메일 주소와 중복 불가 |
+| `WEBMAIL_ADMIN_SESSION_IDLE_MIN` | `60` | 유휴 만료, 1~180분 |
+| `WEBMAIL_ADMIN_SESSION_MAX_HOURS` | `8` | 최대 시간. 유휴 만료보다 짧을 수 없음 |
+| `ADMIN_ACCESS_LIST` | 기존 설정 | NPMplus의 IP 허용 목록. 허용 IP가 있어야 하고 HTTP 인증 사용자는 없어야 함. 비면 관리 프록시 생성 안 함 |
+| `TOOLKIT_ENABLE` | `true` | Toolkit 설치·갱신. false는 자동 제거를 뜻하지 않음 |
+
+관리 주소의 DNS A 레코드를 서버 IP로 만듭니다. `sudo bash scripts/dns-records.sh`가 주소와 확인 표시를 출력합니다. 인증서는 NPMplus가 발급합니다. 다른 대상으로 향하는 기존 프록시는 덮어쓰지 않고 경고합니다. 관리 프록시는 `http://webmail-admin:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, 요청 크기 4m입니다.
+
+### 기존 서버에서 켜기
+
+먼저 웹메일 전용 망 분리를 완료하고 변경 시각을 공지합니다. 스택을 검토된 커밋으로 갱신한 뒤 `.env`, `/home/webmail`의 env·override, NPM 프록시 목록 JSON, Redis `APP_LINKS`를 비공개 백업에 보관합니다. 공개 웹메일의 `LOGO_DIR` 변경으로 사용자가 다시 로그인할 수 있습니다.
+
+서버 `.env`에 `WEBMAIL_ENABLE=true`, `WEBMAIL_ADMIN_ENABLE=true`를 설정하고 `ADMIN_ACCESS_LIST`를 확인합니다. 관리 IP가 목록에 포함돼 있어야 합니다. update는 mailcow 갱신도 할 수 있으므로 관리 화면만 켤 때는 다음 개별 명령 순서를 사용합니다. 스택 저장소 루트에서 실행합니다.
+
+```bash
+STACK_DIR=$PWD
+MAILCOW_DIR=/home/mailcow-dockerized
+WEBMAIL_DIR=/home/webmail
+sudo mkdir -p "$WEBMAIL_DIR"
+sudo rsync -a --delete --exclude=node_modules --exclude=webmail.env \
+  --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
+  --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
+  "$STACK_DIR/webmail/" "$WEBMAIL_DIR/"
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" "$2" "$3"' \
+  bash "$STACK_DIR" "$MAILCOW_DIR" "$WEBMAIL_DIR"
+(cd "$WEBMAIL_DIR" && sudo docker compose build && sudo docker compose --profile admin up -d)
+sudo bash scripts/webmail-cutover.sh add-admin-host
+sudo bash scripts/admin-app-link.sh add "$MAILCOW_DIR"
+sudo bash -e -c '
+  set +x
+  set -a; source "$1/.env"; set +a
+  source "$1/scripts/lib/webmail-env.sh"
+  source "$1/scripts/lib/waf.sh"
+  waf_reconcile "${NPMPLUS_DIR:-/home/npmplus}"
+  docker exec npmplus nginx -t
+  if [ "$WAF_NPMPLUS_RESTART_REQUIRED" = true ]; then
+    docker restart npmplus
+  else
+    docker exec npmplus nginx -s reload
+  fi
+' bash "$PWD"
+sudo bash scripts/verify.sh
+```
+
+순서는 rsync → `webmail_prepare`(공개·관리 env와 override) → build·관리 profile up → 관리 프록시 → 앱 링크 → WAF 재적용 → 확인입니다. WAF 재적용은 update와 같은 `waf_reconcile`로 관리 주소 예외를 생성하고 CrowdSec 설정을 검증·재적용합니다. NPMplus도 `nginx -t` 성공 후 reload하며, 바운서 설정이 바뀌어 함수가 재시작을 요구하면 restart합니다. 어느 단계든 실패하면 다음 단계로 진행하지 말고 원인을 확인합니다.
+
+`/home/webmail/webmail-admin.env`는 권한600입니다. 스택 `.env`와 함께 출력하거나 커밋하지 마세요. `pin` 모드에서는 공개 인증서를 두 컨테이너에 `:ro,z`로 연결하고, 인증서가 바뀌면 둘 다 재생성합니다. 일반 update도 관리 env와 앱 링크를 다시 확인합니다.
+
+### 확인과 업데이트
+
+`sudo bash scripts/verify.sh`에서 관리 컨테이너 running/healthy, 관리 `/healthz` 200, 비로그인 logout 403 및 인증 요구 헤더 부재, 공개 웹메일 관리 경로 404, 공개 웹메일에서 관리 컨테이너·dockerapi 연결 차단, 관리 앱 링크를 확인합니다. 접근 목록에 의해 `/healthz`가 403이면 해당 항목은 건너뜀으로 표시하므로 허용 IP의 브라우저에서도 확인합니다. 관리자 로그인 뒤 상태와 계정 정보가 mailcow 화면과 같은지도 확인합니다.
+
+`sudo bash scripts/update.sh -y`는 켜진 관리 컨테이너의 env를 다시 만들고 같은 이미지로 올린 뒤 앱 링크를 유지합니다. mailcow 갱신을 빼려면 `--skip-mailcow-update`를 붙입니다. 관리 선택을 false로만 바꾸면 실행 중인 관리 컨테이너를 지우지 않고 끄기 절차를 경고합니다.
+
+### 관리 화면 끄기
+
+2단계(`WEBMAIL_ADMIN_DOVEADM_ENABLE`·`WEBMAIL_ADMIN_RELAY_ENABLE`)를 켰다면 먼저 아래 [2단계 끄기와 릴레이 항목 보존](#2단계-끄기와-릴레이-항목-보존) 절차로 두 값을 `false`로 바꾸고 끕니다. 두 값 중 하나라도 `true`로 남아 있으면 아래 `webmail_prepare`가 `admin stage 2 requires WEBMAIL_ADMIN_ENABLE=true`로 멈춥니다.
+
+`.env`의 `WEBMAIL_ADMIN_ENABLE=false`를 먼저 설정하고 다음 순서로 실행합니다. `ADMIN_ACCESS_LIST`는 프록시 제거가 끝날 때까지 유지합니다.
+
+```bash
+(cd /home/webmail && sudo docker compose --profile admin stop webmail-admin && sudo docker compose --profile admin rm -f webmail-admin)
+sudo bash scripts/webmail-cutover.sh remove-admin-host
+sudo bash scripts/admin-app-link.sh remove /home/mailcow-dockerized
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
+(cd /home/webmail && sudo docker compose up -d webmail)
+sudo bash -e -c '
+  set +x
+  set -a; source "$1/.env"; set +a
+  source "$1/scripts/lib/webmail-env.sh"
+  source "$1/scripts/lib/waf.sh"
+  waf_reconcile "${NPMPLUS_DIR:-/home/npmplus}"
+  docker exec npmplus nginx -t
+  if [ "$WAF_NPMPLUS_RESTART_REQUIRED" = true ]; then
+    docker restart npmplus
+  else
+    docker exec npmplus nginx -s reload
+  fi
+' bash "$PWD"
+sudo bash scripts/verify.sh
+```
+
+위 WAF 재적용은 바뀐 `.env`를 읽어 관리 주소 예외도 제거합니다. 설정 검증에 실패하면 reload하지 않고 원인을 확인합니다.
+
+`LOGO_DIR`가 비어 공개 웹메일은 기본 글자 로고를 표시합니다. 관리 주소가 닫혔고 컨테이너가 없는지 확인합니다. `webmail-admin-data`와 `webmail-brand` 볼륨은 남습니다. 실제 이름에는 compose 프로젝트 접두가 붙습니다. 전체 `teardown.sh`도 관리 기록·로고 볼륨을 보존하고 이름을 안내합니다. 별도 확인 없이 `down -v`나 볼륨 삭제를 실행하지 않습니다.
+
+### Toolkit 제거와 mailcow 업데이트
+
+`TOOLKIT_ENABLE=false`는 설치·갱신만 건너뜁니다. 관리 화면에서 Toolkit 대응 기능을 모두 확인하고 서버별 제거 승인을 받은 뒤 진행합니다. 기존 컨테이너·데이터·API 키를 update가 자동 삭제하지 않습니다. 아래 명령은 스택 저장소 루트에서 실행하며 백업 폴더는 아직 없는 경로를 지정합니다.
+
+```bash
+TOOLKIT_BACKUP_DIR=/root/toolkit-backup-$(date +%Y%m%d-%H%M%S)
+sudo env TOOLKIT_BACKUP_DIR="$TOOLKIT_BACKUP_DIR" bash scripts/toolkit-remove.sh backup
+sudo test -s "$TOOLKIT_BACKUP_DIR/toolkit-backup.json"
+sudo stat -c '%a %n' "$TOOLKIT_BACKUP_DIR/config.yml"
+```
+
+`verified backup saved` 성공 메시지와 `config.yml` 권한600을 확인합니다. 도구는 데이터 폴더가 비어 있지 않은지와 config·compose 조각·nginx 경로·PHP 인증 연결·Redis 앱 링크의 백업 및 해시를 검증합니다. 백업 내용을 대화·로그에 출력하지 마세요. 성공 확인 후 스택 `.env`에서 `TOOLKIT_ENABLE=false`로 직접 바꾸고, 같은 셸에서 같은 백업 경로로 제거합니다. `remove`에는 위치 인자를 붙이지 않습니다.
+
+```bash
+sudo env TOOLKIT_BACKUP_DIR="$TOOLKIT_BACKUP_DIR" bash scripts/toolkit-remove.sh remove
+sudo bash scripts/verify.sh
+```
+
+remove는 백업을 다시 검증한 뒤 앱 링크·컨테이너·compose 조각·nginx 경로·PHP 인증 연결을 제거하고 nginx를 reload합니다. 앱 메뉴에서 Toolkit이 사라지고 관리 화면이 남았는지, 허용 IP에서 로그인한 뒤 `https://mailcow.example.com/toolkit/`이 404인지 확인합니다(`example.com`은 실제 도메인으로 바꿈). mailcow API 키는 변경하지 않으며 `/home/mailcow-toolkit` 설치·데이터 폴더와 백업 폴더를 남깁니다.
+
+복구하려면 실제 백업 폴더를 위치 인자로 전달합니다. 아래 예의 경로를 보관한 경로로 바꿉니다.
+
+```bash
+sudo bash scripts/toolkit-remove.sh restore /root/toolkit-backup-20261017-020000
+```
+
+복구 성공 후 스택 `.env`에서 `TOOLKIT_ENABLE=true`로 직접 바꾸고 실행합니다.
+
+```bash
+(cd /home/mailcow-dockerized && sudo docker compose up -d toolkit-mailcow)
+sudo bash toolkit/app_link.sh add /home/mailcow-dockerized
+(cd /home/mailcow-dockerized && sudo docker compose exec -T nginx-mailcow nginx -s reload)
+sudo bash scripts/verify.sh
+```
+
+앱 메뉴에 Toolkit이 돌아오고 `/toolkit/`이 열리는지 확인합니다. 백업 이후 설치 파일·데이터·앱 링크가 달라졌으면 도구는 복구를 거부하므로 변경 내용을 먼저 확인합니다.
+
+mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON API, dockerapi 공유·필터 읽기, 실제 IP 전달, 공개 웹메일 격리를 시험 VM에서 확인합니다. 로고·변경 기록 볼륨도 별도로 백업합니다.
+
+### 2단계: 메일 정리·용량 재확인·릴레이 허용 IP
+
+두 기능은 각각 선택하며 기본 꺼짐입니다. `WEBMAIL_ADMIN_ENABLE=true`가 필수이고, 관리 끔 상태에서 아래 선택값만 켜면 설정 오류로 멈춥니다.
+
+| 변수 | 기본값 | 동작 |
+|---|---|---|
+| `WEBMAIL_ADMIN_DOVEADM_ENABLE` | `false` | 메일 정리·용량 재확인용 내부 HTTP API |
+| `WEBMAIL_ADMIN_DOVEADM_KEY` | 빈 값 | 위 기능이 켜졌을 때만 64자리 hex 키를 생성해 스택 `.env`에 권한600으로 저장. 출력·커밋 금지 |
+| `WEBMAIL_ADMIN_RELAY_ENABLE` | `false` | Postfix/Rspamd 릴레이 파일 두 개 연결 |
+
+사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 기존 IMAP·POP 접속을 끊지 않습니다. 릴레이 목록 변경은 Postfix·Rspamd를 재시작하므로 짧은 SMTP 중단이 있습니다. 운영 반영은 시간대를 정해 진행합니다.
+
+`.env`에서 원하는 선택값을 true로 바꾼 뒤 저장소 루트에서 실행합니다. 관리 컨테이너는 같은 이미지이며 서버 코드를 새로 반영했다면 먼저 이미지를 빌드합니다.
+
+```bash
+sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
+(cd /home/webmail && sudo docker compose --profile admin up -d webmail-admin)
+sudo bash scripts/verify.sh
+```
+
+`webmail_prepare`는 필요한 키만 생성하고 `apply-dovecot-admin-api.sh apply -y` 또는 `--revert -y`를 실행한 뒤 env·override를 만듭니다. setup·update도 같은 준비를 합니다. 같은 Dovecot 블록이면 파일 쓰기·reload가 없습니다. 키와 선택값이 없는 기존 `.env`에서는 2단계 작업을 하지 않습니다.
+
+관리 블록을 쓰면 키 보호를 위해 `extra.conf`를 `0600 root:root`로 둡니다.
+
+관리 env의 `DOVEADM_URL`은 `http://dovecot:12346`이며 `dovecot`은 mailcow 내부망의 서비스 별칭입니다. 클라이언트가 `/doveadm/v1`을 붙입니다. 허용 명령은 `search,expunge,quota get,quota recalc,mailbox list,acl get`입니다. `extra.conf` 관리 블록은 키와 HTTP 리스너를 두고, 허용 목록은 `remote 0.0.0.0/1`·`remote 128.0.0.0/1`·`remote ::/1`·`remote 8000::/1` 네 블록 안에 각각 설정합니다. IP로 들어오는 doveadm 연결에만 허용 목록을 적용해 mailcow replicator의 unix 소켓 연결은 그대로 둡니다. 기존 전역 허용 목록 블록은 적용 시 키를 유지한 새 형식으로 갱신하고 reload하며, `--check`는 새 형식만 통과합니다. 포트12346은 호스트에 게시하지 않습니다. `DOVEADM_KEY`는 관리 env에만 넣고 공개 웹메일에는 전달하지 않습니다.
+
+릴레이는 `/home/mailcow-dockerized/data/conf/postfix/extra.cf`와 `data/conf/rspamd/local.d/options.inc`가 모두 있을 때만 연결합니다. 특히 mailcow 기본 상태에서 `options.inc`가 없으면 빈 파일을 만들지 않고 두 마운트와 `RELAY_FILES`를 비운 뒤 경고합니다. 기능은 `RELAY_DISABLED`로 꺼지고 verify의 파일 검사는 실패로 표시됩니다. 설정을 검토해 두 파일을 준비하거나 선택값을 false로 되돌립니다.
+
+릴레이를 켜면 Postfix 설정 디렉터리를 `/run/relay/postfix`, Rspamd `local.d` 디렉터리를 `/run/relay/rspamd`에 `rw,z`로 연결합니다. 관리 env의 `RELAY_FILES`는 `/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc`입니다. 관리 서버가 쓰는 대상은 두 파일뿐이지만 컨테이너에는 두 설정 디렉터리 전체의 쓰기 권한이 노출됩니다. 이 범위 때문에 릴레이 기능은 기본 꺼짐(`WEBMAIL_ADMIN_RELAY_ENABLE=false`)이며 승인된 관리 작업에만 사용합니다. mailcow Postfix 시작 스크립트는 `sed -i`로 `extra.cf` inode를 바꿉니다. 디렉터리를 연결하면 서비스 재시작 뒤 다음 파일 열기에서도 새 inode를 찾아 읽고 쓸 수 있습니다. mailcow는 Postfix 디렉터리에 `rw,z`, Rspamd `local.d` 디렉터리에 `rw,Z`를 사용하므로 단순히 모든 경로의 라벨을 같은 방식으로 바꿔도 안전하다고 가정할 수 없습니다. 시험 VM은 도커 SELinux가 꺼져 있어 충돌을 검증하지 못했습니다. **운영 서버 반영 전 도커 SELinux 설정과 AVC(`ausearch -m avc --input-logs`) 확인 필수**입니다. 거부가 있으면 적용을 중단하고 mount/컨테이너 라벨을 확인합니다. 운영 반영 전 node UID로 두 파일에 쓸 수 있는지, Postfix 재시작으로 inode가 바뀐 뒤에도 관리 쪽에서 새 내용을 읽고 쓰는지, Rspamd 재시작 뒤에도 같은지 확인합니다. 두 파일에 그룹 64250 쓰기 권한을 붙이며, mailcow update가 파일을 새로 쓰면 권한이 빠질 수 있어 우리 스택 update가 매번 다시 맞춥니다(그 사이 저장은 '쓰기 권한 없음'으로 실패하며 파일은 바뀌지 않습니다). Rspamd는 시작할 때 `local.d`의 소유자·그룹을 다시 바꾸므로, 두 파일에 그룹 64250의 POSIX ACL(`g:64250:rw`)도 붙여 재시작 뒤 그룹 쓰기 권한을 유지합니다.
+
+검증은 `apply-dovecot-admin-api.sh --check`, 관리 컨테이너 안 두 릴레이 파일의 존재·읽기, 시험 메일함 개수·용량, 두 릴레이 목록의 일치 여부를 포함합니다. 메일 정리의 삭제는 휴지통으로 옮기지 않으므로 기준일·대상·개수를 확인해야 합니다.
+
+### 2단계 끄기와 릴레이 항목 보존
+
+원하는 선택값을 false로 바꾼 뒤 같은 `webmail_prepare` → 관리 profile up → verify 순서로 실행합니다. doveadm 관리 블록은 `--revert -y`로 제거하고 reload합니다. 릴레이는 파일 연결만 해제하며 이미 저장한 허용 IP는 자동 삭제하지 않습니다. 릴레이 목록의 원복은 연결을 끄기 전에 변경 기록 또는 `/data/relay-backup/`의 두 파일을 검토해 제자리로 복원한 뒤 Postfix·Rspamd를 재시작합니다.
+
+`apply-postfix-edge.sh apply`는 기본 고정 목록 뒤에 관리 화면이 더한 릴레이 IP를 보존합니다. `--revert`는 망 분리 표식과 중계 제외 항목만 제거합니다. 관리 릴레이 IP가 있으면 기본 허용 목록과 함께 표식 밖 `mynetworks`로 남기므로 관리 항목을 지우지 않습니다. 관리 릴레이 IP가 없으면 기존 되돌리기 동작을 유지합니다. 해석할 수 없는 항목이나 별도 `mynetworks`와의 충돌은 자동 병합하지 않고 멈춥니다. 전체 teardown도 Dovecot 관리 블록을 먼저 제거하며 관리 기록·로고 볼륨은 보존합니다.

@@ -1,0 +1,3469 @@
+[
+  {
+    "name": "empty",
+    "script": "",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "comments",
+    "script": "# comment\n/* safe */\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "require",
+    "script": "require [\"copy\"];\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "one",
+    "script": "redirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "two",
+    "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 36,
+          "end": 72,
+          "simple": true,
+          "lineStart": 36,
+          "termEnd": 73,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "no-final-newline",
+    "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 36,
+          "end": 72,
+          "simple": true,
+          "lineStart": 36,
+          "termEnd": 72,
+          "term": ""
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "crlf",
+    "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";\r\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 37,
+          "term": "\r\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 37,
+          "end": 73,
+          "simple": true,
+          "lineStart": 37,
+          "termEnd": 75,
+          "term": "\r\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";\r\nredirect :copy \"new@example.com\";\r\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";\r\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";\r\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";\r\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "crlf-no-final",
+    "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 37,
+          "term": "\r\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 37,
+          "end": 73,
+          "simple": true,
+          "lineStart": 37,
+          "termEnd": 73,
+          "term": ""
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\r\nredirect :copy \"second@example.com\";",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "indent",
+    "script": "\tredirect :copy \"first@example.com\";\n\tredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 1,
+          "end": 36,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 37,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 38,
+          "end": 74,
+          "simple": true,
+          "lineStart": 37,
+          "termEnd": 75,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "\tredirect :copy \"first@example.com\";\n\tredirect :copy \"second@example.com\";\n\tredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "\tredirect :copy \"first@example.com\";\n\tredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "\tredirect :copy \"second@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "\tredirect :copy \"first@example.com\";\n\tredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "comment-tail",
+    "script": "redirect :copy \"first@example.com\"; # first\nredirect :copy \"second@example.com\"; # second\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 44,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 44,
+          "end": 80,
+          "simple": true,
+          "lineStart": 44,
+          "termEnd": 90,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; # first\nredirect :copy \"second@example.com\"; # second\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; # first\nredirect :copy \"second@example.com\"; # second\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\"; # second\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; # first\nredirect :copy \"second@example.com\"; # second\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "comment-last-no-newline",
+    "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\"; # tail",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 36,
+          "end": 72,
+          "simple": true,
+          "lineStart": 36,
+          "termEnd": 79,
+          "term": ""
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\"; # tail\nredirect :copy \"new@example.com\";",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\"; # tail",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\"; # tail",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\"; # tail",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "same-line",
+    "script": "redirect :copy \"first@example.com\"; redirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": false,
+          "lineStart": 0,
+          "termEnd": 73,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 36,
+          "end": 72,
+          "simple": false,
+          "lineStart": 0,
+          "termEnd": 73,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "line_not_simple"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; redirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "line_not_simple"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; redirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "multiline",
+    "script": "redirect\n :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 36,
+          "simple": false,
+          "lineStart": 0,
+          "termEnd": 37,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 37,
+          "end": 73,
+          "simple": true,
+          "lineStart": 37,
+          "termEnd": 74,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect\n :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect\n :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "line_not_simple"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect\n :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "nested",
+    "script": "if true { redirect :copy \"first@example.com\"; }\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "second@example.com",
+          "start": 48,
+          "end": 84,
+          "simple": true,
+          "lineStart": 48,
+          "termEnd": 85,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "if true { redirect :copy \"first@example.com\"; }\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "if true { redirect :copy \"first@example.com\"; }\nredirect :copy \"second@example.com\";\nredirect :copy \"FIRST@EXAMPLE.COM\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "if true { redirect :copy \"first@example.com\"; }\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "if true { redirect :copy \"first@example.com\"; }\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "stop-first",
+    "script": "stop;\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 6,
+          "end": 41,
+          "simple": true,
+          "lineStart": 6,
+          "termEnd": 42,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 42,
+          "end": 78,
+          "simple": true,
+          "lineStart": 42,
+          "termEnd": 79,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": true,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "stop;\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "stop;\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "stop-between",
+    "script": "redirect :copy \"first@example.com\";\nstop;\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 42,
+          "end": 78,
+          "simple": true,
+          "lineStart": 42,
+          "termEnd": 79,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": true,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nstop;\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nstop;\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "stop-after",
+    "script": "redirect :copy \"first@example.com\";\nstop;\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"new@example.com\";\nstop;\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nstop;\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nstop;\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "discard-first",
+    "script": "discard;\nredirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 9,
+          "end": 44,
+          "simple": true,
+          "lineStart": 9,
+          "termEnd": 45,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": true,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "discard;\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "discard;\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "fileinto-first",
+    "script": "fileinto \"Archive\";\nredirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 20,
+          "end": 55,
+          "simple": true,
+          "lineStart": 20,
+          "termEnd": 56,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": true,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "fileinto \"Archive\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "fileinto \"Archive\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "fileinto-copy",
+    "script": "fileinto :copy \"Archive\";\nredirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 26,
+          "end": 61,
+          "simple": true,
+          "lineStart": 26,
+          "termEnd": 62,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "fileinto :copy \"Archive\";\nredirect :copy \"first@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "fileinto :copy \"Archive\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "fileinto :copy \"Archive\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "forward-first",
+    "script": "redirect \"other@example.com\";\nredirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 30,
+          "end": 65,
+          "simple": true,
+          "lineStart": 30,
+          "termEnd": 66,
+          "term": "\n"
+        }
+      ],
+      "forwards": [
+        "other@example.com"
+      ],
+      "stopperBeforeMember": true,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "stopper_before_member"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect \"other@example.com\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect \"other@example.com\";\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "forward-after",
+    "script": "redirect :copy \"first@example.com\";\nredirect \"other@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        }
+      ],
+      "forwards": [
+        "other@example.com"
+      ],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"new@example.com\";\nredirect \"other@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect \"other@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect \"other@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "forward-only",
+    "script": "redirect \"other@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [],
+      "forwards": [
+        "other@example.com"
+      ],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "duplicates",
+    "script": "redirect :copy \"first@example.com\";\nredirect :copy \"FIRST@example.com\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "FIRST@example.com",
+          "start": 36,
+          "end": 71,
+          "simple": true,
+          "lineStart": 36,
+          "termEnd": 72,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 72,
+          "end": 108,
+          "simple": true,
+          "lineStart": 72,
+          "termEnd": 109,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"FIRST@example.com\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"FIRST@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\";\nredirect :copy \"FIRST@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "uppercase",
+    "script": "REDIRECT :COPY \"FIRST@EXAMPLE.COM\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "FIRST@EXAMPLE.COM",
+          "start": 0,
+          "end": 35,
+          "simple": true,
+          "lineStart": 0,
+          "termEnd": 36,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 36,
+          "end": 72,
+          "simple": true,
+          "lineStart": 36,
+          "termEnd": 73,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "REDIRECT :COPY \"FIRST@EXAMPLE.COM\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "REDIRECT :COPY \"FIRST@EXAMPLE.COM\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "redirect :copy \"second@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "REDIRECT :COPY \"FIRST@EXAMPLE.COM\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "escaped-address",
+    "script": "redirect :copy \"fi\\rst@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "not_team"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "unicode-comment",
+    "script": "# 합성 📨\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 8,
+          "end": 43,
+          "simple": true,
+          "lineStart": 8,
+          "termEnd": 44,
+          "term": "\n"
+        },
+        {
+          "address": "second@example.com",
+          "start": 44,
+          "end": 80,
+          "simple": true,
+          "lineStart": 44,
+          "termEnd": 81,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "# 합성 📨\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "# 합성 📨\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "script": "# 합성 📨\nredirect :copy \"second@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "# 합성 📨\nredirect :copy \"first@example.com\";\nredirect :copy \"second@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "unterminated-string",
+    "script": "redirect :copy \"first@example.com;",
+    "analysis": {
+      "parsed": false,
+      "reason": "unterminated string",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "unterminated-escape",
+    "script": "redirect :copy \"first\\",
+    "analysis": {
+      "parsed": false,
+      "reason": "unterminated string",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "unterminated-comment",
+    "script": "/* unfinished",
+    "analysis": {
+      "parsed": false,
+      "reason": "unterminated comment",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "slash",
+    "script": "/ nope",
+    "analysis": {
+      "parsed": false,
+      "reason": "unexpected character",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "invalid-tag",
+    "script": ":1;",
+    "analysis": {
+      "parsed": false,
+      "reason": "unexpected character",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "invalid-char",
+    "script": "@;",
+    "analysis": {
+      "parsed": false,
+      "reason": "unexpected character",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "unbalanced",
+    "script": "if true { keep;",
+    "analysis": {
+      "parsed": false,
+      "reason": "unbalanced brackets",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "mismatch",
+    "script": "require [\"copy\");",
+    "analysis": {
+      "parsed": false,
+      "reason": "unbalanced brackets",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "text-string",
+    "script": "vacation text:\nexample\n.\n;",
+    "analysis": {
+      "parsed": false,
+      "reason": "multi-line text or unsupported syntax",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "missing-semicolon",
+    "script": "keep",
+    "analysis": {
+      "parsed": false,
+      "reason": "missing semicolon",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "semicolon-in-array",
+    "script": "require [\"copy\";];",
+    "analysis": {
+      "parsed": false,
+      "reason": "semicolon inside brackets",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "empty-command",
+    "script": ";",
+    "analysis": {
+      "parsed": false,
+      "reason": "command expected",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "number-units",
+    "script": "if size :over 10K { keep; }\nredirect :copy \"first@example.com\";\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 28,
+          "end": 63,
+          "simple": true,
+          "lineStart": 28,
+          "termEnd": 64,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "script": "if size :over 10K { keep; }\nredirect :copy \"first@example.com\";\nredirect :copy \"new@example.com\";\n",
+          "changed": true
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "if size :over 10K { keep; }\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "if size :over 10K { keep; }\nredirect :copy \"first@example.com\";\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "trailing-block-comment",
+    "script": "redirect :copy \"first@example.com\"; /* tail */\n",
+    "analysis": {
+      "parsed": true,
+      "reason": "",
+      "members": [
+        {
+          "address": "first@example.com",
+          "start": 0,
+          "end": 35,
+          "simple": false,
+          "lineStart": 0,
+          "termEnd": 47,
+          "term": "\n"
+        }
+      ],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": true
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "line_not_simple"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; /* tail */\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "last_member"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "script": "redirect :copy \"first@example.com\"; /* tail */\n",
+          "changed": false
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "none",
+    "script": null,
+    "analysis": {
+      "parsed": false,
+      "reason": "script is not text",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "not-text",
+    "script": {},
+    "analysis": {
+      "parsed": false,
+      "reason": "script is not text",
+      "members": [],
+      "forwards": [],
+      "stopperBeforeMember": false,
+      "isTeam": false
+    },
+    "operations": [
+      {
+        "operation": "add",
+        "address": "new@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "FIRST@EXAMPLE.COM",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "add",
+        "address": "invalid",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "add",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "first@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "missing@example.com",
+        "expected": {
+          "error": "unparseable"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": "",
+        "expected": {
+          "error": "invalid_address"
+        }
+      },
+      {
+        "operation": "remove",
+        "address": null,
+        "expected": {
+          "error": "invalid_address"
+        }
+      }
+    ]
+  }
+]

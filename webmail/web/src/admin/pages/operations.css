@@ -1,0 +1,4 @@
+.sync-item{display:flex;align-items:center;padding-left:16px}.sync-item .account-item{flex:1;min-width:0}.sync-item input{accent-color:var(--accent)}
+.sync-log{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:13px;line-height:1.7;padding:16px;background:var(--sunken);border:1px solid var(--line);border-radius:8px;max-height:360px;overflow:auto}
+[data-admin-page=sync] .footer-actions,[data-admin-page=fail2ban] .footer-actions{flex-wrap:wrap}
+[data-admin-page=fail2ban] .filters{margin-bottom:20px}

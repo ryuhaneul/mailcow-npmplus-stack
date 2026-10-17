@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 
 # ============================================================
@@ -83,6 +84,24 @@ process.exit(response.status === 403 && !response.headers.has("www-authenticate"
 ')
 }
 
+# Called indirectly by check.
+# shellcheck disable=SC2329
+admin_logout_unauthenticated() {
+    docker exec webmail-admin node --input-type=module -e '
+const response = await fetch("http://127.0.0.1:8080/api/admin/auth/logout", {
+  method: "POST", headers: {origin: `https://${process.argv[1]}`, "content-type": "application/json"}, body: "{}"
+});
+process.exit(response.status === 403 && !response.headers.has("www-authenticate") ? 0 : 1);
+' "$WEBMAIL_ADMIN_HOSTNAME"
+}
+# shellcheck disable=SC2329
+public_admin_routes_absent() {
+    docker exec webmail node --input-type=module -e '
+const response = await fetch("http://127.0.0.1:8080/api/admin/auth/session");
+process.exit(response.status === 404 ? 0 : 1);
+'
+}
+
 check_ssl() {
     local host="$1" port="$2"
     echo | timeout 5 openssl s_client -connect "${host}:${port}" -servername "$host" 2>/dev/null | grep -q "Verify return code: 0"
@@ -105,6 +124,10 @@ fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
     check "webmail running" webmail_container_running
     check_container_healthy webmail
+fi
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    check "webmail-admin running" sh -c '[ "$(docker inspect webmail-admin --format "{{.State.Running}}" 2>/dev/null)" = true ]'
+    check_container_healthy webmail-admin
 fi
 check "nginx-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q nginx-mailcow'
 check "postfix-mailcow running" sh -c 'docker ps --format "{{.Names}}" | grep -q postfix-mailcow'
@@ -232,6 +255,29 @@ if [ "$WEBMAIL_ENABLE" = true ] || [ "$SNAPPYMAIL_ENABLE" = true ]; then
     fi
 fi
 
+# --- Webmail administration ---
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    echo "[Admin]"
+    ADMIN_HEALTH_CODE=$(curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "https://$WEBMAIL_ADMIN_HOSTNAME/healthz") || ADMIN_HEALTH_CODE=000
+    if [ "$ADMIN_HEALTH_CODE" = 403 ] && [ -n "${ADMIN_ACCESS_LIST:-}" ]; then
+        echo "  SKIP  https://$WEBMAIL_ADMIN_HOSTNAME/healthz (access list: $ADMIN_ACCESS_LIST)"
+    else
+        check "$WEBMAIL_ADMIN_HOSTNAME /healthz HTTPS 200" test "$ADMIN_HEALTH_CODE" = 200
+    fi
+    check "Admin unauthenticated logout: 403, no WWW-Authenticate" admin_logout_unauthenticated
+    check "Public Webmail admin routes: 404" public_admin_routes_absent
+    check "webmail blocked webmail-admin:8080" edge_probe_tcp webmail webmail-admin 8080 closed
+    check "webmail blocked dockerapi:443" edge_probe_tcp webmail dockerapi 443 closed
+    check "Admin app link" env WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" check "$MAILCOW_DIR"
+    if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
+        check "Admin doveadm API block" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --check
+    fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ]; then
+        check "Admin relay files visible/readable/writable" docker exec webmail-admin node -e 'const fs = require("node:fs"); if (process.getuid() !== 1000) throw new Error("Expected node UID 1000"); for (const p of process.argv.slice(1)) fs.closeSync(fs.openSync(p, "r+"));' /run/relay/postfix/extra.cf /run/relay/rspamd/options.inc
+    fi
+    echo ""
+fi
+
 # --- Security ---
 echo "[Security]"
 check "Port 8080 not exposed" sh -c '! curl -sk --connect-timeout 3 "http://${SERVER_IP}:8080" 2>/dev/null | grep -q .'
@@ -314,11 +360,13 @@ sys.exit(0 if sum(v.get("parsed",0) for k,v in rows.items() if k.startswith("npm
         # Reuse the cookie transport; keep credentials/cookies in a private workspace.
         waf_host_flags() (
             set +x
+            local admin_host=""
+            if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then admin_host="$WEBMAIL_ADMIN_HOSTNAME"; fi
             umask 077
             work=$(mktemp -d) || return 1
             trap 'rm -rf "$work"' EXIT
             NPM_LOGIN_EMAIL="${NPM_ADMIN_EMAIL:-}" NPM_LOGIN_SECRET="${NPM_ADMIN_PASSWORD:-}" \
-                python3 -B - "$SCRIPT_DIR/lib" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "$DOMAIN" "$WEBMAIL_HOSTNAMES" <<'PYWAFHOSTS'
+                python3 -B - "$SCRIPT_DIR/lib" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "$DOMAIN" "$WEBMAIL_HOSTNAMES" "$admin_host" <<'PYWAFHOSTS'
 import json,os,pathlib,sys
 sys.path.insert(0,sys.argv[1])
 from npm_api import NpmApi
@@ -329,6 +377,7 @@ try:
     login=work/'login.json';login.write_text(json.dumps(dict(identity=identity,secret=secret)))
     client=NpmApi(sys.argv[3],work);client.login(login)
     wanted={f'mailcow.{domain}',f'mail-npm.{domain}',f'mail.{domain}',*filter(None,sys.argv[5].split(','))}
+    if sys.argv[6]: wanted.add(sys.argv[6])
     for host in client.hosts():
         if host.get('npmplus_crowdsec_appsec') is True:
             for name in sorted(wanted.intersection(host.get('domain_names',[]))):

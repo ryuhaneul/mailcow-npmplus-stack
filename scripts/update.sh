@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 
 # ============================================================
@@ -75,6 +76,7 @@ ENV_FILE="${PROJECT_DIR}/.env"
 WEBMAIL_ENABLE=false
 SNAPPYMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
+TOOLKIT_ENABLE=true
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -87,6 +89,7 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 waf_options || die "Invalid WAF options; update stopped before changes"
 waf_resolve_bouncer_key "$NPMPLUS_DIR" "$([ "$WAF_ENABLE" = false ] && echo true || echo false)" || die "Bouncer key selection failed; update stopped before changes"
 WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
@@ -121,7 +124,7 @@ git_pull_if_repo() {
 }
 
 git_pull_if_repo "$PROJECT_DIR" "mailcow-npmplus-stack (self)"
-git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"
+if [ "$TOOLKIT_ENABLE" = true ]; then git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"; fi
 # mailcow-dockerized is managed by its own update.sh; pulling here races with Phase 3.
 # npmplus / snappymail dirs are typically not git repos (compose files copied from stack).
 git_pull_if_repo "$NPMPLUS_DIR" "npmplus (runtime)"
@@ -241,13 +244,32 @@ else
         die "Mailcow update aborted by user"
     fi
 
+    # Keep the pre-update running set: intentionally stopped services are optional.
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=lib/mailcow-health.sh
+    source "$SCRIPT_DIR/lib/mailcow-health.sh"
+    MAILCOW_RUNNING_BEFORE=$(cd "$MAILCOW_DIR" && docker compose ps --status running --services) \
+        || die "Could not record running Mailcow services before update"
+    MAILCOW_UPDATE_RC=0
     log "Running Mailcow official update..."
+    MAILCOW_NAT_NETWORK=$(webmail_mailcow_value IPV4_NETWORK)
+    MAILCOW_NAT_NETWORK="${MAILCOW_NAT_NETWORK:-172.22.1}.0/24"
+    trap 'mailcow_nat_watch_stop' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
     # -f: force yes, skip interactive prompts inside mailcow update.sh.
+    mailcow_nat_watch_start "$MAILCOW_NAT_NETWORK"
     if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
-        log "Mailcow update: done"
+        :
     else
-        die "Mailcow official update failed — see $LOGFILE"
+        MAILCOW_UPDATE_RC=$?
     fi
+    mailcow_nat_watch_stop
+    trap - EXIT INT TERM HUP
+    mailcow_after_update "$MAILCOW_DIR" "$MAILCOW_RUNNING_BEFORE"
+    [ "$MAILCOW_UPDATE_RC" -eq 0 ] || die "Mailcow official update failed — see $LOGFILE"
+    log "Mailcow update: done"
 fi
 
 # ============================================================
@@ -257,6 +279,7 @@ header "Phase 4: Re-apply Toolkit UI patches"
 
 TOOLKIT_UI_PATCHER="$PROJECT_DIR/toolkit/patches/apply-ui-patches.py"
 
+if [ "$TOOLKIT_ENABLE" = true ]; then
 # Re-install Toolkit session-authorization PHP hook (Mailcow's ./update.sh
 # only touches files it tracks, so our added ajax file survives, but we
 # copy defensively in case someone pruned it).
@@ -267,6 +290,8 @@ if [ -f "$AUTHZ_SRC" ]; then
     log "Toolkit auth hook re-installed at $AUTHZ_DST"
 else
     warn "authz_toolkit_check.php source missing at $AUTHZ_SRC"
+fi
+
 fi
 
 if [ -f "$TOOLKIT_UI_PATCHER" ]; then
@@ -280,11 +305,14 @@ else
     warn "UI patcher not found at $TOOLKIT_UI_PATCHER — skipping"
 fi
 
+if [ "$TOOLKIT_ENABLE" = true ]; then
 if [ -x "$TOOLKIT_DIR/app_link.sh" ]; then
     APP_LINK_RESULT=$("$TOOLKIT_DIR/app_link.sh" add "$MAILCOW_DIR" 2>&1 || echo "failed")
     log "Toolkit App Link: $APP_LINK_RESULT"
 else
     warn "$TOOLKIT_DIR/app_link.sh missing — APP_LINKS not refreshed"
+fi
+
 fi
 
 # Shared-folder INDEX relocation (dovecot shared namespace). Re-applies it if the mailcow update overwrote dovecot.conf.
@@ -304,6 +332,7 @@ fi
 # ============================================================
 # Phase 5: Rebuild mailcow-toolkit
 # ============================================================
+if [ "$TOOLKIT_ENABLE" = true ]; then
 header "Phase 5: Rebuild toolkit-mailcow"
 
 # The toolkit-mailcow image is built with /home/mailcow-toolkit as its
@@ -381,22 +410,36 @@ if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     else
         warn "toolkit-mailcow build failed — toolkit may be stale"
     fi
+else
+    warn "Mailcow compose file missing at $MAILCOW_DIR — skipping toolkit rebuild"
+fi
 
+fi
+
+if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     # Ensure the Twig cache reflects the freshly-patched base.twig.
     log "Restarting php-fpm + nginx (Twig cache refresh)..."
     (cd "$MAILCOW_DIR" && docker compose restart php-fpm-mailcow nginx-mailcow 2>&1 | tee -a "$LOGFILE" | tail -3) \
         || warn "Failed to restart php-fpm/nginx — UI changes may not be visible until next restart"
-else
-    warn "Mailcow compose file missing at $MAILCOW_DIR — skipping toolkit rebuild"
 fi
 
 # ============================================================
 # Phase 5b: Webmail/SnappyMail edge migration
 # ============================================================
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+webmail_ensure_admin_key || die "Webmail admin key preparation failed"
+webmail_reconcile_admin_api "$SCRIPT_DIR" || die "Webmail admin API reconciliation failed"
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
+
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
+    (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+    WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
+elif docker inspect webmail-admin >/dev/null 2>&1; then
+    warn "Webmail admin disabled; existing container preserved — 끄려면 docs/guide.md 관리 화면 끄기(계획 7-6) 절차를 따르세요"
+fi
 
 # ============================================================
 # Phase 6: Bring up remaining stacks

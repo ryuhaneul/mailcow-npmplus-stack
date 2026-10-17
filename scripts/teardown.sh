@@ -55,6 +55,11 @@ read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
 
+# Revert only our share policy; copied folder ACLs are retained.
+if grep -qFx '# BEGIN mailstack share-mode (apply-dovecot-share-mode.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-share-mode.sh" --revert -y || { warn 'Share mode revert failed; teardown stopped'; exit 1; }
+fi
+
 # Remove only the managed doveadm API block while Dovecot is still available.
 if grep -qFx '# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --revert -y || { warn 'Admin doveadm revert failed; teardown stopped'; exit 1; }

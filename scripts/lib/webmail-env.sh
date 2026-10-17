@@ -27,12 +27,13 @@ webmail_options() {
     WEBMAIL_ADMIN_SESSION_MAX_HOURS="${WEBMAIL_ADMIN_SESSION_MAX_HOURS:-8}"
     WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-false}"
     SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}"
+    MAIL_SHARE_WHOLE_MAILBOX="${MAIL_SHARE_WHOLE_MAILBOX:-false}"
     MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
     WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
     [[ "$WEBMAIL_ATTACH_MAX_MB" =~ ^[0-9]+$ ]] || { webmail_error "invalid attachment size"; return 1; }
     local flag host joined="" label
     local -a hosts labels
-    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
+    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
     done
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
@@ -106,6 +107,7 @@ webmail_load_config() {
     WEBMAIL_ADMIN_SESSION_IDLE_MIN=
     WEBMAIL_ADMIN_SESSION_MAX_HOURS=
     MAIL_AUTOEXPUNGE_ENABLE=
+    MAIL_SHARE_WHOLE_MAILBOX=false
     WEBMAIL_CONTACTS_ENABLE=true
     # shellcheck disable=SC1090,SC1091
     source "$WEBMAIL_STACK_ENV" || return 1
@@ -279,6 +281,17 @@ webmail_reconcile_admin_api() {
     fi
 }
 
+# Independent of the Webmail/admin enable flags. Old .env files do no new work.
+webmail_reconcile_share_mode() {
+    local scripts="$1"
+    if [ "${MAIL_SHARE_WHOLE_MAILBOX:-false}" = true ]; then
+        MAILCOW_DIR="$MAILCOW_DIR" MAIL_SHARE_WHOLE_MAILBOX=true \
+            bash "$scripts/apply-dovecot-share-mode.sh" apply -y || return 1
+    elif grep -qFx '# BEGIN mailstack share-mode (apply-dovecot-share-mode.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+        MAILCOW_DIR="$MAILCOW_DIR" bash "$scripts/apply-dovecot-share-mode.sh" --revert -y || return 1
+    fi
+}
+
 webmail_env_line() {
     local value="$2"
     [[ ! "$value" =~ [[:cntrl:]] ]] || { webmail_error "control character in $1"; return 1; }
@@ -349,6 +362,7 @@ webmail_generate_admin_env() (
     if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then pin_file=/run/mail-tls-pin.pem; fi
     {
         webmail_env_line ADMIN_MODE true &&
+        webmail_env_line SHARE_WHOLE_MAILBOX "${MAIL_SHARE_WHOLE_MAILBOX:-false}" &&
         webmail_env_line ADMIN_HOSTNAME "$WEBMAIL_ADMIN_HOSTNAME" &&
         webmail_env_line ADMIN_SESSION_IDLE_MIN "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" &&
         webmail_env_line ADMIN_SESSION_MAX_HOURS "$((10#$WEBMAIL_ADMIN_SESSION_MAX_HOURS))" &&

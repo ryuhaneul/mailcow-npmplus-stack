@@ -40,7 +40,7 @@ cleanup() {
     local rc=$?
     trap - EXIT
     if [ "$PENDING" -eq 1 ]; then
-        if [ "$HAD_EXTRA" -eq 1 ]; then cp -p "$WORK/original" "$EXTRA_CONF"; else rm -f "$EXTRA_CONF"; fi
+        restore_extra_conf
         log "original file restored; backup retained: $BACKUP"
     fi
     rm -rf "$WORK"
@@ -126,6 +126,18 @@ protect_extra_conf() {
     [ "$(stat -c '%a' "$EXTRA_CONF")" = 600 ] || chmod 600 "$EXTRA_CONF"
     [ "$(stat -c '%u:%g' "$EXTRA_CONF")" = 0:0 ] || chown root:root "$EXTRA_CONF"
 }
+restore_extra_conf() {
+    if [ "$HAD_EXTRA" -eq 0 ]; then
+        rm -f "$EXTRA_CONF"
+    elif grep -q '^# BEGIN mailstack-admin doveadm' "$WORK/original"; then
+        # Keep the key private throughout restoration, including failed revert.
+        protect_extra_conf
+        cat "$WORK/original" > "$EXTRA_CONF"
+        protect_extra_conf
+    else
+        cp -p "$WORK/original" "$EXTRA_CONF"
+    fi
+}
 if cmp -s "$WORK/original" "$WORK/next"; then
     if [ "$MODE" = check ]; then
         [ "$(stat -c '%a:%u:%g' "$EXTRA_CONF")" = 600:0:0 ] || die "extra.conf permissions/owner differ; update required"
@@ -154,7 +166,7 @@ cat "$WORK/next" > "$EXTRA_CONF"
 dove_reload() { (cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveadm reload) >/dev/null 2>&1; }
 # Do not forward Docker output: configuration diagnostics can include the API key.
 if ! dove_reload; then
-    if [ "$HAD_EXTRA" -eq 1 ]; then cp -p "$WORK/original" "$EXTRA_CONF"; else rm -f "$EXTRA_CONF"; fi
+    restore_extra_conf
     PENDING=0
     dove_reload || log "original reload failed; manual recovery required"
     die "reload failed; original file restored (backup: $BACKUP)"

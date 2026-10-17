@@ -107,3 +107,17 @@ test('f2b unwhitelist validates network and verifies write', async t => {
   f.options.ignoreWrites = true;
   await assert.rejects(action(f, '192.0.2.10', 'unwhitelist'), { statusCode: 502, code: 'WRITE_VERIFY_FAILED' });
 });
+
+for (const supplied of ['2001:db8::/32', '2001:DB8::/32']) test(`f2b unwhitelist keeps stored IPv6 case for ${supplied} and undo`, async t => {
+  const f = await fixture(t), stored = '2001:DB8::/32';
+  f.value.whitelist += '\n' + stored + '\n2001:db8:1::/64'; f.value.blacklist += '\n' + stored;
+  const initial = await f.service.get({}), result = await action(f, supplied, 'unwhitelist');
+  assert.deepEqual(result, { network: stored, whitelist: false, blacklist: true, auditId: result.auditId });
+  const after = await f.service.get({});
+  assert.deepEqual(after.whitelist, initial.whitelist.filter(value => value !== stored)); assert.deepEqual(after.blacklist, initial.blacklist); assert.deepEqual(after.settings, initial.settings);
+  assert.deepEqual(writes(f)[0].body, { items: [], attr: { ...initial.settings, ban_time_increment: '1', manage_external: '1', whitelist: after.whitelist.join('\n'), blacklist: initial.blacklist.join('\n') } });
+  const record = await f.history.detail(result.auditId);
+  assert.deepEqual(record.before, { network: stored, whitelist: true, blacklist: true }); assert.deepEqual(record.after, { network: stored, whitelist: false, blacklist: true });
+  await revert(f, result.auditId);
+  const restored = await f.service.get({}); assert.deepEqual(restored.whitelist, initial.whitelist); assert.ok(restored.whitelist.includes(stored)); assert.deepEqual(restored.blacklist, initial.blacklist); assert.deepEqual(restored.settings, initial.settings);
+});

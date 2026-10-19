@@ -1,8 +1,9 @@
+import { isIP } from 'node:net';
 import { sieveDisabledWarning } from '../../server/admin/messages.js';
 import { mergeSenderAcl } from '../../server/admin/services/senders.js';
 import { parseCsv } from '../../server/admin/services/batch.js';
 export function createFakeAdminApi() {
-  const state = { session: { step: 'done', user: { username: '합성관리자' }, csrf: 'synthetic-admin-csrf', expiresAt: '2099-01-01T00:00:00Z' }, features: { cleanup: true, relay: true }, failure: null, auth: { mode: 'password', loginError: null, totpError: null }, requests: [] };
+  const state = { session: { step: 'done', user: { username: '합성관리자' }, csrf: 'synthetic-admin-csrf', expiresAt: '2099-01-01T00:00:00Z' }, features: { cleanup: true, relay: true, trusted: true }, failure: null, auth: { mode: 'password', loginError: null, totpError: null }, requests: [] };
   state.status = {
     queue: { count: 9, longestDelaySeconds: 240 }, blocked: { count: 4 },
     certificates: [{ port: 993, daysRemaining: 42, expiresAt: '2026-11-27T00:00:00Z', valid: true }, { port: 465, daysRemaining: 18, expiresAt: '2026-11-03T00:00:00Z', valid: false, reason: 'SYNTHETIC_TLS_UNVERIFIED' }],
@@ -42,6 +43,53 @@ export function createFakeAdminApi() {
   state.shares={wholeMailbox:false,warnings:[],items:[{owner:'team@example.com',name:'합성 팀',group:true,grantees:[],grants:[],etag:'share-1'},{owner:'person@example.com',name:'합성 구성원',group:false,grantees:['other@example.com'],grants:[{grantee:'other@example.com',folders:[{mailbox:'INBOX',rights:['lookup','read']}],shared:true,residualFolders:0,readOnly:true},{grantee:'residual@example.com',folders:[{mailbox:'프로젝트',rights:['lookup','read']},{mailbox:'프로젝트/2026',rights:['lookup','read']}],shared:false,residualFolders:2,readOnly:true}],etag:'share-person-1'}]};
   state.syncjobs={items:[1,2].map(id=>({id:String(id),user1:`old${id}@example.com`,host1:'imap.example.test',user2:id===1?'person@example.com':'other@example.com',active:'1',maxage:'0',mins_interval:'20',delete1:'0',delete2:'0',delete2duplicates:'1',custom_params:'--useuid',last_run:'2026-10-16 21:10',exit_status:'EXIT_OK',log:['서버 연결 완료','--password1 ***','대상 사용자 ****@mailcow.local','동기화 완료'],etag:`sync-${id}-1`}))};
   state.fail2ban={settings:{ban_time:600,max_ban_time:86400,max_attempts:10,retry_window:600,netban_ipv4:32,netban_ipv6:128,ban_time_increment:true,manage_external:true},activeBans:[{network:'192.0.2.81/32',ip:'192.0.2.81',self:true,affectsAllPorts:true,notice:'이 IP 에서는 웹메일·관리 화면을 포함한 모든 메일 포트가 막혀 있어요',queuedForUnban:false,bannedUntil:'2026-10-17T01:40:00+09:00'}],permanentBans:[{network:'198.51.100.92',self:false,affectsAllPorts:true,notice:'이 IP 에서는 웹메일·관리 화면을 포함한 모든 메일 포트가 막혀 있어요'}],whitelist:['203.0.113.24'],blacklist:['198.51.100.92'],etag:'ban-1'};
+  state.trusted = { version: 1, readError: null, writeError: null, senders: [
+    { sender: 'cdpmanager@example.com', memo: '고객사 CDP 백업 리포트', ips: ['198.51.100.11', '198.51.100.12', '198.51.100.13', '203.0.113.40', '192.0.2.7', '192.0.2.8'] },
+    { sender: 'alert@example.net', memo: '', ips: ['203.0.113.99'] },
+  ], recent: { range: { from: '2026-10-19T00:12:00Z', to: '2026-10-19T03:58:00Z', lines: 1840 }, failed: false, counts: Object.fromEntries([
+    ['cdpmanager@example.com', '198.51.100.11', 118, '2026-10-19T03:52:00Z'],
+    ['cdpmanager@example.com', '198.51.100.12', 96, '2026-10-19T03:40:00Z'],
+    ['cdpmanager@example.com', '198.51.100.13', 41, '2026-10-19T02:10:00Z'],
+    ['cdpmanager@example.com', '203.0.113.40', 7, '2026-10-19T01:05:00Z'],
+    ['cdpmanager@example.com', '192.0.2.8', 2, '2026-10-19T00:48:00Z'],
+    ['alert@example.net', '203.0.113.99', 23, '2026-10-19T03:30:00Z'],
+  ].map(([sender, ip, count, lastSeen]) => [`${sender}|${ip}`, { count, lastSeen }])) } };
+  const trustedEtag = () => `trusted-${state.trusted.version}`;
+  const trustedSnapshot = () => ({ version: 1, senders: structuredClone(state.trusted.senders) });
+  function trustedIp(ip) {
+    if (typeof ip !== 'string' || ip.includes('%') || !isIP(ip)) return '';
+    return isIP(ip) === 4 ? ip : new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+  }
+  function trustedInput(body, kind, row) {
+    const invalid = (code, message) => ({ status: 422, code: 'INVALID_INPUT', detail: { code }, message });
+    if (kind === 'add-sender' && (typeof body.sender !== 'string' || body.sender.length > 254 || !/^[^@\s#|"'\x00-\x1f\x7f-\x9f]+@[^@\s#|"'\x00-\x1f\x7f-\x9f]+$/.test(body.sender))) return invalid('INVALID_SENDER', '메일 주소 형식이 아니에요. 예: alert@example.com');
+    if (kind === 'add-sender' || kind === 'memo') {
+      const memo = kind === 'memo' ? body.memo : body.memo ?? '';
+      if (typeof memo !== 'string' || /[\x00-\x1f\x7f-\x9f]/.test(memo)) return invalid('MEMO_INVALID', '용도에 줄바꿈이나 제어 문자를 넣을 수 없어요.');
+      if ([...memo].length > 80) return invalid('MEMO_TOO_LONG', `용도는 80자까지 넣을 수 있어요. (지금 ${[...memo].length}자)`);
+    }
+    if (kind === 'add-sender' || kind === 'add-ips') {
+      if (!Array.isArray(body.ips) || !body.ips.length) return invalid('INVALID_IP', 'IP 를 한 줄에 하나씩 넣어 주세요.');
+      if (body.ips.length > 50) return invalid('TOO_MANY_IPS', `한 번에 50개까지 넣을 수 있어요. (지금 ${body.ips.length}개)`);
+      const seen = new Set();
+      for (const ip of body.ips) {
+        if (typeof ip === 'string' && ip.includes('/')) return invalid('CIDR_NOT_ALLOWED', '대역은 넣을 수 없어요. IP 를 하나씩 넣어 주세요.');
+        const normalized = trustedIp(ip);
+        if (!normalized) return invalid('INVALID_IP', 'IPv4 또는 IPv6 주소 한 개를 넣어 주세요.');
+        if (seen.has(normalized)) return invalid('DUPLICATE_IP', '같은 IP 를 두 번 넣었어요.');
+        if (row?.ips.includes(normalized)) return invalid('DUPLICATE_PAIR', '이미 이 발신자에 등록된 IP 예요.');
+        seen.add(normalized);
+      }
+    }
+  }
+  function saveTrusted(action, target, before, revertOf) {
+    state.trusted.senders.sort((a, b) => a.sender.localeCompare(b.sender));
+    state.trusted.senders.forEach(row => row.ips.sort());
+    state.trusted.version++;
+    const record = { id: String(state.trusted.version).padStart(32, 'a'), ts: '2026-10-19T04:00:00Z', actor: '합성관리자', action: `trusted.${action}`, summary: '신뢰 발신 장비를 바꿨어요', target, result: 'ok', kind: 'config', revertible: true, canRevert: true, before, after: trustedSnapshot(), detail: {}, ...(revertOf ? { revertOf } : {}) };
+    state.history.unshift(record);
+    return { result: 'ok', auditId: record.id, etag: trustedEtag() };
+  }
   function inspectCsv(kind, text) {
     const records = parseCsv(text), header = records.shift().fields, seen = new Set();
     const items = records.map(record => {
@@ -69,6 +117,39 @@ export function createFakeAdminApi() {
     }
     if (state.failure || !state.session) { response.statusCode = 403; response.end(JSON.stringify({ error: state.failure ?? { code: 'NO_SESSION', message: '로그인이 필요해요.' } })); return; }
     if (url.pathname === '/api/admin/auth/session') return response.end(JSON.stringify({ ...state.session, features: state.features }));
+    if (/^\/api\/admin\/trusted(?:\/|$)/.test(url.pathname)) {
+      if (state.features.trusted !== true) return fail({ status: 404, code: 'NOT_FOUND', message: '합성 경로 없음' });
+      if (state.session.step !== 'done') return fail({ status: 403, code: 'FORBIDDEN', message: '관리 권한이 필요해요.' });
+      if (request.method === 'GET' && url.pathname === '/api/admin/trusted/recent') return response.end(JSON.stringify(state.trusted.recent.failed ? { ...state.trusted.recent, counts: {} } : state.trusted.recent));
+      if (state.trusted.readError) return fail(state.trusted.readError);
+      if (request.method === 'GET' && url.pathname === '/api/admin/trusted') return response.end(JSON.stringify({ senders: state.trusted.senders, pairs: state.trusted.senders.reduce((sum, row) => sum + row.ips.length, 0), etag: trustedEtag() }));
+      const match = url.pathname.match(/^\/api\/admin\/trusted\/senders(?:\/([^/]+)(?:\/ips(?:\/([^/]+))?)?)?$/);
+      const senderPath = match?.[1] && url.pathname === `/api/admin/trusted/senders/${match[1]}`;
+      const kind = request.method === 'POST' && url.pathname === '/api/admin/trusted/senders' ? 'add-sender' : match?.[1] && request.method === 'POST' && url.pathname.endsWith('/ips') ? 'add-ips' : match?.[2] && request.method === 'DELETE' ? 'remove-ip' : senderPath && request.method === 'DELETE' ? 'remove-sender' : senderPath && request.method === 'PATCH' ? 'memo' : '';
+      if (!kind) return fail({ status: 404, code: 'NOT_FOUND', message: '합성 경로 없음' });
+      if (request.headers['x-mailadmin-csrf'] !== state.session.csrf) return fail({ status: 403, code: 'CSRF', message: '다시 로그인해 주세요.' });
+      let body;
+      try { let raw = ''; for await (const part of request) raw += part; body = JSON.parse(raw); if (!body || typeof body !== 'object' || Array.isArray(body) || Object.values(body).some(value => value === null)) throw new Error('invalid body'); }
+      catch { return fail({ status: 422, code: 'INVALID_INPUT', message: '입력 값을 확인해 주세요.' }); }
+      if (body.etag !== trustedEtag()) return fail({ status: 409, code: 'CONFLICT', message: '다른 곳에서 목록이 바뀌었어요. 다시 읽고 확인해 주세요.' });
+      const sender = (kind === 'add-sender' ? typeof body.sender === 'string' ? body.sender.toLowerCase() : '' : decodeURIComponent(match[1]).toLowerCase()), row = state.trusted.senders.find(row => row.sender === sender);
+      if (kind !== 'add-sender' && !row) return fail({ status: 404, code: 'NOT_FOUND', message: '발신자가 목록에 없어요.' });
+      if (kind === 'add-sender' && row) return fail({ status: 409, code: 'EXISTS', message: '이미 등록된 발신자예요. 이 발신자에 IP 를 더해 주세요.' });
+      const invalid = trustedInput(body, kind, row);
+      if (invalid) return fail(invalid);
+      const rawIp = kind === 'remove-ip' ? decodeURIComponent(match[2]) : '';
+      const ip = trustedIp(rawIp);
+      if (kind === 'remove-ip' && !ip) return fail({ status: 422, code: 'INVALID_INPUT', detail: { code: rawIp.includes('/') ? 'CIDR_NOT_ALLOWED' : 'INVALID_IP' }, message: rawIp.includes('/') ? '대역은 넣을 수 없어요. IP 를 하나씩 넣어 주세요.' : 'IPv4 또는 IPv6 주소 한 개를 넣어 주세요.' });
+      if (kind === 'remove-ip' && !row.ips.includes(ip)) return fail({ status: 404, code: 'NOT_FOUND', message: 'IP 가 목록에 없어요.' });
+      if (state.trusted.writeError) return fail(state.trusted.writeError);
+      const before = trustedSnapshot();
+      if (kind === 'add-sender') state.trusted.senders.push({ sender, memo: body.memo ?? '', ips: body.ips.map(trustedIp) });
+      if (kind === 'add-ips') row.ips.push(...body.ips.map(trustedIp));
+      if (kind === 'memo') row.memo = body.memo;
+      if (kind === 'remove-ip') row.ips = row.ips.filter(value => value !== ip);
+      if (kind === 'remove-sender' || kind === 'remove-ip' && !row.ips.length) state.trusted.senders = state.trusted.senders.filter(value => value !== row);
+      return response.end(JSON.stringify(saveTrusted(kind, sender, before)));
+    }
     const historyMatch = url.pathname.match(/^\/api\/admin\/history\/([^/]+)(\/revert)?$/);
     if (historyMatch) {
       const record = state.history.find(row => row.id === historyMatch[1]);
@@ -76,6 +157,13 @@ export function createFakeAdminApi() {
       if (historyMatch[2] && request.method === 'POST') {
         for await (const _part of request) { /* Consume confirmation. */ }
         if (!record?.canRevert) return fail({ status: 409, code: record?.revertCode || 'CONFLICT', message: record?.revertReason || '되돌릴 수 없는 기록이에요.' });
+        if (record?.action?.startsWith('trusted.')) {
+          if (request.headers['x-mailadmin-csrf'] !== state.session.csrf) return fail({ status: 403, code: 'CSRF', message: '다시 로그인해 주세요.' });
+          if (JSON.stringify(trustedSnapshot()) !== JSON.stringify(record.after)) return fail({ status: 409, code: 'CONFLICT', message: '다른 곳에서 목록이 바뀌었어요.' });
+          const before = trustedSnapshot(); state.trusted.senders = structuredClone(record.before.senders);
+          const saved = saveTrusted(record.action.slice(8), record.target, before, record.id);
+          return response.end(JSON.stringify(state.history.find(row => row.id === saved.auditId)));
+        }
         const result = { id: '55555555555555555555555555555555', ts: '2026-10-16T06:00:00Z', actor: '합성관리자', action: record.action, target: record.target, summary: '공유 변경 되돌리기', result: 'ok', kind: 'config', revertible: true, canRevert: true, before: record.after, after: { version: 2, grants: [] }, revertOf: record.id, skipped: [...state.historySkipped], detail: { skipped: [...state.historySkipped] } };
         state.history.push(result);
         return response.end(JSON.stringify(result));

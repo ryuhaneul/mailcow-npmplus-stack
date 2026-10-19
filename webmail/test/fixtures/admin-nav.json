@@ -67,6 +67,11 @@
       "relay"
     ],
     [
+      "trusted",
+      "신뢰 발신 장비",
+      "shield"
+    ],
+    [
       "trust",
       "전달·발신자 허용",
       "share"

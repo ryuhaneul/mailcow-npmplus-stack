@@ -244,7 +244,7 @@ webmail_reconcile_admin_api() {
             while IFS= read -r acl_entry; do
                 case "$acl_entry" in
                     group:64250:*) ;;
-                    user:?*:*|group:?*:*)
+                    user:[!:]*:*|group:[!:]*:*)
                         webmail_error "host group 64250 ACL contains other named entries; refusing relay file access"
                         return 1 ;;
                 esac

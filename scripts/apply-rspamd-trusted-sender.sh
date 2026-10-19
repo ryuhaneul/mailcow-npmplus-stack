@@ -101,7 +101,7 @@ preflight_acl() {
         while IFS= read -r entry; do
             case "$entry" in
                 group:64250:*|default:group:64250:*) ;;
-                user:?*:*|group:?*:*|default:user:?*:*|default:group:?*:*)
+                user:[!:]*:*|group:[!:]*:*|default:user:[!:]*:*|default:group:[!:]*:*)
                     die 'host group 64250 ACL contains other named entries; nothing changed' ;;
             esac
         done <<< "$acl"

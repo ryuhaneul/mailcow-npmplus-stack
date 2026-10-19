@@ -42,9 +42,12 @@ if tool == 'getfacl':
     assert pathlib.Path(path).exists()
     print('# file: ' + path)
     print('user::rwx' if pathlib.Path(path).is_dir() else 'user::rw-')
-    print('group::r-x' if pathlib.Path(path).is_dir() else 'group::r--')
+    inherited = any(line.startswith('default:') for line in state.get(str(pathlib.Path(path).parent), []))
+    print('group::r-x' if pathlib.Path(path).is_dir() else 'group::r-x\\t#effective:r--' if inherited else 'group::r--')
+    entries = state.get(path, [])
+    print('\\n'.join(line for line in entries if not line.startswith('default:')))
     print('other::r-x' if pathlib.Path(path).is_dir() else 'other::r--')
-    print('\\n'.join(state.get(path, [])))
+    print('\\n'.join(line for line in entries if line.startswith('default:')))
     sys.exit(0)
 assert tool == 'setfacl', tool
 with (root / 'acl-calls').open('a') as f: f.write(' '.join(args) + '\\n')
@@ -56,7 +59,7 @@ else:
     assert args[0] == '-m'
     path = args[2]; entries = state.setdefault(path, [])
     if args[1] == 'd:g:64250:rw':
-        changed = ['default:group:64250:rw-', 'default:mask::rwx']
+        changed = ['default:user::rwx', 'default:group::r-x', 'default:group:64250:rw-', 'default:mask::rwx', 'default:other::r-x']
     else:
         assert args[1] in ('g:64250:rwx', 'g:64250:rw')
         perm = 'rwx' if args[1].endswith('rwx') else 'rw-'
@@ -109,6 +112,18 @@ statefile.write_text(json.dumps(state))
     assert before == (metadata(rule), metadata(mapfile), metadata(directory), records('acl-calls'), records('restarts'))
     passed('second apply: writes 0, ACL changes 0, restarts 0')
 
+    aclfile = root / 'acl.json'
+    acl = subprocess.run(['getfacl', '-n', str(mapfile)], env=env, check=True, capture_output=True, text=True).stdout
+    assert 'group::r-x\t#effective:r--' in acl
+    state = json.loads(aclfile.read_text())
+    state[str(directory)] = [entry.replace('default:group::r-x', 'default:group::r-x\t#effective:r--').replace('default:mask::rwx', 'default:mask::rw-') for entry in state[str(directory)]]
+    aclfile.write_text(json.dumps(state))
+    before = records('acl-calls'), records('restarts')
+    run('apply')
+    run('--check')
+    assert before == (records('acl-calls'), records('restarts'))
+    passed('inherited file and default base group effective comments: apply/check succeed, mutations 0')
+
     mapfile.write_text(edited)
     protected = metadata(mapfile)
     seed.write_text('invalid seed is ignored when map exists\n')
@@ -137,15 +152,17 @@ statefile.write_text(json.dumps(state))
     aclfile = root / 'acl.json'
     baseline = aclfile.read_bytes()
     for path in (directory, mapfile):
-        for entry in ('user:12345:r--', 'group:12345:r--', 'user:64250:r--', 'default:group:12345:r--'):
+        for entry in ('user:12345:r--', 'group:4242:rw-', 'user:64250:r--', 'default:group:12345:r--', 'default:user:4242:rw-'):
             state = json.loads(baseline)
             state[str(path)].append(entry)
             aclfile.write_text(json.dumps(state))
             before = records('acl-calls'), records('restarts')
-            run('apply', ok=False)
+            for mode in ('apply', '--check'):
+                result = run(mode, ok=False)
+                assert b'ACL contains other named entries' in result.stderr
             assert not rule.exists() and before == (records('acl-calls'), records('restarts'))
     aclfile.write_bytes(baseline)
-    passed('other named access/default ACLs refused before mutations (8 cases)')
+    passed('other named access/default ACLs refused before mutations (20 mode/path/entry cases)')
 
     for status in ('0', '1', '3'):
         before = records('acl-calls'), records('restarts')

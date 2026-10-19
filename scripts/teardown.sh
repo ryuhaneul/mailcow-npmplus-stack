@@ -55,6 +55,11 @@ read -p "Continue? (y/N) " -n 1 -r
 echo ""
 [[ $REPLY =~ ^[Yy]$ ]] || exit 0
 
+# Remove our Rspamd rule while the container is still running; retain pair map.
+if grep -qFx '# Managed by mailstack (apply-rspamd-trusted-sender.sh)' "$MAILCOW_DIR/data/conf/rspamd/override.d/multimap.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-rspamd-trusted-sender.sh" --revert -y || { warn 'Trusted sender revert failed; teardown stopped'; exit 1; }
+fi
+
 # Revert only our share policy; copied folder ACLs are retained.
 if grep -qFx '# BEGIN mailstack share-mode (apply-dovecot-share-mode.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-share-mode.sh" --revert -y || { warn 'Share mode revert failed; teardown stopped'; exit 1; }

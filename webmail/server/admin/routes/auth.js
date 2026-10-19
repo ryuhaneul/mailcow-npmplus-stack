@@ -23,7 +23,7 @@ export async function installAdminAuth(app, { config, client = createMailcowClie
 }
 
 async function authRoutes(app, { config, client, sessions, rateLimiter }) {
-  const publicSession = session => ({ step: session.state === 'totp' ? 'totp' : 'done', user: { username: session.username }, csrf: session.csrf, features: { cleanup: Boolean(config.doveadmUrl && config.doveadmKey), relay: Boolean(config.relayFiles?.length) }, expiresAt: sessions.expiresAt(session) });
+  const publicSession = session => ({ step: session.state === 'totp' ? 'totp' : 'done', user: { username: session.username }, csrf: session.csrf, features: { trusted: Boolean(config.trustedSenderFile), cleanup: Boolean(config.doveadmUrl && config.doveadmKey), relay: Boolean(config.relayFiles?.length) }, expiresAt: sessions.expiresAt(session) });
   const clear = reply => reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
   app.post('/api/admin/auth/login', async (request, reply) => {
     const body = request.body;

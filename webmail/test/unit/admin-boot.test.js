@@ -14,7 +14,7 @@ const env = {
   MAILCOW_UI_URL: 'https://nginx-mailcow:8443', MAILCOW_UI_SERVERNAME: 'mailcow.example.com',
   IMAP_HOST: 'dovecot-mailcow', SMTP_HOST: 'postfix-mailcow', MAIL_TLS_SERVERNAME: 'mail.example.com',
   MAIL_TLS_MODE: 'verify', MAIL_TLS_PIN_FILE: '', DOMAIN: 'example.com', TRUST_PROXY: '192.0.2.0/24',
-  DOCKERAPI_URL: 'https://dockerapi:443', DOVEADM_URL: '', DOVEADM_KEY: '', RELAY_FILES: '',
+  TRUSTED_SENDER_FILE: '', DOCKERAPI_URL: 'https://dockerapi:443', DOVEADM_URL: '', DOVEADM_KEY: '', RELAY_FILES: '',
   MAILCOW_IPV4_NETWORK: '192.0.2', MAILCOW_IPV6_NETWORK: '2001:db8::/64', AUTOEXPUNGE_DAYS: '30',
   LOGO_DIR: '/brand', AUDIT_DIR: '/data/audit', LOG_LEVEL: 'silent',
 };
@@ -29,7 +29,7 @@ for (const [key, value] of [
   ['ADMIN_HOSTNAME', undefined], ['ADMIN_HOSTNAME', 'https://example.com'],
   ['ADMIN_SESSION_IDLE_MIN', '181'], ['ADMIN_SESSION_MAX_HOURS', '0'],
   ['MAILCOW_UI_URL', 'http://example.com'], ['MAIL_TLS_PIN_FILE', '/synthetic.pem'],
-  ['TRUST_PROXY', '192.0.2.1/33'], ['AUDIT_DIR', undefined],
+  ['TRUST_PROXY', '192.0.2.1/33'], ['TRUSTED_SENDER_FILE', '/tmp/trusted_senders.map'], ['TRUSTED_SENDER_FILE', undefined], ['AUDIT_DIR', undefined],
 ]) {
   test(`admin boot: invalid ${key} (${value === undefined ? 'missing' : 'format'}) fails startup`, () => {
     const invalid = { ...env, [key]: value };
@@ -199,4 +199,10 @@ test('admin config: whole-mailbox sharing defaults false and only accepts litera
   assert.equal(loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: 'false' }).wholeMailbox, false);
   assert.equal(loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: 'true' }).wholeMailbox, true);
   for (const value of ['', 'TRUE', '1', 'yes', true]) assert.throws(() => loadAdminConfig({ ...env, SHARE_WHOLE_MAILBOX: value }), /SHARE_WHOLE_MAILBOX/);
+});
+
+test('admin config: trusted sender file only accepts the agreed enabled and disabled paths', () => {
+  assert.equal(loadAdminConfig(env).trustedSenderFile, '');
+  assert.equal(loadAdminConfig({ ...env, TRUSTED_SENDER_FILE: '/run/trusted/trusted_senders.map' }).trustedSenderFile, '/run/trusted/trusted_senders.map');
+  for (const value of ['/run/trusted/other.map', ' ', false]) assert.throws(() => loadAdminConfig({ ...env, TRUSTED_SENDER_FILE: value }), /TRUSTED_SENDER_FILE/);
 });

@@ -109,6 +109,30 @@ test('admin audit: month selection follows KST intent time and result stays with
   assert.equal(november[0].ts, '2026-11-01T00:00:01+09:00');
 });
 
+test('admin history: trusted titles omit the internal target in list and detail without changing records', async t => {
+  const f = await fixture(t);
+  const before = { version: 1, senders: [] }, after = { version: 1, senders: [{ sender: 'device@example.com', memo: '장비', ips: ['203.0.113.8'] }] };
+  for (const action of ['add-sender', 'add-ips', 'remove-ip', 'remove-sender', 'memo']) {
+    f.history.register(`trusted.${action}`, { label: '신뢰 발신 장비를 바꿨어요' });
+    for (const [result, suffix] of [['ok', ''], ['partial', ' (일부 적용)']]) {
+      const { id } = await seed(f, { action: `trusted.${action}`, target: 'trusted', before, after }, { result });
+      const record = await f.history.detail(id);
+      assert.equal(record.summary, `admin님이 신뢰 발신 장비를 바꿨어요${suffix}`);
+      assert.equal((await f.history.list()).items.find(row => row.id === id).summary, record.summary);
+      assert.equal(record.target, 'trusted'); assert.equal(record.action, `trusted.${action}`);
+      assert.deepEqual(record.before, before); assert.deepEqual(record.after, after);
+      assert.equal(record.canRevert, result === 'ok');
+    }
+  }
+});
+
+test('admin history: other titles retain the changed target', async t => {
+  const f = await fixture(t);
+  f.history.register(entry.action, { label: '구성원을 바꿨어요' });
+  const { id } = await seed(f);
+  assert.equal((await f.history.detail(id)).summary, 'admin님이 operations@example.com 구성원을 바꿨어요');
+});
+
 test('admin history: missing result is visible and cannot be reverted', async t => {
   const f = await fixture(t); const id = 'a'.repeat(32);
   await fs.writeFile(join(f.dir, '2026-10.jsonl'), JSON.stringify({ v: 1, id, phase: 'intent', ts: '2026-10-16T17:00:00+09:00', ...entry }) + '\n');

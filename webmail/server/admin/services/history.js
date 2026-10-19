@@ -14,7 +14,7 @@ export function createHistoryService({ audit, lock }) {
     const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter) && !isOldShare(record);
     const label = adapter?.label ?? '설정을 바꿨어요';
     const suffix = !record.result ? ' (결과 확인 안 됨)' : record.result === 'failed' ? ' (실패)' : record.result === 'partial' ? ' (일부 적용)' : record.kind === 'irreversible' ? ' (되돌리기 불가)' : '';
-    return { ...record, ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.target} ${label}${suffix}` };
+    return { ...record, ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.action.startsWith('trusted.') ? '' : `${record.target} `}${label}${suffix}` };
   }
   async function records() {
     const entries = new Map();

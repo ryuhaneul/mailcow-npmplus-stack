@@ -24,7 +24,7 @@ export function trustedIp(value) {
   return family === 4 ? value : new URL(`http://[${value}]/`).hostname.slice(1, -1);
 }
 export function trustedMemo(value) {
-  if (typeof value !== 'string' || /[\x00-\x1f\x7f-\x9f]/.test(value)) throw trustedInvalid('MEMO_INVALID');
+  if (typeof value !== 'string' || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value)) throw trustedInvalid('MEMO_INVALID');
   if (Array.from(value).length > 80) throw trustedInvalid('MEMO_TOO_LONG');
   return value;
 }

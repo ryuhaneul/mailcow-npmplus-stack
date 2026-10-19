@@ -175,6 +175,7 @@ await test('trusted admin list and fake API contract', async t => {
         [{ ips: '2001:0db8::25\n2001:db8::25' }, 'DUPLICATE_IP', '같은 IP 를 두 번 넣었어요.'],
         [{ memo: '가'.repeat(81) }, 'MEMO_TOO_LONG', '용도는 80자까지 넣을 수 있어요. (지금 81자)'],
         [{ memo: '제어\t문자' }, 'MEMO_INVALID', '용도에 줄바꿈이나 제어 문자를 넣을 수 없어요.'],
+        [{ memo: '업무\u2028백업\u2029메모' }, 'MEMO_INVALID', '용도에 줄바꿈이나 제어 문자를 넣을 수 없어요.'],
       ];
       for (const [value, code, message] of cases) {
         await draft(page, value); await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();

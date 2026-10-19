@@ -36,7 +36,7 @@ test('trusted memo rejects CR LF tab controls and counts Unicode characters', ()
   assert.equal(trustedMemo('가'.repeat(80)).length, 80);
   assert.equal(Array.from(trustedMemo('😀'.repeat(80))).length, 80);
   assert.throws(() => trustedMemo('가'.repeat(81)), { detail: { code: 'MEMO_TOO_LONG' } });
-  for (const memo of ['\r', '\nother@example.net|203.0.113.99', '\t', '\0', '\x1f', '\x7f', '\x85', null]) assert.throws(() => trustedMemo(memo), { detail: { code: 'MEMO_INVALID' } });
+  for (const memo of ['\r', '\nother@example.net|203.0.113.99', '\t', '\0', '\x1f', '\x7f', '\x85', '\u2028', '\u2029', null]) assert.throws(() => trustedMemo(memo), { detail: { code: 'MEMO_INVALID' } });
 });
 test('trusted file v1 canonical serialization, sorting and empty file', () => {
   const text = renderTrustedSenders([{ sender: 'z@example.com', memo: '', ips: ['2001:0DB8::1'] }, { sender, memo: '백업', ips: ['203.0.113.9', '203.0.113.8'] }]);

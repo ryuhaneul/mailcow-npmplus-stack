@@ -31,7 +31,7 @@ function validate(mode, draft, senders) {
   if (mode === 'add' && (sender.length > 254 || !senderPattern.test(sender))) invalid('sender', 'INVALID_SENDER');
   if (mode === 'add' && senders.some(row => row.sender === sender)) errors.push({ field: 'sender', code: 'EXISTS', message: '이미 등록된 발신자예요. 이 발신자에 IP 를 더해 주세요.' });
   if (mode === 'add' || mode === 'memo') {
-    if (/[\x00-\x1f\x7f-\x9f]/.test(draft.memo)) invalid('memo', 'MEMO_INVALID');
+    if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(draft.memo)) invalid('memo', 'MEMO_INVALID');
     else if (Array.from(draft.memo).length > 80) invalid('memo', 'MEMO_TOO_LONG');
   }
   if (mode === 'add' || mode === 'addIp') {

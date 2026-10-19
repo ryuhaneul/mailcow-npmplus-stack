@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAdminApp } from '../../server/admin/app.js';
@@ -85,6 +85,24 @@ test('trusted API validates all input detail codes and sender/IP/memo injection'
   failure(await f.request('POST', `${path}/ips`, { ips: ['203.0.113.8'], etag: (await f.list()).etag }), 422, 'INVALID_INPUT', 'DUPLICATE_PAIR');
   failure(await f.request('PATCH', path, { memo: '\nother@example.net|203.0.113.99', etag: (await f.list()).etag }), 422, 'INVALID_INPUT', 'MEMO_INVALID');
   assert.equal((await f.list()).pairs, 1);
+});
+for (const separator of ['\u2028', '\u2029']) test(`trusted API rejects U+${separator.codePointAt(0).toString(16)} memos without changing bytes and preserves valid roundtrips`, async t => {
+  const f = await setup(t), invalidMemo = `업무${separator}백업`;
+  const empty = await readFile(f.file);
+  failure(await f.request('POST', `${root}/senders`, { sender, memo: invalidMemo, ips: ['203.0.113.8'], etag: (await f.list()).etag }), 422, 'INVALID_INPUT', 'MEMO_INVALID');
+  assert.deepEqual(await readFile(f.file), empty);
+  success(await f.add());
+  const before = await readFile(f.file);
+  failure(await f.request('PATCH', path, { memo: invalidMemo, etag: (await f.list()).etag }), 422, 'INVALID_INPUT', 'MEMO_INVALID');
+  assert.deepEqual(await readFile(f.file), before);
+  assert.equal((await f.list()).senders[0].memo, '장비');
+  const memo = '업무 백업 😀 #@sender memo=|', changed = await f.request('PATCH', path, { memo, etag: (await f.list()).etag });
+  success(changed);
+  assert.equal((await f.list()).senders[0].memo, memo);
+  const reverted = await f.request('POST', `/api/admin/history/${changed.json().auditId}/revert`, { confirm: true });
+  assert.equal(reverted.statusCode, 200, reverted.body);
+  assert.equal((await f.list()).senders[0].memo, '장비');
+  assert.deepEqual(await readFile(f.file), before);
 });
 test('trusted API EXISTS, NOT_FOUND, CONFLICT, invalid file and WRITE_FAILED contract', async t => {
   const f = await setup(t), stale = (await f.list()).etag; success(await f.add());

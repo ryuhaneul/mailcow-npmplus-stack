@@ -46,6 +46,8 @@ import { createLogoService } from './services/logo.js';
 import logoRoutes from './routes/logo.js';
 import { createRelayService } from './services/relay.js';
 import relayRoutes from './routes/relay.js';
+import { createTrustedService } from './services/trusted.js';
+import trustedRoutes from './routes/trusted.js';
 import { createDoveadm } from './doveadm.js';
 import { createAclReader } from './acl-reader.js';
 import { createAclFolders } from './acl-folders.js';
@@ -146,6 +148,11 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const relay = createRelayService({ config, mailcow: app.mailcow, dockerapi, audit, lock: adminLock, logs, history });
   app.decorate('relay', relay);
   await app.register(relayRoutes, { service: relay });
+  if (config.trustedSenderFile) {
+    const trusted = createTrustedService({ config, mailcow: app.mailcow, audit, lock: adminLock, history });
+    app.decorate('trusted', trusted);
+    await app.register(trustedRoutes, { service: trusted });
+  }
   const quota = createQuotaService({ doveadm, audit, lock: adminLock });
   const cleanup = createCleanupService({ mailcow: app.mailcow, doveadm, quota, audit, lock: adminLock });
   await app.register(cleanupRoutes, { cleanup, quota, enabled: Boolean(config.doveadmUrl && config.doveadmKey) });

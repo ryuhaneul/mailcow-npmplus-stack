@@ -39,6 +39,7 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 | `WEBMAIL_ADMIN_ENABLE` | `false` | 웹메일 관리 화면. `WEBMAIL_ENABLE=true`와 관리자 IP 접근 목록 필요 |
 | `TOOLKIT_ENABLE` | `true` | Toolkit 설치·업데이트. false로 바꿔도 기존 컨테이너는 자동 삭제하지 않음 |
 | `MAIL_SHARE_WHOLE_MAILBOX` | `false` | 받은편지함 공유를 메일함 전체로 확장. 켜기 전 기존 공유 목록 확인. 끄면 설정만 되돌리고 복사된 폴더 권한은 남음 |
+| `MAIL_TRUSTED_SENDER_ENABLE` | `false` | SMTP 발신자+IP 짝에 Rspamd -100 점수. 끄면 규칙만 제거하고 목록 보존 |
 | `MAIL_AUTOEXPUNGE_ENABLE` | `false` | 모든 메일 프로그램의 Junk·Trash 자동 삭제. `MAIL_AUTOEXPUNGE_DAYS=30`(1~365일) |
 
 관리 주소는 `WEBMAIL_ADMIN_HOSTNAME`(기본 `mailadmin.${DOMAIN}`), 세션 기본값은 유휴 60분·최대 8시간입니다. `ADMIN_ACCESS_LIST`가 비면 관리 프록시를 만들지 않습니다. 기존 서버의 켜기·DNS·검증·끄기는 [관리 화면 안내](docs/guide.md#12-관리-화면)를 따르세요.
@@ -59,6 +60,12 @@ CrowdSec 보안 필터는 기본 켬(`WAF_ENABLE=true`, 키가 없어도 켬)이
 **운영 detect 경보에는 사용자 입력이 남을 수 있습니다.** 짧게 재현·튜닝한 뒤 block으로 복귀하고 `docker exec crowdsec cscli alerts delete --all`로 경보를 삭제하세요. 밴 해제와 요청 오탐 예외는 별도입니다. [튜닝·오탐 대응 절차](docs/guide.md#14-crowdsec-보안-필터)를 따르세요. NPMplus의 `npmplus_crowdsec_appsec=true`는 AppSec를 끈다는 뜻입니다.
 
 주소 전환은 `scripts/webmail-cutover.sh`, 관찰 정지·백업·제거·복원은 `scripts/snappymail-remove.sh`를 관리자가 직접 실행합니다. 두 도구는 `.env`를 수정하지 않습니다. 브랜드·접속 제한·TLS·전환·되돌리기는 [웹메일 운영 가이드](docs/guide.md#10-웹메일)를 참고하세요.
+
+### 신뢰 발신 장비
+
+`MAIL_TRUSTED_SENDER_ENABLE=true`로 켜면 setup·update가 SMTP 발신자+접속 IP **짝**에만 -100 점수를 주는 Rspamd 규칙을 설치합니다(기본 꺼짐, 바이러스 검사는 유지). 관리 화면에서는 '신뢰 발신 장비' 목록을 편집합니다. 먼저 규칙만 적용하려면 `scripts/apply-rspamd-trusted-sender.sh` 하나를 복사해 `apply -y --seed <비공개 목록 파일>`을 실행합니다. seed는 목록이 없을 때만 사용하며 기존·수정된 목록을 덮어쓰지 않습니다. `--check`로 검사하고, `--revert -y` 또는 설정을 끈 뒤 update로 규칙만 제거할 수 있습니다. 목록은 남습니다.
+
+옛 발신자 화이트리스트 줄은 스크립트가 지우지 않으므로 서버에서 별도로 백업·제거해야 합니다. 관리 컨테이너의 목록 폴더 `:rw,z`와 Rspamd 상위 `override.d:Z`는 **SELinux 라벨 충돌 위험**이 있어 운영 반영 전 AVC·재시작 후 읽기/쓰기 시험이 필요합니다. 의존 도구·seed 형식·되돌리기는 [설치 가이드](docs/guide.md#신뢰-발신-장비-발신자--ip-짝)를 참고하세요.
 
 ## 테스트 환경
 

@@ -1144,3 +1144,35 @@ sudo bash scripts/verify.sh
 원하는 선택값을 false로 바꾼 뒤 같은 `webmail_prepare` → 관리 profile up → verify 순서로 실행합니다. doveadm 관리 블록은 `--revert -y`로 제거하고 reload합니다. 릴레이는 파일 연결만 해제하며 이미 저장한 허용 IP는 자동 삭제하지 않습니다. 릴레이 목록의 원복은 연결을 끄기 전에 변경 기록 또는 `/data/relay-backup/`의 두 파일을 검토해 제자리로 복원한 뒤 Postfix·Rspamd를 재시작합니다.
 
 `apply-postfix-edge.sh apply`는 기본 고정 목록 뒤에 관리 화면이 더한 릴레이 IP를 보존합니다. `--revert`는 망 분리 표식과 중계 제외 항목만 제거합니다. 관리 릴레이 IP가 있으면 기본 허용 목록과 함께 표식 밖 `mynetworks`로 남기므로 관리 항목을 지우지 않습니다. 관리 릴레이 IP가 없으면 기존 되돌리기 동작을 유지합니다. 해석할 수 없는 항목이나 별도 `mynetworks`와의 충돌은 자동 병합하지 않고 멈춥니다. 전체 teardown도 Dovecot 관리 블록을 먼저 제거하며 관리 기록·로고 볼륨은 보존합니다.
+
+### 신뢰 발신 장비 (발신자 + IP 짝)
+
+`MAIL_TRUSTED_SENDER_ENABLE=false`가 기본값입니다. `true`로 켜고 setup/update를 실행하면 SMTP 발신자와 접속 IP가 **같은 짝**으로 목록에 있을 때만 `MAILSTACK_TRUSTED_SENDER` 점수 -100을 더합니다. 강제 수락이나 검사 생략이 아니므로 바이러스(+2000), 발신자 차단 등 기존 검사는 계속 적용됩니다. IP 대역(CIDR)은 지원하지 않습니다. 관리 화면이 켜져 있으면 '운영 · 보안 → 신뢰 발신 장비'에서 짝과 발신자별 메모를 관리합니다. 규칙 기능은 웹메일·관리 화면 설치 없이도 먼저 적용할 수 있습니다.
+
+선적용은 **`scripts/apply-rspamd-trusted-sender.sh` 파일 하나만 복사**해서 실행할 수 있습니다. Bash, Python 3, `getent`, POSIX ACL 도구(`getfacl`·`setfacl`, Debian/Ubuntu의 `acl` 패키지), 실행 중인 mailcow Rspamd와 Docker Compose가 필요합니다. `MAILCOW_DIR` 기본값은 `/home/mailcow-dockerized`입니다. 호스트 그룹 64250이 이미 존재하거나 NSS 조회가 실패하면 적용을 거부합니다. 다른 이름 있는 ACL도 자동 변경하지 않고 거부합니다.
+
+```bash
+# 공개 저장소에는 합성 값만 사용합니다. 실제 seed는 서버의 비공개 파일로 준비합니다.
+cat > /tmp/trusted-example.map <<'MAP'
+# mailstack trusted senders v1
+#@sender reports@example.com memo=백업 리포트
+reports@example.com|192.0.2.10
+reports@example.com|2001:db8::1
+MAP
+sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-trusted-sender.sh apply -y --seed /tmp/trusted-example.map
+sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-trusted-sender.sh --check
+```
+
+seed는 `data/conf/rspamd/override.d/mailstack-trusted/trusted_senders.map`이 **없을 때만** 읽습니다. 기존 파일이 있으면 seed가 달라도 덮어쓰지 않습니다. 선적용 뒤 관리 화면에서 수정한 목록도 나중 스택 설치·업데이트가 그대로 이어받습니다. seed 없이 처음 적용하면 첫 줄만 있는 빈 목록을 만듭니다. 파일은 첫 줄 `# mailstack trusted senders v1`, 발신자마다 `#@sender <소문자 주소> memo=<80자 이하 메모>`, 그 뒤 `<소문자 주소>|<IP>` 줄 순서입니다. 발신자·IP를 각각 정렬하고 중복 없이 끝 줄바꿈 하나를 둡니다. IPv4는 앞자리 0 없는 점 표기, IPv6는 압축 소문자 표기이며 대역·공백·제어문자는 허용하지 않습니다. 표준 형식이 아닌 seed 또는 기존 목록은 전체를 오류로 처리합니다.
+
+스크립트는 `override.d/multimap.conf`를 표식과 함께 통째로 관리합니다. 같은 이름의 표식 없는 파일이 있으면 중단합니다. `rspamadm configtest`가 실패하면 원래 규칙·권한으로 복구합니다. 규칙 파일이 바뀌거나 삭제될 때만 Rspamd를 한 번 재시작하며, 목록만 바꾸면 재시작하지 않습니다. 목록은 Rspamd가 자동으로 다시 읽습니다. 재시작하는 몇 초 동안 수신은 잠시 지연될 수 있습니다. 재시작 자체가 실패하면 디스크의 규칙은 유지되므로 원인을 고친 후 `docker compose restart rspamd-mailcow`를 다시 실행합니다.
+
+**옛 발신자만 보는 화이트리스트 줄은 이 스크립트가 지우지 않습니다.** 서버별 `custom/global_smtp_from_whitelist.map`을 별도로 백업하고 대상 줄만 제거해야 짝 검사로 좁혀집니다. 적용 실패 시 옛 줄을 자동 복구하지도 않습니다. 다른 multimap 규칙 보존, 짝 불일치·빈 발신자·바이러스 거절, 목록 변경 자동 반영은 시험 VM/서버에서 따로 확인합니다.
+
+관리 컨테이너에는 목록 전용 폴더만 `/run/trusted:rw,z`로 연결하고 그룹 64250을 추가합니다. 관리 env `TRUSTED_SENDER_FILE`은 켬이면 `/run/trusted/trusted_senders.map`, 끔이면 빈 값입니다. 폴더의 그룹 ACL `g:64250:rwx`와 기본 ACL `d:g:64250:rw`, 파일의 `g:64250:rw`로 Rspamd 재시작 후에도 관리 화면이 파일을 원자 교체할 수 있게 합니다. **SELinux 주의:** mailcow Rspamd는 상위 `override.d`를 `:Z`로 연결하므로 관리 컨테이너의 하위 폴더 `:z`와 라벨이 충돌할 수 있습니다(릴레이와 같은 주의 사항). SELinux를 켠 서버는 반영 전에 Docker SELinux 설정·AVC(`ausearch -m avc --input-logs`)를 확인하고, Rspamd 재시작 뒤에도 관리 컨테이너의 node UID로 목록 읽기·쓰기·rename이 되는지 시험합니다. 거부가 있으면 반영을 멈추고 라벨을 확인합니다.
+
+끄려면 `.env`를 `MAIL_TRUSTED_SENDER_ENABLE=false`로 바꾸고 update를 실행합니다. 관리 env/override를 수동 생성하는 경우에도 `webmail_prepare` 후 관리 컨테이너를 재생성해야 메뉴와 연결이 해제됩니다. 직접 규칙만 되돌리려면 아래 명령을 사용합니다. **규칙만 제거하며 목록 파일·폴더는 남깁니다.** teardown도 컨테이너를 내리기 전에 같은 되돌리기를 실행합니다. 단, **전체 teardown은 기존 동작대로 mailcow 설치 디렉터리까지 지우므로 목록도 삭제됩니다.** 전체 제거 전에 보관할 목록은 설치 경로 밖으로 백업합니다. 키도 관리 규칙도 없는 옛 `.env`에는 새 적용 단계를 실행하지 않습니다.
+
+```bash
+sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-trusted-sender.sh --revert -y
+```

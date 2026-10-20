@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import { createFakeApi } from '../../web/dev/fake-api.js';
+import AxeBuilder from '@axe-core/playwright';
 
 const captures = process.env.SELECT_ALL_CAPTURE_DIR || '/tmp/webmail-select-all-captures';
+const matrixCaptures = process.env.SELECT_ALL_V3_CAPTURE_DIR || '/tmp/webmail-select-all-v3-captures';
 const actions = ['seen','unseen','flag','unflag','move','archive','trash','spam','notspam','delete-forever'];
 const scopeOf = (patch = {}) => ({view:'inbox',folder:'',quick:'all',q:'',in:'',...patch});
 const keys = value => Object.keys(value).sort();
@@ -148,6 +150,42 @@ function receipt(selectionId, sequence, initialTotal, totals, {delta = totals, f
   return {selectionId,batchId:`${selectionId}:${sequence}`,sequence,state:completed?'completed':'running',reason:completed?'complete':'batch',initialTotal,delta,totals,failed,nextCursor:completed?null:`${selectionId}-execute-${sequence+1}`,remainingEstimate,elapsedMs:1};
 }
 
+// Existing screen issues, reproduced with the same targets on d84dbe9.
+// Keep full-page axe enabled; allow only these date rows and closed-nav links.
+const knownSidebarHashes = [
+  ...['compose','inbox','allmail','spam','shared','filters','storage','password','settings'].map(path => `#${path}`),
+  ...['Sent','Drafts','Archive','Trash','거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰',
+    'Shared/sales@example.com/INBOX','Shared/sales@example.com/거래처','Shared/sales@example.com/거래처/2026','Shared/sales@example.com/견적','Shared/support@example.com/INBOX'].map(path => `#f/${encodeURIComponent(path)}`),
+];
+async function classifyAxeViolations(page, violations) {
+  const allowed = await page.evaluate(({violations,knownHashes}) => violations.map(violation => violation.nodes.map(node => {
+    if (node.target.length !== 1 || typeof node.target[0] !== 'string') return false;
+    const element = document.querySelector(node.target[0]);
+    if (!element) return false;
+    if (violation.id === 'list') {
+      const check = node.none[0], lists = document.querySelectorAll('.mailview ul.list');
+      return lists.length === 1 && element === lists[0] && !node.any.length && !node.all.length &&
+        node.none.length === 1 && check.id === 'only-listitems' && check.data?.values === '[role=presentation]' &&
+        check.relatedNodes.length > 0 && check.relatedNodes.every(related => {
+          if (related.target.length !== 1 || typeof related.target[0] !== 'string') return false;
+          const row = document.querySelector(related.target[0]);
+          return row?.parentElement === element && row.matches('li.grp[role="presentation"]');
+        }) && [...element.children].every(child => child.matches('li.grp[role="presentation"]') ||
+          (['LI','SCRIPT','TEMPLATE'].includes(child.tagName) && !child.hasAttribute('role')));
+    }
+    if (violation.id === 'skip-link') {
+      const sidebar = document.getElementById('mail-sidebar');
+      return element.matches('a[href^="#"]') && sidebar?.contains(element) &&
+        !document.body.classList.contains('nav-open') && sidebar.getBoundingClientRect().right <= 0 &&
+        knownHashes.includes(element.getAttribute('href')) && node.any.length === 1 &&
+        node.any[0].id === 'skip-link' && !node.all.length && !node.none.length;
+    }
+    return false;
+  })),{violations,knownHashes:knownSidebarHashes});
+  const select = expected => violations.map((violation,index) => ({...violation,nodes:violation.nodes.filter((_,nodeIndex) => allowed[index][nodeIndex] === expected)})).filter(violation => violation.nodes.length);
+  return {knownViolations:select(true),unexpectedViolations:select(false)};
+}
+
 await test('select-all: selection, confirmation and recovery', async t => {
   const fake = createFakeApi({authenticated:true});
   const server = await createServer({configFile:false,root:fileURLToPath(new URL('../../web',import.meta.url)),logLevel:'error',plugins:[preact(),{name:'select-all-test-api',configureServer(server) {server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
@@ -157,16 +195,20 @@ await test('select-all: selection, confirmation and recovery', async t => {
   t.after(() => browser.close());
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   await mkdir(captures,{recursive:true});
+  await mkdir(matrixCaptures,{recursive:true});
   async function pageFor(t, options = {}) {
-    const context = await browser.newContext({viewport:{width:1280,height:900}});
+    const width = options.width || 1280, mode = options.mode || 'light';
+    fake.state.prefs = {...fake.state.prefs,theme:'ink',mode};
+    const context = await browser.newContext({viewport:{width,height:width<700?844:900},colorScheme:mode});
     t.after(() => context.close());
-    await context.addInitScript(() => localStorage.setItem('webmail-prefs',JSON.stringify({theme:'ink',mode:'light'})));
+    await context.addInitScript(mode => localStorage.setItem('webmail-prefs',JSON.stringify({theme:'ink',mode})),mode);
     const page = await context.newPage(), errors = [];
     page.on('pageerror',error => errors.push(error.message));
     const model = await installSelectionApi(page, options);
     t.after(() => {assert.deepEqual(model.errors.map(error => error.message),[]);assert.deepEqual(errors,[]);});
     await page.goto(`${origin}/#${options.route || 'inbox'}`);
     await expect(page.locator('.mailview')).toBeVisible();
+    await expect(page.locator('html')).toHaveAttribute('data-mode',mode);
     await expect(page.locator('.mailview .scroll')).toHaveAttribute('aria-busy','false');
     return {page,model};
   }
@@ -657,6 +699,167 @@ await test('select-all: selection, confirmation and recovery', async t => {
     assert.equal(model.executions().length,1);assert.equal(model.prepares().length,1);
     if (change === 'condition') await allCleared(page);
     else await expect(page.locator('[data-page="storage"]')).toBeVisible();
+  });
+
+
+  async function tabTo(page, locator) {
+    await expect(locator).toBeVisible();
+    for (let count = 0; count < 150; count++) {
+      if (await locator.evaluate(element => element === document.activeElement)) return;
+      await page.keyboard.press('Tab');
+    }
+    assert.fail(`Keyboard could not reach ${await locator.getAttribute('aria-label') || await locator.textContent()}`);
+  }
+  const announcement = page => page.locator('.mailview [role="status"][aria-live="polite"]');
+
+  await t.test('keyboard-only all-selection, dialog, stop, resume and completion announce their states',async t => {
+    const first = deferred(), second = deferred();
+    t.after(() => {first.resolve();second.resolve();});
+    let calls = 0;
+    const {page,model} = await pageFor(t,{inbox:51,handlers:{execute:async ({reply}) => {
+      const sequence = calls++;
+      await (sequence === 0?first.promise:second.promise);
+      return reply(sequence === 0
+        ? receipt('synthetic-selection-1',0,51,{processed:20,skipped:0,failed:0})
+        : receipt('synthetic-selection-1',1,51,{processed:51,skipped:0,failed:0},{delta:{processed:31,skipped:0,failed:0},completed:true}));
+    }}});
+    // Every user interaction in this scenario uses Tab/Space/Enter or the
+    // existing archive shortcut. No click(), focus() or state mutation.
+    await tabTo(page,page.locator('.sa-tools .cbw'));
+    await page.keyboard.press('Space');
+    await tabTo(page,page.locator('.sa-notice button'));
+    await page.keyboard.press('Enter');
+    await expect(announcement(page)).toHaveText('조건에 맞는 메일 51통 모두 선택됨');
+    await expect(announcement(page)).toHaveAttribute('aria-atomic','true');
+    await expect(page.locator('.sa-notice button')).toBeFocused();
+    await page.keyboard.press('e');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button',{name:'취소',exact:true})).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(dialog.locator('button[type="submit"]')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => calls).toBe(1);
+    await painted(page);
+    const focusAtStart = await page.evaluate(() => ({tag:document.activeElement.tagName,id:document.activeElement.id,html:document.activeElement.outerHTML}));
+    await writeFile(`${matrixCaptures}/keyboard-start-focus.json`,JSON.stringify(focusAtStart,null,2));
+    await page.screenshot({path:`${matrixCaptures}/keyboard-start-focus.png`,animations:'disabled'});
+    await tabTo(page,page.getByRole('button',{name:'멈추기',exact:true}));
+    await expect(announcement(page)).toContainText('보관 중. 시도 0 / 51통. 처리 0통.');
+    await page.keyboard.press('Space');
+    await expect(announcement(page)).toHaveText('현재 묶음을 마친 뒤 멈춰요.');
+    first.resolve();
+    await expect(page.locator('.sa-result')).toContainText('보관 중단');
+    await expect(announcement(page)).toHaveText('보관 중단. 처리 20통, 건너뜀 0통, 실패 0통.');
+    assert.equal(model.executions().length,1);
+    await tabTo(page,page.getByRole('button',{name:'남은 것 이어서',exact:true}));
+    await page.keyboard.press('Enter');await expect.poll(() => calls).toBe(2);
+    await expect(announcement(page)).toContainText('시도 20 / 51통. 처리 20통.');
+    second.resolve();
+    await expect(page.locator('.sa-result')).toContainText('보관을 마쳤어요');
+    await expect(announcement(page)).toHaveText('보관을 마쳤어요. 처리 51통, 건너뜀 0통, 실패 0통.');
+    assert.equal(model.prepares().length,1);assert.equal(model.executions().length,2);
+    await page.screenshot({path:`${matrixCaptures}/keyboard-completed.png`,animations:'disabled'});
+    assert.notEqual(focusAtStart.tag,'BODY','Confirmation removal must retain a meaningful keyboard focus; see keyboard-start-focus.json');
+  });
+
+  await t.test('dialog traps Tab, Escape restores action focus, and refresh keeps its accessible name and focus',async t => {
+    const {page,model} = await pageFor(t,{inbox:51});
+    const refresh = page.getByRole('button',{name:'새로 고침',exact:true});
+    await expect(refresh).toHaveCount(1);
+    await tabTo(page,refresh);
+    await waitList(page,() => page.keyboard.press('Enter'));
+    await expect(refresh).toBeFocused();
+    await selectAll(page);
+    const trigger = page.locator('[data-sa-action="archive"]');
+    await trigger.focus();await page.keyboard.press('Enter');
+    const dialog = page.getByRole('dialog'), cancel = dialog.getByRole('button',{name:'취소',exact:true}), submit = dialog.locator('button[type="submit"]');
+    await expect(cancel).toBeFocused();
+    await page.keyboard.press('Shift+Tab');await expect(submit).toBeFocused();
+    await page.keyboard.press('Tab');await expect(cancel).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);await expect(trigger).toBeFocused();
+    noPosts(model);
+  });
+
+  await t.test('list redraw preserves the focused row and falls back to a row when it disappears',async t => {
+    const {page,model} = await pageFor(t,{inbox:51});
+    // Ensure the SSE subscription is active before using a mailbox event.
+    await expect.poll(() => fake.state.requests.filter(record => record.path === '/api/events').length).toBeGreaterThan(0);
+    const row = page.locator('.m').nth(3), ref = await row.getAttribute('data-ref');
+    await row.focus();
+    await waitList(page,async () => fake.emit('mailbox',{path:'INBOX',unseen:26,total:51}));
+    await expect(page.locator(`.m[data-ref="${ref}"]`)).toBeFocused();
+    model.rows = model.rows.filter(item => item.ref !== ref);
+    await waitList(page,async () => fake.emit('mailbox',{path:'INBOX',unseen:25,total:50}));
+    await expect(page.locator('.m').first()).toBeFocused();
+    noPosts(model);
+  });
+
+  await mkdir(matrixCaptures,{recursive:true});
+  for (const width of [1280,768,390,375]) for (const mode of ['light','dark']) await t.test(`seven scenes, full-page axe and overflow ${width} ${mode}`,async t => {
+    const first = deferred(), second = deferred();
+    t.after(() => {first.resolve();second.resolve();});
+    let calls = 0;
+    const {page} = await pageFor(t,{inbox:51,width,mode,handlers:{execute:async ({reply}) => {
+      const sequence = calls++;
+      if (sequence === 0) {await first.promise;return reply(receipt('synthetic-selection-1',0,51,{processed:20,skipped:3,failed:0}));}
+      if (sequence === 1) {await second.promise;return reply(receipt('synthetic-selection-1',1,51,{processed:30,skipped:3,failed:0},{delta:{processed:10,skipped:0,failed:0}}));}
+      return reply(receipt('synthetic-selection-1',2,51,{processed:48,skipped:3,failed:0},{delta:{processed:18,skipped:0,failed:0},completed:true}));
+    }}});
+    const issues = [];
+    async function capture(scene) {
+      const name = `${scene}-${width}-${mode}`;
+      await page.screenshot({path:`${matrixCaptures}/${name}.png`,animations:'disabled'});
+      const geometry = await page.evaluate(() => ({viewport:innerWidth,document:document.documentElement.scrollWidth,body:document.body.scrollWidth}));
+      if (geometry.document>width || geometry.body>width) issues.push({scene,geometry});
+      const result = await new AxeBuilder({page}).analyze();
+      const classified = await classifyAxeViolations(page,result.violations);
+      await writeFile(`${matrixCaptures}/${name}.axe.json`,JSON.stringify({scene,width,mode,geometry,violations:result.violations,...classified,incomplete:result.incomplete},null,2));
+      if (classified.unexpectedViolations.length) issues.push({scene,violations:classified.unexpectedViolations.map(({id,nodes}) => ({id,targets:nodes.map(node => node.target)}))});
+    }
+    await selectPage(page);await capture('01-page');
+    await page.locator('.sa-notice button').click();await capture('02-all');
+    const q = 'from:sender@example.com in:INBOX';
+    await waitList(page,async () => {await page.getByRole('textbox',{name:'메일 검색',exact:true}).fill(q);await page.getByRole('textbox',{name:'메일 검색',exact:true}).press('Enter');});
+    await capture('03-search');
+    await selectAll(page);await chooseAction(page,'archive');await capture('04-confirm');
+    await page.getByRole('dialog').locator('button[type="submit"]').click();
+    await expect.poll(() => calls).toBe(1);first.resolve();await expect.poll(() => calls).toBe(2);
+    await progress(page,23,51,20,3,0);await capture('05-progress');
+    await page.getByRole('button',{name:'멈추기',exact:true}).click();second.resolve();
+    await expect(page.locator('.sa-result')).toContainText('보관 중단');
+    await capture('07-stopped');
+    await page.getByRole('button',{name:'남은 것 이어서',exact:true}).click();
+    await expect(page.locator('.sa-result')).toContainText('보관을 마쳤어요');await capture('06-done');
+    assert.deepEqual(issues,[],`See ${matrixCaptures} PNG and axe JSON evidence`);
+  });
+
+  for (const width of [1280,768,390,375]) for (const mode of ['light','dark']) await t.test(`long Korean folder and query confirmation fit ${width} ${mode}`,async t => {
+    const longFolder = '합성_아주_긴_한글_폴더_이름_검토_자료_보관_'.repeat(4);
+    const q = `from:sender@example.com in:${longFolder}`;
+    const {page,model} = await pageFor(t,{inbox:51,width,mode});
+    for (const item of model.rows) if (item.folder === '거래처') {item.folder=longFolder;item.folderName=longFolder;}
+    await page.route('**/api/folders',async route => {
+      const response = await route.fetch(), value = await response.json();
+      value.folders.push({path:longFolder,name:longFolder,parent:null,specialUse:null,shared:false,rights:{write:true,delete:true,insert:true,seen:true},unseen:30,total:60,color:null});
+      await route.fulfill({response,json:value});
+    });
+    await page.reload();
+    await expect(page.locator('.mailview .scroll')).toHaveAttribute('aria-busy','false');
+    await waitList(page,async () => {await page.getByRole('textbox',{name:'메일 검색',exact:true}).fill(q);await page.getByRole('textbox',{name:'메일 검색',exact:true}).press('Enter');});
+    await selectAll(page);await chooseAction(page,'archive');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.locator('dl')).toContainText(q);
+    await page.screenshot({path:`${matrixCaptures}/long-confirm-${width}-${mode}.png`,animations:'disabled'});
+    const geometry = await page.evaluate(() => {
+      const dialog=document.querySelector('dialog'),root=document.documentElement;
+      return {document:root.scrollWidth,viewport:innerWidth,dialogScroll:dialog.scrollWidth,dialogClient:dialog.clientWidth};
+    });
+    assert.ok(geometry.document<=width,JSON.stringify(geometry));
+    assert.ok(geometry.dialogScroll<=geometry.dialogClient,JSON.stringify(geometry));
+    await expect(dialog.locator('button[type="submit"]')).toBeInViewport();
+    noPosts(model);
   });
 
 });

@@ -96,7 +96,7 @@ for (const failure of [new AppError(502, 'DOVEADM_REJECTED', '거부'), new AppE
     assert.deepEqual(detail.refs.shares, []); assert.equal(detail.warnings[0].code, 'SHARES_PARTIAL');
     await assert.rejects(accounts.deletePreview({}, owner), { statusCode: 502, code: 'SHARES_UNAVAILABLE' });
     const shares = createSharesService({ mailcow, dockerapi: reader, history });
-    await assert.rejects(shares.list({}), error => error === failure);
+    await assert.rejects(shares.get({}, owner), error => error === failure);
   });
 }
 
@@ -175,7 +175,7 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
   t.after(() => app.close());
   assert.equal((await app.inject('/healthz')).statusCode, 200);
   const denied = await app.inject('/api/admin/shares'); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
-  const item = async () => (await app.shares.list({})).items.find(row => row.owner === owner);
+  const item = async () => app.shares.get({}, owner);
   const change = async grant => app.shares.change({ session: {}, actor: 'admin', ip: '192.0.2.1', owner, grantee, grant, etag: (await item()).etag });
   await change(true);
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });

@@ -72,6 +72,9 @@ export function createImapPool({ config, destroySession, clientFactory = options
     clearTimeout(state.timer);
     state.monitor?.close();
     state.monitor = null;
+    for (const client of state.fresh) client.close();
+    state.fresh.clear();
+    state.finishRefresh?.();
     const work = state.work;
     state.work = null;
     if (work) {
@@ -83,7 +86,7 @@ export function createImapPool({ config, destroySession, clientFactory = options
 
   async function verifyLogin(credentials) {
     const work = await connect(credentials, false);
-    const state = { ...credentials, work, monitor: null, workPending: null, monitorPending: null, timer: null, attempt: 0, listeners: new Set(), closed: false };
+    const state = { ...credentials, work, monitor: null, workPending: null, monitorPending: null, timer: null, attempt: 0, listeners: new Set(), fresh: new Set(), sharedOwners: null, workActive: 0, workRefresh: null, finishRefresh: null, closed: false };
     const connection = { logout: () => closeState(state) };
     resources.set(connection, state);
     return { name: credentials.email, connection };
@@ -126,18 +129,69 @@ export function createImapPool({ config, destroySession, clientFactory = options
     }
     return state.workPending;
   }
+  function retireWork(state) {
+    state.work?.close();
+    state.work = null;
+    const finish = state.finishRefresh;
+    state.workRefresh = null;
+    state.finishRefresh = null;
+    finish?.();
+  }
+  function refreshShared(session, paths) {
+    const state = stateFor(session);
+    const owners = JSON.stringify([...new Set(paths.filter(path => path.startsWith('Shared/')).map(path => path.split('/')[1]))].sort());
+    if (state.sharedOwners === owners) return;
+    state.sharedOwners = owners;
+    if (state.workActive) {
+      if (!state.workRefresh) state.workRefresh = new Promise(resolve => { state.finishRefresh = resolve; });
+    } else retireWork(state);
+    clearTimeout(state.timer);
+    state.timer = null;
+    state.attempt = 0;
+    state.monitor?.close();
+    state.monitor = null;
+    scheduleMonitor(session, state);
+  }
+  async function withFreshConnection(session, operation) {
+    const state = stateFor(session);
+    let client;
+    try {
+      client = await connect(state, false, value => { client = value; state.fresh.add(value); });
+      if (state.closed) throw expired();
+      const result = await deadline(Promise.resolve().then(() => operation(client)), 60000, client);
+      if (state.closed) throw expired();
+      return result;
+    } catch (error) {
+      if (state.closed) throw expired();
+      if (authRejected(error)) return connectionFailure(error, session);
+      if (!(error instanceof AppError)) throw unavailable();
+      throw error;
+    } finally {
+      if (client) {
+        try { if (client.usable) await deadline(client.logout(), 60000, client); } catch { /* The request has already completed. */ }
+        finally { client.close(); state.fresh.delete(client); }
+      }
+    }
+  }
   async function withMailbox(session, path, operation, options = {}) {
     const state = stateFor(session);
-    const client = await workFor(session, state);
-    let lock;
+    while (state.workRefresh && !state.closed) await state.workRefresh;
+    if (state.closed) throw expired();
+    state.workActive++;
+    let client, lock;
     try {
+      client = await workFor(session, state);
       lock = await client.getMailboxLock(path, { ...options, acquireTimeout: 60000 });
       return await deadline(Promise.resolve().then(() => operation(client)), 60000, client);
     } catch (error) {
       if (authRejected(error)) return connectionFailure(error, session);
-      if (!client.usable && !(error instanceof AppError)) throw unavailable();
+      if (client && !client.usable && !(error instanceof AppError)) throw unavailable();
       throw error;
-    } finally { lock?.release(); }
+    } finally {
+      lock?.release();
+      state.workActive--;
+      if (!state.workActive && state.workRefresh) retireWork(state);
+    }
   }
 
   function withRef(session, token, operation) {
@@ -162,9 +216,9 @@ export function createImapPool({ config, destroySession, clientFactory = options
     state.monitorPending = (async () => {
       try {
         const client = await connect(state, true, client => { state.monitor = client; });
-        if (state.closed || !state.listeners.size) { client.close(); return; }
+        if (state.closed || !state.listeners.size || state.monitor !== client) { client.close(); return; }
         await deadline(client.mailboxOpen('INBOX', { readOnly: true }), 60000, client);
-        if (state.closed || !state.listeners.size) { client.close(); return; }
+        if (state.closed || !state.listeners.size || state.monitor !== client) { client.close(); return; }
         state.attempt = 0;
         for (const type of ['exists', 'flags', 'expunge']) {
           client.on(type, event => {
@@ -189,7 +243,10 @@ export function createImapPool({ config, destroySession, clientFactory = options
           return;
         }
         scheduleMonitor(session, state);
-      } finally { state.monitorPending = null; }
+      } finally {
+        state.monitorPending = null;
+        if (!state.monitor?.usable) scheduleMonitor(session, state);
+      }
     })();
   }
   function watch(session, listener) {
@@ -207,5 +264,5 @@ export function createImapPool({ config, destroySession, clientFactory = options
       }
     };
   }
-  return { verifyLogin, verifySessionLogin, withMailbox, withRef, watch };
+  return { verifyLogin, verifySessionLogin, withMailbox, withRef, watch, withFreshConnection, refreshShared };
 }

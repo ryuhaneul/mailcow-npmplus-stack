@@ -54,7 +54,7 @@ async function fixture(t, initial = [], options = {}) {
   } };
   // Limit listing to the tested owner: readOwned must never receive a grantee address.
   const service = createSharesService({ dockerapi, aclFolders, mailcow, audit, lock, history, config: { wholeMailbox: options.wholeMailbox === true } });
-  const item = async () => (await service.list({}, { q: owner })).items[0];
+  const item = async () => service.get({}, owner);
   const change = async (grant, expected) => service.change({ owner, grantee, grant, etag: expected ?? (await item()).etag, actor: 'admin', ip: '192.0.2.1', session: {} });
   return Object.assign(f, { dir, doveadm, aclFolders, audit, history, service, item, change });
 }

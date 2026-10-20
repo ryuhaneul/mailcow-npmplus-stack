@@ -83,10 +83,11 @@ export function createFolderService({ imap, rulesService, logger, now = Date.now
     return result;
   }
   async function folders(session) {
-    return imap.withMailbox(session, 'INBOX', async client => {
+    return imap.withFreshConnection(session, async client => {
       const rows = await list(client);
       const folders = [];
       for (const row of rows) folders.push(await describe(client, session, row));
+      imap.refreshShared(session, rows.map(row => row.path));
       return { folders, virtualAllMail: 'WebmailVirtual/AllMail' };
     });
   }

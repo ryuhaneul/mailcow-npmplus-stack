@@ -80,7 +80,7 @@ test('KST display accepts epoch seconds, milliseconds and ISO with identical app
  assert.equal(kst('invalid'),'invalid');assert.equal(kst(undefined),'—');assert.equal(kst(''),'—');
 });
 
-test('shared ACL loading guidance follows pending list, preview and run requests', async t => {
+test('shared ACL loading guidance follows pending detail, preview and run requests', async t => {
  const { createServer } = await import('vite'), { fileURLToPath } = await import('node:url');
  const { h, render } = await import('preact'), { act } = await import('preact/test-utils');
  const dom = new JSDOM('<div id="root"></div>', { url: 'https://admin.example.com/' });
@@ -91,10 +91,10 @@ test('shared ACL loading guidance follows pending list, preview and run requests
  const address = 'person@example.com', other = 'other@example.com';
  const items = [{ address, name: '시험 계정', active: 1, messages: 0 }, { address: other, active: 1 }];
  const list = { items, total: items.length, pageSize: 50, mailboxes: items };
- let pending = [], delayList = false;
+ let pending = [], delayList = false, delayDetail = false;
  Object.assign(globalThis, { window: dom.window, document: dom.window.document, location: dom.window.location, addEventListener: dom.window.addEventListener.bind(dom.window), removeEventListener: dom.window.removeEventListener.bind(dom.window), fetch: (path, options) => {
-  if (options.method !== 'GET' || delayList && path.startsWith('/api/admin/shares?')) return new Promise(resolve => pending.push({ path, options, resolve: value => resolve(response(200, value)) }));
-  return Promise.resolve(response(200, path.startsWith('/api/admin/mailboxes/') ? items[0] : list));
+  if (options.method !== 'GET' || delayList && path.startsWith('/api/admin/shares?') || delayDetail && path.startsWith('/api/admin/shares/')) return new Promise(resolve => pending.push({ path, options, resolve: value => resolve(response(200, value)) }));
+  return Promise.resolve(response(200, path.startsWith('/api/admin/shares/') ? { owner: address, name: '시험 계정', grants: [], etag: 'synthetic' } : path.startsWith('/api/admin/shares?') ? { ...list, items: [{ owner: address, name: '시험 계정' }] } : path.startsWith('/api/admin/mailboxes/') ? items[0] : list));
  } });
  const server = await createServer({ root: fileURLToPath(new URL('../../web', import.meta.url)), configFile: fileURLToPath(new URL('../../web/vite.admin.config.js', import.meta.url)), server: { middlewareMode: true, watch: null }, appType: 'custom' });
  const settle = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
@@ -112,9 +112,14 @@ test('shared ACL loading guidance follows pending list, preview and run requests
   await t.test('Loading retains its default copy', async () => {
    await mount(Loading); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중…');
   });
-  await t.test('shares list guidance disappears after delayed response', async () => {
-   delayList = true; await mount(Shares); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+  await t.test('shares list uses ordinary loading and detail has selected mailbox guidance', async () => {
+   delayList = true; await mount(Shares); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중…');
    await finish({ items: [], total: 0, pageSize: 50 }); delayList = false;
+   delayDetail = true; await mount(Shares); await waitLoading();
+   assert.equal(root.querySelector('[role="status"]').textContent, '선택한 메일함의 공유 정보를 확인하고 있어요.');
+   assert.ok(root.querySelector('.list-pane').textContent.includes(address));
+   assert.equal(pending[0].path, `/api/admin/shares/${encodeURIComponent(address)}`);
+   await finish({ owner: address, name: '시험 계정', grants: [], etag: 'synthetic' }); delayDetail = false;
   });
   for (const mode of ['leave', 'delete', 'rename', 'toAlias', 'toMailbox']) await t.test(`${mode} guidance appears during both preview and run`, async () => {
    const lifecycle = mode === 'leave' || mode === 'delete';

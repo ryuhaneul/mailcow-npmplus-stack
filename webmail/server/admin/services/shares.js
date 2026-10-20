@@ -54,16 +54,15 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     const search = q.trim().toLowerCase();
     const selected = boxes.filter(box => `${box.owner} ${box.name}`.toLowerCase().includes(search)).sort((a, b) => a.owner.localeCompare(b.owner));
     const pageBoxes = selected.slice((Number(page) - 1) * 50, Number(page) * 50);
-    const items = new Array(pageBoxes.length);
-    let cursor = 0;
-    await Promise.all(Array.from({ length: Math.min(4, pageBoxes.length) }, async () => {
-      while (cursor < pageBoxes.length) {
-        const index = cursor++, box = pageBoxes[index];
-        const state = await snapshot(box.owner);
-        items[index] = { ...box, group: groups.has(box.owner), ...describe(state) };
-      }
-    }));
+    const items = pageBoxes.map(box => ({ ...box, group: groups.has(box.owner) }));
     return { items, total: selected.length, page: Number(page), pageSize: 50, wholeMailbox, warnings };
+  }
+  async function get(session, rawOwner) {
+    const owner = address(rawOwner);
+    if (!owner) throw invalid();
+    const box = (await mailboxes(session)).find(row => row.owner === owner);
+    if (!box) throw new AppError(404, 'NOT_FOUND', '메일함을 찾을 수 없어요.');
+    return { ...box, ...describe(await snapshot(owner)) };
   }
   async function change({ session, actor, ip, owner: rawOwner, grantee: rawGrantee, etag: expected, grant }) {
     const owner = address(rawOwner), grantee = address(rawGrantee);
@@ -127,5 +126,5 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
   };
   history.register('share.grant', adapter);
   history.register('share.revoke', adapter);
-  return { list, change };
+  return { list, get, change };
 }

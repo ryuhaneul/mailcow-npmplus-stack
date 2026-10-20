@@ -34,6 +34,26 @@ await test('shared admin folder grants, residual cleanup and history guidance', 
    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false); assert.deepEqual(errors, []);
   } finally { await context.close(); }
  });
+ await t.test('mailbox list stays usable while selected ACL detail loads and only selection is fetched', async () => {
+  const { page, context, errors } = await open();
+  try {
+   await expect(page.locator('.detail-head')).toBeVisible();
+   const before=fake.state.requests.length;
+   let release;
+   const blocked=new Promise(resolve=>{release=resolve;});
+   await page.route('**/api/admin/shares/team%40example.com',async route=>{await blocked;await route.continue();});
+   await page.getByRole('textbox',{name:'공유 검색',exact:true}).fill('');
+   await expect(page.locator('.list-pane .account-item')).toHaveCount(2);
+   await page.locator('.list-pane .account-item').filter({hasText:'team@example.com'}).click();
+   await expect(page.locator('.account-detail')).toContainText('선택한 메일함의 공유 정보를 확인하고 있어요.');
+   await expect(page.locator('.list-pane .account-item')).toHaveCount(2);
+   release();
+   await expect(page.locator('.detail-head')).toContainText('team@example.com');
+   const details=fake.state.requests.slice(before).filter(row=>row.method==='GET'&&row.path.startsWith('/api/admin/shares/'));
+   assert.deepEqual(details.map(row=>row.path),['/api/admin/shares/team%40example.com']);
+   assert.deepEqual(errors,[]);
+  } finally { await context.close(); }
+ });
  await t.test('inbox scope and disabled subfolder ACL warning', async () => {
   const { page, context, errors } = await open(undefined, 1280, state => { state.shares.warnings = ['SUBFOLDER_ACL_UNCHECKED']; });
   try {
@@ -49,7 +69,7 @@ await test('shared admin folder grants, residual cleanup and history guidance', 
  await t.test('residual cleanup confirms all folders and uses DELETE with current etag', async () => {
   const { page, context, errors } = await open();
   try {
-   let body; await page.route('**/api/admin/shares/person%40example.com', route => { body = route.request().postDataJSON(); return route.continue(); });
+   let body; await page.route('**/api/admin/shares/person%40example.com', route => { if(route.request().method()==='DELETE')body = route.request().postDataJSON(); return route.continue(); });
    await page.getByRole('button', { name: '정리', exact: true }).click(); await expect(page.locator('dialog')).toContainText('남은 권한을 모두 지워요');
    await page.getByRole('button', { name: '남은 권한 정리', exact: true }).click(); await expect(page.locator('dialog')).toHaveCount(0);
    await expect(page.locator('.mini-row')).toHaveCount(1); await expect(page.locator('.mini-row')).not.toContainText('residual@example.com');

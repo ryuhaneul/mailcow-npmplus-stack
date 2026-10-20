@@ -61,20 +61,31 @@ const config = {
   imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com',
   brandName: '메일', orgName: '', brandMark: '', defaultTheme: 'ink', defaultMode: 'system', attachMaxMb: 25, autoexpungeDays: 30,
 };
-async function fixture(t, { rules = true } = {}) {
+async function fixture(t, { rules = true, configureClient = () => {} } = {}) {
   let client, logs = '', time = 0;
+  const clients = [];
   const rulesCalls = [];
   const service = rules === true ? { async getState() { return 'ok'; }, async renameFolderRefs(_session, from, to) { rulesCalls.push({ from, to }); }, async folderInUse() { return false; } } : rules || undefined;
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w04-test-'));
   const stream = new Writable({ write(chunk, _enc, done) { logs += chunk.toString(); done(); } });
-  const app = await createApp({ config, logger: { ...logOptions('info'), stream }, auth: { tempRoot, clientFactory: options => { client = new FolderImap(options); return client; } }, folders: { rulesService: service, now: () => time } });
+  const app = await createApp({ config, logger: { ...logOptions('info'), stream }, auth: { tempRoot, clientFactory: options => {
+    const next = new FolderImap(options);
+    if (client) {
+      // Mailboxes and ACLs belong to the fake server, not an individual connection.
+      for (const key of ['rows', 'stats', 'acl', 'uids', 'calls', 'listCount', 'statusCount', 'renameCount', 'uidValidity', 'getQuota']) {
+        Object.defineProperty(next, key, { get: () => client[key], set: value => { client[key] = value; }, configurable: true });
+      }
+    } else client = next;
+    clients.push(next); configureClient(next, clients.length);
+    return next;
+  } }, folders: { rulesService: service, now: () => time } });
   app.directory.mailboxName = async email => email;
   t.after(async () => { await app.close(); if (process.env.WEBMAIL_TEST_LOG) await appendFile(process.env.WEBMAIL_TEST_LOG, logs); await rm(tempRoot, { recursive: true, force: true }); });
   const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-imap-password' } });
   assert.equal(login.statusCode, 200);
   const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://newmail.example.com', 'x-webmail-csrf': login.json().csrf };
   const request = (method, path, payload) => app.inject({ method, url: path, headers, payload });
-  return { app, client, headers, request, rulesCalls, service, advance(ms) { time += ms; }, get logs() { return logs; } };
+  return { app, client, clients, headers, request, rulesCalls, service, advance(ms) { time += ms; }, get logs() { return logs; } };
 }
 const pathFor = path => '/api/folders/' + encodeURIComponent(path);
 function error(response, status, code) { assert.equal(response.statusCode, status, response.body); assert.equal(response.json().error.code, code); assert.equal(response.headers['www-authenticate'], undefined); }
@@ -243,4 +254,42 @@ test('folders: first path wins; selectable shared owner root, virtual and Nosele
   const storage = await f.request('GET', '/api/storage'); assert.equal(storage.statusCode, 200);
   assert.equal(storage.json().quota.usedBytes, 2800);
   assert.equal(storage.json().folders.length, 8);
+});
+
+test('folders: refresh sees connection-scoped sharing changes and new work can open the shared folder', async t => {
+  let sharedPaths = [];
+  const f = await fixture(t, { configureClient(client) {
+    const connect = client.connect.bind(client);
+    client.connect = async () => {
+      await connect();
+      client.visible = [...client.rows.filter(row => !row.path.startsWith('Shared/')), ...sharedPaths.map(path => ({ path, flags: new Set() }))];
+    };
+    client.list = async () => client.visible.map(row => ({ ...row, status: { messages: 2, unseen: 1 } }));
+    client.getMailboxLock = async path => {
+      if (!client.visible.some(row => row.path === path)) throw Object.assign(new Error('synthetic namespace unavailable'), { code: 'NotFound' });
+      client.mailbox = { path, uidValidity: 123n };
+      return { release() {} };
+    };
+  } });
+  const paths = async () => {
+    const response = await f.request('GET', '/api/folders');
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json().folders.filter(row => row.shared).map(row => row.path);
+  };
+  assert.deepEqual(await paths(), []);
+  assert.equal(f.clients[0].usable, false); // The first refresh establishes the baseline.
+  assert.equal((await f.request('GET', '/api/messages')).statusCode, 200);
+  const work = f.clients.at(-1);
+  assert.deepEqual(await paths(), []); assert.equal(work.usable, true);
+  const path = 'Shared/new@example.com/INBOX';
+  sharedPaths = [path]; f.client.stats.set(path, { messages: 2, size: 100 });
+  assert.ok(!(await work.list()).some(row => row.path === path));
+  assert.deepEqual(await paths(), [path]); assert.equal(work.usable, false);
+  const response = await f.request('GET', `/api/messages?view=folder&folder=${encodeURIComponent(path)}`);
+  assert.equal(response.statusCode, 200, response.body); assert.equal(response.json().total, 2);
+  const changedWork = f.clients.at(-1);
+  sharedPaths = [];
+  assert.ok((await changedWork.list()).some(row => row.path === path));
+  assert.deepEqual(await paths(), []); assert.equal(changedWork.usable, false);
+  assert.ok(f.clients.every(client => !client.usable));
 });

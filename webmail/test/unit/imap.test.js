@@ -395,3 +395,63 @@ test('login: refused connection remains 503 MAIL_UNAVAILABLE', async t => {
   assert.equal(response.statusCode, 503); assert.equal(response.json().error.code, 'MAIL_UNAVAILABLE');
   assert.equal(response.headers['www-authenticate'], undefined);
 });
+
+test('pool: sharing refresh drains active and queued mailbox work before replacing work and monitor', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fakeFixture(t);
+  f.pool.refreshShared(f.session, ['INBOX']);
+  await f.pool.withMailbox(f.session, 'INBOX', () => true);
+  const work = f.clients.at(-1);
+  const events = [], stop = f.pool.watch(f.session, event => events.push(event));
+  await flush(); const monitor = f.clients.at(-1);
+  let release, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = f.pool.withMailbox(f.session, 'INBOX', async client => {
+    assert.equal(client, work); entered();
+    await new Promise(resolve => { release = resolve; });
+    assert.equal(client.usable, true);
+  });
+  await started;
+  const queued = f.pool.withMailbox(f.session, 'Archive', client => { assert.equal(client, work); assert.equal(client.usable, true); });
+  const paths = ['INBOX', 'Shared/new@example.com/INBOX'];
+  f.pool.refreshShared(f.session, paths);
+  assert.equal(work.usable, true); assert.equal(monitor.usable, false);
+  let opened = false;
+  const next = f.pool.withMailbox(f.session, paths[1], client => { opened = true; assert.notEqual(client, work); });
+  await flush(); assert.equal(opened, false);
+  release(); await Promise.all([pending, queued, next]);
+  assert.equal(work.usable, false); assert.equal(work.locks, 0);
+  const replacement = f.clients.at(-1), count = f.clients.length;
+  f.pool.refreshShared(f.session, [...paths].reverse());
+  assert.equal(replacement.usable, true); assert.equal(f.clients.length, count);
+  t.mock.timers.tick(5000); await flush();
+  const freshMonitor = f.clients.at(-1);
+  assert.notEqual(freshMonitor, monitor); assert.equal(freshMonitor.idling, true);
+  freshMonitor.emit('exists', { count: 3 }); assert.equal(events[0].count, 3);
+  f.pool.refreshShared(f.session, paths);
+  assert.equal(freshMonitor.usable, true); assert.equal(replacement.usable, true);
+  stop();
+});
+
+test('pool: temporary folder connections close on failure, timeout, and session logout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fakeFixture(t);
+  await assert.rejects(f.pool.withFreshConnection(f.session, () => { throw new Error('synthetic failure'); }), { statusCode: 503 });
+  assert.equal(f.clients.at(-1).usable, false); assert.equal(f.clients[0].usable, true);
+  const timed = assert.rejects(f.pool.withFreshConnection(f.session, () => new Promise(() => {})), { statusCode: 503 });
+  await flush(); t.mock.timers.tick(60000); await timed;
+  assert.equal(f.clients.at(-1).usable, false);
+  let release;
+  const pending = assert.rejects(f.pool.withFreshConnection(f.session, () => new Promise(resolve => { release = resolve; })), { statusCode: 403 });
+  await flush(); const fresh = f.clients.at(-1);
+  await f.session.connection.logout(); assert.equal(fresh.usable, false);
+  release(); await pending;
+});
+
+test('pool: temporary connection authentication rejection expires session', async t => {
+  const f = await fakeFixture(t, (client, index) => {
+    if (index > 1) client.connect = async () => { throw Object.assign(new Error('synthetic rejection'), { authenticationFailed: true }); };
+  });
+  await assert.rejects(f.pool.withFreshConnection(f.session, () => true), { statusCode: 403, code: 'SESSION_EXPIRED' });
+  assert.equal(f.session.connection, null); assert.ok(f.clients.every(client => !client.usable));
+});

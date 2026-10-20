@@ -72,7 +72,7 @@ async function fixture(t, options = {}) {
   const service = createSharesService({ mailcow, dockerapi: fake.client, audit, lock, history });
   return { ...fake, dir, audit, lock, history, mailcow, mailCalls, boxes, filters, service };
 }
-async function ownerItem(f) { return (await f.service.list({})).items.find(row => row.owner === owner); }
+async function ownerItem(f) { return f.service.get({}, owner); }
 function change(f, expected, grant = true, changes = {}) { return f.service.change({ session: {}, actor: 'admin', ip: '198.51.100.9', owner, grantee, etag: expected, grant, ...changes }); }
 
 test('dockerapi: three ACL task bodies match Toolkit and response projection drops inspect Env', async t => {
@@ -147,49 +147,47 @@ test('shares: active mailbox listing, group flags, pagination and search project
   const f = await fixture(t); f.boxes.push({ username: 'disabled@example.com', active: 0 });
   f.acl.set(`${owner}|${grantee}`, ['lookup', 'read']);
   const list = await f.service.list({}); assert.equal(list.total, 3); assert.equal(list.pageSize, 50);
-  const item = list.items.find(row => row.owner === owner); assert.equal(item.group, true); assert.deepEqual(item.grantees, [grantee]); assert.match(item.etag, /^[a-f0-9]{64}$/);
+  const item = list.items.find(row => row.owner === owner); assert.equal(item.group, true); assert.equal(item.grantees, undefined); assert.equal(item.etag, undefined);
+  const detail = await f.service.get({}, owner); assert.deepEqual(detail.grantees, [grantee]); assert.match(detail.etag, /^[a-f0-9]{64}$/);
   assert.equal((await f.service.list({}, { q: '팀' })).total, 1); assert.equal((await f.service.list({}, { page: '2' })).items.length, 0);
   assert.ok(!JSON.stringify(list).includes(secret)); assert.ok(!JSON.stringify(list).includes('Env'));
 });
 
-test('shares: listing runs at most four ACL snapshots concurrently and preserves sorted items', async () => {
-  const owners = Array.from({ length: 9 }, (_, i) => `mailbox${i}@example.com`);
-  let active = 0, peak = 0;
-  const calls = [], completed = [];
-  const dockerapi = { async getAcl(who) {
-    calls.push(who); active++; peak = Math.max(peak, active);
-    try {
-      await new Promise(resolve => setTimeout(resolve, who === owners[0] ? 40 : 5));
-      completed.push(who);
-      return [{ user: who, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }];
-    } finally { active--; }
+test('shares: listing and search never read ACLs; detail reads only the selected owner', async () => {
+  const owners = Array.from({ length: 60 }, (_, i) => `mailbox${String(i).padStart(2, '0')}@example.com`);
+  const calls = [];
+  const aclFolders = { enabled: true, async readOwned(who) {
+    calls.push(who);
+    return [{ user: who, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] }];
   } };
   const mailcow = { async call(_session, _method, path) {
     return path.endsWith('mailbox/all') ? [...owners].reverse().map(username => ({ username, name: username, active: 1 })) : [];
   } };
-  const service = createSharesService({ mailcow, dockerapi, history: { register() {} } });
-  const result = await service.list({});
-  assert.equal(peak, 4); assert.equal(active, 0);
-  assert.deepEqual(calls, owners);
-  assert.notDeepEqual(completed, owners);
-  assert.deepEqual(result, {
-    items: owners.map(who => ({ owner: who, name: who, group: false, grantees: [grantee], grants: [{ grantee, folders: [{ mailbox: 'INBOX', rights: ['lookup', 'read'] }], shared: true, residualFolders: 0, readOnly: true }], wholeMailbox: false, warnings: ['SUBFOLDER_ACL_UNCHECKED'], etag: etag({ version: 2, grants: [{ grantee, folders: [{ mailbox: 'INBOX', rights: ['lookup', 'read'] }] }] }) })),
-    total: owners.length, page: 1, pageSize: 50, wholeMailbox: false, warnings: ['SUBFOLDER_ACL_UNCHECKED'],
-  });
+  const service = createSharesService({ mailcow, aclFolders, history: { register() {} } });
+  const first = await service.list({});
+  assert.deepEqual(first.items, owners.slice(0, 50).map(owner => ({ owner, name: owner, group: false })));
+  assert.equal(first.total, 60);
+  const second = await service.list({}, { page: '2' }); assert.equal(second.items.length, 10);
+  assert.equal((await service.list({}, { q: 'mailbox59' })).total, 1);
+  assert.deepEqual(calls, []);
+  const detail = await service.get({}, owners[59]);
+  assert.deepEqual(calls, [owners[59]]);
+  assert.deepEqual(detail.grantees, [grantee]);
+  assert.match(detail.etag, /^[a-f0-9]{64}$/);
+  await assert.rejects(service.get({}, 'missing@example.com'), { statusCode: 404 });
+  await assert.rejects(service.get({}, 'invalid'), { statusCode: 422 });
+  assert.deepEqual(calls, [owners[59]]);
 });
 
-test('shares: listing propagates the original ACL snapshot error without partial results', async () => {
+test('shares: detail propagates the original ACL error while mailbox listing remains available', async () => {
   const failure = new AppError(503, 'DOCKERAPI_UNAVAILABLE', '공유 정보를 읽을 수 없어요.');
-  const dockerapi = { async getAcl(who) {
-    await new Promise(resolve => setTimeout(resolve, 5));
-    if (who === owner) throw failure;
-    return [];
-  } };
+  const aclFolders = { enabled: true, async readOwned(who) { assert.equal(who, owner); throw failure; } };
   const mailcow = { async call(_session, _method, path) {
     return path.endsWith('mailbox/all') ? [owner, grantee, other].map(username => ({ username, active: 1 })) : [];
   } };
-  const service = createSharesService({ mailcow, dockerapi, history: { register() {} } });
-  await assert.rejects(service.list({}), error => error === failure);
+  const service = createSharesService({ mailcow, aclFolders, history: { register() {} } });
+  assert.equal((await service.list({})).total, 3);
+  await assert.rejects(service.get({}, owner), error => error === failure);
 });
 
 test('shares: grant and revoke create config records, preserve other ACLs and support reverts', async t => {
@@ -291,7 +289,7 @@ test('shares: ignores received shares and non-INBOX grants when building owner s
     { user: owner, id: other, mailbox: 'Sent', rights: ['lookup', 'read'] },
   ]; } };
   const service = createSharesService({ mailcow: { async call(_session, _method, path) { return path.endsWith('mailbox/all') ? [{ username: owner, active: 1 }] : []; } }, dockerapi, audit, lock: createResourceLock(), history });
-  const item = (await service.list({})).items[0]; assert.deepEqual(item.grantees, [grantee]);
+  const item = await service.get({}, owner); assert.deepEqual(item.grantees, [grantee]);
 });
 
 test('shares: failed post-write verification is recorded as failure', async t => {
@@ -327,8 +325,12 @@ test('shares HTTP: common guard, CSRF, add/revoke and history operate without le
   const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
   let response = await app.inject({ url: '/api/admin/shares', headers }); assert.equal(response.statusCode, 200);
   const item = response.json().items.find(row => row.owner === owner);
-  assert.equal(item.group, false);
+  assert.equal(item.group, false); assert.equal(item.etag, undefined);
   const url = `/api/admin/shares/${owner}`;
+  assert.equal((await app.inject(url)).statusCode, 403);
+  response = await app.inject({ url, headers }); assert.equal(response.statusCode, 200);
+  item.etag = response.json().etag;
+  assert.match(item.etag, /^[a-f0-9]{64}$/);
   assert.equal((await app.inject({ method: 'POST', url, headers: { ...headers, 'x-mailadmin-csrf': 'bad' }, payload: { grantee, etag: item.etag } })).statusCode, 403);
   response = await app.inject({ method: 'POST', url, headers, payload: { grantee, etag: item.etag } }); assert.equal(response.statusCode, 200, response.body);
   const grantAuditId = response.json().auditId; assert.match(grantAuditId, /^[a-f0-9]{32}$/);

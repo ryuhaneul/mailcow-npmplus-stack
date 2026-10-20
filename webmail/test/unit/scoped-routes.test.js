@@ -7,6 +7,12 @@ import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { encodeRef } from '../../server/mail/ref.js';
 
+function expandSet(set) {
+  return set.split(',').flatMap(part => {
+    const [first, last = first] = part.split(':').map(Number);
+    return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+  });
+}
 const origin = 'https://newmail.example.com';
 const scope = { view: 'inbox', folder: '', quick: 'unread', q: '', in: '' };
 const prepareBody = { selectionKey: 'synthetic-selection-001', scope, action: 'seen', cursor: null };
@@ -28,16 +34,18 @@ class RouteImap extends EventEmitter {
   async exec(command, attributes, { untagged } = {}) {
     const state = this.state;
     if (command === 'MYRIGHTS') untagged.MYRIGHTS({ attributes: [attributes[0], { value: 'lrswite' }] });
-    if (command === 'UID SORT') {
-      state.searches++;
+    if (command === 'UID SEARCH' && state.searchFailure) { state.searchFailure = false; throw new Error('synthetic search transport failure'); }
+    if (command === 'UID SORT' || command === 'UID SEARCH') {
+      if (command === 'UID SORT') state.searches++;
       const unseen = JSON.stringify(attributes).includes('UNSEEN');
       const uids = Array.from({ length: state.count }, (_, i) => i + 1).filter(uid => !unseen || !state.seen.has(uid));
-      untagged.SORT({ attributes: uids.map(uid => ({ value: String(uid) })) });
+      const requested = command === 'UID SEARCH' ? new Set(expandSet(attributes.find(attribute => attribute.type === 'SEQUENCE').value)) : null;
+      untagged[command === 'UID SEARCH' ? 'SEARCH' : 'SORT']({ attributes: uids.filter(uid => !requested || requested.has(uid)).map(uid => ({ value: String(uid) })) });
     }
     if (command === 'UID STORE' || command === 'UID MOVE') {
       state.mutations.push({ command, attributes });
       if (state.unknown) throw new Error('synthetic lost acknowledgement');
-      for (const uid of attributes[0].value.split(',').map(Number)) state.seen.add(uid);
+      for (const uid of expandSet(attributes[0].value)) state.seen.add(uid);
       if (state.replaceAfterMutation) state.validity++;
     }
     return { response: { command: 'OK' }, next() {} };
@@ -128,7 +136,7 @@ test('scoped HTTP: move target is bound at preparation and mismatched execution 
 
 test('scoped HTTP: failure metadata and failed-only retry preserve original refs and separate totals', async t => {
   const f = await fixture(t), ready = await f.prepare();
-  f.state.fetchFailure = true;
+  f.state.searchFailure = true;
   const response = await f.post(executeUrl, execution(ready));
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json().totals, { processed: 0, skipped: 0, failed: 3 });
@@ -162,7 +170,7 @@ test('scoped HTTP: unknown outcome is a 200 failure and failed-only retry exclud
 });
 
 test('scoped HTTP: partial STALE_SCOPE serializes error.detail and replays the same 409 receipt', async t => {
-  const f = await fixture(t, 51), ready = await f.prepare();
+  const f = await fixture(t, 5001), ready = await f.prepare();
   await f.get('/api/messages?quick=unread');
   f.state.replaceAfterMutation = true;
   const response = await f.post(executeUrl, execution(ready));
@@ -171,7 +179,7 @@ test('scoped HTTP: partial STALE_SCOPE serializes error.detail and replays the s
   const detail = body.error.detail;
   assert.equal(detail.state, 'stopped'); assert.equal(detail.reason, 'stale_scope');
   assert.equal(detail.nextCursor, null); assert.equal(detail.selectionId, ready.selectionId);
-  assert.deepEqual(detail.totals, { processed: 50, skipped: 0, failed: 0 });
+  assert.deepEqual(detail.totals, { processed: 5000, skipped: 0, failed: 0 });
   assert.equal(detail.remainingEstimate, 1);
   const replay = await f.post(executeUrl, execution(ready));
   assertError(replay, 409, 'STALE_SCOPE'); assert.deepEqual(replay.json(), body);

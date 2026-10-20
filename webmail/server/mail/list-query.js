@@ -1,7 +1,7 @@
 import { searchCompiler } from 'imapflow/lib/search-compiler.js';
 import { AppError } from '../errors.js';
 import { parseSearchQuery } from './search-query.js';
-import { encodeRef, originalRefs } from './ref.js';
+import { encodeRef, originalRefs, uidSet } from './ref.js';
 
 export const allmail = 'WebmailVirtual/AllMail';
 // Leave 10 seconds before the measured 60-second proxy limit.
@@ -59,19 +59,25 @@ export async function resolveListScope(session, scope = {}, { imap, budget } = {
     return { ...options, filters: await resolveFilters(client, options.filters, { budget }) };
   }, { budget });
 }
-export async function sortUids(client, conditions, searching = false, { budget } = {}) {
+export const sortUids = (client, conditions, searching = false, options = {}) => queryUids(client, conditions, searching, options, true);
+export const searchUids = (client, conditions, searching = false, options = {}) => queryUids(client, conditions, searching, options, false);
+async function queryUids(client, conditions, searching, { budget }, sorted) {
   checkBudget(budget);
+  let charset = false;
   const search = conditions.flatMap(condition => {
     const compiled = searchCompiler(client, condition);
-    return compiled[0]?.value === 'CHARSET' ? compiled.slice(2) : compiled;
+    if (compiled[0]?.value === 'CHARSET') { charset = true; return compiled.slice(2); }
+    return compiled;
   });
   if (!search.length) search.push(atom('ALL'));
   const uids = [];
   checkBudget(budget);
   const remaining = budget?.remainingMs() ?? Infinity;
   const timeout = Math.min(searching ? searchTimeout : Infinity, remaining);
-  const request = client.exec('UID SORT', [[atom('REVERSE'), atom('ARRIVAL')], atom('UTF-8'), ...search], {
-    untagged: { SORT: row => { for (const token of row.attributes ?? []) uids.push(Number(token.value)); } },
+  const responseType = sorted ? 'SORT' : 'SEARCH';
+  const attributes = sorted ? [[atom('REVERSE'), atom('ARRIVAL')], atom('UTF-8'), ...search] : [...(charset ? [atom('CHARSET'), atom('UTF-8')] : []), ...search];
+  const request = client.exec(`UID ${responseType}`, attributes, {
+    untagged: { [responseType]: row => { for (const token of row.attributes ?? []) uids.push(Number(token.value)); } },
   });
   let timer;
   try {
@@ -111,8 +117,9 @@ export async function resolveCandidateSources(client, session, uids, scope, { fr
   checkBudget(budget);
   let sources;
   if (scope.mailbox === allmail) {
-    sources = await originalRefs(client, session, uids.join(','), { freshValidity, budget, now });
-    if (freshValidity && (sources.length !== uids.length || new Set(sources.map(source => source.virtualUid)).size !== uids.length || sources.some(source => !uids.includes(source.virtualUid)))) {
+    sources = await originalRefs(client, session, uidSet(uids), { freshValidity, budget, now });
+    const candidates = new Set(uids);
+    if (freshValidity && (sources.length !== uids.length || new Set(sources.map(source => source.virtualUid)).size !== uids.length || sources.some(source => !candidates.has(source.virtualUid)))) {
       throw new AppError(409, 'STALE_SCOPE', '메일함이 바뀌었어요. 다시 선택해 주세요.');
     }
   } else {

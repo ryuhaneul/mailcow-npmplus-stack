@@ -204,9 +204,9 @@ function scopedFixture(action = 'seen') {
     if (command === 'MYRIGHTS') {
       client.rightsQueries.push(attrs[0].value);
       options.untagged.MYRIGHTS({ attributes: [attrs[0], { value: client.access.get(attrs[0].value) ?? 'lrswite' }] });
-    } else if (command === 'UID SORT') {
+    } else if (command === 'UID SEARCH') {
       client.sortCalls ??= []; client.sortCalls.push(attrs);
-      options.untagged.SORT({ attributes: (client.matches ?? [7, 8]).map(value => ({ value: String(value) })) });
+      options.untagged.SEARCH({ attributes: (client.matches ?? [7, 8]).filter(uid => !client.missingUids?.has(uid)).map(value => ({ value: String(value) })) });
     } else {
       client.calls.push([command, attrs]);
       await client.mutation?.(command, attrs);
@@ -269,7 +269,7 @@ for (const action of scopedActions) {
     assert.deepEqual(result.skipped, [ref(path, 7), ref(path, 9)]);
     assert.deepEqual(result.processed, [ref(path, 8)]);
     assert.equal(f.client.sortCalls.length, 1);
-    assert.deepEqual(f.client.sortCalls[0].slice(-2), [{ type: 'ATOM', value: 'UID' }, { type: 'SEQUENCE', value: '8,9' }]);
+    assert.deepEqual(f.client.sortCalls[0].slice(0, 2), [{ type: 'ATOM', value: 'UID' }, { type: 'SEQUENCE', value: '7:9' }]);
     assertScopedPartition(result, f.options.refs, f.outcomes);
   });
   test(`scoped ${action}: source ACL denial is a confirmed failure`, async () => {
@@ -369,7 +369,7 @@ test('scoped: read checks consume the same budget; no mutation starts after ACL 
     f.options.resolvedScope.imap = [{ flagged: true }];
     f.client.exec = async (...args) => {
       const result = await exec(...args);
-      if (args[0] === (stage === 'rights' ? 'MYRIGHTS' : 'UID SORT')) f.time(9999);
+      if (args[0] === (stage === 'rights' ? 'MYRIGHTS' : 'UID SEARCH')) f.time(9999);
       return result;
     };
     const result = await f.run(); assert.deepEqual(result.remaining, f.options.refs); assert.equal(result.reason, 'budget');
@@ -407,15 +407,15 @@ test('scoped: missing or BYE ACK and explicit server rejection cannot claim succ
 });
 test('scoped: partial application before command failure never retries a subset automatically', async () => {
   const f = scopedFixture('move'); f.options.refs.push(ref('INBOX', 8)); let applied;
-  f.client.mutation = async (_command, attrs) => { applied = attrs[0].value.split(',')[0]; throw new Error('synthetic partial application'); };
+  f.client.mutation = async (_command, attrs) => { applied = attrs[0].value.split(/[,:]/)[0]; throw new Error('synthetic partial application'); };
   const result = await f.run(); assert.equal(applied, '7'); assert.equal(result.unknown.length, 2);
   assert.equal(f.client.calls.length, 1); assertScopedPartition(result, f.options.refs, f.outcomes);
 });
 test('scoped: read transport failure is retryable failed, not unknown; session errors propagate before sending', async () => {
-  const f = scopedFixture(); f.client.fetch = async function* () { throw new Error('synthetic fetch failed'); };
+  const f = scopedFixture(); const exec = f.client.exec; f.client.exec = async (...args) => { if (args[0] === 'UID SEARCH') throw new Error('synthetic search failed'); return exec(...args); };
   const result = await f.run(); assert.deepEqual(result.failed, [{ ref: ref(), code: 'MAIL_UNAVAILABLE', retryable: true }]);
   assertScopedPartition(result, f.options.refs, f.outcomes);
-  const g = scopedFixture(); g.client.fetch = async function* () { throw Object.assign(new Error('synthetic expiry'), { code: 'SESSION_EXPIRED' }); };
+  const g = scopedFixture(); const next = g.client.exec; g.client.exec = async (...args) => { if (args[0] === 'UID SEARCH') throw Object.assign(new Error('synthetic expiry'), { code: 'SESSION_EXPIRED' }); return next(...args); };
   await assert.rejects(g.run(), { code: 'SESSION_EXPIRED' }); assert.deepEqual(g.client.calls, []);
 });
 

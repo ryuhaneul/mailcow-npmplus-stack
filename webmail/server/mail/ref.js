@@ -78,3 +78,33 @@ export async function originalRefs(client, session, set, { now = Date.now, fresh
     return { ...row, uidValidity, ref: encodeRef(row.path, uidValidity, row.uid) };
   });
 }
+
+// Shared limits for scoped preparation and execution; keep UID commands bounded.
+export const scopedUidLimit = 5000, scopedSetLimit = 16 * 1024;
+export function uidSet(uids) {
+  const ranges = [];
+  let first, last;
+  for (const uid of uids) {
+    if (uid === last) continue;
+    if (uid === last + 1) { last = uid; continue; }
+    if (first !== undefined) ranges.push(first === last ? String(first) : `${first}:${last}`);
+    first = last = uid;
+  }
+  if (first !== undefined) ranges.push(first === last ? String(first) : `${first}:${last}`);
+  return ranges.join(',');
+}
+export function* scopedUidBatches(uids) {
+  let batch = [], length = 0, first, last;
+  for (const uid of uids) {
+    const contiguous = batch.length && uid === last + 1;
+    const added = contiguous ? (first === last ? 1 + String(uid).length : String(uid).length - String(last).length) : (batch.length ? 1 : 0) + String(uid).length;
+    if (batch.length && (batch.length === scopedUidLimit || length + added > scopedSetLimit)) {
+      yield batch;
+      batch = []; length = 0; first = last = undefined;
+    }
+    if (!batch.length || uid !== last + 1) first = uid;
+    const extra = batch.length && uid === last + 1 ? (first === last ? 1 + String(uid).length : String(uid).length - String(last).length) : (batch.length ? 1 : 0) + String(uid).length;
+    length += extra; batch.push(uid); last = uid;
+  }
+  if (batch.length) yield batch;
+}

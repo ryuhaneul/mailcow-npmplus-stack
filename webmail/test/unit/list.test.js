@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { parseSearchQuery } from '../../server/mail/search-query.js';
 import { createListService, listOptions } from '../../server/mail/list.js';
 import { decodeRef, encodeRef, originalRefs } from '../../server/mail/ref.js';
-import { scopeOptions, resolveListScope, sortUids, resolveCandidateSources, matchesFolderFilters } from '../../server/mail/list-query.js';
+import { scopeOptions, resolveListScope, sortUids, searchUids, resolveCandidateSources, matchesFolderFilters } from '../../server/mail/list-query.js';
 import { validateDocument } from '../../server/sieve/model.js';
 import { createApp } from '../../server/app.js';
 
@@ -509,4 +509,39 @@ test('failed-list metadata: minimal read-only FETCH, original identity/order, mi
   await assert.rejects(f.service.metadata(f.session, [encodeRef('missing', 321, 5)], { budget }), { code: 'STALE_REF' });
   assert.equal(f.client.fetches.length, 0);
   assert.deepEqual(await f.service.metadata(f.session, [], { budget }), []);
+});
+
+
+test('scoped SEARCH shares compiler and UID validation without SORT or FETCH', async () => {
+  let wire;
+  const client = { enabled: new Set(), capabilities: new Map(), async exec(...args) {
+    wire = args;
+    args[2].untagged.SEARCH({ attributes: [{ value: '9' }, { value: '2' }] });
+    return { next() {} };
+  } };
+  assert.deepEqual(await searchUids(client, [{ uid: '2,9' }, { seen: false }, { subject: '합성' }]), [9, 2]);
+  assert.equal(wire[0], 'UID SEARCH');
+  assert.deepEqual(wire[1].slice(0, 5), [{ type: 'ATOM', value: 'CHARSET' }, { type: 'ATOM', value: 'UTF-8' }, { type: 'ATOM', value: 'UID' }, { type: 'SEQUENCE', value: '2,9' }, { type: 'ATOM', value: 'UNSEEN' }]);
+  client.exec = async (_command, _attributes, options) => { options.untagged.SEARCH({ attributes: [{ value: '4294967296' }] }); return { next() {} }; };
+  await assert.rejects(searchUids(client, []), { code: 'MAIL_UNAVAILABLE' });
+  await assert.rejects(searchUids(client, [], false, { budget: { remainingMs: () => 0 } }), error => error.budgetExhausted);
+});
+
+test('scoped SEARCH closes its connection on shared request deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = { enabled: new Set(), capabilities: new Map(), closed: false, close() { this.closed = true; }, exec() { return new Promise(() => {}); } };
+  const result = assert.rejects(searchUids(client, [{ uid: '1:5000' }], true, { budget: { remainingMs: () => 25 } }), error => error.budgetExhausted && error.code === 'MAIL_UNAVAILABLE');
+  t.mock.timers.tick(25); await result; assert.equal(client.closed, true);
+});
+
+
+test('scoped SEARCH follows compiler charset rules on ASCII and UTF8=ACCEPT connections', async () => {
+  let attributes;
+  const client = { enabled: new Set(), capabilities: new Map(), async exec(_command, wire) { attributes = wire; return { next() {} }; } };
+  await searchUids(client, [{ uid: '1:5000' }]);
+  assert.deepEqual(attributes, [{ type: 'ATOM', value: 'UID' }, { type: 'SEQUENCE', value: '1:5000' }]);
+  client.enabled.add('UTF8=ACCEPT');
+  await searchUids(client, [{ uid: '1:5000' }, { subject: '합성' }, { from: '합성@example.com' }]);
+  assert.equal(attributes.some(attribute => attribute.value === 'CHARSET'), false);
+  assert.equal(attributes.filter(attribute => attribute.type === 'LITERAL').length, 2);
 });

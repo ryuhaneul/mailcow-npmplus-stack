@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { uidSet, scopedUidBatches, scopedUidLimit, scopedSetLimit } from '../../server/mail/ref.js';
 import { createScopedActionService } from '../../server/mail/scoped-actions.js';
 
+function expandSet(set) {
+  return set.split(',').flatMap(part => {
+    const [first, last = first] = part.split(':').map(Number);
+    return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+  });
+}
 const virtual = 'WebmailVirtual/AllMail';
 function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
   let clock = 0, nested = false;
@@ -15,30 +22,32 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
     enabled: new Set(), capabilities: new Map([['MOVE', true]]),
     async *fetch(range) {
       clock += 1000; await state.onFetch?.();
-      for (const uid of range.split(',').map(Number)) if (state.live.get(client.mailbox.path)?.has(uid)) yield { uid, internalDate: new Date(0), envelope: { subject: `synthetic ${uid}` }, flags: new Set(state.seen.has(identity(uid)) ? ['\\Seen'] : []), size: 10, headers: Buffer.from('') };
+      for (const uid of expandSet(range)) if (state.live.get(client.mailbox.path)?.has(uid)) yield { uid, internalDate: new Date(0), envelope: { subject: `synthetic ${uid}` }, flags: new Set(state.seen.has(identity(uid)) ? ['\\Seen'] : []), size: 10, headers: Buffer.from('') };
     },
     async list() { clock += 1000; return [...folders].map(([path, box]) => ({ path, name: path.split('/').at(-1), specialUse: box.specialUse, flags: new Set() })); },
     async mailboxCreate(path) { clock += 1000; state.creates.push(path); await state.onCreate?.(); folders.set(path, { validity: 44, next: 1 }); return true; },
     async exec(command, attributes, { untagged } = {}) {
       clock += 1000; state.commands.push(command);
       await state.hook?.(command, attributes);
-      if (command === 'UID SORT') {
-        state.searches++; const wire = JSON.stringify(attributes);
+      if (command === 'UID SEARCH') await state.onFetch?.();
+      if (command === 'UID SORT' || command === 'UID SEARCH') {
+        if (command === 'UID SORT') state.searches++; const wire = JSON.stringify(attributes);
         const current = uids.filter(uid => state.live.get(client.mailbox.path)?.has(uid) && (!wire.includes('UNSEEN') || !state.seen.has(identity(uid))) && (!wire.includes('FLAGGED') || state.flagged.has(identity(uid))));
-        untagged.SORT({ attributes: current.map(uid => ({ value: String(uid) })) });
+        const requested = command === 'UID SEARCH' ? new Set(expandSet(attributes.find(attribute => attribute.type === 'SEQUENCE').value)) : null;
+        untagged[command === 'UID SEARCH' ? 'SEARCH' : 'SORT']({ attributes: current.filter(uid => !requested || requested.has(uid)).map(uid => ({ value: String(uid) })) });
       }
       if (command === 'MYRIGHTS') untagged.MYRIGHTS({ attributes: [attributes[0], { value: state.readonly ? 'lr' : 'lrswite' }] });
       if (command === 'STATUS') untagged.STATUS({ attributes: [attributes[0], [{ value: 'UIDVALIDITY' }, { value: String(folders.get(attributes[0].value).validity) }]] });
       if (command === 'UID FETCH') {
         state.fetches.push(attributes[0].value);
-        for (const uid of attributes[0].value.split(',').map(Number)) {
+        for (const uid of expandSet(attributes[0].value)) {
           if (uid === state.missing) continue;
           const source = mapping?.(uid) ?? { path: uid % 2 ? 'INBOX' : 'Projects', uid: uid };
           untagged.FETCH({ attributes: [{ value: 'FETCH' }, [{ value: 'UID' }, { value: String(uid) }, { value: 'X-MAILBOX' }, { value: source.path }, { value: 'X-REAL-UID' }, { value: String(source.uid) }]] });
         }
       }
       if (['UID STORE', 'UID MOVE', 'UID EXPUNGE'].includes(command)) {
-        const selected = attributes[0].value.split(',').map(Number);
+        const selected = expandSet(attributes[0].value);
         state.mutations.push({ command, path: client.mailbox.path, uids: selected });
         for (const uid of selected) {
           if (command === 'UID STORE') {
@@ -110,17 +119,17 @@ test('prepare: virtual conversion deduplicates originals and sorts paths, preser
   assert.equal(record.boundary.path, virtual); assert.equal(record.boundary.uidValidity, 33);
   assert.equal(f.state.commands.filter(command => /STORE|MOVE|EXPUNGE/.test(command)).length, 0);
 });
-test('prepare: bounded 50-UID mapping resumes without re-search, same cursor replays identical receipt', async () => {
-  const f = fixture({ uids: Array.from({ length: 120 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 1000 }], ['Projects', { validity: 22, next: 1000 }], [virtual, { validity: 33, next: 121 }]]) });
+test('prepare: bounded 5000-UID mapping resumes without re-search, same cursor replays identical receipt', async () => {
+  const f = fixture({ uids: Array.from({ length: 10020 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 20000 }], ['Projects', { validity: 22, next: 20000 }], [virtual, { validity: 33, next: 10021 }]]) });
   const body = { ...f.body, scope: { view: 'allmail' } };
   const first = await f.service.prepare(f.session, body, { budget: f.budget(11000) });
   assert.equal(first.phase, 'preparing'); const calls = f.state.commands.length;
   assert.deepEqual(await f.service.prepare(f.session, body), first); assert.equal(f.state.commands.length, calls);
   // New virtual arrivals stay outside the captured search and fence.
-  f.folders.get(virtual).next = 1001;
+  f.folders.get(virtual).next = 20001;
   const { result, record, replies } = await ready(f, { ...body, cursor: first.cursor }, 11000);
-  assert.ok(replies.length > 1); assert.equal(result.initialTotal, 120); assert.equal(f.state.searches, 1);
-  assert.equal(record.boundary.upper, 120); assert.ok(f.state.fetches.every(set => set.split(',').length <= 50));
+  assert.ok(replies.length > 1); assert.equal(result.initialTotal, 10020); assert.equal(f.state.searches, 1);
+  assert.equal(record.boundary.upper, 10020); assert.ok(f.state.fetches.every(set => expandSet(set).length <= 5000 && set.length <= 16384));
   assert.deepEqual(await f.service.prepare(f.session, body), first);
 });
 for (const when of ['before mapping', 'during mapping', 'before original SELECT']) test(`prepare: replacement with same UID ${when} is STALE_SCOPE, mutation count zero`, async () => {
@@ -172,7 +181,8 @@ test('prepare: foreign cursor mismatches without exposing foreign selection; unk
 test('prepare: concurrent same selection is busy, never performs duplicate search', async () => {
   const f = fixture(); let release, started;
   const gate = new Promise(resolve => { release = resolve; }); const entered = new Promise(resolve => { started = resolve; });
-  f.state.hook = async command => { if (command === 'UID SORT') { started(); await gate; } };
+  f.state.hook = async command => { if (command === 'UID SEARCH') await state.onFetch?.();
+      if (command === 'UID SORT' || command === 'UID SEARCH') { started(); await gate; } };
   const pending = f.service.prepare(f.session, f.body); await entered;
   await assert.rejects(f.service.prepare(f.session, f.body), { code: 'SCOPE_BUSY' });
   release(); await pending; assert.equal(f.state.searches, 1);
@@ -210,7 +220,8 @@ test('store: memory cap includes metadata and receipts; no valid history silentl
 test('store: abort removes data even from active request references and forbids late completion', async () => {
   const f = fixture(); let release, entered;
   const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; });
-  f.state.hook = async command => { if (command === 'UID SORT') { entered(); await gate; } };
+  f.state.hook = async command => { if (command === 'UID SEARCH') await state.onFetch?.();
+      if (command === 'UID SORT' || command === 'UID SEARCH') { entered(); await gate; } };
   const pending = f.service.prepare(f.session, f.body); await started;
   f.session.scanAbort.abort(); release();
   await assert.rejects(pending, { code: 'SESSION_EXPIRED', statusCode: 403 });
@@ -292,10 +303,10 @@ for (const action of ['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'tr
   assert.equal(record.resolvedTarget, { move: 'Projects', archive: 'Archive', trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[action] ?? null);
   assert.deepEqual(f.state.creates, []);
 });
-test('prepare: 2050 candidates retain all 50/200/1000 boundaries in immutable numeric manifest', async () => {
+test('prepare: 2050 candidates retain immutable numeric manifest in immutable numeric manifest', async () => {
   const f = fixture({ uids: Array.from({ length: 2050 }, (_, i) => 2050 - i), boxes: new Map([['INBOX', { validity: 11, next: 2051 }]]) });
   const { record, replies } = await ready(f, f.body, 10000);
-  assert.ok(replies.length > 1); assert.equal(record.initialTotal, 2050);
+  assert.ok(replies.length >= 1); assert.equal(record.initialTotal, 2050);
   assert.deepEqual(record.manifest[0].uids, Array.from({ length: 2050 }, (_, i) => i + 1));
   assert.equal(f.state.searches, 1);
 });
@@ -336,24 +347,24 @@ async function executeAll(f, body = f.body, requestMs = 50000) {
   }
   assert.fail('execution did not converge');
 }
-for (const action of ['move', 'delete-forever', 'seen', 'flag']) test(`execute ${action}: 2050 shrinking/nonshrinking candidates settle once across 50/200/1000 boundaries`, async () => {
+for (const action of ['move', 'delete-forever', 'seen', 'flag']) test(`execute ${action}: 2050 shrinking/nonshrinking candidates settle once in a compressed batch`, async () => {
   const path = action === 'delete-forever' ? 'Trash' : 'INBOX';
   const f = fixture({ uids: Array.from({ length: 2050 }, (_, index) => 2050 - index), boxes: new Map([[path, { validity: 11, next: 2051 }], ['Projects', { validity: 22, next: 9000 }]]) });
   const body = { ...f.body, scope: { view: 'folder', folder: path }, action, ...(action === 'move' ? { target: 'Projects' } : {}) };
   const { result, record, replies } = await executeAll(f, body);
   assert.deepEqual(result.totals, { processed: 2050, skipped: 0, failed: 0 }); assert.equal(result.state, 'completed'); assert.equal(record.phase, 'completed');
-  assert.ok(replies.length >= 3); assert.ok(replies.every(reply => Object.values(reply.delta).reduce((a, b) => a + b, 0) <= 1000));
+  assert.equal(replies.length, 1);
   const command = action === 'move' ? 'UID MOVE' : action === 'delete-forever' ? 'UID EXPUNGE' : 'UID STORE';
   const applied = f.state.mutations.filter(mutation => mutation.command === command).flatMap(mutation => mutation.uids);
-  assert.equal(applied.length, 2050); assert.equal(new Set(applied).size, 2050); assert.ok(f.state.mutations.every(mutation => mutation.uids.length <= 50));
+  assert.equal(applied.length, 2050); assert.equal(new Set(applied).size, 2050); assert.ok(f.state.mutations.every(mutation => mutation.uids.length <= 5000));
   if (action === 'move' || action === 'delete-forever') assert.equal(f.state.live.get(path).size, 0);
   else assert.equal(f.state.live.get(path).size, 2050);
 });
 test('execute: lost HTTP response and older cursor replay immutable totals without issuing any command', async () => {
-  const f = fixture({ uids: Array.from({ length: 120 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 121 }]]) });
+  const f = fixture({ uids: Array.from({ length: 12000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 12001 }]]) });
   const { result: prepared } = await ready(f);
-  const first = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: f.budget(19000) });
-  assert.equal(first.state, 'running'); assert.equal(first.totals.processed, 100);
+  const first = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: f.budget(18000) });
+  assert.equal(first.state, 'running'); assert.equal(first.totals.processed, 10000);
   const calls = f.state.commands.length;
   assert.deepEqual(await f.service.execute(f.session, runBody(f.body, prepared.cursor)), first); assert.equal(f.state.commands.length, calls);
   const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor)); assert.equal(second.state, 'completed');
@@ -401,13 +412,13 @@ test('execute: source UIDVALIDITY change produces identical 409/detail on first 
   await ready(f, { ...f.body, selectionKey: 'synthetic-after-stale' });
 });
 test('execute: partial successes survive later STALE_SCOPE; terminal invariant and replay remain exact', async () => {
-  const f = fixture({ uids: Array.from({ length: 100 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 101 }]]) });
+  const f = fixture({ uids: Array.from({ length: 10000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 10001 }]]) });
   const { result: prepared } = await ready(f);
   f.state.hook = async command => { if (command === 'UID STORE') f.folders.get('INBOX').validity++; };
   let detail;
   await assert.rejects(f.service.execute(f.session, runBody(f.body, prepared.cursor)), error => { detail = error.detail; return error.code === 'STALE_SCOPE'; });
-  assert.equal(detail.totals.processed, 50); assert.equal(detail.remainingEstimate, 50);
-  assert.equal(detail.totals.processed + detail.totals.skipped + detail.totals.failed + detail.remainingEstimate, 100);
+  assert.equal(detail.totals.processed, 5000); assert.equal(detail.remainingEstimate, 5000);
+  assert.equal(detail.totals.processed + detail.totals.skipped + detail.totals.failed + detail.remainingEstimate, 10000);
   assert.equal(f.state.mutations.length, 1);
   await assert.rejects(f.service.execute(f.session, runBody(f.body, prepared.cursor)), error => { assert.deepEqual(error.detail, detail); return error.code === 'STALE_SCOPE'; });
 });
@@ -426,7 +437,7 @@ test('execute: existing UID newly matching flags is never added to fixed candida
   assert.equal(f.state.seen.has('INBOX:2'), false); assert.equal(f.state.seen.has('INBOX:1'), true);
 });
 test('execute: ready reserve refuses an oversized manifest before any mutation', async () => {
-  const f = fixture({ uids: Array.from({ length: 32000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 32001 }]]) });
+  const f = fixture({ uids: Array.from({ length: 100000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 100001 }]]) });
   await assert.rejects(ready(f), { code: 'SCOPE_LIMIT' }); assert.equal(f.state.mutations.length, 0); assert.deepEqual(f.state.creates, []);
 });
 test('execute: request capacity admission rejects before changing mail and preserves prior record', async () => {
@@ -541,15 +552,23 @@ test('execute: logout during command clears held records and forbids late ACK fr
   assert.equal(record.disposed, true); assert.equal(record.totals, undefined); assert.deepEqual(record.runReceipts, {});
 });
 
-test('execute: one HTTP batch stops at 1000 even when time allows more', async () => {
-  const f = fixture({ uids: Array.from({ length: 2050 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 2051 }]]) });
-  const { result: prepared } = await ready(f);
-  const first = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: { remainingMs: () => 50000 } });
-  assert.equal(first.delta.processed, 1000); assert.equal(first.reason, 'batch'); assert.equal(first.remainingEstimate, 1050);
-  const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor), { budget: { remainingMs: () => 50000 } });
-  assert.equal(second.delta.processed, 1000); assert.equal(second.remainingEstimate, 50);
-  const last = await f.service.execute(f.session, runBody(f.body, second.nextCursor)); assert.equal(last.totals.processed, 2050);
+test('execute: one HTTP request handles all 50k when time allows, with bounded commands and cached rights', async () => {
+  const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }]]) });
+  const { result: prepared, record } = await ready(f);
+  assert.ok(f.service.checkStorage(f.session) < 32 * 1024 * 1024);
+  const commands = f.state.commands.length, selects = f.state.selects.length;
+  const result = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: { remainingMs: () => 50000 } });
+  assert.equal(result.delta.processed, 50000); assert.equal(result.reason, 'complete'); assert.equal(result.remainingEstimate, 0);
+  assert.equal(f.state.selects.length - selects, 10);
+  assert.deepEqual(f.state.commands.slice(commands), ['MYRIGHTS', ...Array.from({ length: 10 }, () => ['UID SEARCH', 'UID STORE']).flat()]);
+  assert.ok(f.state.mutations.every(row => row.uids.length === 5000));
+  assert.equal(record.reserveBytes, 0);
+  assert.ok(f.service.checkStorage(f.session) < 32 * 1024 * 1024);
+  const count = f.state.commands.length;
+  assert.deepEqual(await f.service.execute(f.session, runBody(f.body, prepared.cursor)), result);
+  assert.equal(f.state.commands.length, count);
 });
+
 test('execute: destination also a later source never reselects fresh destination UIDs', async () => {
   const f = fixture(); const body = { ...f.body, scope: { view: 'allmail' }, action: 'move', target: 'Projects' };
   const { result: prepared, record } = await ready(f, body);
@@ -614,27 +633,27 @@ test('S3: superseded ready record stays queryable but all its execution/preparat
   await assert.rejects(f.service.prepare(f.session, f.body), { code: 'SCOPE_EXPIRED' }); assert.equal(f.state.commands.length, calls);
 });
 test('S3: paused running record closes for new prepare, retains failures, rejects next and settled cursors', async () => {
-  const f = fixture({ uids: Array.from({ length: 120 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 121 }]]) });
+  const f = fixture({ uids: Array.from({ length: 12000 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 12001 }]]) });
   const first = await ready(f); let fetches = 0;
   f.state.onFetch = async () => { if (++fetches === 1) throw new Error('synthetic first-group failure'); };
-  const paused = await f.service.execute(f.session, runBody(f.body, first.result.cursor), { budget: f.budget(19000) });
-  assert.equal(paused.state, 'running'); assert.deepEqual(paused.totals, { processed: 50, skipped: 0, failed: 50 });
+  const paused = await f.service.execute(f.session, runBody(f.body, first.result.cursor), { budget: f.budget(17000) });
+  assert.equal(paused.state, 'running'); assert.deepEqual(paused.totals, { processed: 5000, skipped: 0, failed: 5000 });
   f.state.onFetch = null;
   await ready(f, { ...f.body, selectionKey: 'synthetic-after-pause' }); assert.equal(first.record.phase, 'stopped');
-  const failures = await f.service.failures(f.session, first.result.selectionId); assert.equal(failures.total, 50); assert.ok(failures.items.every(item => item.retryable));
+  const failures = await f.service.failures(f.session, first.result.selectionId); assert.equal(failures.total, 5000); assert.ok(failures.items.every(item => item.retryable));
   const changes = f.state.mutations.length;
   for (const cursor of [first.result.cursor, paused.nextCursor]) await assert.rejects(f.service.execute(f.session, runBody(f.body, cursor)), { code: 'SCOPE_EXPIRED' });
   assert.equal(f.state.mutations.length, changes);
 });
 test('S3: failed-only prepare can replace a paused running source without waiting for TTL', async () => {
-  const f = fixture({ uids: Array.from({ length: 60 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 61 }]]) });
+  const f = fixture({ uids: Array.from({ length: 6000 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 6001 }]]) });
   const first = await ready(f); f.state.onFetch = async () => { throw new Error('synthetic read failure'); };
   const paused = await f.service.execute(f.session, runBody(f.body, first.result.cursor), { budget: f.budget(12000) });
-  assert.equal(paused.state, 'running'); assert.equal(paused.totals.failed, 50); f.state.onFetch = null;
+  assert.equal(paused.state, 'running'); assert.equal(paused.totals.failed, 5000); f.state.onFetch = null;
   const searches = f.state.searches;
   const retry = await ready(f, { ...f.body, selectionKey: 'synthetic-retry-paused', selectionId: first.result.selectionId, retry: 'failed' });
-  assert.equal(first.record.phase, 'stopped'); assert.equal(retry.result.initialTotal, 50); assert.equal(f.state.searches, searches);
-  assert.equal((await f.service.failures(f.session, first.result.selectionId)).total, 50);
+  assert.equal(first.record.phase, 'stopped'); assert.equal(retry.result.initialTotal, 5000); assert.equal(f.state.searches, searches);
+  assert.equal((await f.service.failures(f.session, first.result.selectionId)).total, 5000);
 });
 test('S3: partially prepared idle selection closes and its old preparation cursor cannot resume', async () => {
   const f = fixture(); const body = { ...f.body, scope: { view: 'allmail' } };
@@ -646,7 +665,8 @@ test('S3: partially prepared idle selection closes and its old preparation curso
 test('S3: new preparation during an in-flight prepare is BUSY and does not close the old selection', async () => {
   const f = fixture(); let entered, release;
   const started = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; });
-  f.state.hook = async command => { if (command === 'UID SORT') { entered(); await gate; } };
+  f.state.hook = async command => { if (command === 'UID SEARCH') await state.onFetch?.();
+      if (command === 'UID SORT' || command === 'UID SEARCH') { entered(); await gate; } };
   const pending = f.service.prepare(f.session, f.body); await started;
   const selects = f.state.selects.length;
   await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-during-preparing' }), { statusCode: 409, code: 'SCOPE_BUSY' });
@@ -680,4 +700,163 @@ test('S3: eviction skips a closed record whose failures metadata request is stil
   assert.throws(() => f.service.getSelection(f.session, second.result.selectionId), { code: 'SCOPE_EXPIRED' });
   assert.equal(f.service.getSelection(f.session, third.result.selectionId), third.record);
   release(); assert.equal((await reading).items.length, 4); assert.equal(first.record.readers, 0);
+});
+
+
+test('UID sets: range compression preserves gaps, uint32 edge and the 5000/16KiB limits', () => {
+  assert.equal(uidSet([1, 2, 3, 7, 9, 10, 0xfffffffe, 0xffffffff]), '1:3,7,9:10,4294967294:4294967295');
+  for (const uids of [
+    Array.from({ length: 50000 }, (_, index) => index + 1),
+    Array.from({ length: 5000 }, (_, index) => 0xffffffff - 10000 + index * 2),
+  ]) {
+    const batches = [...scopedUidBatches(uids)];
+    assert.deepEqual(batches.flat(), uids);
+    for (const batch of batches) {
+      assert.ok(batch.length <= scopedUidLimit);
+      assert.ok(uidSet(batch).length <= scopedSetLimit);
+      assert.deepEqual(expandSet(uidSet(batch)), batch);
+    }
+    if (uids.length === 50000) assert.equal(batches.length, 10);
+    else { assert.equal(batches.length, 4); assert.equal(uidSet(batches[0]).length, 16378); }
+  }
+});
+for (const action of ['trash', 'move']) test(`PERF 50k ${action}: ten SEARCH/MOVE pairs, one source/target rights and LIST per request`, async t => {
+  const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }], ['Trash', { validity: 22, next: 1 }], ['Projects', { validity: 33, next: 1 }]]) });
+  const body = { ...f.body, action, scope: { quick: 'unread' }, ...(action === 'move' ? { target: 'Projects' } : {}) };
+  const { result: prepared } = await ready(f, body);
+  const commands = f.state.commands.length;
+  let lists = 0; const list = f.client.list;
+  f.client.list = async (...args) => { lists++; return list(...args); };
+  const result = await f.service.execute(f.session, runBody(body, prepared.cursor), { budget: { remainingMs: () => 50000 } });
+  assert.equal(result.totals.processed, 50000); assert.equal(result.state, 'completed');
+  const wire = f.state.commands.slice(commands);
+  assert.equal(wire.filter(command => command === 'UID SEARCH').length, 10);
+  assert.equal(wire.filter(command => command === 'UID MOVE').length, 10);
+  assert.equal(wire.filter(command => command === 'MYRIGHTS').length, 2); assert.equal(lists, 1);
+  assert.equal(wire.filter(command => ['UID SORT', 'UID FETCH'].includes(command)).length, 0);
+  assert.equal(f.state.live.get('INBOX').size, 0);
+  assert.equal(f.state.live.get(action === 'trash' ? 'Trash' : 'Projects').size, 50000);
+  t.diagnostic(`50k ${action}: ${wire.length + lists} IMAP commands excluding SELECT, storage ${f.service.checkStorage(f.session)} bytes`);
+});
+
+test('PERF 50k retryable failures: prepare, full failure receipts and failed-only retry fit 32MiB', async t => {
+  const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }]]) });
+  const { result: prepared } = await ready(f);
+  const preparedBytes = f.service.checkStorage(f.session);
+  f.state.onFetch = async () => { throw new Error('synthetic read failure'); };
+  const result = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: { remainingMs: () => 50000 } });
+  assert.equal(result.totals.failed, 50000); assert.equal(result.state, 'completed');
+  assert.ok(result.failed.every(row => row.retryable));
+  const failedBytes = f.service.checkStorage(f.session);
+  assert.ok(preparedBytes < 32 * 1024 * 1024); assert.ok(failedBytes < 32 * 1024 * 1024);
+  const count = f.state.commands.length;
+  assert.deepEqual(await f.service.execute(f.session, runBody(f.body, prepared.cursor)), result);
+  assert.equal(f.state.commands.length, count);
+  f.state.onFetch = null;
+  const retryBody = { ...f.body, selectionKey: 'synthetic-50k-retry', selectionId: prepared.selectionId, retry: 'failed' };
+  const retry = await ready(f, retryBody);
+  assert.equal(retry.result.initialTotal, 50000);
+  const retryBytes = f.service.checkStorage(f.session); assert.ok(retryBytes < 32 * 1024 * 1024);
+  const recovered = await f.service.execute(f.session, runBody(f.body, retry.result.cursor), { budget: { remainingMs: () => 50000 } });
+  assert.equal(recovered.totals.processed, 50000);
+  t.diagnostic(`50k storage: prepared=${preparedBytes}, failed=${failedBytes}, retained failure plus ready retry=${retryBytes} bytes`);
+});
+
+test('PERF 50k lost ACK: exactly 5000 unknown per request, no next group, replay and retry exclusion', async t => {
+  const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }]]) });
+  const { result: prepared } = await ready(f);
+  f.state.hook = async command => { if (command === 'UID STORE') throw new Error('synthetic lost ACK'); };
+  let cursor = prepared.cursor, maximumBytes = f.service.checkStorage(f.session), result;
+  for (let batch = 0; batch < 10; batch++) {
+    const before = f.state.commands.length;
+    result = await f.service.execute(f.session, runBody(f.body, cursor), { budget: { remainingMs: () => 50000 } });
+    assert.equal(result.delta.failed, 5000);
+    assert.equal(result.remainingEstimate, 50000 - (batch + 1) * 5000);
+    assert.ok(result.failed.every(row => row.code === 'ACTION_OUTCOME_UNKNOWN' && !row.retryable));
+    assert.deepEqual(f.state.commands.slice(before), ['MYRIGHTS', 'UID SEARCH', 'UID STORE']);
+    const after = f.state.commands.length;
+    assert.deepEqual(await f.service.execute(f.session, runBody(f.body, cursor)), result);
+    assert.equal(f.state.commands.length, after);
+    maximumBytes = Math.max(maximumBytes, f.service.checkStorage(f.session));
+    cursor = result.nextCursor;
+  }
+  assert.equal(result.totals.failed, 50000); assert.equal(result.state, 'completed');
+  assert.ok(maximumBytes < 32 * 1024 * 1024);
+  const retry = await ready(f, { ...f.body, selectionKey: 'synthetic-no-unknown-retry', selectionId: prepared.selectionId, retry: 'failed' });
+  assert.equal(retry.result.initialTotal, 0);
+  t.diagnostic(`50k unknown: maximum admitted storage=${maximumBytes} bytes`);
+});
+
+
+for (const loseSecond of [false, true]) test(`sparse recheck: bounded mutation subgroups preserve ${loseSecond ? 'first ACK and unknown remainder' : 'all ACKs'}`, async () => {
+  const uids = Array.from({ length: 5000 }, (_, index) => 0xffffffff - 4999 + index);
+  const f = fixture({ uids, boxes: new Map([['INBOX', { validity: 11, next: 0x100000000 }]]) });
+  const { result: prepared } = await ready(f);
+  const matching = uids.filter(uid => uid % 2 === 0);
+  f.state.live.set('INBOX', new Set(matching));
+  const batches = [...scopedUidBatches(matching)]; assert.equal(batches.length, 2);
+  const wire = [];
+  f.state.hook = async (command, attributes) => {
+    if (command !== 'UID STORE') return;
+    wire.push(attributes[0].value);
+    if (loseSecond && wire.length === 2) throw new Error('synthetic second-subgroup ACK loss');
+  };
+  const result = await f.service.execute(f.session, runBody(f.body, prepared.cursor));
+  assert.deepEqual(wire, batches.map(uidSet));
+  assert.ok(wire.every(set => set.length <= scopedSetLimit));
+  assert.equal(result.totals.skipped, 2500);
+  assert.equal(result.totals.processed, loseSecond ? batches[0].length : 2500);
+  assert.equal(result.totals.failed, loseSecond ? batches[1].length : 0);
+  assert.ok(result.failed.every(row => row.code === 'ACTION_OUTCOME_UNKNOWN' && !row.retryable));
+  assert.equal(result.state, 'completed');
+  const count = f.state.commands.length;
+  assert.deepEqual(await f.service.execute(f.session, runBody(f.body, prepared.cursor)), result);
+  assert.equal(f.state.commands.length, count);
+});
+
+test('execution rights cache expires with each request, and changed ACL prevents the next mutation', async () => {
+  const f = fixture({ uids: Array.from({ length: 12000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 12001 }]]) });
+  const { result: prepared } = await ready(f);
+  const first = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: f.budget(18000) });
+  assert.equal(first.totals.processed, 10000); assert.equal(first.state, 'running');
+  const mutations = f.state.mutations.length, rights = f.state.commands.filter(command => command === 'MYRIGHTS').length;
+  f.state.readonly = true;
+  const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor));
+  assert.equal(second.totals.failed, 2000); assert.equal(second.state, 'completed');
+  assert.equal(f.state.mutations.length, mutations);
+  assert.equal(f.state.commands.filter(command => command === 'MYRIGHTS').length, rights + 1);
+  assert.ok(second.failed.every(row => row.code === 'FOLDER_READONLY' && !row.retryable));
+});
+
+
+test('PERF 50k allmail preparation: ten mapping groups preserve both STATUS fences', async t => {
+  const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }], ['Projects', { validity: 22, next: 50001 }], [virtual, { validity: 33, next: 50001 }]]) });
+  let lists = 0; const list = f.client.list;
+  f.client.list = async (...args) => { lists++; return list(...args); };
+  const result = await f.service.prepare(f.session, { ...f.body, scope: { view: 'allmail' } }, { budget: { remainingMs: () => 50000 } });
+  assert.equal(result.phase, 'ready'); assert.equal(result.initialTotal, 50000);
+  assert.equal(f.state.fetches.length, 10); assert.equal(lists, 10);
+  assert.equal(f.state.commands.filter(command => command === 'STATUS').length, 40);
+  assert.equal(f.state.searches, 1);
+  assert.ok(f.state.fetches.every(set => expandSet(set).length === 5000 && set.length <= scopedSetLimit));
+  assert.ok(f.service.checkStorage(f.session) < 32 * 1024 * 1024);
+  t.diagnostic(`50k allmail, two source folders: ${f.state.commands.length + lists} preparation commands excluding SELECT`);
+});
+
+test('sparse recheck: budget after first subgroup ACK preserves success and resumes only unsent UIDs', async () => {
+  const uids = Array.from({ length: 5000 }, (_, index) => 0xffffffff - 4999 + index);
+  const f = fixture({ uids, boxes: new Map([['INBOX', { validity: 11, next: 0x100000000 }]]) });
+  const { result: prepared } = await ready(f);
+  const matching = uids.filter(uid => uid % 2 === 0), batches = [...scopedUidBatches(matching)];
+  f.state.live.set('INBOX', new Set(matching));
+  let stores = 0;
+  f.state.hook = async command => { if (command === 'UID STORE' && ++stores === 1) f.advance(2000); };
+  const first = await f.service.execute(f.session, runBody(f.body, prepared.cursor), { budget: f.budget(15000) });
+  assert.deepEqual(first.totals, { processed: batches[0].length, skipped: 2500, failed: 0 });
+  assert.equal(first.remainingEstimate, batches[1].length); assert.equal(first.reason, 'budget');
+  assert.equal(stores, 1);
+  f.state.hook = null;
+  const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor));
+  assert.equal(second.totals.processed, 2500); assert.equal(second.state, 'completed');
+  assert.deepEqual(f.state.mutations.at(-1).uids, batches[1]);
 });

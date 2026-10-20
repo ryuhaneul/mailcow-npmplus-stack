@@ -6,7 +6,7 @@ import { mailboxRights } from './folders.js';
 import { createActionService } from './actions.js';
 import { createListService } from './list.js';
 import { listOptions } from './list-query.js';
-import { encodeRef, decodeRef } from './ref.js';
+import { encodeRef, decodeRef, scopedUidBatches } from './ref.js';
 
 const ttlMs = 30 * 60_000, memoryLimit = 32 * 1024 * 1024;
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -167,7 +167,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
       record.totalEstimate = snapshot.uids.length; record.stage = 'mapping'; checkStorage(session);
     }
     while (record.stage === 'mapping' && record.mappingIndex < record.pendingUids.length) {
-      const uids = record.pendingUids.slice(record.mappingIndex, record.mappingIndex + 50);
+      const uids = scopedUidBatches(record.pendingUids.slice(record.mappingIndex)).next().value;
       const sources = await mailbox(session, store, record, record.boundary.path, budget, async client => {
         assertFence(client, record.boundary);
         const rows = await resolveCandidateSources(client, session, uids, record.resolvedScope, { freshValidity: true, budget, now });
@@ -299,7 +299,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
 
   // Reserve the largest per-candidate failure, cursor and receipt representation.
   // Request overhead is admitted separately, including requests that settle nothing.
-  const candidateBytes = ref => 1024 + 4 * Buffer.byteLength(JSON.stringify(ref));
+  const candidateBytes = ref => 256 + 4 * Buffer.byteLength(JSON.stringify(ref));
   function initializeRun(record) {
     record.outcomes = record.manifest.map(group => group.uids.map(() => 0));
     record.totals = { processed: 0, skipped: 0, failed: 0 };
@@ -324,18 +324,13 @@ export function createScopedActionService({ imap, now = Date.now }) {
     if (ownsCursor(store, cursor)) throw expired();
     throw mismatch();
   }
-  function plannedGroups(record) {
-    const groups = []; let count = 0;
-    for (let g = 0; g < record.manifest.length && count < 1000; g++) {
-      const group = record.manifest[g]; let indices = [];
-      for (let index = 0; index < group.uids.length && count < 1000; index++) {
-        if (record.outcomes[g][index]) continue;
-        indices.push(index); count++;
-        if (indices.length === 50) { groups.push({ g, indices }); indices = []; }
-      }
-      if (indices.length) groups.push({ g, indices });
+  function* plannedGroups(record) {
+    for (let g = 0; g < record.manifest.length; g++) {
+      const group = record.manifest[g];
+      const positions = new Map(group.uids.map((uid, index) => [uid, index]));
+      const pending = group.uids.filter((_uid, index) => !record.outcomes[g][index]);
+      for (const uids of scopedUidBatches(pending)) yield { g, indices: uids.map(uid => positions.get(uid)) };
     }
-    return groups;
   }
   async function execute(session, body, { budget = requestBudget() } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['scope', 'cursor', 'action', 'target'].includes(key)) || typeof body.cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.cursor) || typeof budget?.remainingMs !== 'function') throw invalid();
@@ -354,6 +349,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
     record.busy = true;
     const started = performance.now(), sequence = record.sequence;
     const before = { ...record.totals }, newFailures = [];
+    const checks = { rights: new Map(), folders: null };
     let reservedUsed = 0, reason = 'batch', terminal, active = true;
     const settle = (g, indices, refs) => {
       const positions = new Map(refs.map((ref, index) => [ref, indices[index]]));
@@ -386,10 +382,11 @@ export function createScopedActionService({ imap, now = Date.now }) {
         const onOutcome = settle(g, indices, refs);
         const result = await actionService.runScopedGroup(session, {
           refs, action: record.action, resolvedTarget: record.resolvedTarget,
-          resolvedScope: record.resolvedScope, budget, minStartRemainingMs: 10000, onOutcome,
+          resolvedScope: record.resolvedScope, checks, budget, minStartRemainingMs: 10000, onOutcome,
         });
         live(store, record);
         if (result.reason === 'budget' || result.remaining.length) { reason = 'budget'; break; }
+        if (result.unknown.length) break;
       }
     } catch (error) {
       if (record.disposed || store.closed || ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) throw error;

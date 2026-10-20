@@ -858,9 +858,10 @@ test('sparse recheck: budget after first subgroup ACK preserves success and resu
   assert.equal(first.remainingEstimate, batches[1].length); assert.equal(first.reason, 'budget');
   assert.equal(stores, 1);
   f.state.hook = null;
+  const count = f.state.mutations.length;
   const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor));
   assert.equal(second.totals.processed, 2500); assert.equal(second.state, 'completed');
-  assert.deepEqual(f.state.mutations.at(-1).uids, batches[1]);
+  assert.deepEqual(f.state.mutations.slice(count).flatMap(row => row.uids), batches[1]);
 });
 
 
@@ -875,7 +876,10 @@ test('adaptive policy: initial/min/max/growth bounds and size-scaled strict star
   assert.equal(scopedBatchReserve(state, 50), 14000);
   assert.equal(scopedBatchReserve(state, 100), 26000);
   for (const action of ['seen', 'unseen', 'flag', 'unflag']) {
-    const fixed = scopedBatchState(action); updateScopedBatch(fixed, 5000, 80000); assert.equal(fixed.size, 5000);
+    const flags = scopedBatchState(action); assert.equal(flags.size, 5000);
+    updateScopedBatch(flags, 5000, 80000); assert.equal(flags.size, 125);
+    for (let step = 0; step < 8; step++) updateScopedBatch(flags, flags.size, 1);
+    assert.equal(flags.size, 5000);
   }
   for (const action of ['move', 'trash', 'archive', 'spam', 'notspam', 'delete-forever']) assert.equal(scopedBatchState(action).size, scopedBatchPolicy.initial);
 });
@@ -896,4 +900,53 @@ test('adaptive MOVE: size and previous cost survive cursor boundaries, slow comm
   const resumed = await f.service.execute(f.session, runBody(body, response.nextCursor));
   assert.equal(f.state.mutations[count].uids.length, state.size);
   assert.equal(resumed.state, 'completed'); assert.equal(resumed.totals.processed, 3000);
+});
+
+
+for (const action of ['seen', 'unseen', 'flag', 'unflag', 'move', 'trash', 'delete-forever']) test(`slow ACK recovery ${action}: 10k complete after the first mutation takes 30 seconds`, async () => {
+  const path = action === 'delete-forever' ? 'Trash' : 'INBOX';
+  const boxes = new Map([[path, { validity: 11, next: 10001 }], ['Projects', { validity: 22, next: 1 }]]);
+  if (action === 'trash') boxes.set('Trash', { validity: 33, next: 1 });
+  const f = fixture({ uids: Array.from({ length: 10000 }, (_, index) => index + 1), boxes });
+  const body = { ...f.body, action, scope: { view: 'folder', folder: path }, ...(action === 'move' ? { target: 'Projects' } : {}) };
+  const { result: prepared, record } = await ready(f, body);
+  let slow = true;
+  f.state.hook = async command => {
+    if (slow && ['UID STORE', 'UID MOVE'].includes(command)) { slow = false; f.advance(29000); }
+  };
+  let cursor = prepared.cursor, result, requests = 0, previously = 0;
+  while (cursor && requests < 25) {
+    result = await f.service.execute(f.session, runBody(body, cursor), { budget: f.budget(50000) });
+    assert.ok(result.delta.processed > 0, 'every resumed request must progress after the one slow ACK');
+    assert.ok(result.totals.processed > previously); previously = result.totals.processed;
+    assert.equal(result.totals.failed, 0);
+    if (requests === 0) {
+      assert.ok(result.nextCursor, 'first slow request leaves work for another request');
+      const initial = ['seen', 'unseen', 'flag', 'unflag'].includes(action) ? 5000 : 500;
+      assert.equal(f.state.mutations[0].uids.length, initial);
+      assert.ok(record.batchStates[0].size < initial);
+    }
+    cursor = result.nextCursor; requests++;
+  }
+  assert.equal(result.state, 'completed'); assert.equal(result.totals.processed, 10000);
+  assert.equal(result.remainingEstimate, 0); assert.ok(requests >= 2);
+  const applied = f.state.mutations.filter(row => row.command === (action === 'delete-forever' ? 'UID EXPUNGE' : ['move', 'trash'].includes(action) ? 'UID MOVE' : 'UID STORE')).flatMap(row => row.uids);
+  assert.equal(applied.length, 10000); assert.equal(new Set(applied).size, 10000);
+});
+
+
+for (const action of ['seen', 'move', 'delete-forever']) test(`minimum probe ${action}: every fresh request progresses despite a minimum-size estimate exceeding 50 seconds`, async () => {
+  const path = action === 'delete-forever' ? 'Trash' : 'INBOX';
+  const f = fixture({ uids: Array.from({ length: 100 }, (_, index) => index + 1), boxes: new Map([[path, { validity: 11, next: 101 }], ['Projects', { validity: 22, next: 1 }]]) });
+  const body = { ...f.body, action, scope: { view: 'folder', folder: path }, ...(action === 'move' ? { target: 'Projects' } : {}) };
+  const { result: prepared, record } = await ready(f, body);
+  Object.assign(record.batchStates[0], { size: 50, lastMs: 60000, lastCount: 50 });
+  f.state.hook = async command => { if (['UID STORE', 'UID MOVE'].includes(command)) f.advance(59000); };
+  const first = await f.service.execute(f.session, runBody(body, prepared.cursor), { budget: f.budget(50000) });
+  assert.equal(first.delta.processed, 50); assert.equal(first.remainingEstimate, 50); assert.equal(first.state, 'running');
+  assert.equal(first.totals.failed, 0); assert.equal(record.batchStates[0].size, 50);
+  const second = await f.service.execute(f.session, runBody(body, first.nextCursor), { budget: f.budget(50000) });
+  assert.equal(second.delta.processed, 50); assert.equal(second.totals.processed, 100); assert.equal(second.state, 'completed');
+  assert.equal(second.totals.failed, 0);
+  assert.deepEqual(f.state.mutations.filter(row => row.command !== 'UID EXPUNGE').map(row => row.uids.length), [50, 50]);
 });

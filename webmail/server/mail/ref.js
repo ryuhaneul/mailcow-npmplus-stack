@@ -110,12 +110,13 @@ export function* scopedUidBatches(uids, limit = scopedUidLimit) {
 }
 
 export const scopedBatchPolicy = Object.freeze({
-  initial: 500, min: 50, max: 2000, targetMs: 2000, growth: 2,
+  initial: 500, min: 50, max: 2000, flagInitial: scopedUidLimit, flagMax: scopedUidLimit, targetMs: 2000, growth: 2,
   safety: 2, marginMs: 2000, minStartMs: 10000, mutationTimeoutMs: 120000,
 });
 export function scopedBatchState(action) {
-  const adaptive = !['seen', 'unseen', 'flag', 'unflag'].includes(action);
-  return { adaptive, size: adaptive ? scopedBatchPolicy.initial : scopedUidLimit, lastMs: 0, lastCount: 0 };
+  const flag = ['seen', 'unseen', 'flag', 'unflag'].includes(action);
+  return { size: flag ? scopedBatchPolicy.flagInitial : scopedBatchPolicy.initial,
+    max: flag ? scopedBatchPolicy.flagMax : scopedBatchPolicy.max, lastMs: 0, lastCount: 0 };
 }
 export function scopedBatchReserve(state, count) {
   const estimate = state.lastCount ? state.lastMs * count / state.lastCount : 0;
@@ -123,6 +124,6 @@ export function scopedBatchReserve(state, count) {
 }
 export function updateScopedBatch(state, count, elapsedMs) {
   state.lastMs = elapsedMs; state.lastCount = count;
-  if (state.adaptive) state.size = Math.max(scopedBatchPolicy.min, Math.min(scopedBatchPolicy.max,
+  state.size = Math.max(scopedBatchPolicy.min, Math.min(state.max,
     state.size * scopedBatchPolicy.growth, Math.floor(count * scopedBatchPolicy.targetMs / Math.max(1, elapsedMs))));
 }

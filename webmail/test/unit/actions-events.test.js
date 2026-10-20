@@ -10,7 +10,7 @@ import { createScopedActionService } from '../../server/mail/scoped-actions.js';
 import { createActionService } from '../../server/mail/actions.js';
 import { createImapPool } from '../../server/mail/imap-pool.js';
 import { createEventService } from '../../server/mail/events.js';
-import { encodeRef } from '../../server/mail/ref.js';
+import { encodeRef, scopedBatchState } from '../../server/mail/ref.js';
 import { createApp } from '../../server/app.js';
 
 const ref = (path = 'INBOX', uid = 7) => encodeRef(path, 123, uid);
@@ -359,8 +359,8 @@ test('scoped: validation rejects unsafe destinations, virtual sources, multiple 
   await assert.rejects(g.run(), { code: 'DELETE_NOT_ALLOWED' }); assert.deepEqual(g.client.calls, []);
   assert.deepEqual(f.client.calls, []);
 });
-test('scoped: strict start threshold and S larger reserve reject equality', async () => {
-  const f = scopedFixture(); f.time(10000); assert.equal((await f.run()).processed.length, 0);
+test('scoped: first minimum probe allows start-margin equality, larger caller reserve remains enforced', async () => {
+  const f = scopedFixture(); f.time(10000); assert.equal((await f.run()).processed.length, 1);
   const above = scopedFixture(); above.time(10001); assert.equal((await above.run()).processed.length, 1);
   const g = scopedFixture(); g.options.minStartRemainingMs = 15000; g.time(14999);
   assert.deepEqual((await g.run()).remaining, g.options.refs); assert.deepEqual(g.client.calls, []);
@@ -524,12 +524,37 @@ test('scoped service: MOVE ACK after proxy deadline is retained for same-cursor 
 });
 
 
-for (const remaining of [14000, 14001]) test(`scoped adaptive admission: ${remaining}ms applies strict previous-cost reserve`, async () => {
+for (const remaining of [14000, 14001]) test(`scoped adaptive admission: ${remaining}ms applies strict reserve after a prior mutation`, async () => {
   const f = scopedFixture('move');
-  f.options.batchState = { adaptive: true, size: 500, lastMs: 6000, lastCount: 1 };
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 6000, lastCount: 1 };
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
   f.time(remaining);
   const result = await f.run();
   assert.equal(result.processed.length, remaining > 14000 ? 1 : 0);
   assert.equal(result.remaining.length, remaining > 14000 ? 0 : 1);
   assert.equal(f.client.calls.length, remaining > 14000 ? 1 : 0);
+});
+
+
+for (const remaining of [9999, 10000, 10001, 50000]) test(`minimum probe: first mutation with ${remaining}ms remaining ignores an oversized old estimate`, async () => {
+  const f = scopedFixture('move');
+  f.options.refs = Array.from({ length: 100 }, (_, index) => ref('INBOX', index + 1));
+  f.client.matches = Array.from({ length: 100 }, (_, index) => index + 1);
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 60000, lastCount: 50 };
+  f.time(remaining); f.client.mutation = async () => f.time(0);
+  const result = await f.run();
+  assert.equal(result.processed.length, remaining >= 10000 ? 50 : 0);
+  assert.equal(result.remaining.length, remaining >= 10000 ? 50 : 100);
+  assert.equal(f.client.calls.length, remaining >= 10000 ? 1 : 0);
+  if (remaining >= 10000) assert.equal(f.client.calls[0][1][0].value, '1:50');
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+
+test('minimum probe: another source group cannot force a second mutation in the same request', async () => {
+  const f = scopedFixture('move');
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 60000, lastCount: 1 };
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
+  const result = await f.run();
+  assert.equal(result.processed.length, 0); assert.deepEqual(result.remaining, f.options.refs);
+  assert.equal(f.client.calls.length, 0);
 });

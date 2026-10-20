@@ -156,6 +156,7 @@ export function createActionService({ imap, measureNow = () => performance.now()
           // Use raw commands: messageMove/Flags swallow transport errors as false.
           // From this boundary onward any unconfirmed result is conservatively unknown.
           sent = true;
+          checks.mutationsStarted = (checks.mutationsStarted ?? 0) + 1;
           const response = await client.exec(name, attributes);
           response.next();
           if (mutation.timedOut) throw exhausted();
@@ -164,9 +165,16 @@ export function createActionService({ imap, measureNow = () => performance.now()
         };
         // Removing nonmatching UIDs can turn a short range into a long sparse set.
         const byUid = new Map([...pending.values()].map(item => [item.ref.uid, item.token]));
-        for (const uids of scopedUidBatches([...byUid.keys()].sort((a, b) => a - b), batchState.size)) {
+        const candidates = [...byUid.keys()].sort((a, b) => a - b);
+        for (let offset = 0; offset < candidates.length;) {
+          let uids = scopedUidBatches(candidates.slice(offset), batchState.size).next().value;
           check();
-          if (budget.remainingMs() <= Math.max(minStartRemainingMs, scopedBatchReserve(batchState, uids.length))) throw exhausted();
+          const remainingMs = budget.remainingMs();
+          if (remainingMs <= Math.max(minStartRemainingMs, scopedBatchReserve(batchState, uids.length))) {
+            // Probe at minimum size once per request so an old slow ACK cannot block all future requests.
+            if (checks.mutationsStarted || remainingMs < Math.max(minStartRemainingMs, scopedBatchPolicy.minStartMs)) throw exhausted();
+            uids = uids.slice(0, scopedBatchPolicy.min);
+          }
           const sequence = { type: 'SEQUENCE', value: uidSet(uids) };
           const socket = client.socket, previousTimeout = socket?.timeout ?? client.socketTimeout ?? 60000;
           const started = measureNow();
@@ -195,6 +203,7 @@ export function createActionService({ imap, measureNow = () => performance.now()
             settle('processed', undefined, uids.map(uid => byUid.get(uid)));
             mutated = false;
             updateScopedBatch(batchState, uids.length, Math.max(0, measureNow() - started));
+            offset += uids.length;
           } finally {
             clearTimeout(timer); mutation.active = false;
             if (!socket?.destroyed) socket?.setTimeout(previousTimeout);

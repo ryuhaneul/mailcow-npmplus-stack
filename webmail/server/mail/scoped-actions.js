@@ -354,7 +354,7 @@ export function createScopedActionService({ imap, now = Date.now, measureNow = (
     record.busy = true;
     const started = performance.now(), sequence = record.sequence;
     const before = { ...record.totals }, newFailures = [];
-    const checks = { rights: new Map(), folders: null };
+    const checks = { rights: new Map(), folders: null, mutationsStarted: 0 };
     let reservedUsed = 0, reason = 'batch', terminal, active = true;
     const settle = (g, indices, refs) => {
       const positions = new Map(refs.map((ref, index) => [ref, indices[index]]));

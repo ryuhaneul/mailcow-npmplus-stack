@@ -7,6 +7,8 @@ import { convertGmailEntries } from '../../server/sieve/import-xml.js';
 import { parseGmailSearch, tokenize } from '../../server/sieve/gmail-search.js';
 import { validateDocument } from '../../server/sieve/model.js';
 import { generateScript } from '../../server/sieve/generate.js';
+import { matches } from '../../server/sieve/match.js';
+import { validateConditionTree } from '../../server/sieve/condition-tree.js';
 
 const policy = { internalDomains: ['example.com'] };
 const folders = [{ path: 'Archive', specialUse: '\\Archive' }, { path: 'News' }];
@@ -220,7 +222,109 @@ test('script byte limit retains the prefix and rejects remaining entries', () =>
   assert.ok(Buffer.byteLength(generateScript(doc(result.rules), { ...policy, folders })) <= 1024 * 1024);
 });
 
-test('stage2 dispatch keeps stage1 behavior for the X2 handoff', () => {
-  const rows = [props(valid), props({ subject: '(a OR b)', from: 'x', shouldStar: 'true' })];
+test('stage2 keeps ordinary stage1 conversion and its default unchanged', () => {
+  const rows = [props(valid), props({ subject: 'weekly notice', shouldMarkAsRead: 'true' })];
   assert.deepEqual(convert(rows, { stage: 2 }), convert(rows, { stage: 1 }));
+  assert.deepEqual(convertGmailEntries(entries(rows), { policy, folders }), convert(rows));
+});
+
+const stageTwoCases = [
+  ['AND of OR groups', { from: '(notice OR news)', subject: '(weekly OR monthly)' }, 'same', 'all', [['from', 'notice'], ['subject', 'weekly']], [['from', 'notice'], ['subject', 'other']]],
+  ['OR of AND groups', { hasTheWord: '(from:notice subject:weekly) OR (from:news subject:monthly)' }, 'same', 'any', [['from', 'news'], ['subject', 'monthly']], [['from', 'notice'], ['subject', 'monthly']]],
+  ['mixed leaves and group', { from: 'notice', subject: '(weekly OR monthly)' }, 'same', 'all', [['from', 'notice'], ['subject', 'monthly']], [['from', 'news'], ['subject', 'monthly']]],
+  ['flatten same groups', { hasTheWord: '((from:notice AND subject:weekly) AND subject:report)' }, 'same', 'all', [['from', 'notice'], ['subject', 'weekly report']], [['from', 'notice'], ['subject', 'weekly']]],
+  ['singleton groups disappear', { subject: '((((weekly))))' }, 'same', 'all', [['subject', 'weekly']], [['subject', 'monthly']]],
+  ['De Morgan OR of AND', { doesNotHaveTheWord: '(from:notice subject:weekly) OR (from:news subject:monthly)' }, 'same', 'all', [['from', 'other'], ['subject', 'weekly']], [['from', 'notice'], ['subject', 'weekly']]],
+  ['De Morgan flatten after negation', { hasTheWord: '-(from:notice OR subject:weekly) -subject:monthly' }, 'same', 'all', [['from', 'news'], ['subject', 'daily']], [['from', 'news'], ['subject', 'monthly']]],
+  ['double negation', { hasTheWord: '--from:notice' }, 'same', 'all', [['from', 'notice']], [['from', 'news']]],
+  ['double recipient negation', { hasTheWord: '--to:team@example.com' }, 'changed', 'all', [['cc', 'team@example.com']], [['to', 'other@example.com']]],
+  ['attachment and OR', { from: '(notice OR news)', hasAttachment: 'true' }, 'changed', 'all', [['from', 'news'], ['content-type', 'multipart/mixed']], [['from', 'news'], ['content-type', 'multipart/alternative']]],
+  ['leading star', { subject: '*report' }, 'changed', 'all', [['subject', 'weekly report']], [['subject', 'report weekly']]],
+  ['middle star', { subject: 'week*report' }, 'changed', 'all', [['subject', 'weekly report']], [['subject', 'a weekly report']]],
+  ['trailing star is now pattern', { subject: 'report*' }, 'changed', 'all', [['subject', 'report weekly']], [['subject', 'a report']]],
+  ['star alone', { subject: '*' }, 'changed', 'all', [['subject', 'anything']], []],
+  ['consecutive stars', { subject: 'week**report' }, 'changed', 'all', [['subject', 'weekly report']], [['subject', 'monthly report']]],
+  ['address pattern checks address', { from: '*@example.com' }, 'changed', 'all', [['from', 'Display <notice@example.com>']], [['from', 'notice@example.com <notice@example.net>']]],
+  ['recipient pattern checks Cc', { to: '*@example.com' }, 'changed', 'all', [['cc', 'team@example.com']], [['to', 'team@example.net']]],
+  ['Korean pattern', { subject: '주간*안내' }, 'changed', 'all', [['subject', '주간 소식 안내']], [['subject', '월간 소식 안내']]],
+  ['ASCII case folds', { subject: 'Week*Report' }, 'changed', 'all', [['subject', 'WEEKLY REPORT']], [['subject', 'monthly report']]],
+  ['non-ASCII case stays distinct', { subject: 'Ä*' }, 'changed', 'all', [['subject', 'ÄBC']], [['subject', 'äBC']]],
+  ['literal backslash before star', { subject: String.raw`path\*` }, 'changed', 'all', [['subject', String.raw`path\report`]], [['subject', 'pathreport']]],
+  ['literal trailing backslash', { subject: '*path\\' }, 'changed', 'all', [['subject', 'a path\\']], [['subject', 'a path']]],
+  ['long header is not truncated', { subject: '*tail' }, 'changed', 'all', [['subject', 'x'.repeat(1500) + 'tail']], [['subject', 'x'.repeat(1500) + 'fail']]],
+  ['mixed pattern and OR', { from: 'notice', subject: '(week* OR month*)' }, 'changed', 'all', [['from', 'notice'], ['subject', 'monthly']], [['from', 'notice'], ['subject', 'daily']]],
+];
+for (const [name, conditions, status, match, positive, negative] of stageTwoCases) {
+  test(`Gmail stage2 conversion and matcher: ${name}`, () => {
+    const item = one(props({ ...conditions, shouldStar: 'true' }), { stage: 2 });
+    assert.equal(item.status, status, item.reason);
+    assert.equal(item.rule.match, match);
+    assert.equal(validateConditionTree(item.rule), null);
+    const extended = item.rule.conditions.some(c => c.conditions || c.op === 'matches');
+    const document = { ...doc([item.rule]), v: extended ? 2 : 1 };
+    validateDocument(document, { ...policy, folders });
+    const script = generateScript(document, { ...policy, folders });
+    assert.match(script, /addflag .*Flagged/);
+    assert.equal(matches(item.rule, Object.fromEntries(positive.map(([k, v]) => [k, [v]]))), true);
+    assert.equal(matches(item.rule, Object.fromEntries(negative.map(([k, v]) => [k, [v]]))), false);
+    if (JSON.stringify(item.rule).includes('"matches"')) {
+      assert.ok(item.changes.some(change => /전체 값/.test(change)));
+      assert.ok(script.includes(':matches'));
+    }
+  });
+}
+
+const stageTwoRejections = [
+  ['depth three', { hasTheWord: 'from:a OR (subject:b (from:c OR from:d))' }, /복잡/],
+  ['negative pattern', { from: '-notice*' }, /제외 조건/],
+  ['negative pattern group', { doesNotHaveTheWord: '(from:notice* OR subject:weekly)' }, /제외 조건/],
+  ['negative recipient', { hasTheWord: '-to:team@example.com' }, /제외 조건/],
+  ['excluded recipient', { doesNotHaveTheWord: 'to:team@example.com' }, /제외 조건/],
+  ['question', { subject: 'week?report' }, /물음표/],
+  ['Gmail backslash does not escape question', { subject: String.raw`week\?report` }, /물음표/],
+  ['21 stars', { subject: '*a'.repeat(21) }, /패턴.*복잡/],
+  ['root 11', { hasTheWord: Array(11).fill('from:a').join(' AND ') }, /복잡/],
+  ['group 11', { from: Array(11).fill('a').join(' OR '), subject: 'weekly' }, /복잡/],
+  ['21 leaves', { hasTheWord: Array(7).fill('(from:a OR from:b OR from:c)').join(' AND ') }, /복잡/],
+  ['empty group', { from: '()' }, /예상치 못한/],
+  ['9 parentheses', { subject: '('.repeat(9) + 'a' + ')'.repeat(9) }, /괄호 8단/],
+  ['201 tokens', { subject: Array(201).fill('a').join(' ') }, /토큰 200개/],
+  ['bare body search still rejects whole entry', { from: 'a', hasTheWord: 'bodyword' }, /본문/],
+  ['Cc still unavailable', { hasTheWord: 'from:a OR cc:b' }, /cc:/],
+  ['unsupported operator', { hasTheWord: 'from:a OR label:News' }, /label:/],
+];
+for (const [name, conditions, reason] of stageTwoRejections) {
+  test(`Gmail stage2 rejection: ${name}`, () => {
+    const item = one(props({ ...conditions, shouldStar: 'true' }), { stage: 2 });
+    assert.equal(item.status, 'no');
+    assert.equal(item.rule, undefined);
+    assert.match(item.reason, reason);
+  });
+}
+
+test('stage2 limit boundaries: 20 leaves, root/group 10, 20 stars, 8 parentheses, 200 tokens', () => {
+  const expressions = [
+    { hasTheWord: Array(10).fill('(from:a OR subject:b)').join(' AND ') },
+    { from: Array(10).fill('a').join(' OR '), subject: 'weekly' },
+    { subject: '*a'.repeat(20) },
+    { subject: '('.repeat(8) + 'a' + ')'.repeat(8) },
+    { subject: 'from:'.repeat(199) + 'a' },
+  ];
+  for (const conditions of expressions) {
+    const item = one(props({ ...conditions, shouldStar: 'true' }), { stage: 2 });
+    assert.notEqual(item.status, 'no', item.reason);
+    assert.doesNotThrow(() => generateScript(doc([item.rule]), { ...policy, folders }));
+  }
+});
+
+test('stage2 escapes Gmail backslashes only in patterns, retains v1 simple rules and appends v2 rules', () => {
+  const pattern = one(props({ subject: String.raw`path\*`, shouldStar: 'true' }), { stage: 2 }).rule;
+  assert.deepEqual(pattern.conditions, [{ field: 'subject', op: 'matches', value: String.raw`path\\*` }]);
+  const literal = one(props({ subject: String.raw`path\report`, shouldStar: 'true' }), { stage: 2 }).rule;
+  assert.deepEqual(literal.conditions, [{ field: 'subject', op: 'has', value: String.raw`path\report` }]);
+  const basic = one(props(valid), { stage: 2 }).rule;
+  validateDocument(doc([basic]), { ...policy, folders });
+  const report = convert([props(valid)], { stage: 2, mode: 'append', existingRules: [pattern] });
+  assert.equal(report.rules.length, 1);
+  assert.equal(report.items[0].status, 'same');
 });

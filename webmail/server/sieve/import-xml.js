@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { parseGmailSearch } from './gmail-search.js';
 import { allowedMoveFolder, asciiLower, validateAddress, validateDocument } from './model.js';
 import { generateScript } from './generate.js';
+import { normalizeConditionTree, validateConditionTree } from './condition-tree.js';
+import { patternProblem } from './glob.js';
 
 const SEARCH = ['from', 'to', 'subject', 'hasTheWord', 'doesNotHaveTheWord'];
 const CONDITIONS = new Set([...SEARCH, 'hasAttachment', 'size', 'sizeOperator', 'sizeUnit', 'excludeChats']);
@@ -9,7 +11,7 @@ const BOOL = ['hasAttachment', 'excludeChats', 'shouldArchive', 'shouldTrash', '
   'shouldMarkAsRead', 'shouldStar', 'shouldAlwaysMarkAsImportant', 'shouldNeverMarkAsImportant'];
 const OMIT = ['shouldNeverSpam', 'shouldAlwaysMarkAsImportant', 'shouldNeverMarkAsImportant', 'smartLabelToApply'];
 const KNOWN = new Set([...CONDITIONS, ...BOOL, ...OMIT, 'label', 'forwardTo']);
-const documentFor = rules => ({ v: 1, rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
+const documentFor = rules => ({ v: rules.some(rule => rule.conditions.some(c => Object.hasOwn(c, 'conditions') || c.op === 'matches')) ? 2 : 1, rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
 const fail = reason => { throw new Error(reason); };
 
 function properties(props) {
@@ -79,9 +81,51 @@ function stageOneConditions(props, changes) {
   return { match: ast.t === 'or' ? 'any' : 'all', conditions };
 }
 
+function stageTwoConditions(props, changes) {
+  function convert(node) {
+    if (node.t === 'not') return { not: convert(node.kid) };
+    if (node.t !== 'term') return { match: node.t === 'and' ? 'all' : 'any', conditions: node.kids.map(convert) };
+    const { field, value } = node;
+    if (!['from', 'to', 'subject', 'attachment'].includes(field)) {
+      fail(field === 'cc' ? 'cc: 조건은 옮길 수 없어요' : '본문 검색 조건은 옮길 수 없어요');
+    }
+    if (field === 'to') changes.push('받는 사람은 To·Cc만 확인하며 숨은참조 수신은 확인하지 못해요');
+    if (field === 'attachment') changes.push('첨부 조건은 최상위 multipart/mixed로 근사해 확인해요');
+    if (/[*?]/.test(value)) {
+      // Gmail values have no glob escapes: preserve each literal backslash.
+      const pattern = value.replace(/\\/g, '\\\\');
+      const problem = patternProblem(pattern);
+      if (problem === 'pattern_question') fail('물음표 패턴은 옮길 수 없어요');
+      if (problem) fail('패턴이 너무 복잡해요');
+      changes.push('Gmail에서는 검색어처럼 쓰이는 별표를 여기서는 전체 값과 비교하는 패턴으로 옮겨요');
+      return { field, op: 'matches', value: pattern };
+    }
+    return { field, op: 'has', value };
+  }
+  const conditions = [];
+  for (const key of SEARCH) {
+    if (!props[key]?.trim()) continue;
+    const context = ['from', 'to', 'subject'].includes(key) ? key : 'any';
+    const condition = convert(parseGmailSearch(props[key], context));
+    conditions.push(key === 'doesNotHaveTheWord' ? { not: condition } : condition);
+  }
+  if (props.size?.trim()) fail('메일 크기 조건은 옮길 수 없어요');
+  if (props.hasAttachment === 'true') conditions.push(convert({ t: 'term', field: 'attachment', value: '' }));
+  if (!conditions.length) fail('변환할 조건이 없어요');
+  try {
+    const tree = normalizeConditionTree({ match: 'all', conditions });
+    if (validateConditionTree(tree)) fail('조건이 너무 복잡해요');
+    return tree;
+  } catch (error) {
+    if (error.reason === 'negation') fail('이 제외 조건은 옮길 수 없어요');
+    if (error.reason === 'group_shape') fail('조건이 너무 복잡해요');
+    throw error;
+  }
+}
+
 function convertConditions(props, changes, stage) {
   switch (stage) {
-    case 2: return stageOneConditions(props, changes);
+    case 2: return stageTwoConditions(props, changes);
     case 1: return stageOneConditions(props, changes);
     default: fail('지원하지 않는 가져오기 단계예요');
   }

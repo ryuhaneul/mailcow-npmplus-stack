@@ -3,9 +3,11 @@ import Icon from './Icon.jsx';
 import { folders, folderColor } from '../state/folders.js';
 
 export function Condition({ condition: c }) {
+  if (c.conditions) return <>({c.conditions.map((child, i) => <span key={i}>{i > 0 && (c.match === 'all' ? ' 그리고 ' : ' 또는 ')}<Condition condition={child}/></span>)})</>;
   if (c.field === 'attachment') return <>첨부파일이 있으면</>;
   const field = c.field === 'subject' ? '제목' : c.field === 'from' ? '보낸 사람' : '받는 사람(To·Cc)';
   if (c.op === 'eq') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} <b>{c.value}</b>과 같으면</>;
+  if (c.op === 'matches') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} 패턴 <b>{c.value}</b>에 맞으면</>;
   if (c.op === 'start') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} <b>{c.value}</b>으로 시작하면</>;
   return <>{field}{c.field === 'subject' ? '에' : ' 이름·주소에'} <b>{c.value}</b>{c.op === 'not' ? '이 없으면' : '이 있으면'}</>;
 }

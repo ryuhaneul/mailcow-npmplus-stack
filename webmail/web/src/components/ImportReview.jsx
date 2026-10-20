@@ -24,6 +24,8 @@ export function ImportTable({ items }) {
       {item.newFolder && <p class="rule-note">‘{item.newFolder}’ 폴더가 없어서 적용할 때 새로 만들어요.</p>}
     </>}</td>
     <td class="gi-stc"><span class={`gi-st gi-st-${item.status}`}><Icon name={item.status === 'same' ? 'check' : item.status === 'changed' ? 'info' : 'x'} size="s"/>{statuses[item.status]}</span>
+      {item.status !== 'no' && item.rule?.conditions.some(c => c.conditions) && <span class="chip plain gi-tag">2단 조건</span>}
+      {item.status !== 'no' && item.rule?.conditions.flatMap(c => c.conditions ?? [c]).some(c => c.op === 'matches') && <span class="chip plain gi-tag">패턴</span>}
       {item.newFolder && <span class="chip plain gi-tag">폴더 새로 만듦</span>}</td>
   </tr>;
   return <>

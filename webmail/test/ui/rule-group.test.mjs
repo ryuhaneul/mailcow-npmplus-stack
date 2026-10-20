@@ -7,7 +7,7 @@ import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { createFakeApi } from '../../web/dev/fake-api.js';
-import { validateDocument } from '../../server/sieve/model.js';
+import { validateDocument, minimumDocumentVersion } from '../../server/sieve/model.js';
 import { rulesFixture } from '../../web/dev/fake-rules.js';
 const captures=process.env.RULE_GROUP_CAPTURE_DIR || '/tmp/webmail-rule-group-captures';
 const fake=createFakeApi({authenticated:true});
@@ -38,7 +38,7 @@ await test('condition group editor',async t=>{
     const request=page.waitForRequest(req=>req.method()==='PUT'&&new URL(req.url()).pathname==='/api/rules');
     await page.getByRole('button',{name:'규칙 저장',exact:true}).click();const doc=(await request).postDataJSON().doc;
     validateDocument(doc,{checkPolicy:false});
-    assert.equal(doc.v,doc.rules.some(r=>r.conditions.some(c=>c.conditions||c.op==='matches'))?2:1);return doc.rules[0];
+    assert.equal(doc.v,minimumDocumentVersion(doc.rules));return doc.rules[0];
   }
   const combination=page=>page.getByRole('group',{name:'묶음 1 조건 결합',exact:true});
   await t.test('flat rules retain condition rows, labels and saved request',async()=>{
@@ -85,6 +85,25 @@ await test('condition group editor',async t=>{
     await expect(page.locator('#rule-pattern-note')).toContainText('?는 사용할 수 없어요');await expect(page.getByRole('button',{name:'규칙 저장',exact:true})).toBeDisabled();await expect(page.getByRole('status')).toContainText('물음표');
     await page.getByLabel('1번 조건 값',{exact:true}).fill('*견\\?적*');assert.equal((await save(page)).conditions[0].op,'matches');await context.close();
   });
+  await t.test('summary keeps group parentheses, both conjunctions and address/subject patterns in editor and list',async()=>{
+    for(const match of ['all','any']) {
+      const rule={...base([{match:match==='all'?'any':'all',conditions:[leaf('견적'),leaf('발주')]},{field:'from',op:'matches',value:'noreply-*@ci.example.com'},{field:'to',op:'matches',value:'team*@example.com'},{field:'subject',op:'matches',value:'*소식*'}]),match};
+      const {page,context,errors}=await open(rule);
+      const inner=match==='all'?' 또는 ':' 그리고 ',outer=match==='all'?' 그리고 ':' 또는 ';
+      const expected=`(제목에 견적이 있으면${inner}제목에 발주이 있으면)${outer}보낸 사람 주소가 패턴 noreply-*@ci.example.com에 맞으면${outer}받는 사람(To·Cc) 주소가 패턴 team*@example.com에 맞으면${outer}제목이 패턴 *소식*에 맞으면 → 읽음으로 표시`;
+      await expect(page.locator('.summary')).toHaveText(`이렇게 동작합니다${expected}`);
+      await page.evaluate(()=>{location.hash='filters';});await expect(page.locator('.rules .say')).toHaveText(expected);
+      assert.deepEqual(errors,[]);await context.close();
+    }
+  });
+  await t.test('client saved minimum version agrees with server for identical feature fixtures',async()=>{
+    const pattern={field:'subject',op:'matches',value:'*소식*'};
+    const fixtures=[[leaf('견적')],[{field:'from',op:'start',value:'team'},{field:'attachment',op:'has',value:''}],[pattern],[leaf('견적'),group()],[leaf('견적'),{match:'any',conditions:[pattern,leaf('발주')]}]];
+    assert.deepEqual(fixtures.map(conditions=>minimumDocumentVersion([base(conditions)])),[1,1,2,2,2]);
+    for(const conditions of fixtures) {
+      const {page,context}=await open(base(conditions));await save(page);await context.close();
+    }
+  });
   await t.test('keyboard only: add, toggle, edit, remove, restore focus and save',async()=>{
     const {page,context}=await open();
     async function tabTo(target){for(let i=0;i<100;i++){if(await target.evaluate(el=>el===document.activeElement))return;await page.keyboard.press('Tab');}assert.fail('keyboard target not reached');}
@@ -100,7 +119,7 @@ await test('condition group editor',async t=>{
   });
   await t.test('light/dark, desktop/mobile/tablet: no overflow, zero axe violations',async()=>{
     for(const [width,mode] of [[1280,'light'],[1280,'dark'],[390,'light'],[390,'dark'],[375,'light'],[768,'light']]) {
-      const {page,context,errors}=await open(base([group(),group()]),width,mode);await expect(page.getByRole('button',{name:'규칙 저장',exact:true})).toBeEnabled();
+      const {page,context,errors}=await open(base([group(),{match:'any',conditions:[{field:'subject',op:'matches',value:'*소식*'},leaf('발주')]}]),width,mode);await expect(page.getByRole('button',{name:'규칙 저장',exact:true})).toBeEnabled();
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.equal(await page.locator('.rule-builder-view .scroll').evaluate(el=>el.scrollWidth>el.clientWidth),false);
       assert.deepEqual((await new AxeBuilder({page}).include('.rule-builder-view').analyze()).violations,[]);
       await page.screenshot({path:`${captures}/rule-group-${width}-${mode}.png`,fullPage:true});

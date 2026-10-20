@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { previewFixture } from './fake-rule-preview.js';
+import { minimumDocumentVersion } from '../../server/sieve/model.js';
 // Synthetic development fixtures. API fields follow server/sieve/service.js.
 export const exampleRules = [
   {id:'rule0001',enabled:true,match:'all',conditions:[{field:'from',op:'has',value:'@partner.example.com'},{field:'subject',op:'has',value:'명세서'}],actions:{move:'거래처'},stop:false},
@@ -18,13 +19,20 @@ export function rulesFixture(state = 'ok', overrides = {}) {
   if (state === 'import_blocked') {result.importReport.rules=[];result.importReport.items=result.importReport.items.filter(item=>item.status==='unconvertible');}
   return {...result,...overrides};
 }
+// Stage-two examples keep the basic five-rule fixture unchanged.
+export const exampleGroupedRules = [
+  {id:'gmail001',enabled:true,match:'all',conditions:[
+    {match:'any',conditions:[{field:'from',op:'eq',value:'billing@example.com'},{field:'from',op:'eq',value:'orders@example.com'}]},
+    {match:'any',conditions:[{field:'subject',op:'has',value:'견적'},{field:'subject',op:'has',value:'발주'}]},
+  ],actions:{move:'거래처'},stop:false},
+  {id:'gmail002',enabled:true,match:'all',conditions:[{field:'subject',op:'matches',value:'*소식*'}],actions:{move:'신규 폴더',read:true},stop:false},
+];
 // Synthetic XML preview, independently overridable by UI scenarios.
 export function gmailImportFixture() {
-  const same = {...structuredClone(exampleRules[0]),id:'gmail001',conditions:[{field:'from',op:'eq',value:'billing@example.com'}]};
-  const changed = {...structuredClone(exampleRules[3]),id:'gmail002',enabled:true,conditions:[{field:'subject',op:'has',value:'소식'}],actions:{move:'신규 폴더',read:true}};
+  const [same,changed] = structuredClone(exampleGroupedRules);
   return [
-    {n:1,gmail:{conditions:[['보낸 사람','billing@example.com']],actions:['받은편지함 건너뛰기','거래처 라벨']},status:'same',rule:same,changes:[]},
-    {n:2,gmail:{conditions:[['제목','소식']],actions:['신규 폴더 라벨','스팸으로 보내지 않음','읽음 표시']},status:'changed',rule:changed,changes:['스팸으로 보내지 않음은 반영하지 않아요.','받은편지함에 남지 않고 폴더로만 가요.'],newFolder:'신규 폴더'},
+    {n:1,gmail:{conditions:[['보낸 사람','billing@example.com OR orders@example.com'],['제목','견적 OR 발주']],actions:['받은편지함 건너뛰기','거래처 라벨']},status:'same',rule:same,changes:[]},
+    {n:2,gmail:{conditions:[['제목','*소식*']],actions:['신규 폴더 라벨','스팸으로 보내지 않음','읽음 표시']},status:'changed',rule:changed,changes:['Gmail은 검색어처럼 찾지만, 여기서는 제목 전체를 패턴으로 비교해요.','스팸으로 보내지 않음은 반영하지 않아요.','받은편지함에 남지 않고 폴더로만 가요.'],newFolder:'신규 폴더'},
     {n:3,gmail:{conditions:[['포함하는 단어','body:example']],actions:['별표']},status:'no',changes:[],reason:'본문 조건은 옮길 수 없어요.'},
   ];
 }
@@ -45,6 +53,7 @@ function imported(state, {rules,dropped,mode,name,kind,createdFolders=[],deactiv
   for(const path of createdFolders)if(!state.folders.some(folder=>folder.path===path))state.folders.push({...state.folders[0],path,name:path.split('/').at(-1),parent:path.includes('/')?path.slice(0,path.lastIndexOf('/')):null,specialUse:null,shared:false,unseen:0,total:0,color:null});
   const rev = (state.rules.rev ?? 0) + 1;
   const doc = {...(state.rules.doc ?? rulesFixture('none').doc),rev,rules:mode==='append'?[...(state.rules.doc?.rules ?? []),...rules]:rules};
+  doc.v = minimumDocumentVersion(doc.rules);
   const importInfo = {at:new Date().toISOString(),source:{kind,name},mode,dropped:dropped.map(item=>({n:item.n,summary:item.summary ?? [...(item.gmail?.conditions ?? []).map(([key,value])=>`${key}: ${value}`),...(item.gmail?.actions ?? [])].join(' · '),reason:item.reason})),undo:{available:true,edited:false}};
   state.rules = {...state.rules,state:'ok',doc,rev,activeName:'webmail-rules',activeScript:'webmail-rules',importInfo};
   delete state.rules.importReport;

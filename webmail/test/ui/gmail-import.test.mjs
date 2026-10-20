@@ -7,6 +7,7 @@ import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { createFakeApi } from '../../web/dev/fake-api.js';
+import { validateDocument, minimumDocumentVersion } from '../../server/sieve/model.js';
 import { rulesFixture, gmailImportFixture } from '../../web/dev/fake-rules.js';
 
 const captures = process.env.GMAIL_IMPORT_CAPTURE_DIR || '/tmp/webmail-gmail-import-captures';
@@ -56,7 +57,8 @@ await test('Gmail import preview and explicit partial apply', async t => {
     await expect(page.locator('.gi-tr-no .gi-st')).toHaveText('반영 안 됨');
     await expect(page.locator('.gi-badgroup')).toContainText('본문 조건은 옮길 수 없어요.');
     await expect(page.locator('.gi-tr-same .gi-orig')).toContainText('billing@example.com');
-    await expect(page.locator('.gi-tag')).toHaveText('폴더 새로 만듦');
+    await expect(page.locator('.gi-tr-same .gi-tag')).toHaveText('2단 조건');
+    await expect(page.locator('.gi-tr-changed .gi-tag')).toHaveText(['패턴','폴더 새로 만듦']);
     await expect(page.locator('.gi-tr-changed .gi-res')).toContainText('적용할 때 새로 만들어요.');
     await page.getByRole('button',{name:'달라짐 1',exact:true}).click();await expect(page.locator('.gi-tr')).toHaveCount(1);
     await page.getByRole('button',{name:'반영 안 됨 1',exact:true}).click();await expect(page.locator('.gi-tr-no')).toHaveCount(1);
@@ -138,8 +140,11 @@ await test('Gmail import preview and explicit partial apply', async t => {
     }
     await tabTo('a[href="#filters/import"]');await page.keyboard.press('Enter');
     await expect(page.getByRole('heading',{name:'Gmail 필터 가져오기',exact:true})).toBeVisible();
+    // Register interception before keyboard navigation reaches the native file input.
+    const picker=page.waitForEvent('filechooser');
     await tabTo('input[type=file]');
-    const picker=page.waitForEvent('filechooser');await page.keyboard.press('Enter');await (await picker).setFiles(file);
+    await expect(page.getByLabel('Gmail 필터 파일 고르기',{exact:true})).toBeFocused();
+    await page.keyboard.press('Enter');await (await picker).setFiles(file);
     await expect(page.locator('.gi-table')).toBeVisible();
     await tabTo('.gi-confirm input');await page.keyboard.press('Space');
     await page.keyboard.press('Tab');await expect(page.getByRole('link',{name:'취소',exact:true})).toBeFocused();
@@ -303,6 +308,57 @@ await test('Gmail import preview and explicit partial apply', async t => {
     await expect(page.getByRole('button',{name:'2개 적용',exact:true})).toBeDisabled();
     fake.state.rulesError=null;await page.getByRole('button',{name:'다시 불러오기',exact:true}).click();
     await expect(page.getByRole('alert')).toHaveCount(0);await expect(page.locator('.gi-confirm input')).not.toBeChecked();await context.close();
+  });
+  await t.test('server import review shares group parentheses and pattern chips',async()=>{
+    const {page,context}=await pageFor({state:'import_pending',route:'filters'});
+    const applicable=gmailImportFixture().filter(item=>item.rule);
+    applicable[1].rule.conditions=[{field:'from',op:'has',value:'example.com'},{match:'any',conditions:[{field:'subject',op:'matches',value:'*소식*'},{field:'subject',op:'has',value:'발주'}]}];
+    fake.state.rules.importReport.rules=applicable.map(item=>item.rule);
+    fake.state.rules.importReport.items=applicable.map(({n,status,changes})=>({n,status,changes,summary:'합성 조건'}));
+    await page.reload();
+    await expect(page.locator('.gi-tr-same .gi-tag')).toHaveText('2단 조건');
+    await expect(page.locator('.gi-tr-same .say')).toContainText(') 그리고 (');
+    await expect(page.locator('.gi-tr-changed .gi-tag')).toHaveText(['2단 조건','패턴']);
+    await expect(page.locator('.gi-tr-changed .say')).toContainText('제목이 패턴 *소식*에 맞으면');
+    await page.locator('.gi-confirm input').check();await page.getByRole('button',{name:'2개 적용',exact:true}).click();
+    await expect(page.locator('.gi-result')).toContainText('기존 필터 2개를 반영했어요');
+    assert.equal(fake.state.rules.doc.v,2);validateDocument(fake.state.rules.doc,{checkPolicy:false});
+    await context.close();
+  });
+  await t.test('integrated grouped XML preview, apply, grouped edit/save and edited undo at 1280/390 light/dark',async()=>{
+    for(const width of [1280,390])for(const mode of ['light','dark']) {
+      const {page,context,errors}=await pageFor({width,mode});await pick(page);
+      const expected='(보낸 사람 주소가 billing@example.com과 같으면 또는 보낸 사람 주소가 orders@example.com과 같으면) 그리고 (제목에 견적이 있으면 또는 제목에 발주이 있으면)';
+      await expect(page.locator('.gi-tr-same .say')).toContainText(expected);
+      await expect(page.locator('.gi-tr-same .gi-tag')).toHaveText('2단 조건');
+      await expect(page.locator('.gi-tr-changed .say')).toContainText('제목이 패턴 *소식*에 맞으면');
+      await expect(page.locator('.gi-tr-changed .gi-tag')).toHaveText(['패턴','폴더 새로 만듦']);
+      await page.evaluate(()=>document.fonts.ready);
+      assert.deepEqual(await page.evaluate(()=>[document.documentElement.scrollWidth-innerWidth,...['.filters-view .scroll','.gi-tablewrap'].map(selector=>{const el=document.querySelector(selector);return el.scrollWidth-el.clientWidth;})]),[0,0,0]);
+      assert.deepEqual((await new AxeBuilder({page}).include('.gi-body').withTags(['wcag2a','wcag2aa','wcag21aa']).analyze()).violations,[]);
+      await page.locator('.gi-tr-same').scrollIntoViewIfNeeded();await page.screenshot({path:`${captures}/gmail-grouped-${width}-${mode}.png`,fullPage:true});
+      await page.locator('.gi-tr-changed').scrollIntoViewIfNeeded();await page.screenshot({path:`${captures}/gmail-pattern-${width}-${mode}.png`,fullPage:true});
+      await page.locator('.gi-confirm input').check();await page.getByRole('button',{name:'2개 적용',exact:true}).click();
+      await expect(page.locator('.gi-result')).toContainText('2개를 반영했어요');
+      assert.equal(fake.state.rules.doc.v,minimumDocumentVersion(fake.state.rules.doc.rules));validateDocument(fake.state.rules.doc,{checkPolicy:false});
+      await expect(page.locator('.rules .rule').nth(5)).toContainText(expected);
+      await page.getByRole('link',{name:'6번 규칙 수정',exact:true}).click();
+      await expect(page.locator('.summary')).toContainText(expected);
+      await page.getByLabel('묶음 2의 1번 조건 값',{exact:true}).fill('수정 견적');
+      const applyOld=page.getByRole('checkbox',{name:/이미 받은 메일/});await expect(applyOld).toBeEnabled();await applyOld.uncheck();
+      await page.locator('.rule-builder-view .scroll').evaluate(el=>{el.scrollTop=0;});
+      await page.screenshot({path:`${captures}/gmail-grouped-editor-${width}-${mode}.png`,fullPage:true});
+      await page.getByRole('button',{name:'규칙 저장',exact:true}).click();
+      await expect(page.locator('.rules .rule').nth(5)).toContainText('수정 견적');
+      const saved=recorded('/api/rules').filter(request=>request.method==='PUT').at(-1).body.doc;
+      assert.equal(saved.v,minimumDocumentVersion(saved.rules));validateDocument(saved,{checkPolicy:false});
+      assert.equal(saved.rules[5].conditions[1].conditions[0].value,'수정 견적');
+      await page.locator('.gi-result button').click();await expect(page.locator('.gi-undo-edited')).toContainText('고친 내용도 사라져요');
+      await expect(page.locator('.gi-undo button').last()).toBeDisabled();await page.locator('.gi-undo-edited input').check();await page.locator('.gi-undo button').last().click();
+      await expect(page.locator('.gi-result')).toContainText('되돌렸어요');await expect(page.locator('.rules .rule')).toHaveCount(5);
+      assert.equal(recorded(paths.undo).at(-1).body.acceptEdits,true);
+      assert.deepEqual(fake.state.rules.doc,rulesFixture().doc);assert.deepEqual(errors,[]);await context.close();
+    }
   });
   await t.test('applied result and undo dialog 1280/390 light/dark: overflow zero and axe zero',async()=>{
     for(const width of [1280,390])for(const mode of ['light','dark']) {

@@ -1,3 +1,5 @@
+import { normalizeConditionTree } from './condition-tree.js';
+import { patternProblem } from './glob.js';
 // Deliberately limited reader for known import formats; no Sieve is executed.
 export const unsupported = reason => { throw new Error(reason); };
 
@@ -64,37 +66,53 @@ function prefix(pattern) {
 }
 
 export function readConditions(reader, depth = 0) {
-  const keyword = reader.take();
-  if (['allof', 'anyof'].includes(keyword)) {
-    if (depth >= 1) unsupported('중첩 깊이 2 이상의 조건은 가져올 수 없어요.');
-    reader.expect('('); const parts = [readConditions(reader, depth + 1)];
-    while (reader.peek() === ',') { reader.take(); parts.push(readConditions(reader, depth + 1)); }
-    reader.expect(')');
-    if (parts.some(part => part.conditions.length !== 1)) unsupported('혼합 조건 묶음은 가져올 수 없어요.');
-    return { match: keyword === 'allof' ? 'all' : 'any', conditions: parts.flatMap(part => part.conditions) };
+  function read(level) {
+    if (level > 8) unsupported('조건이 너무 복잡해요.');
+    const keyword = reader.take();
+    if (['allof', 'anyof'].includes(keyword)) {
+      reader.expect('('); const parts = [read(level + 1)];
+      while (reader.peek() === ',') { reader.take(); parts.push(read(level + 1)); }
+      reader.expect(')');
+      return { match: keyword === 'allof' ? 'all' : 'any', conditions: parts };
+    }
+    if (keyword === 'not') return { not: read(level + 1) };
+    if (!['header', 'address'].includes(keyword)) unsupported('본문·크기 또는 지원하지 않는 조건이에요.');
+    let comparator = ':is';
+    while (typeof reader.peek() === 'string' && reader.peek().startsWith(':')) {
+      const tag = reader.take();
+      if ([':contains', ':is', ':matches'].includes(tag)) comparator = tag;
+      else if (tag === ':comparator') {
+        if (reader.string() !== 'i;ascii-casemap') unsupported('지원하지 않는 비교 방식이에요.');
+      } else if (tag !== ':all' || keyword !== 'address') unsupported('지원하지 않는 비교 방식이에요.');
+    }
+    const headers = reader.strings().map(value => value.toLowerCase()).sort();
+    const values = reader.strings();
+    if (keyword === 'header' && comparator === ':contains' && headers.length === 1 && headers[0] === 'content-type'
+      && values.length === 1 && values[0] === 'multipart/mixed') return { field: 'attachment', op: 'has', value: '' };
+    const field = headers.length === 1 && ['from', 'subject'].includes(headers[0]) ? headers[0]
+      : JSON.stringify(headers) === '["cc","to"]' ? 'to' : null;
+    if (!field) unsupported('이 머리글 검사는 같은 뜻으로 옮길 수 없어요.');
+    if (keyword === 'address' && field === 'subject') unsupported('제목 주소 검사는 지원하지 않아요.');
+    if (keyword === 'address' && comparator === ':contains') unsupported('주소만 포함하는 조건은 머리글 포함과 달라요.');
+    if (keyword === 'header' && field !== 'subject' && comparator !== ':contains') unsupported('머리글 전체 비교는 주소 비교와 달라요.');
+    const conditions = values.map(value => {
+      let op = { ':contains': 'has', ':is': 'eq', ':matches': 'matches' }[comparator];
+      if (op === 'matches') {
+        const reason = patternProblem(value);
+        if (reason) unsupported(reason);
+        // Preserve the legacy v:1 representation for an exact literal prefix.
+        try { const literal = prefix(value); op = 'start'; value = literal; } catch { /* General glob stays matches. */ }
+      }
+      return { field, op, value };
+    });
+    return { match: 'any', conditions };
   }
-  if (keyword === 'not') {
-    const part = readConditions(reader, depth);
-    if (part.conditions.length !== 1 || part.conditions[0].op !== 'has' || part.conditions[0].field === 'to') unsupported('이 부정 조건은 가져올 수 없어요.');
-    part.conditions[0].op = 'not'; return part;
+  try { return normalizeConditionTree(read(depth)); }
+  catch (error) {
+    if (error.reason === 'group_shape') unsupported('조건이 너무 복잡해요.');
+    if (error.reason === 'negation') unsupported('이 제외 조건은 옮길 수 없어요.');
+    throw error;
   }
-  if (!['header', 'address'].includes(keyword)) unsupported('본문·크기 또는 지원하지 않는 조건이에요.');
-  let comparator = ':is';
-  while (typeof reader.peek() === 'string' && reader.peek().startsWith(':')) {
-    const tag = reader.take();
-    if ([':contains', ':is', ':matches'].includes(tag)) comparator = tag;
-    else if (tag !== ':all' || keyword !== 'address') unsupported('지원하지 않는 비교 방식이에요.');
-  }
-  const headers = reader.strings().map(value => value.toLowerCase()).sort();
-  const field = headers.length === 1 && ['from', 'subject'].includes(headers[0]) ? headers[0]
-    : JSON.stringify(headers) === '["cc","to"]' ? 'to' : null;
-  if (!field) unsupported('이 머리글 검사는 같은 뜻으로 옮길 수 없어요.');
-  if (keyword === 'address' && field === 'subject') unsupported('제목 주소 검사는 지원하지 않아요.');
-  if (keyword === 'address' && comparator === ':contains') unsupported('주소만 포함하는 조건은 머리글 포함과 달라요.');
-  if (keyword === 'header' && field !== 'subject' && comparator !== ':contains') unsupported('머리글 전체 비교는 주소 비교와 달라요.');
-  const values = reader.strings();
-  const op = { ':contains': 'has', ':is': 'eq', ':matches': 'start' }[comparator];
-  return { match: values.length > 1 ? 'any' : 'all', conditions: values.map(value => ({ field, op, value: comparator === ':matches' ? prefix(value) : value })) };
 }
 
 export function unknownItems(source) {

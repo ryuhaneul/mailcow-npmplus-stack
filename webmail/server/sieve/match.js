@@ -5,6 +5,7 @@ import { AppError } from '../errors.js';
 import { item as listItem } from '../mail/list.js';
 import { encodeRef } from '../mail/ref.js';
 import { asciiLower } from './model.js';
+import { globMatch } from './glob.js';
 
 const sessions = new WeakMap();
 export function invalidateInboxHeaders(session) {
@@ -54,13 +55,16 @@ function decodedHeaders(headers) {
  */
 export function matches(rule, headers) {
   const decoded = decodedHeaders(headers);
-  const test = ({ field, op, value }) => {
+  const test = condition => {
+    if (Object.hasOwn(condition, 'conditions')) return condition.match === 'all' ? condition.conditions.every(test) : condition.conditions.some(test);
+    const { field, op, value } = condition;
     if (field === 'attachment') return decoded['content-type'].some(text => asciiLower(text).includes('multipart/mixed'));
     const names = field === 'to' ? ['to', 'cc'] : [field];
-    const address = field !== 'subject' && ['eq', 'start'].includes(op);
+    const address = field !== 'subject' && ['eq', 'start', 'matches'].includes(op);
     const values = names.flatMap(name => address ? decoded.addresses[name] : decoded[name]);
     const key = asciiLower(value);
     const found = values.some(text => {
+      if (op === 'matches') return globMatch(value, text);
       text = asciiLower(text);
       if (op === 'eq') return text === key;
       if (op === 'start') return text.startsWith(key);
@@ -68,7 +72,7 @@ export function matches(rule, headers) {
     });
     return op === 'not' ? !found : found;
   };
-  return rule.match === 'all' ? rule.conditions.every(test) : rule.conditions.some(test);
+  return test(rule);
 }
 
 function yearBefore(time) {

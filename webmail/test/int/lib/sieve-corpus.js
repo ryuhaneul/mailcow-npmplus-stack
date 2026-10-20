@@ -24,7 +24,34 @@ export function sieveCorpus() {
     conditions: i < conditions.length ? [conditions[i]] : [conditions[i % conditions.length], conditions[(i + 5) % conditions.length]],
     actions: { read: true }, stop: false,
   }));
-  const scripts = rules.map((rule, i) => `require ["vnd.dovecot.debug"];\nif ${rule.match === 'all' ? 'allof' : 'anyof'}(${rule.conditions.map(conditionTest).join(', ')}) { debug_log "WM_MATCH_${i}"; }\n`);
+  // Keep the 40 × 30 host-runner contract while replacing repeated filler
+  // cases with stage-two patterns, mixed joins and headers beyond 998 chars.
+  const sample = (subject, from = 'alpha@example.com', display = '합성 표시 이름', to = 'recipient@example.com') =>
+    `From: "${display}" <${from}>\r\nTo: ${to}\r\nCc: team@example.com\r\nSubject: ${subject}\r\nContent-Type: text/plain\r\n\r\nSynthetic body.\r\n`;
+  const extras = [
+    sample('prefix middle suffix'), sample('literal * and ? and \\'), sample('회의 안내'),
+    sample(`${'x'.repeat(1200)}TAIL`), sample(`${'x'.repeat(1200)}FAIL`),
+    sample('주소 검사', 'alpha@example.com', 'prefix middle suffix'),
+    sample('long address', `${'x'.repeat(1100)}tail@example.com`),
+    sample('Ä case', 'Beta@example.org'),
+  ];
+  mails.splice(mails.length - extras.length, extras.length, ...extras);
+  const leaf = (field, value, op = 'matches') => ({ field, op, value });
+  const patterns = [
+    leaf('subject', 'prefix*'), leaf('subject', '*middle*'), leaf('subject', '*suffix'),
+    leaf('subject', '*\\**'), leaf('subject', '*\\?*'), leaf('subject', '*\\\\*'),
+    leaf('subject', '회*안내'), leaf('subject', '*TAIL'),
+    leaf('from', '*@example.com'), leaf('to', 'team*@example.com'),
+    leaf('from', '*tail@example.com'), leaf('subject', 'ä*'),
+  ];
+  const trees = patterns.map(condition => ({ match: 'all', conditions: [condition] }));
+  trees.push(
+    { match: 'all', conditions: [leaf('subject', 'prefix', 'has'), { match: 'any', conditions: [leaf('from', 'alpha*'), leaf('to', '*@example.org')] }] },
+    { match: 'any', conditions: [leaf('subject', 'missing', 'not'), { match: 'all', conditions: [leaf('from', '*@example.com'), leaf('subject', '*TAIL')] }] },
+    { match: 'all', conditions: [leaf('from', 'missing', 'not'), { match: 'any', conditions: [leaf('subject', '회*'), leaf('subject', '*suffix')] }] },
+  );
+  trees.forEach((tree, i) => { const index = rules.length - trees.length + i; rules[index] = { ...rules[index], ...tree }; });
+  const scripts = rules.map((rule, i) => `require ["vnd.dovecot.debug"];\nif ${conditionTest(rule)} { debug_log "WM_MATCH_${i}"; }\n`);
   return { mails, rules, scripts };
 }
 

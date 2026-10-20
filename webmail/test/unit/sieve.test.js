@@ -256,7 +256,7 @@ test('move requires an existing personal allowed folder', () => {
 
 test('rule schema rejects missing, unknown and invalid fields', () => {
   const changes = [
-    d => { d.v = 2; }, d => { d.rev = -1; }, d => { d.rev = 1.1; }, d => { d.extra = true; },
+    d => { d.v = 3; }, d => { d.rev = -1; }, d => { d.rev = 1.1; }, d => { d.extra = true; },
     d => { delete d.blocked; }, d => { d.rules = null; }, d => { d.rules[0].id = 'short'; },
     d => { d.rules.push(structuredClone(d.rules[0])); }, d => { d.rules[0].enabled = 1; },
     d => { d.rules[0].stop = null; }, d => { d.rules[0].match = 'each'; },
@@ -386,4 +386,59 @@ test('vacation body: other controls stay 422, LF is allowed only in body, normal
   validateDocument(doc, context);
   assert.equal([...doc.vacation.body].length, 4000);
   doc.vacation.body += 'a'; expectInvalid(doc);
+});
+
+test('stage-two generated metadata uses the minimum version without changing input', () => {
+  const basic = document(); basic.v = 2;
+  const snapshot = structuredClone(basic);
+  assert.equal(parseScript(generateScript(basic, context)).doc.v, 1);
+  assert.deepEqual(basic, snapshot);
+  for (const conditions of [
+    [{ field: 'subject', op: 'matches', value: '*tail' }],
+    [{ field: 'subject', op: 'has', value: 'a' }, { match: 'any', conditions: [{ field: 'from', op: 'has', value: 'b' }, { field: 'subject', op: 'not', value: 'c' }] }],
+  ]) {
+    const doc = document(); doc.rules[0].conditions = conditions;
+    const before = structuredClone(doc);
+    const script = generateScript(doc, context);
+    const parsed = parseScript(script);
+    assert.equal(parsed.state, 'ok'); assert.equal(parsed.doc.v, 2);
+    assert.deepEqual(parsed.doc.rules, doc.rules);
+    assert.deepEqual(doc, before);
+    assert.ok(!script.includes('undefined'));
+  }
+});
+
+test('condition Sieve roundtrips normalized trees through the restricted reader', async () => {
+  const { Reader, readConditions } = await import('../../server/sieve/import-syntax.js');
+  const { normalizeConditionTree } = await import('../../server/sieve/condition-tree.js');
+  const a = { field: 'subject', op: 'matches', value: '*a\\*b\\?c\\\\"*' };
+  const b = { field: 'from', op: 'matches', value: '*@example.com' };
+  const c = { field: 'subject', op: 'not', value: 'missing' };
+  const attachment = { field: 'attachment', op: 'has', value: '' };
+  for (const tree of [
+    { match: 'all', conditions: [a] },
+    { match: 'all', conditions: [a, { match: 'any', conditions: [b, c] }] },
+    { match: 'any', conditions: [a, { match: 'all', conditions: [b, c] }] },
+    { match: 'all', conditions: [attachment, c] },
+  ]) {
+    const reader = new Reader(conditionTest(tree));
+    assert.deepEqual(readConditions(reader), normalizeConditionTree(tree));
+    reader.done();
+  }
+});
+
+test('condition reader normalizes joins and De Morgan but rejects unsupported exclusions', async () => {
+  const { Reader, readConditions } = await import('../../server/sieve/import-syntax.js');
+  const read = text => { const reader = new Reader(text); const result = readConditions(reader); reader.done(); return result; };
+  const h = 'header :contains "subject" "a"';
+  assert.deepEqual(read(`allof(allof(${h}, ${h}), ${h})`).conditions.length, 3);
+  assert.deepEqual(read(`not allof(${h}, ${h})`), { match: 'any', conditions: Array.from({ length: 2 }, () => ({ field: 'subject', op: 'not', value: 'a' })) });
+  assert.equal(read('address :all :matches "from" "prefix*"').conditions[0].op, 'start');
+  assert.equal(read('address :matches "from" "a*b"').conditions[0].op, 'matches');
+  for (const text of [
+    'not header :is "subject" "a"', 'not header :matches "subject" "a*b"',
+    'not header :contains ["to", "cc"] "a"', 'not header :contains "content-type" "multipart/mixed"',
+    'header :matches "subject" "a?b"', 'header :matches "subject" "a\\\\q"',
+    `allof(${h}, anyof(${h}, allof(${h}, ${h})))`,
+  ]) assert.throws(() => read(text), text);
 });

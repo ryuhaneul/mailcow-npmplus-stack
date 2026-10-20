@@ -215,3 +215,91 @@ test('preview counts full snapshot, returns latest 20 list rows and recomputes w
   assert.equal(preview(rule(condition('subject', 'has', '견적')), { ...snapshot, limited: true }).limited, true);
   assert.deepEqual(snapshot.items.map(record => record.uid), Array.from({ length: 25 }, (_, i) => 25 - i));
 });
+
+// Stage-two expectations pair exact generated Sieve with independent outcomes.
+for (const field of ['from', 'to', 'subject']) {
+  for (const [pattern, positive, negative] of [
+    ['prefix*', 'PREFIX middle suffix', 'xprefix middle suffix'],
+    ['*middle*', 'prefix MIDDLE suffix', 'prefix suffix'],
+    ['*suffix', 'prefix middle SUFFIX', 'prefix middle suffixx'],
+    ['a**b', 'A long B', 'A long C'],
+    ['literal\\*', 'literal*', 'literalx'],
+    ['literal\\?', 'literal?', 'literalx'],
+    ['literal\\\\', 'literal\\', 'literalx'],
+    ['회*안내', '회의 안내', '회의'],
+    ['Ä*', 'ÄBC', 'äBC'],
+  ]) test(`pattern generation and matcher ${field}/${pattern}`, () => {
+    const c = condition(field, 'matches', pattern);
+    const valueHeaders = value => field === 'subject' ? { subject: [value] } : {
+      addresses: { from: field === 'from' ? [value] : [], to: field === 'to' ? [value] : [], cc: [] },
+      from: [], to: [], cc: [], subject: [], 'content-type': [],
+    };
+    const quoted = `"${pattern.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    assert.equal(conditionTest(c), `${field === 'subject' ? 'header' : 'address :all'} :matches ${field === 'to' ? '["to", "cc"]' : `"${field}"`} ${quoted}`);
+    assert.equal(matches(rule(c), valueHeaders(positive)), true);
+    assert.equal(matches(rule(c), valueHeaders(negative)), false);
+  });
+}
+
+test('patterns select addresses rather than display names, including Cc and decoded Korean subjects', () => {
+  const headers = `From: "prefix display" <alpha@example.com>\r\nTo: "recipient" <one@example.org>\r\nCc: team@example.com\r\nSubject: ${bWord('회의 안내')}\r\n`;
+  assert.equal(matches(rule(condition('from', 'matches', 'prefix*')), headers), false);
+  assert.equal(matches(rule(condition('from', 'matches', '*@EXAMPLE.COM')), headers), true);
+  assert.equal(matches(rule(condition('to', 'matches', 'team*')), headers), true);
+  assert.equal(matches(rule(condition('subject', 'matches', '회*안내')), headers), true);
+});
+
+test('mixed condition joins generate recursive Sieve and evaluate every/some recursively', () => {
+  const a = condition('subject', 'matches', '*tail');
+  const b = condition('from', 'matches', '*@example.com');
+  const c = condition('subject', 'not', 'missing');
+  for (const [outer, inner] of [['all', 'any'], ['any', 'all']]) {
+    const tree = { match: outer, conditions: [a, { match: inner, conditions: [b, c] }] };
+    assert.equal(conditionTest(tree), `${outer === 'all' ? 'allof' : 'anyof'}(${conditionTest(a)}, ${inner === 'all' ? 'allof' : 'anyof'}(${conditionTest(b)}, ${conditionTest(c)}))`);
+    for (const [subject, from] of [['tail', 'a@example.com'], ['missing', 'a@example.com'], ['tail', 'a@example.org'], ['missing', 'a@example.org']]) {
+      const A = subject.endsWith('tail'), B = from.endsWith('@example.com'), C = !subject.includes('missing');
+      assert.equal(matches(tree, { subject: [subject], from: [from] }), outer === 'all' ? A && (B || C) : A || (B && C));
+    }
+  }
+});
+
+test('long subjects and addresses are matched in full beyond 998 characters', () => {
+  for (const field of ['from', 'to', 'subject']) {
+    const tail = field === 'subject' ? 'TAIL' : 'tail@example.com';
+    const value = `${'x'.repeat(1200)}${tail}`;
+    assert.equal(matches(rule(condition(field, 'matches', `*${tail}`)), { [field]: [value] }), true);
+    assert.equal(matches(rule(condition(field, 'matches', `*${tail}x`)), { [field]: [value] }), false);
+    assert.equal(matches(rule(condition(field, 'matches', `${'x'.repeat(100)}*`)), { [field]: [value] }), true);
+  }
+});
+
+test('expanded VM corpus keeps 1200 pairs and importable generated conditions preserve matcher results', async () => {
+  const { sieveCorpus } = await import('../int/lib/sieve-corpus.js');
+  const { Reader, readConditions } = await import('../../server/sieve/import-syntax.js');
+  const { mails, rules, scripts } = sieveCorpus();
+  assert.equal(mails.length, 40); assert.equal(rules.length, 30);
+  assert.ok(mails.some(mail => mail.includes('x'.repeat(1200))));
+  let checked = 0, excluded = 0;
+  const excludedNegation = node => node.conditions ? node.conditions.some(excludedNegation) : node.field === 'to' && node.op === 'not';
+  for (const [index, source] of scripts.entries()) {
+    const reader = new Reader(source);
+    reader.expect('require'); reader.strings(); reader.expect(';'); reader.expect('if');
+    // Existing v:1 recipient exclusions remain executable, but importing new
+    // exclusions on recipients is deliberately unsupported by the contract.
+    if (excludedNegation(rules[index])) {
+      assert.throws(() => readConditions(reader), /이 제외 조건/);
+      excluded += mails.length;
+      continue;
+    }
+    const parsed = readConditions(reader);
+    reader.expect('{'); reader.expect('debug_log'); reader.string(); reader.expect(';'); reader.expect('}'); reader.done();
+    for (const mail of mails) {
+      const headers = mail.split('\r\n\r\n')[0];
+      assert.equal(matches(parsed, headers), matches(rules[index], headers), `rule ${index}, pair ${checked}`);
+      checked++;
+    }
+  }
+  assert.equal(checked, 1160);
+  assert.equal(excluded, 40);
+  assert.equal(checked + excluded, 1200);
+});

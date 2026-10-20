@@ -109,6 +109,8 @@ export function* scopedUidBatches(uids, limit = scopedUidLimit) {
   if (batch.length) yield batch;
 }
 
+export const MUTATION_STALL_ALLOWANCE_MS = 38000;
+
 export const scopedBatchPolicy = Object.freeze({
   initial: 500, min: 50, max: 2000, flagInitial: scopedUidLimit, flagMax: scopedUidLimit, targetMs: 2000, growth: 2,
   safety: 2, marginMs: 2000, minStartMs: 10000, mutationTimeoutMs: 120000,

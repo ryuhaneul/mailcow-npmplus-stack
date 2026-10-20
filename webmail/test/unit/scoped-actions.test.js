@@ -10,7 +10,7 @@ function expandSet(set) {
   });
 }
 const virtual = 'WebmailVirtual/AllMail';
-function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
+function fixture({ uids = [9, 2, 7, 1], boxes, mapping, stepMs = 1000 } = {}) {
   let clock = 0, nested = false;
   const state = { searches: 0, fetches: [], selects: [], creates: [], commands: [], hook: null };
   const folders = boxes ?? new Map([['INBOX', { validity: 11, next: 10 }], ['Projects', { validity: 22, next: 1000 }], [virtual, { validity: 33, next: 1000 }]]);
@@ -21,13 +21,13 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
   const client = {
     enabled: new Set(), capabilities: new Map([['MOVE', true]]),
     async *fetch(range) {
-      clock += 1000; await state.onFetch?.();
+      clock += stepMs; await state.onFetch?.();
       for (const uid of expandSet(range)) if (state.live.get(client.mailbox.path)?.has(uid)) yield { uid, internalDate: new Date(0), envelope: { subject: `synthetic ${uid}` }, flags: new Set(state.seen.has(identity(uid)) ? ['\\Seen'] : []), size: 10, headers: Buffer.from('') };
     },
-    async list() { clock += 1000; return [...folders].map(([path, box]) => ({ path, name: path.split('/').at(-1), specialUse: box.specialUse, flags: new Set() })); },
-    async mailboxCreate(path) { clock += 1000; state.creates.push(path); await state.onCreate?.(); folders.set(path, { validity: 44, next: 1 }); return true; },
+    async list() { clock += stepMs; return [...folders].map(([path, box]) => ({ path, name: path.split('/').at(-1), specialUse: box.specialUse, flags: new Set() })); },
+    async mailboxCreate(path) { clock += stepMs; state.creates.push(path); await state.onCreate?.(); folders.set(path, { validity: 44, next: 1 }); return true; },
     async exec(command, attributes, { untagged } = {}) {
-      clock += 1000; state.commands.push(command);
+      clock += stepMs; state.commands.push(command);
       await state.hook?.(command, attributes);
       if (command === 'UID SEARCH') await state.onFetch?.();
       if (command === 'UID SORT' || command === 'UID SEARCH') {
@@ -70,7 +70,7 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
   };
   const imap = { async withMailbox(_session, path, operation, { budget } = {}) {
     assert.equal(nested, false, 'mailbox locks must not nest'); assert.equal(typeof budget.remainingMs, 'function');
-    clock += 1000; state.selects.push(path);
+    clock += stepMs; state.selects.push(path);
     const box = folders.get(path); if (!box) throw Object.assign(new Error('synthetic missing folder'), { code: 'NotFound' });
     client.mailbox = { path, uidValidity: BigInt(box.validity), uidNext: box.next };
     nested = true;
@@ -78,7 +78,7 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
   } };
   const service = createScopedActionService({ imap, now: () => clock, measureNow: () => clock });
   const body = { selectionKey: 'synthetic-001', scope: {}, action: 'seen', cursor: null };
-  return { state, folders, client, session, service, body, advance(ms) { clock += ms; }, budget(ms) { const end = clock + ms; return { remainingMs: () => end - clock }; } };
+  return { state, folders, client, session, service, body, advance(ms) { clock += ms; }, elapsed() { return clock; }, budget(ms) { const end = clock + ms; return { remainingMs: () => end - clock }; } };
 }
 async function ready(f, body = f.body, requestMs = 50000) {
   let result; const replies = [];
@@ -353,7 +353,7 @@ for (const action of ['move', 'delete-forever', 'seen', 'flag']) test(`execute $
   const body = { ...f.body, scope: { view: 'folder', folder: path }, action, ...(action === 'move' ? { target: 'Projects' } : {}) };
   const { result, record, replies } = await executeAll(f, body);
   assert.deepEqual(result.totals, { processed: 2050, skipped: 0, failed: 0 }); assert.equal(result.state, 'completed'); assert.equal(record.phase, 'completed');
-  assert.equal(replies.length, 1);
+  if (action === 'delete-forever') assert.ok(replies.length > 1); else assert.equal(replies.length, 1);
   const command = action === 'move' ? 'UID MOVE' : action === 'delete-forever' ? 'UID EXPUNGE' : 'UID STORE';
   const applied = f.state.mutations.filter(mutation => mutation.command === command).flatMap(mutation => mutation.uids);
   assert.equal(applied.length, 2050); assert.equal(new Set(applied).size, 2050); assert.ok(f.state.mutations.every(mutation => mutation.uids.length <= 5000));
@@ -892,12 +892,15 @@ test('adaptive MOVE: size and previous cost survive cursor boundaries, slow comm
   f.state.hook = async command => { if (command === 'UID MOVE' && first) { first = false; f.advance(29000); } };
   const response = await f.service.execute(f.session, runBody(body, prepared.cursor), { budget: f.budget(50000) });
   assert.equal(f.state.mutations[0].uids.length, 500);
-  assert.equal(record.batchStates[0].lastMs, 1000, 'subsequent smaller fast groups replace the initial 30s observation');
-  assert.ok(f.state.mutations.some(row => row.uids.length === 50), 'slow first unit shrinks to minimum');
-  assert.ok(response.nextCursor); assert.ok(response.totals.processed > 500);
+  assert.equal(record.batchStates[0].lastMs, 30000, 'stall allowance ends the request after the slow first unit');
+  assert.equal(record.batchStates[0].size, 50, 'slow first unit shrinks to minimum');
+  assert.ok(response.nextCursor); assert.ok(response.totals.processed === 500);
   const state = structuredClone(record.batchStates[0]);
   const count = f.state.mutations.length;
-  const resumed = await f.service.execute(f.session, runBody(body, response.nextCursor));
+  let resumed, cursor = response.nextCursor;
+  for (let attempt = 0; cursor && attempt < 20; attempt++) {
+    resumed = await f.service.execute(f.session, runBody(body, cursor)); cursor = resumed.nextCursor;
+  }
   assert.equal(f.state.mutations[count].uids.length, state.size);
   assert.equal(resumed.state, 'completed'); assert.equal(resumed.totals.processed, 3000);
 });
@@ -915,7 +918,7 @@ for (const action of ['seen', 'unseen', 'flag', 'unflag', 'move', 'trash', 'dele
     if (slow && ['UID STORE', 'UID MOVE'].includes(command)) { slow = false; f.advance(29000); }
   };
   let cursor = prepared.cursor, result, requests = 0, previously = 0;
-  while (cursor && requests < 25) {
+  while (cursor && requests < 100) {
     result = await f.service.execute(f.session, runBody(body, cursor), { budget: f.budget(50000) });
     assert.ok(result.delta.processed > 0, 'every resumed request must progress after the one slow ACK');
     assert.ok(result.totals.processed > previously); previously = result.totals.processed;
@@ -949,4 +952,50 @@ for (const action of ['seen', 'move', 'delete-forever']) test(`minimum probe ${a
   assert.equal(second.delta.processed, 50); assert.equal(second.totals.processed, 100); assert.equal(second.state, 'completed');
   assert.equal(second.totals.failed, 0);
   assert.deepEqual(f.state.mutations.filter(row => row.command !== 'UID EXPUNGE').map(row => row.uids.length), [50, 50]);
+});
+
+
+for (const action of ['move', 'trash', 'archive', 'spam', 'notspam', 'delete-forever']) test(`stall profile 50k ${action}: intermittent 35s mutation, every request at most 52s, exact final set`, async t => {
+  const count = 50000, stepMs = 1;
+  const path = action === 'notspam' ? 'Junk' : action === 'delete-forever' ? 'Trash' : 'INBOX';
+  const target = { move: 'Projects', trash: 'Trash', archive: 'Archive', spam: 'Junk', notspam: 'INBOX' }[action];
+  const boxes = new Map([[path, { validity: 11, next: count + 2 }]]);
+  if (target) boxes.set(target, { validity: 22, next: 1, ...(action === 'archive' ? { specialUse: '\\Archive' } : {}) });
+  const f = fixture({ uids: Array.from({ length: count + 1 }, (_, index) => index + 1), boxes, stepMs });
+  f.state.seen.add(`${path}:${count + 1}`);
+  if (target) f.state.live.set(target, new Set());
+  const body = { ...f.body, action, scope: { view: 'folder', folder: path, quick: 'unread' }, ...(action === 'move' ? { target } : {}) };
+  const { result: prepared } = await ready(f, body);
+  assert.equal(prepared.initialTotal, count);
+  f.state.live.get(path).add(count + 2); f.folders.get(path).next++;
+  let moved = 0, nextStall = 6000, stalls = 0;
+  f.state.hook = async (command, attributes) => {
+    if (!['UID MOVE', 'UID STORE', 'UID EXPUNGE'].includes(command)) return;
+    const n = expandSet(attributes[0].value).length;
+    if (action === 'delete-forever' && command === 'UID STORE') { f.advance(n * 0.05 - stepMs); return; }
+    const stall = moved + n >= nextStall;
+    if (stall) { nextStall += 6000; stalls++; }
+    f.advance((stall ? 35000 : n * (action === 'delete-forever' ? 0.60 : 0.65)) - stepMs);
+    moved += n;
+  };
+  let cursor = prepared.cursor, receipt; const walls = [];
+  for (let request = 0; cursor && request < 100; request++) {
+    const start = f.elapsed();
+    receipt = await f.service.execute(f.session, runBody(body, cursor), { budget: f.budget(50000) });
+    walls.push(f.elapsed() - start);
+    assert.ok(walls.at(-1) <= 52000, `request took ${walls.at(-1)}ms`);
+    assert.ok(receipt.delta.processed > 0); assert.equal(receipt.totals.failed, 0);
+    const commands = f.state.commands.length;
+    assert.deepEqual(await f.service.execute(f.session, runBody(body, cursor)), receipt);
+    assert.equal(f.state.commands.length, commands);
+    cursor = receipt.nextCursor;
+  }
+  assert.equal(receipt.state, 'completed'); assert.equal(receipt.totals.processed, count);
+  assert.ok(stalls >= 8); assert.ok(walls.length > 1);
+  const applied = f.state.mutations.filter(row => row.command === (action === 'delete-forever' ? 'UID EXPUNGE' : 'UID MOVE')).flatMap(row => row.uids);
+  assert.equal(applied.length, count); assert.equal(new Set(applied).size, count);
+  assert.deepEqual([...f.state.live.get(path)].sort((a, b) => a - b), [count + 1, count + 2]);
+  assert.equal(f.state.seen.has(`${path}:${count + 1}`), true); assert.equal(f.state.seen.has(`${path}:${count + 2}`), false);
+  if (target) assert.equal(f.state.live.get(target).size, count);
+  t.diagnostic(JSON.stringify({ action, count, stalls, requests: walls.length, maxWallMs: Math.max(...walls), totalWallMs: walls.reduce((a, b) => a + b, 0), walls }));
 });

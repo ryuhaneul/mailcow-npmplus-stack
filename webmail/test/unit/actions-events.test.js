@@ -524,29 +524,29 @@ test('scoped service: MOVE ACK after proxy deadline is retained for same-cursor 
 });
 
 
-for (const remaining of [14000, 14001]) test(`scoped adaptive admission: ${remaining}ms applies strict reserve after a prior mutation`, async () => {
+for (const remaining of [42000, 42001]) test(`scoped adaptive admission: ${remaining}ms applies strict reserve after a prior mutation`, async () => {
   const f = scopedFixture('move');
-  f.options.batchState = { ...scopedBatchState('move'), lastMs: 6000, lastCount: 1 };
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 20000, lastCount: 1 };
   f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
   f.time(remaining);
   const result = await f.run();
-  assert.equal(result.processed.length, remaining > 14000 ? 1 : 0);
-  assert.equal(result.remaining.length, remaining > 14000 ? 0 : 1);
-  assert.equal(f.client.calls.length, remaining > 14000 ? 1 : 0);
+  assert.equal(result.processed.length, remaining > 42000 ? 1 : 0);
+  assert.equal(result.remaining.length, remaining > 42000 ? 0 : 1);
+  assert.equal(f.client.calls.length, remaining > 42000 ? 1 : 0);
 });
 
 
-for (const remaining of [9999, 10000, 10001, 50000]) test(`minimum probe: first mutation with ${remaining}ms remaining ignores an oversized old estimate`, async () => {
-  const f = scopedFixture('move');
+for (const action of ['seen', 'move']) for (const remaining of [9999, 10000, 10001, 37999, 38000, 38001, 50000]) test(`minimum probe ${action}: first mutation with ${remaining}ms remaining ignores an oversized old estimate`, async () => {
+  const f = scopedFixture(action);
   f.options.refs = Array.from({ length: 100 }, (_, index) => ref('INBOX', index + 1));
   f.client.matches = Array.from({ length: 100 }, (_, index) => index + 1);
-  f.options.batchState = { ...scopedBatchState('move'), lastMs: 60000, lastCount: 50 };
+  f.options.batchState = { ...scopedBatchState(action), lastMs: 60000, lastCount: 50 };
   f.time(remaining); f.client.mutation = async () => f.time(0);
   const result = await f.run();
-  assert.equal(result.processed.length, remaining >= 10000 ? 50 : 0);
-  assert.equal(result.remaining.length, remaining >= 10000 ? 50 : 100);
-  assert.equal(f.client.calls.length, remaining >= 10000 ? 1 : 0);
-  if (remaining >= 10000) assert.equal(f.client.calls[0][1][0].value, '1:50');
+  assert.equal(result.processed.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 50 : 0);
+  assert.equal(result.remaining.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 50 : 100);
+  assert.equal(f.client.calls.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 1 : 0);
+  if (remaining >= (action === 'seen' ? 10000 : 38000)) assert.equal(f.client.calls[0][1][0].value, '1:50');
   assertScopedPartition(result, f.options.refs, f.outcomes);
 });
 
@@ -557,4 +557,25 @@ test('minimum probe: another source group cannot force a second mutation in the 
   const result = await f.run();
   assert.equal(result.processed.length, 0); assert.deepEqual(result.remaining, f.options.refs);
   assert.equal(f.client.calls.length, 0);
+});
+
+
+for (const action of scopedActions) for (const remaining of [37999, 38000, 38001]) test(`stall allowance ${action}: remaining ${remaining}ms`, async () => {
+  const f = scopedFixture(action);
+  if (action === 'notspam') f.options.refs = [ref('Junk')];
+  f.time(remaining);
+  const result = await f.run();
+  const protectedAction = movingActions.includes(action) || action === 'delete-forever';
+  const allowed = !protectedAction || remaining >= 38000;
+  assert.equal(result.processed.length, allowed ? 1 : 0);
+  assert.equal(result.remaining.length, allowed ? 0 : 1);
+  assert.equal(f.client.calls.length, allowed ? action === 'delete-forever' ? 2 : 1 : 0);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+for (const action of ['seen', 'unseen', 'flag', 'unflag']) for (const remaining of [10000, 10001]) test(`flags preserve start reserve ${action}: ${remaining}ms after prior mutation`, async () => {
+  const f = scopedFixture(action);
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
+  f.time(remaining); const result = await f.run();
+  assert.equal(result.processed.length, remaining > 10000 ? 1 : 0);
+  assert.equal(f.client.calls.length, remaining > 10000 ? 1 : 0);
 });

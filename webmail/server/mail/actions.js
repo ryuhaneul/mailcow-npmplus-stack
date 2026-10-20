@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import { AppError } from '../errors.js';
 import { encodePath, hasCapability } from 'imapflow/lib/tools.js';
 import { checkBudget, matchesFolderFilters, searchUids } from './list-query.js';
-import { decodeRef, assertUidValidity, uidSet, scopedUidLimit, scopedSetLimit, scopedUidBatches, scopedBatchPolicy, scopedBatchState, scopedBatchReserve, updateScopedBatch } from './ref.js';
+import { decodeRef, assertUidValidity, uidSet, scopedUidLimit, scopedSetLimit, scopedUidBatches, MUTATION_STALL_ALLOWANCE_MS, scopedBatchPolicy, scopedBatchState, scopedBatchReserve, updateScopedBatch } from './ref.js';
 import { mailboxRights } from './folders.js';
 
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -170,6 +170,7 @@ export function createActionService({ imap, measureNow = () => performance.now()
           let uids = scopedUidBatches(candidates.slice(offset), batchState.size).next().value;
           check();
           const remainingMs = budget.remainingMs();
+          if ((moving || action === 'delete-forever') && remainingMs < MUTATION_STALL_ALLOWANCE_MS) throw exhausted();
           if (remainingMs <= Math.max(minStartRemainingMs, scopedBatchReserve(batchState, uids.length))) {
             // Probe at minimum size once per request so an old slow ACK cannot block all future requests.
             if (checks.mutationsStarted || remainingMs < Math.max(minStartRemainingMs, scopedBatchPolicy.minStartMs)) throw exhausted();

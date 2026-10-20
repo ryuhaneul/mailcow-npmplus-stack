@@ -108,6 +108,7 @@ _waf_webmail_crs_exclusions() {
     apply:
       - Remove${band}BandRuleByID(941100)
       - Remove${band}BandRuleByID(941130)
+      - Remove${band}BandRuleByID(941310)
   - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing"]))
     apply:
       - Remove${band}BandRuleByTag("attack-xss")

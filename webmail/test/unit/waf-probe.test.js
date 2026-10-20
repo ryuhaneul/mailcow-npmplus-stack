@@ -12,7 +12,7 @@ const credentials = { email: 'user1@mail.example.com', password: 'synthetic-pass
 const original = { v: 1, rev: 1, rules: [], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
 
 for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
-  test(`WAF ${mode} YAML limits Gmail XML exclusions to two IDs, POST and webmail hosts`, () => {
+  test(`WAF ${mode} YAML limits Gmail XML exclusions to three IDs, POST and webmail hosts`, () => {
     const root = fileURLToPath(new URL('../../../', import.meta.url));
     const render = enabled => execFileSync('bash', ['-c', 'source scripts/lib/webmail-env.sh; source scripts/lib/waf.sh; waf_render_appsec_config'], {
       cwd: root,
@@ -24,12 +24,12 @@ for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
     const xmlBlocks = blocks.filter(block => block.includes('/api/rules/import/xml'));
     assert.equal(xmlBlocks.length, 2);
     for (const [index, host] of ['newmail.example.com', 'other.example.com'].entries()) {
-      assert.equal(xmlBlocks[index], `  - filter: Is${band}Band == true && req.Host == "${host}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]\n    apply:\n      - Remove${band}BandRuleByID(941100)\n      - Remove${band}BandRuleByID(941130)\n`);
+      assert.equal(xmlBlocks[index], `  - filter: Is${band}Band == true && req.Host == "${host}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]\n    apply:\n      - Remove${band}BandRuleByID(941100)\n      - Remove${band}BandRuleByID(941130)\n      - Remove${band}BandRuleByID(941310)\n`);
     }
-    assert.ok(blocks.filter(block => !xmlBlocks.includes(block)).every(block => !/RuleByID\(941(?:100|130)\)/.test(block)));
+    assert.ok(blocks.filter(block => !xmlBlocks.includes(block)).every(block => !/RuleByID\(941(?:100|130|310)\)/.test(block)));
     const disabled = render('false');
     assert.ok(!disabled.includes('/api/rules/import/xml'));
-    assert.ok(!/RuleByID\(941(?:100|130)\)/.test(disabled));
+    assert.ok(!/RuleByID\(941(?:100|130|310)\)/.test(disabled));
   });
 }
 
@@ -84,6 +84,14 @@ test('real fake-server probe sends the full R-WAF bundle with cookies/CSRF and r
     const requests = server.requests;
     assert.ok(requests.find(req => req.path === '/api/drafts').body.html.includes('<script>'));
     assert.ok(requests.some(req => req.body?.subject?.includes('SELECT *')));
+    const xmlRequests = requests.filter(req => ['/api/rules/import/xml/preview', '/api/rules/import/xml'].includes(req.path));
+    assert.equal(xmlRequests.length, 2);
+    for (const { body } of xmlRequests) {
+      assert.ok(body.xml.includes('쾌속 배송') && body.xml.includes('알림/공지'));
+      const bytes = Buffer.from(body.xml).toString('latin1');
+      assert.match(bytes, /<\s*\/\s*[^\xbe]*\xbe/);
+      assert.match(bytes, /\xbc\s*\/\s*[^\xbe>]*[\xbe>]/);
+    }
     const rules = requests.filter(req => req.path === '/api/rules' && req.method === 'PUT');
     const value = rules[0].body.doc.rules[0].conditions[0].value;
     assert.ok(!value.includes('${') && value.includes('"') && value.includes('<') && value.includes(';') && value.includes('합성'));

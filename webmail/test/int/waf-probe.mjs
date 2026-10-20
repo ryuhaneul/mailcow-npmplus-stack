@@ -59,7 +59,7 @@ export async function runProbe(base, { email, password, request = fetch, timeout
   await send('SQL 모양 제목 보내기', 'POST', '/api/send', { ...draft, subject: "SELECT * FROM messages WHERE subject = 'quote'; -- 합성 시험" });
   // Both routes must reach the app through AppSec. Leave confirmation false
   // for the write probe so it cannot replace the account's import/undo archive.
-  const xml = `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="subject" value="&quot;&lt;태그&gt; ' OR - 합성*&quot;"/><apps:property name="shouldMarkAsRead" value="true"/></entry></feed>`;
+  const xml = `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="subject" value="&quot;&lt;태그&gt; ' OR - 합성*&quot;"/><apps:property name="shouldMarkAsRead" value="true"/></entry><entry><apps:property name="subject" value="쾌속 배송"/><apps:property name="label" value="알림/공지"/></entry></feed>`;
   const xmlBody = { xml, fileName: 'synthetic-waf.xml', mode: 'append' };
   const preview = await send('Gmail XML 미리보기', 'POST', '/api/rules/import/xml/preview', xmlBody);
   await send('Gmail XML 적용(확인 전 거절)', 'POST', '/api/rules/import/xml', { ...xmlBody, confirm: false, ...(preview.value?.expect ? { expect: preview.value.expect } : {}) });

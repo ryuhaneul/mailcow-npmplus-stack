@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { createPrefsService, MAX_PREFS_BYTES, PREFS_ENTRY } from '../../server/prefs.js';
+import { SIGNATURES_ENTRY } from '../../server/signatures.js';
+import { SIGNATURE_IMAGES_ENTRY } from '../../server/signature-images.js';
+import { withSignatureStoreLock } from '../../server/signature-store-lock.js';
 import { sanitizeComposeHtml } from '../../server/mail/sanitize.js';
 
 const config = {
@@ -15,7 +18,7 @@ const config = {
 };
 const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null });
 class PrefsImap extends EventEmitter {
-  constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.calls = []; }
+  constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.metadata = new Map(); this.calls = []; }
   async connect() { this.usable = true; }
   close() { this.usable = false; }
   async logout() { this.close(); }
@@ -23,16 +26,26 @@ class PrefsImap extends EventEmitter {
   async exec(command, args, options) {
     this.calls.push({ command, args });
     if (this.fail) throw new Error('synthetic-private-value');
-    assert.deepEqual(args[0], { type: 'STRING', value: '' });
     if (command === 'GETMETADATA') {
-      assert.deepEqual(args[1], { type: 'STRING', value: PREFS_ENTRY });
-      options.untagged.METADATA({ attributes: [args[0], [{ value: PREFS_ENTRY }, { value: this.value === null ? null : Buffer.from(this.value) }]] });
+      const key = args.at(-1).value;
+      assert.deepEqual(args.at(-2), { type: 'STRING', value: '' });
+      if (args.length === 3) assert.deepEqual(args[0], [{ type: 'ATOM', value: 'MAXSIZE' }, { type: 'ATOM', value: String(key === PREFS_ENTRY ? MAX_PREFS_BYTES : 262144) }]);
+      assert.ok([PREFS_ENTRY, SIGNATURES_ENTRY].includes(key));
+      const value = key === PREFS_ENTRY ? this.value : this.metadata.get(key) ?? null;
+      options.untagged.METADATA({ attributes: [{ value: '' }, [{ value: key }, { value: value === null ? null : Buffer.from(value) }]] });
     } else {
       assert.equal(command, 'SETMETADATA');
-      assert.deepEqual(args[1][0], { type: 'STRING', value: PREFS_ENTRY });
-      assert.equal(args[1][1].type, 'LITERAL');
-      assert.ok(Buffer.isBuffer(args[1][1].value));
-      this.value = args[1][1].value.toString('utf8');
+      assert.deepEqual(args[0], { type: 'STRING', value: '' });
+      await this.beforeSet?.(args);
+      for (let i = 0; i < args[1].length; i += 2) {
+        const key = args[1][i].value;
+        assert.ok([PREFS_ENTRY, SIGNATURES_ENTRY].includes(key));
+        assert.equal(args[1][i + 1].type, 'LITERAL');
+        assert.ok(Buffer.isBuffer(args[1][i + 1].value));
+        const value = args[1][i + 1].value.toString('utf8');
+        if (key === PREFS_ENTRY) this.value = value;
+        else this.metadata.set(key, value);
+      }
     }
     return { next() {} };
   }
@@ -63,27 +76,25 @@ test('prefs: full document METADATA round trip, address normalization and sessio
   const f = await fixture(t);
   const doc = { ...defaults(), theme: 'terra', mode: 'system', accent: { ink: 0, olive: 6, terra: '#abC123' }, layout: { pane: 'right', density: 'compact', compose: 'drawer' }, folderColors: { 'Projects/견적': 7 }, imageAllow: [' Sender@EXAMPLE.COM ', 'sender@example.com'], signatures: { ' USER@EXAMPLE.COM ': { html: '<script>raw signature</script>', auto: true } }, defaultFrom: ' Alias@EXAMPLE.COM ' };
   status(await f.request('PUT', doc), 204);
-  const expected = { ...doc, imageAllow: ['sender@example.com'], signatures: { 'user@example.com': { html: '', auto: true } }, defaultFrom: 'alias@example.com' };
+  const expected = { ...doc, imageAllow: ['sender@example.com'], signatures: {}, defaultFrom: 'alias@example.com' };
   assert.deepEqual(JSON.parse(f.client.value), expected); assert.deepEqual(f.session.prefs, expected);
   status(await f.request('GET'), 200); assert.deepEqual(f.session.prefs, expected);
-  assert.deepEqual(f.client.calls.map(call => call.command), ['SETMETADATA', 'GETMETADATA']);
+  assert.deepEqual(f.client.calls.map(call => call.command), ['GETMETADATA', 'GETMETADATA', 'GETMETADATA', 'SETMETADATA', 'GETMETADATA']);
 });
-test('prefs: signature scripts, event handlers and javascript links are sanitized before storage', async t => {
+test('prefs: requested signature scripts, handlers and links cannot replace the stored mirror', async t => {
   const f = await fixture(t);
   const html = '<script>alert(1)</script><img src="https://images.example.com/logo.png" onerror="alert(2)"><a href="javascript:alert(3)">Contact</a>';
   status(await f.request('PUT', { ...defaults(), signatures: { 'user@example.com': { html, auto: true } } }), 204);
-  const saved = JSON.parse(f.client.value).signatures['user@example.com'];
-  assert.equal(saved.html, sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }));
-  assert.doesNotMatch(saved.html, /script|onerror|javascript:/i);
-  assert.equal(saved.auto, true);
-  assert.deepEqual(f.session.prefs.signatures['user@example.com'], saved);
+  assert.deepEqual(JSON.parse(f.client.value).signatures, {});
+  assert.deepEqual(f.session.prefs.signatures, {});
   const response = await f.request('GET'); status(response, 200);
-  assert.deepEqual(response.json().signatures['user@example.com'], saved);
+  assert.deepEqual(response.json().signatures, {});
 });
-test('prefs: signature business card formatting and image host policy match sending', async t => {
+test('prefs: stored business card mirror survives non-signature settings save', async t => {
   const f = await fixture(t);
   const html = '<table cellpadding="4"><tr><td style="color:#123456;font-weight:bold">Example Team<br><a href="mailto:user@example.com">user@example.com</a></td><td><img src="https://images.example.com/card.png" width="80" alt="Card"><img src="https://newmail.example.com/api/messages/private/parts/1"></td></tr></table>';
-  status(await f.request('PUT', { ...defaults(), signatures: { 'user@example.com': { html, auto: false } } }), 204);
+  f.client.value = JSON.stringify({ ...defaults(), signatures: { 'user@example.com': { html: sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }), auto: false } } });
+  status(await f.request('PUT', { ...defaults(), signatures: {} }), 204);
   const saved = JSON.parse(f.client.value).signatures['user@example.com'].html;
   assert.equal(saved, sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }));
   assert.match(saved, /<table cellpadding="4">/);
@@ -195,4 +206,117 @@ test('prefs sharedView: old document without field loads defaults; invalid field
   f.client.value = JSON.stringify({ ...defaults(), theme: 'amber', sharedView: ownerView({ folders: ['Shared/other@example.com/INBOX'] }) });
   response = await f.request('GET'); status(response, 200);
   assert.deepEqual(response.json(), { ...defaults(), theme: 'amber' });
+});
+
+test('prefs mirror: no-list legacy bytes survive stale requests, without migration or image lookups', async t => {
+  const f = await fixture(t);
+  const mirror = { 'user@example.com': { html: '<p>원문 & data<img src="data:image/png;base64,YQ=="></p>', auto: true } };
+  f.client.value = JSON.stringify({ ...defaults(), signatures: mirror });
+  const response = await f.request('PUT', { ...defaults(), mode: 'light', signatures: { 'user@example.com': { html: '<p>stale</p>', auto: false } } });
+  status(response, 204); assert.equal(response.body, ''); assert.equal(response.headers.etag, undefined);
+  assert.deepEqual(JSON.parse(f.client.value), { ...defaults(), mode: 'light', signatures: mirror });
+  assert.deepEqual(f.session.prefs.signatures, mirror); assert.equal(f.client.metadata.has(SIGNATURES_ENTRY), false);
+  const writes = f.client.calls.filter(call => call.command === 'SETMETADATA');
+  assert.equal(writes.length, 1); assert.deepEqual(writes[0].args[1], [{ type: 'STRING', value: PREFS_ENTRY }, { type: 'LITERAL', value: Buffer.from(f.client.value) }]);
+  assert.ok(f.client.calls.every(call => !JSON.stringify(call.args).includes(SIGNATURE_IMAGES_ENTRY)));
+});
+
+test('prefs mirror: synchronized list defaults and other settings survive a stale prefs PUT', async t => {
+  const f = await fixture(t);
+  f.app.directory.identities = async session => { assert.equal(session.email, 'user@example.com'); return { identities: [{ address: session.email, kind: 'self' }] }; };
+  const first = await f.app.inject({ url: '/api/signatures', headers: f.headers }); status(first, 200);
+  const saved = await f.app.inject({ method: 'PUT', url: '/api/signatures', headers: { ...f.headers, 'if-match': first.json().revision }, payload: {
+    items: [{ id: 'client-new', name: '합성 업무', html: '<p>최신 서명</p>' }], defaults: { 'user@example.com': { newDefault: 'client-new', replyDefault: null } },
+  } }); status(saved, 200);
+  const listBefore = f.client.metadata.get(SIGNATURES_ENTRY), mirror = JSON.parse(f.client.value).signatures;
+  f.client.calls.length = 0;
+  const settings = { ...defaults(), theme: 'terra', accent: { olive: 3 }, folderColors: { INBOX: 2 }, defaultFrom: 'user@example.com', signatures: { 'user@example.com': { html: '<p>stale</p>', auto: false } } };
+  status(await f.request('PUT', settings), 204);
+  assert.deepEqual(JSON.parse(f.client.value), { ...settings, signatures: mirror });
+  assert.equal(f.client.metadata.get(SIGNATURES_ENTRY), listBefore);
+  const writes = f.client.calls.filter(call => call.command === 'SETMETADATA'); assert.equal(writes.length, 1); assert.equal(writes[0].args[1].length, 2);
+  assert.deepEqual(f.session.prefs, JSON.parse(f.client.value));
+});
+
+test('prefs mirror: migration and pending legacy edits are preserved; importing makes old list revision stale', async t => {
+  const f = await fixture(t);
+  const original = { 'user@example.com': { html: '<p>원래 거울</p>', auto: true } };
+  f.client.value = JSON.stringify({ ...defaults(), signatures: original });
+  const list = await f.app.inject({ url: '/api/signatures', headers: f.headers }); status(list, 200);
+  const migrated = f.client.metadata.get(SIGNATURES_ENTRY);
+  status(await f.request('PUT', { ...defaults(), mode: 'light' }), 204);
+  assert.deepEqual(JSON.parse(f.client.value).signatures, original); assert.equal(f.client.metadata.get(SIGNATURES_ENTRY), migrated);
+  const edited = { 'user@example.com': { html: '<p>구판 수정</p>', auto: false } };
+  f.client.value = JSON.stringify({ ...JSON.parse(f.client.value), signatures: edited });
+  f.client.calls.length = 0;
+  status(await f.request('PUT', { ...defaults(), theme: 'amber', signatures: original }), 204);
+  assert.deepEqual(JSON.parse(f.client.value), { ...defaults(), theme: 'amber', signatures: edited });
+  const storedList = JSON.parse(f.client.metadata.get(SIGNATURES_ENTRY));
+  assert.equal(storedList.items.length, 2); assert.equal(storedList.items[1].html, edited['user@example.com'].html);
+  assert.deepEqual(storedList.defaults, list.json().defaults);
+  assert.equal(storedList.mirror.lastWrittenHash, null);
+  const writes = f.client.calls.filter(call => call.command === 'SETMETADATA');
+  assert.deepEqual(writes.map(call => call.args[1].filter((_, index) => index % 2 === 0).map(arg => arg.value)), [[SIGNATURES_ENTRY], [PREFS_ENTRY]]);
+  const stale = await f.app.inject({ method: 'PUT', url: '/api/signatures', headers: { ...f.headers, 'if-match': list.json().revision }, payload: { items: [], defaults: {} } });
+  status(stale, 409); assert.equal(stale.json().error.code, 'SIGNATURE_CONFLICT');
+});
+
+test('prefs mirror: final combined 64KiB boundary and overflow preserve state without SET', async t => {
+  const f = await fixture(t);
+  const doc = { ...defaults(), signatures: { 'user@example.com': { html: '', auto: false } } };
+  doc.signatures['user@example.com'].html = 'x'.repeat(MAX_PREFS_BYTES - Buffer.byteLength(JSON.stringify(doc)));
+  f.client.value = JSON.stringify(doc); const before = f.client.value;
+  status(await f.request('PUT', defaults()), 204); assert.equal(f.client.value, before);
+  f.client.calls.length = 0;
+  const response = await f.request('PUT', { ...defaults(), folderColors: { INBOX: 7 } }); status(response, 413);
+  assert.equal(response.json().error.code, 'PREFS_TOO_LARGE'); assert.equal(f.client.value, before);
+  assert.deepEqual(f.session.prefs, doc); assert.equal(f.client.calls.filter(call => call.command === 'SETMETADATA').length, 0);
+});
+
+test('prefs mirror: account queue includes prepare, SET completion and session update across sessions', async t => {
+  const f = await fixture(t);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), ready = new Promise(resolve => { entered = resolve; });
+  let prepared = 0, inSet = 0;
+  const service = createPrefsService({ config, imap: { async withMailbox(session, path, operation) { assert.equal(path, 'INBOX'); return operation(f.client); } }, signatures: {
+    async preparePrefs({ session, client, prefs }) {
+      prepared++; assert.strictEqual(client, f.client);
+      await assert.rejects(withSignatureStoreLock(session.email, () => {}), { code: 'SIGNATURE_STORE_REENTRANT' });
+      return { prefs: { ...prefs, signatures: {} }, mirrorSync: false };
+    },
+  } });
+  f.client.beforeSet = async () => { inSet++; if (inSet === 1) { entered(); await gate; } };
+  const one = { email: 'USER@example.com' }, two = { email: 'user@example.com' };
+  const first = service.put(one, { ...defaults(), mode: 'light' }); await ready;
+  const second = service.put(two, { ...defaults(), theme: 'amber' });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(prepared, 1); assert.equal(inSet, 1); assert.equal(two.prefs, undefined);
+  release(); await Promise.all([first, second]); assert.equal(prepared, 2); assert.equal(inSet, 2);
+  assert.equal(one.prefs.mode, 'light'); assert.equal(two.prefs.theme, 'amber'); assert.equal(JSON.parse(f.client.value).theme, 'amber');
+});
+
+test('prefs mirror: divergent prepared mirror logs only account and hashes, preserves actual and writes prefs alone', async t => {
+  const f = await fixture(t), entries = [];
+  const actual = { 'user@example.com': { html: '<p>synthetic-private-content</p>', auto: false } };
+  f.client.value = JSON.stringify({ ...defaults(), signatures: actual });
+  const service = createPrefsService({ config, imap: { async withMailbox(_session, _path, operation) { return operation(f.client); } }, logger: { info(value, message) { entries.push({ value, message }); } }, signatures: {
+    async preparePrefs({ prefs }) { return { prefs: { ...prefs, signatures: {} }, mirrorSync: true }; },
+  } });
+  await service.put({ email: 'user@example.com' }, defaults());
+  assert.deepEqual(JSON.parse(f.client.value).signatures, actual); assert.equal(entries.length, 1);
+  assert.deepEqual(Object.keys(entries[0].value), ['email', 'actualHash', 'preparedHash']);
+  assert.match(entries[0].value.actualHash, /^[a-f0-9]{64}$/); assert.match(entries[0].value.preparedHash, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(JSON.stringify(entries), /synthetic-private-content|html|base64/);
+  assert.deepEqual(f.client.calls.filter(c => c.command === 'SETMETADATA').map(c => c.args[1].map(arg => arg.type)), [['STRING', 'LITERAL']]);
+});
+
+test('prefs mirror: corrupt/oversized stored data and failed SET preserve stored bytes and cached session', async t => {
+  const f = await fixture(t); const beforeSession = defaults(); f.session.prefs = beforeSession;
+  for (const raw of ['{broken', JSON.stringify({ ...defaults(), signatures: { invalid: { html: '', auto: true } } }), JSON.stringify({ ...defaults(), signatures: {}, padding: 'x'.repeat(MAX_PREFS_BYTES) })]) {
+    f.client.value = raw; f.client.calls.length = 0;
+    const response = await f.request('PUT', defaults()); status(response, 503); assert.equal(response.json().error.code, 'SIGNATURES_INVALID');
+    assert.equal(f.client.value, raw); assert.strictEqual(f.session.prefs, beforeSession); assert.equal(f.client.calls.filter(c => c.command === 'SETMETADATA').length, 0);
+  }
+  f.client.value = JSON.stringify(defaults()); f.client.beforeSet = async () => { throw new Error('synthetic-private-failure'); };
+  const response = await f.request('PUT', { ...defaults(), theme: 'terra' }); status(response, 503); assert.equal(response.json().error.code, 'MAIL_UNAVAILABLE');
+  assert.equal(f.client.value, JSON.stringify(defaults())); assert.strictEqual(f.session.prefs, beforeSession); assert.doesNotMatch(response.body, /synthetic-private-failure/);
 });

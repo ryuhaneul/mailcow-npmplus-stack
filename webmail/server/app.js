@@ -16,6 +16,11 @@ import storageRoutes from './routes/storage.js';
 import messageRoutes from './routes/messages.js';
 import eventRoutes from './routes/events.js';
 import prefsRoutes from './routes/prefs.js';
+import signatureImagesRoutes from './routes/signature-images.js';
+import signaturesRoutes, { createSignatureNormalizer } from './routes/signatures.js';
+import { createSignatureImagesService } from './signature-images.js';
+import { createSignaturesService } from './signatures.js';
+import { createPrefsService } from './prefs.js';
 import passwordRoutes from './routes/password.js';
 import { createReadService } from './mail/read.js';
 import { createListService } from './mail/list.js';
@@ -44,7 +49,15 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await app.register(storageRoutes, { service: folderService });
   await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap }) });
   await app.register(eventRoutes, { listService });
-  await app.register(prefsRoutes, { config });
+  const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
+  const normalizeHtml = createSignatureNormalizer({ config, images });
+  const signatures = createSignaturesService({ imap: app.imap, normalizeHtml, getIdentities: async session => {
+    const { identities } = await app.directory.identities(session);
+    return identities.map(item => item.address);
+  } });
+  await app.register(signatureImagesRoutes, { service: images });
+  await app.register(signaturesRoutes, { service: signatures, normalizeHtml, imap: app.imap });
+  await app.register(prefsRoutes, { config, service: createPrefsService({ config, imap: app.imap, logger: app.log, signatures }) });
   await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });

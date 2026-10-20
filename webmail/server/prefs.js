@@ -1,7 +1,9 @@
 import { AppError } from './errors.js';
 import { themes, modes } from './config.js';
-import { getMetadata, setMetadata } from './mail/imap-raw.js';
+import { getMetadata, setMetadataEntries } from './mail/imap-raw.js';
 import { sanitizeComposeHtml } from './mail/sanitize.js';
+import { withSignatureStoreLock } from './signature-store-lock.js';
+import { signatureMirrorHash } from './signatures.js';
 
 export const MAX_PREFS_BYTES = 64 * 1024;
 export const PREFS_ENTRY = '/private/vendor/mailstack-webmail/prefs';
@@ -97,10 +99,10 @@ function readDocument(raw, config, logger) {
   if (discarded) logger?.warn({ code: 'PREFS_DISCARDED' }, '저장된 설정에서 사용할 수 없는 항목을 제외했습니다.');
   return result;
 }
-export function createPrefsService({ config, imap, logger }) {
+export function createPrefsService({ config, imap, logger, signatures }) {
   async function mailCall(session, operation) {
     try { return await imap.withMailbox(session, 'INBOX', operation); } catch (error) {
-      if (error instanceof AppError) throw error;
+      if (error instanceof AppError && error.statusCode !== 502) throw error;
       throw new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
     }
   }
@@ -113,11 +115,26 @@ export function createPrefsService({ config, imap, logger }) {
     },
     async put(session, body) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
-      const doc = normalize(body, config);
-      const json = JSON.stringify(doc);
-      if (Buffer.byteLength(json) > MAX_PREFS_BYTES) throw tooLarge();
-      await mailCall(session, client => setMetadata(client, '', PREFS_ENTRY, json));
-      session.prefs = doc;
+      const input = normalize(body, config);
+      await withSignatureStoreLock(session.email, () => mailCall(session, async client => {
+        let doc = input;
+        if (signatures) {
+          const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
+          const prepared = await signatures.preparePrefs({ session, client, prefs: input });
+          // The list API alone owns the legacy mirror. Even a pending mirror sync
+          // must not replace an unprocessed or preserved legacy edit here.
+          const actual = raw === null ? {} : JSON.parse(raw);
+          const mirror = actual.signatures ?? {};
+          const actualHash = signatureMirrorHash({ signatures: mirror });
+          const preparedHash = signatureMirrorHash(prepared.prefs);
+          if (actualHash !== preparedHash) logger?.info({ email: session.email, actualHash, preparedHash }, '서명 거울 동기화는 목록 저장 때 적용합니다.');
+          doc = { ...prepared.prefs, signatures: mirror };
+        }
+        const json = JSON.stringify(doc);
+        if (Buffer.byteLength(json) > MAX_PREFS_BYTES) throw tooLarge();
+        await setMetadataEntries(client, [[PREFS_ENTRY, json]]);
+        session.prefs = doc;
+      }));
     },
   };
 }

@@ -3,7 +3,8 @@ import { pathToFileURL } from 'node:url';
 const successKeys = {
   '/api/auth/login': ['user', 'csrf'], '/api/drafts': ['draftRef'], '/api/send': ['ok'],
   '/api/attachments': ['id', 'size'], '/api/messages': ['items', 'total'],
-  '/api/rules': ['rev'], '/api/password': ['relogin'],
+  '/api/rules': ['rev'], '/api/rules/import/xml/preview': ['items', 'counts', 'plan', 'expect'],
+  '/api/rules/import/xml': ['rev', 'applied', 'dropped', 'createdFolders'], '/api/password': ['relogin'],
 };
 
 export function classifyResponse({ status, contentType = '', body, failed = false }, path) {
@@ -56,6 +57,12 @@ export async function runProbe(base, { email, password, request = fetch, timeout
   await send('HTML 본문 임시저장', 'PUT', '/api/drafts', draft);
   await send('HTML 본문 보내기', 'POST', '/api/send', draft);
   await send('SQL 모양 제목 보내기', 'POST', '/api/send', { ...draft, subject: "SELECT * FROM messages WHERE subject = 'quote'; -- 합성 시험" });
+  // Both routes must reach the app through AppSec. Leave confirmation false
+  // for the write probe so it cannot replace the account's import/undo archive.
+  const xml = `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="subject" value="&quot;&lt;태그&gt; ' OR - 합성*&quot;"/><apps:property name="shouldMarkAsRead" value="true"/></entry></feed>`;
+  const xmlBody = { xml, fileName: 'synthetic-waf.xml', mode: 'append' };
+  const preview = await send('Gmail XML 미리보기', 'POST', '/api/rules/import/xml/preview', xmlBody);
+  await send('Gmail XML 적용(확인 전 거절)', 'POST', '/api/rules/import/xml', { ...xmlBody, confirm: false, ...(preview.value?.expect ? { expect: preview.value.expect } : {}) });
   let original; let savedRev;
   try {
     const rules = await send('규칙 원본 조회', 'GET', '/api/rules');

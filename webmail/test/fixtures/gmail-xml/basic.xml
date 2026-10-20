@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:settings="http://schemas.google.com/apps/2006">
+  <a:title>Synthetic filters</a:title>
+  <a:entry>
+    <a:title>Example filter</a:title>
+    <settings:property name="from" value="notice@example.com"/>
+    <settings:property name="shouldMarkAsRead" value="true"/>
+    <settings:property name="shouldStar" value="true"/>
+  </a:entry>
+  <a:entry>
+    <settings:property name="subject" value="정기 안내"/>
+    <settings:property name="label" value="News"/>
+    <settings:property name="shouldArchive" value="true"/>
+  </a:entry>
+</a:feed>

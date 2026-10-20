@@ -1,11 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import { AppError } from '../errors.js';
-import { validateAddress, validateDocument, validateText, MAX_SCRIPT_BYTES } from './model.js';
+import { validateAddress, validateDocument, validateText, MAX_SCRIPT_BYTES, minimumDocumentVersion } from './model.js';
 import { GMAIL_HEADER, gmailBlocks } from './import-gmail.js';
 import { rainloopBlocks } from './import-rainloop.js';
 import { unknownItems } from './import-syntax.js';
+import { generateScript } from './generate.js';
 
-export const rulesDocument = rules => ({ v: 1, rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
+export const rulesDocument = rules => ({
+  v: minimumDocumentVersion(rules),
+  rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' }
+});
 
 /** Only explicit administrator/server policy is accepted; never infer permissions from imported data. */
 export function importPolicy(input) {
@@ -52,7 +56,12 @@ export function importScript(source, { name = '', policy } = {}) {
   const moves = new Set(entries.map(entry => entry.rule?.actions.move).filter(Boolean));
   for (const [index, entry] of entries.entries()) {
     entry.item.n = index + 1;
-    if (!entry.rule) continue;
+    if (!entry.rule) {
+      if (['same', 'changed'].includes(entry.item.status)) {
+        entry.item.status = 'unconvertible'; entry.item.reason = '동작이 없어 반영 안 됨';
+      }
+      continue;
+    }
     if (moves.size > 1 && entry.rule.actions.move) {
       entry.item.changes.push('여러 라벨이 맞으면 첫 폴더 하나에만 들어가요'); entry.item.status = 'changed';
     }
@@ -62,17 +71,24 @@ export function importScript(source, { name = '', policy } = {}) {
       if (!context.checkFolders && entry.rule.actions.move) entry.item.warnings = ['폴더 존재 미확인'];
     } catch (error) {
       entry.item.status = 'unconvertible';
-      entry.item.reason = error.code === 'FORWARD_EXTERNAL' ? '외부 주소 전달은 가져올 수 없어요.' : `규칙 문서 검사 실패: ${error.reason ?? 'invalid'}`;
+      entry.item.reason = error.code === 'FORWARD_EXTERNAL' ? '외부 주소 전달은 가져올 수 없어요.' : '규칙의 값이나 형식을 옮길 수 없어요.';
       delete entry.rule;
     }
   }
-  let rules = entries.flatMap(entry => entry.rule ? [entry.rule] : []);
-  try { validateDocument(rulesDocument(rules), context); }
-  catch (error) {
-    for (const entry of entries.filter(entry => entry.rule)) {
-      entry.item.status = 'unconvertible'; entry.item.reason = `전체 규칙 제한을 넘었어요: ${error.code}`;
+  const rules = [];
+  let limitReason;
+  for (const entry of entries) {
+    if (!entry.rule) continue;
+    if (!limitReason) {
+      try {
+        generateScript(rulesDocument([...rules, entry.rule]), context);
+        rules.push(entry.rule); continue;
+      } catch (error) {
+        limitReason = rules.length >= 100 ? '규칙 100개 한도' : error.reason === 'script_too_large' ? '생성 스크립트 1MB 한도' : error.code === 'TOO_MANY_FORWARDS' ? '전달 주소 수 한도' : '전체 규칙 제한을 넘었어요.';
+      }
     }
-    rules = [];
+    entry.item.status = 'unconvertible'; entry.item.reason = limitReason;
+    delete entry.rule;
   }
   return { format, rules, items: entries.map(entry => entry.item), uncheckedFolders: entries.filter(entry => entry.item.warnings?.includes('폴더 존재 미확인')).length };
 }

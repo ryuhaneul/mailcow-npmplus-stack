@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { classifyResponse, runProbe, exitCode } from '../int/waf-probe.mjs';
 import { validateDocument } from '../../server/sieve/model.js';
@@ -10,6 +10,29 @@ import { listArtifacts, formatListing, parseArgs } from '../int/list-artifacts.m
 
 const credentials = { email: 'user1@mail.example.com', password: 'synthetic-password' };
 const original = { v: 1, rev: 1, rules: [], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+
+for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
+  test(`WAF ${mode} YAML limits Gmail XML exclusions to two IDs, POST and webmail hosts`, () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url));
+    const render = enabled => execFileSync('bash', ['-c', 'source scripts/lib/webmail-env.sh; source scripts/lib/waf.sh; waf_render_appsec_config'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, DOMAIN: 'example.com', WEBMAIL_ENABLE: enabled, WEBMAIL_HOSTNAMES: 'newmail.example.com,other.example.com', SNAPPYMAIL_ENABLE: 'true', WEBMAIL_ADMIN_ENABLE: enabled, WEBMAIL_ADMIN_HOSTNAME: 'admin.example.com', WAF_MODE: mode, WAF_ALLOWLIST: '' },
+    });
+    const yaml = render('true');
+    const blocks = yaml.split(/(?=^  - filter:)/m);
+    const xmlBlocks = blocks.filter(block => block.includes('/api/rules/import/xml'));
+    assert.equal(xmlBlocks.length, 2);
+    for (const [index, host] of ['newmail.example.com', 'other.example.com'].entries()) {
+      assert.equal(xmlBlocks[index], `  - filter: Is${band}Band == true && req.Host == "${host}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]\n    apply:\n      - Remove${band}BandRuleByID(941100)\n      - Remove${band}BandRuleByID(941130)\n`);
+    }
+    assert.ok(blocks.filter(block => !xmlBlocks.includes(block)).every(block => !/RuleByID\(941(?:100|130)\)/.test(block)));
+    const disabled = render('false');
+    assert.ok(!disabled.includes('/api/rules/import/xml'));
+    assert.ok(!/RuleByID\(941(?:100|130)\)/.test(disabled));
+  });
+}
+
 async function fakeServer(options = {}) {
   const requests = []; let rev = options.state === 'none' ? 0 : 1;
   const server = http.createServer(async (req, res) => {

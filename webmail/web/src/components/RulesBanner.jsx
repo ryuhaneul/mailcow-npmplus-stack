@@ -3,7 +3,7 @@ export default function RulesBanner({ data, busy, onAction }) {
   const activeName = data.activeName ?? data.activeScript;
   const messages = {
     none: '아직 저장한 필터가 없어요. 새 규칙을 저장하면 필터가 켜져요.',
-    import_pending: '기존 필터를 가져올 수 있어요. 달라지는 동작을 확인한 뒤 켜 주세요.',
+    import_pending: '기존 필터에서 반영할 수 있는 규칙만 가져와요. 반영 안 되는 규칙과 달라지는 동작을 확인한 뒤 켜 주세요.',
     import_blocked: '관리자가 기존 필터를 옮겨 드린 뒤 여기서 고칠 수 있어요.',
     inactive_other: activeName ? '필터가 다른 프로그램에서 바뀌었어요' : '필터가 꺼져 있어요',
     modified_externally: '다른 곳에서 필터 내용을 고쳤어요. 저장된 웹메일 규칙은 읽기 전용으로 보여요.',

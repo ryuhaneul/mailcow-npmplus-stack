@@ -256,7 +256,7 @@ test('move requires an existing personal allowed folder', () => {
 
 test('rule schema rejects missing, unknown and invalid fields', () => {
   const changes = [
-    d => { d.v = 2; }, d => { d.rev = -1; }, d => { d.rev = 1.1; }, d => { d.extra = true; },
+    d => { d.v = 3; }, d => { d.rev = -1; }, d => { d.rev = 1.1; }, d => { d.extra = true; },
     d => { delete d.blocked; }, d => { d.rules = null; }, d => { d.rules[0].id = 'short'; },
     d => { d.rules.push(structuredClone(d.rules[0])); }, d => { d.rules[0].enabled = 1; },
     d => { d.rules[0].stop = null; }, d => { d.rules[0].match = 'each'; },
@@ -328,8 +328,8 @@ test('state classification covers all seven states and the approved inactive-wit
   const script = generateScript(document(), context);
   const cases = [
     [{}, 'none'],
-    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [], items: [{ status: 'changed' }] } }, 'import_pending'],
-    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [], items: [{ status: 'same' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [rule()], items: [{ status: 'changed' }, { status: 'unconvertible' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [rule()], items: [{ status: 'same' }] } }, 'import_pending'],
     [{ activeName: 'legacy', importReport: { format: 'unknown', items: [] } }, 'import_blocked'],
     [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', items: [{ status: 'unconvertible' }] } }, 'import_blocked'],
     [{ activeName: 'legacy' }, 'import_blocked'],
@@ -388,12 +388,13 @@ test('vacation body: other controls stay 422, LF is allowed only in body, normal
   doc.vacation.body += 'a'; expectInvalid(doc);
 });
 
-const newerScript = await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8');
+const newerDoc = parseScript(await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8')).doc;
+const newerScript = newerEnvelope({ ...newerDoc, v: 3 });
 function newerEnvelope(doc, body = 'keep;\n') {
   const encoded = Buffer.from(JSON.stringify(doc)).toString('base64url');
   return `${MAGIC}\n${encoded.match(/.{1,120}/g).map(chunk => `# WEBMAIL-DATA ${chunk}\n`).join('')}# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
 }
-test('generated v2 grouped patterns and future versions are read-only even when inactive', () => {
+test('future grouped patterns and versions are read-only even when inactive', () => {
   const parsed = parseScript(newerScript);
   assert.equal(parsed.state, 'newer_version');
   assert.equal(parsed.rev, 3);
@@ -405,7 +406,7 @@ test('generated v2 grouped patterns and future versions are read-only even when 
   }
   assert.equal(parseScript(newerEnvelope({ ...parsed.doc, v: 3, rules: [null] })).state, 'newer_version');
 });
-test('broken v2 metadata or hash remains damaged', () => {
+test('broken future-version metadata or hash remains damaged', () => {
   const doc = parseScript(newerScript).doc;
   for (const script of [
     `${newerScript}# changed\n`, newerScript.replace(/# WEBMAIL-HASH [a-f0-9]{64}\n/, ''),
@@ -413,4 +414,89 @@ test('broken v2 metadata or hash remains damaged', () => {
     ...[null, 0, 1.5, '2'].map(v => newerEnvelope({ ...doc, v })),
     ...[{rev:-1},{rev:1.5},{rules:{}},{blocked:null},{vacation:null},{vacation:'invalid'}].map(change => newerEnvelope({...doc,...change})),
   ]) assert.deepEqual(parseScript(script), { state: 'damaged', doc: null, rev: null });
+});
+
+test('stage-two generated metadata uses the minimum version without changing input', () => {
+  const basic = document(); basic.v = 2;
+  const snapshot = structuredClone(basic);
+  assert.equal(parseScript(generateScript(basic, context)).doc.v, 1);
+  assert.deepEqual(basic, snapshot);
+  for (const conditions of [
+    [{ field: 'subject', op: 'matches', value: '*tail' }],
+    [{ field: 'subject', op: 'has', value: 'a' }, { match: 'any', conditions: [{ field: 'from', op: 'has', value: 'b' }, { field: 'subject', op: 'not', value: 'c' }] }],
+  ]) {
+    const doc = document(); doc.rules[0].conditions = conditions;
+    const before = structuredClone(doc);
+    const script = generateScript(doc, context);
+    const parsed = parseScript(script);
+    assert.equal(parsed.state, 'ok'); assert.equal(parsed.doc.v, 2);
+    assert.deepEqual(parsed.doc.rules, doc.rules);
+    assert.deepEqual(doc, before);
+    assert.ok(!script.includes('undefined'));
+  }
+});
+
+test('condition Sieve roundtrips normalized trees through the restricted reader', async () => {
+  const { Reader, readConditions } = await import('../../server/sieve/import-syntax.js');
+  const { normalizeConditionTree } = await import('../../server/sieve/condition-tree.js');
+  const a = { field: 'subject', op: 'matches', value: '*a\\*b\\?c\\\\"*' };
+  const b = { field: 'from', op: 'matches', value: '*@example.com' };
+  const c = { field: 'subject', op: 'not', value: 'missing' };
+  const attachment = { field: 'attachment', op: 'has', value: '' };
+  for (const tree of [
+    { match: 'all', conditions: [a] },
+    { match: 'all', conditions: [a, { match: 'any', conditions: [b, c] }] },
+    { match: 'any', conditions: [a, { match: 'all', conditions: [b, c] }] },
+    { match: 'all', conditions: [attachment, c] },
+  ]) {
+    const reader = new Reader(conditionTest(tree));
+    assert.deepEqual(readConditions(reader), normalizeConditionTree(tree));
+    reader.done();
+  }
+});
+
+test('condition reader normalizes joins and De Morgan but rejects unsupported exclusions', async () => {
+  const { Reader, readConditions } = await import('../../server/sieve/import-syntax.js');
+  const read = text => { const reader = new Reader(text); const result = readConditions(reader); reader.done(); return result; };
+  const h = 'header :contains "subject" "a"';
+  assert.deepEqual(read(`allof(allof(${h}, ${h}), ${h})`).conditions.length, 3);
+  assert.deepEqual(read(`not allof(${h}, ${h})`), { match: 'any', conditions: Array.from({ length: 2 }, () => ({ field: 'subject', op: 'not', value: 'a' })) });
+  assert.equal(read('address :all :matches "from" "prefix*"').conditions[0].op, 'start');
+  assert.equal(read('address :matches "from" "a*b"').conditions[0].op, 'matches');
+  for (const text of [
+    'not header :is "subject" "a"', 'not header :matches "subject" "a*b"',
+    'not header :contains ["to", "cc"] "a"', 'not header :contains "content-type" "multipart/mixed"',
+    'header :matches "subject" "a?b"', 'header :matches "subject" "a\\\\q"',
+    `allof(${h}, anyof(${h}, allof(${h}, ${h})))`,
+  ]) assert.throws(() => read(text), text);
+});
+
+// Unknown versions must not offer destructive recovery.
+test('intact future-version envelopes are newer_version; damaged future envelopes stay damaged', () => {
+  const doc = { ...document(), v: 3 };
+  doc.rules[0].conditions[0].op = 'matches';
+  const script = envelope(doc);
+  assert.deepEqual(parseScript(script), { state: 'newer_version', doc, rev: doc.rev });
+  assert.equal(classifyState({ activeName: 'legacy', webmailScript: script }).state, 'newer_version');
+  assert.equal(parseScript(`${script}# external\n`).state, 'damaged');
+  assert.equal(parseScript(envelope({ ...doc, rev: -1 })).state, 'damaged');
+});
+
+
+test('import and generation share minimum versions for groups, patterns and flat rules', async () => {
+  const { minimumDocumentVersion } = await import('../../server/sieve/model.js');
+  const { rulesDocument } = await import('../../server/sieve/import.js');
+  for (const [conditions, expected] of [
+    [[{ field: 'subject', op: 'has', value: 'basic' }], 1],
+    [[{ field: 'from', op: 'matches', value: '*@example.com' }], 2],
+    [[{ field: 'subject', op: 'has', value: 'basic' }, { match: 'any', conditions: [
+      { field: 'from', op: 'has', value: 'notice@example.com' },
+      { field: 'subject', op: 'has', value: 'news' },
+    ] }], 2],
+  ]) {
+    const doc = document(); doc.rules[0].conditions = conditions;
+    assert.equal(minimumDocumentVersion(doc.rules), expected);
+    assert.equal(rulesDocument(doc.rules).v, expected);
+    assert.equal(parseScript(generateScript(doc, context)).doc.v, expected);
+  }
 });

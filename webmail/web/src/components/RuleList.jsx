@@ -3,9 +3,11 @@ import Icon from './Icon.jsx';
 import { folders, folderColor } from '../state/folders.js';
 
 export function Condition({ condition: c }) {
+  if (c.conditions) return <>({c.conditions.map((child, i) => <span key={i}>{i > 0 && (c.match === 'all' ? ' 그리고 ' : ' 또는 ')}<Condition condition={child}/></span>)})</>;
   if (c.field === 'attachment') return <>첨부파일이 있으면</>;
   const field = c.field === 'subject' ? '제목' : c.field === 'from' ? '보낸 사람' : '받는 사람(To·Cc)';
   if (c.op === 'eq') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} <b>{c.value}</b>과 같으면</>;
+  if (c.op === 'matches') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} 패턴 <b>{c.value}</b>에 맞으면</>;
   if (c.op === 'start') return <>{field}{c.field === 'subject' ? '이' : ' 주소가'} <b>{c.value}</b>으로 시작하면</>;
   return <>{field}{c.field === 'subject' ? '에' : ' 이름·주소에'} <b>{c.value}</b>{c.op === 'not' ? '이 없으면' : '이 있으면'}</>;
 }
@@ -32,7 +34,7 @@ export default function RuleList({ rules, editable = false, busy = false, missin
     if (from === to || from < 0 || busy || !editable) return;
     const next = [...rules]; next.splice(to, 0, next.splice(from, 1)[0]); onChange(next);
   }
-  return <ul class="rules" aria-label="필터 규칙">{rules.map((rule, i) => <li class={`rule${rule.enabled ? '' : ' off'}`} key={rule.id}
+  return <ul class="rules" aria-label={editable ? '필터 규칙' : '필터 규칙 (읽기 전용)'}>{rules.map((rule, i) => <li class={`rule${rule.enabled ? '' : ' off'}`} key={rule.id}
     onDragOver={event => { if (editable && !busy) event.preventDefault(); }}
     onDrop={event => {event.preventDefault(); move(rules.findIndex(r => r.id === dragId), i); setDragId(null);}}>
     <span class="grip" draggable={editable && !busy} onDragStart={event => {setDragId(rule.id); event.dataTransfer.setData('text/plain', rule.id);}} onDragEnd={() => setDragId(null)} aria-hidden="true"><svg class="i s" viewBox="0 0 24 24"><path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01"/></svg></span>

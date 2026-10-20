@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!DOCTYPE feed [
+ <!ENTITY a "0123456789">
+ <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+ <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+ <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">
+ <!ENTITY e "&d;&d;&d;&d;&d;&d;&d;&d;&d;&d;">
+]>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006">
+ <entry><apps:property name="subject" value="&e;"/><apps:property name="shouldStar" value="true"/></entry>
+</feed>

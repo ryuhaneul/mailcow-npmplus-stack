@@ -104,6 +104,10 @@ _waf_webmail_crs_exclusions() {
   - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.URL.Path == "/api/send" && req.Method == "POST") || (req.URL.Path == "/api/drafts" && req.Method == "PUT"))
     apply:
       - Remove${band}BandRuleByID(930120)
+  - filter: Is${band}Band == true && req.Host == "${domain}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]
+    apply:
+      - Remove${band}BandRuleByID(941100)
+      - Remove${band}BandRuleByID(941130)
   - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing"]))
     apply:
       - Remove${band}BandRuleByTag("attack-xss")

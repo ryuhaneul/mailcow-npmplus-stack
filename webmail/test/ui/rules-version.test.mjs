@@ -10,7 +10,7 @@ import { rulesFixture } from '../../web/dev/fake-rules.js';
 import { parseScript } from '../../server/sieve/parse.js';
 
 await test('newer filter versions hide unsupported summaries and all write controls', async t => {
-  const doc = parseScript(await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8')).doc;
+  const doc = { ...parseScript(await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8')).doc, v: 3 };
   const fake = createFakeApi({ authenticated: true });
   fake.state.rules = rulesFixture('newer_version', { doc, rev: doc.rev, prevAvailable: false });
   const server = await createServer({ configFile: false, root: fileURLToPath(new URL('../../web', import.meta.url)), logLevel: 'error', plugins: [preact(), { name: 'rules-version-test-api', configureServer(server) { server.middlewares.use(fake.middleware); } }], server: { host: '127.0.0.1', port: 0 } });

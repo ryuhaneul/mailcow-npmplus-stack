@@ -1,4 +1,6 @@
 import { AppError } from '../errors.js';
+import { validateConditionTree } from './condition-tree.js';
+import { patternProblem } from './glob.js';
 
 export const MAX_SCRIPT_BYTES = 1024 * 1024;
 export const SCRIPT_NAME = 'webmail-rules';
@@ -59,7 +61,7 @@ export function allowedMoveFolder(folder) {
  */
 export function validateDocument(doc, { internalDomains = [], folders = [], maxRedirects = 100, checkPolicy = true, checkFolders = true } = {}) {
   object(doc, '$', ['v', 'rev', 'rules', 'blocked', 'vacation', 'importedFrom'], ['v', 'rev', 'rules', 'blocked', 'vacation']);
-  if (doc.v !== 1) invalid('$.v', 'version');
+  if (![1, 2].includes(doc.v)) invalid('$.v', 'version');
   if (!Number.isSafeInteger(doc.rev) || doc.rev < 0) invalid('$.rev', 'revision');
   list(doc.rules, '$.rules', 0, 100);
   const ids = new Set();
@@ -73,17 +75,30 @@ export function validateDocument(doc, { internalDomains = [], folders = [], maxR
     ids.add(rule.id);
     bool(rule.enabled, `${p}.enabled`);
     bool(rule.stop, `${p}.stop`);
-    if (!['all', 'any'].includes(rule.match)) invalid(`${p}.match`, 'match');
-    list(rule.conditions, `${p}.conditions`, 1, 10);
-    for (const [j, condition] of rule.conditions.entries()) {
-      const c = `${p}.conditions[${j}]`;
-      object(condition, c, ['field', 'op', 'value']);
-      if (!['from', 'to', 'subject', 'attachment'].includes(condition.field)) invalid(`${c}.field`, 'field');
-      if (!['has', 'not', 'eq', 'start'].includes(condition.op)) invalid(`${c}.op`, 'operator');
-      if (condition.field === 'attachment') {
-        if (condition.op !== 'has' || condition.value !== '') invalid(c, 'attachment');
-      } else text(condition.value, `${c}.value`, { min: 1, max: 200 });
+    const problem = validateConditionTree(rule);
+    if (problem) invalid(`${p}${problem.path.slice(1)}`, problem.reason);
+    function conditions(items, path) {
+      for (const [j, condition] of items.entries()) {
+        const c = `${path}[${j}]`;
+        if (Object.hasOwn(condition, 'conditions')) {
+          if (doc.v === 1) invalid('$.v', 'version');
+          conditions(condition.conditions, `${c}.conditions`);
+          continue;
+        }
+        object(condition, c, ['field', 'op', 'value']);
+        if (!['from', 'to', 'subject', 'attachment'].includes(condition.field)) invalid(`${c}.field`, 'field');
+        if (!['has', 'not', 'eq', 'start', 'matches'].includes(condition.op)) invalid(`${c}.op`, 'operator');
+        if (condition.field === 'attachment') {
+          if (condition.op !== 'has' || condition.value !== '') invalid(c, 'attachment');
+        } else text(condition.value, `${c}.value`, { min: 1, max: 200 });
+        if (condition.op === 'matches') {
+          if (doc.v === 1) invalid('$.v', 'version');
+          const reason = patternProblem(condition.value);
+          if (reason) invalid(`${c}.value`, reason);
+        }
+      }
     }
+    conditions(rule.conditions, `${p}.conditions`);
     const a = `${p}.actions`;
     object(rule.actions, a, ['move', 'trash', 'read', 'star', 'forward'], []);
     const actions = rule.actions;

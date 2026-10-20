@@ -33,6 +33,20 @@ test('rule validation blocks unsafe conditions, missing folders, empty actions a
   assert.ok(ruleProblem({...rule,actions:{forward:['user@external.example.org']}},[folder],['example.com'],'user@external.example.org'));
 });
 
+test('browser rule form accepts nested opposite joins and escaped literal question patterns', () => {
+  const grouped = { ...rule, conditions: [rule.conditions[0], { match: 'any', conditions: [
+    { field: 'from', op: 'matches', value: '*@example.com' },
+    { field: 'subject', op: 'matches', value: 'question\\?' },
+  ] }] };
+  assert.equal(ruleProblem(grouped, [folder], [], ''), null);
+  const invalid = structuredClone(grouped);
+  invalid.conditions[1].conditions[1].value = 'question?';
+  assert.ok(ruleProblem(invalid, [folder], [], ''));
+  invalid.conditions[1].conditions[1].value = 'question\\?';
+  invalid.conditions[1].match = 'all';
+  assert.ok(ruleProblem(invalid, [folder], [], ''));
+});
+
 // Exercise the actual JSX screens with the shared API/session handling.
 test('disabled Sieve shows existing filter notices and leaves composing and the session usable', async t => {
   const { registerHooks } = await import('node:module');

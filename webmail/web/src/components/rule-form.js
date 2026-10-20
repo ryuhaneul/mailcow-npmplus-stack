@@ -1,3 +1,5 @@
+import { validateConditionTree } from '../../../server/sieve/condition-tree.js';
+import { patternProblem } from '../../../server/sieve/glob.js';
 // Browser validation mirrors the rule fields accepted by server/sieve/model.js.
 const lower = value => value.replace(/[A-Z]/g, c => c.toLowerCase());
 const safe = value => typeof value === 'string' && value.isWellFormed() && !/[\u0000-\u001f\u007f-\u009f]/u.test(value) && !value.includes('${');
@@ -18,8 +20,26 @@ export function forwardStatus(text, internalDomains) {
   return { addresses, external, valid: valid && !external };
 }
 export function ruleProblem(rule, allFolders, internalDomains, forwardText) {
-  if (rule.conditions.length < 1 || rule.conditions.length > 10) return '조건은 1개부터 10개까지 넣어 주세요.';
-  if (rule.conditions.some(c => c.field !== 'attachment' && (!safe(c.value) || [...c.value].length < 1 || [...c.value].length > 200))) return '조건 값은 제어문자와 ${ 없이 1~200자로 입력해 주세요.';
+  if (validateConditionTree(rule)) return '조건 묶음 모양을 확인해 주세요. 조건은 묶음마다 2~10개, 전체 20개까지 넣을 수 있어요.';
+  function conditionProblem(items) {
+    for (const c of items) {
+      if (Object.hasOwn(c, 'conditions')) {
+        const problem = conditionProblem(c.conditions);
+        if (problem) return problem;
+        continue;
+      }
+      if (Object.keys(c).some(key => !['field', 'op', 'value'].includes(key))
+        || !['from', 'to', 'subject', 'attachment'].includes(c.field)
+        || !['has', 'not', 'eq', 'start', 'matches'].includes(c.op)) return '조건 항목과 방식을 확인해 주세요.';
+      if (c.field === 'attachment') {
+        if (c.op !== 'has' || c.value !== '') return '첨부파일 조건을 확인해 주세요.';
+      } else if (!safe(c.value) || [...c.value].length < 1 || [...c.value].length > 200) return '조건 값은 제어문자와 ${ 없이 1~200자로 입력해 주세요.';
+      if (c.op === 'matches' && patternProblem(c.value)) return '패턴은 별표 20개까지 사용할 수 있어요. 물음표와 잘못된 이스케이프를 확인해 주세요.';
+    }
+    return null;
+  }
+  const problem = conditionProblem(rule.conditions);
+  if (problem) return problem;
   const a = rule.actions;
   if (Object.hasOwn(a, 'move') && (!allFolders.some(f => f.path === a.move && personalFolder(f)) || a.trash)) return '옮길 개인 폴더를 선택해 주세요. 삭제와 함께 고를 수 없습니다.';
   if (a.forward && !forwardStatus(forwardText, internalDomains).valid) return '전달 받을 사내 메일 주소를 쉼표로 나누어 1~3개 입력해 주세요.';

@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { parse } from '@babel/parser';
 import { Writable } from 'node:stream';
 import { createApp } from '../../server/app.js';
 import { loadConfig } from '../../server/config.js';
@@ -247,4 +250,60 @@ test('config: legacy public environment without LOGO_DIR starts, optional absolu
   assert.equal(Object.hasOwn(env, 'LOGO_DIR'), false); const app = await fixture(t); assert.equal((await app.inject('/api/config')).json().logo, null);
   assert.equal(loadConfig(env).logoDir, ''); assert.equal(loadConfig({ ...env, LOGO_DIR: '' }).logoDir, ''); assert.equal(loadConfig({ ...env, LOGO_DIR: '/brand' }).logoDir, '/brand');
   for (const value of ['relative', '/bad\0path', 7]) assert.throws(() => loadConfig({ ...env, LOGO_DIR: value }), /LOGO_DIR/);
+});
+
+
+test('Docker web-build copies every browser server import and its relative dependencies', () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const server = join(root, 'server');
+  const required = new Set();
+  const visited = new Set();
+  function visit(file) {
+    if (visited.has(file)) return;
+    visited.add(file);
+    if (file.startsWith(`${server}/`)) required.add(file);
+    const ast = parse(readFileSync(file, 'utf8'), { sourceType: 'module', plugins: ['jsx'] });
+    function walk(node) {
+      if (!node || typeof node !== 'object') return;
+      const source = ['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression'].includes(node.type)
+        ? node.source : node.type === 'CallExpression' && node.callee.type === 'Import' ? node.arguments[0] : null;
+      if (source?.type === 'StringLiteral' && source.value.startsWith('.')) {
+        const base = resolve(dirname(file), source.value.split(/[?#]/)[0]);
+        const dependency = [base, `${base}.js`, `${base}.jsx`, join(base, 'index.js'), join(base, 'index.jsx')]
+          .find(candidate => { try { return statSync(candidate).isFile(); } catch { return false; } });
+        assert.ok(dependency, `Unresolved relative import: ${relative(root, file)} -> ${source.value}`);
+        if (/\.[cm]?jsx?$/.test(dependency)) visit(dependency);
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(walk);
+        else if (value && typeof value === 'object') walk(value);
+      }
+    }
+    walk(ast);
+  }
+  function scan(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) scan(file);
+      else if (/\.[cm]?jsx?$/.test(file)) visit(file);
+    }
+  }
+  scan(join(root, 'web/src'));
+  const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+  const stage = dockerfile.split(/^FROM .* AS web-build\s*$/mi)[1]?.split(/^FROM /mi)[0];
+  assert.ok(stage, 'Dockerfile must have a web-build stage');
+  const copies = [...stage.replace(/\\\r?\n/g, ' ').matchAll(/^COPY\s+(.+)$/gm)].flatMap(([, instruction]) => {
+    if (/--from=/.test(instruction)) return [];
+    const args = instruction.replace(/--\S+\s*/g, '').trim();
+    const parts = args.startsWith('[') ? JSON.parse(args) : args.split(/\s+/);
+    const destination = resolve(root, parts.pop().replace(/^\/app\/?/, './'));
+    return parts.map(source => ({ source: resolve(root, source), destination }));
+  });
+  assert.ok(required.size > 0, 'Browser server imports must be discovered');
+  const missing = [...required].filter(file => !copies.some(({ source, destination }) => {
+    const suffix = relative(source, file);
+    if (statSync(source).isDirectory()) return !suffix.startsWith('..') && resolve(destination, suffix) === file;
+    return source === file && (destination === file || join(destination, source.split('/').at(-1)) === file);
+  })).map(file => relative(root, file));
+  assert.deepEqual(missing, [], 'Server dependencies missing from Docker web-build COPY');
 });

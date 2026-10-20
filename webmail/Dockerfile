@@ -4,8 +4,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 # web/ 입력은 F01 산출물이다.
-# 관리 화면이 서버 문구를 같이 씀.
+# 화면이 서버 문구와 순수 규칙 검사 함수를 같이 씀.
 COPY server/admin/messages.js ./server/admin/messages.js
+COPY server/sieve/condition-tree.js server/sieve/glob.js ./server/sieve/
 COPY web ./web
 RUN npm run build && npm run build:admin
 

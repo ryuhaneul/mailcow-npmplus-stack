@@ -387,3 +387,30 @@ test('vacation body: other controls stay 422, LF is allowed only in body, normal
   assert.equal([...doc.vacation.body].length, 4000);
   doc.vacation.body += 'a'; expectInvalid(doc);
 });
+
+const newerScript = await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8');
+function newerEnvelope(doc, body = 'keep;\n') {
+  const encoded = Buffer.from(JSON.stringify(doc)).toString('base64url');
+  return `${MAGIC}\n${encoded.match(/.{1,120}/g).map(chunk => `# WEBMAIL-DATA ${chunk}\n`).join('')}# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+}
+test('generated v2 grouped patterns and future versions are read-only even when inactive', () => {
+  const parsed = parseScript(newerScript);
+  assert.equal(parsed.state, 'newer_version');
+  assert.equal(parsed.rev, 3);
+  assert.equal(parsed.doc.rules[0].conditions[0].conditions[0].op, 'matches');
+  for (const activeName of ['webmail-rules', 'legacy', null]) {
+    const result = classifyState({ activeName, webmailScript: newerScript });
+    assert.equal(result.state, 'newer_version');
+    assert.deepEqual(result.missingFolders, []);
+  }
+  assert.equal(parseScript(newerEnvelope({ ...parsed.doc, v: 3, rules: [null] })).state, 'newer_version');
+});
+test('broken v2 metadata or hash remains damaged', () => {
+  const doc = parseScript(newerScript).doc;
+  for (const script of [
+    `${newerScript}# changed\n`, newerScript.replace(/# WEBMAIL-HASH [a-f0-9]{64}\n/, ''),
+    newerScript.replace('# WEBMAIL-DATA ', '# WEBMAIL-DATA !'),
+    ...[null, 0, 1.5, '2'].map(v => newerEnvelope({ ...doc, v })),
+    ...[{rev:-1},{rev:1.5},{rules:{}},{blocked:null},{vacation:null},{vacation:'invalid'}].map(change => newerEnvelope({...doc,...change})),
+  ]) assert.deepEqual(parseScript(script), { state: 'damaged', doc: null, rev: null });
+});

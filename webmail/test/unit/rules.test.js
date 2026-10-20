@@ -23,6 +23,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const policy = { internalDomains: ['example.com'], folders: ['Archive', 'Projects', 'Projects/Sub', 'Empty'].map(path => ({ path })), addresses: ['user@example.com', 'alias@example.com'] };
 const document = (rev = 3) => ({ v: 1, rev, rules: [{ id: 'rule0001', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: '회의' }], actions: { move: 'Projects' }, stop: false }], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
 const legacy = await readFile(new URL('../fixtures/sieve/gmail-basic.sieve', import.meta.url), 'utf8');
+const newer = await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8');
 const unknown = '# synthetic example.com\nif true { keep; }\n';
 const mutating = commands => commands.filter(row => ['CHECKSCRIPT', 'PUTSCRIPT', 'SETACTIVE'].includes(row.command));
 const useful = commands => commands.filter(row => !['STARTTLS', 'AUTHENTICATE', 'LOGOUT'].includes(row.command)).map(row => row.command + (row.name ? ` ${row.name}` : ''));
@@ -35,6 +36,7 @@ async function fixture(t, state = 'ok') {
     import_blocked: { scripts: [['legacy', unknown]], activeName: 'legacy' },
     inactive_other: { scripts: [[web, good], ['legacy', unknown]], activeName: 'legacy' },
     modified_externally: { scripts: [[web, `${good}# external\n`]], activeName: web },
+    newer_version: { scripts: [[web, newer], [prev, previous]], activeName: web },
     damaged: { scripts: [[web, '# damaged'], [prev, previous]], activeName: web },
   };
   const server = await rulesServer(t, { certificate, privateKey, ...states[state] });
@@ -106,12 +108,13 @@ test('rules GET screen fields require a session', async t => {
   assert.equal(response.json().internalDomains, undefined);
   assert.deepEqual(f.server.commands, []);
 });
-for (const state of ['ok', 'none', 'import_pending', 'import_blocked', 'inactive_other', 'modified_externally', 'damaged']) {
+for (const state of ['ok', 'none', 'import_pending', 'import_blocked', 'inactive_other', 'modified_externally', 'damaged', 'newer_version']) {
   test(`rules GET ${state} is read-only and preserves active script`, async t => {
     const f = await fixture(t, state); const active = f.server.activeName;
     const response = await f.request('GET', '/api/rules'); status(response, 200);
     const body = response.json(); assert.equal(body.state, state); assert.equal(body.activeScript, active); assert.equal(body.activeName, active);
     assert.equal(response.headers['cache-control'], 'no-store'); assert.deepEqual(mutating(f.server.commands), []);
+    if (state === 'newer_version') { assert.equal(body.prevAvailable, false); assert.equal(body.doc.v, 2); assert.deepEqual(body.missingFolders, []); }
     if (state === 'none') { assert.equal(body.rev, 0); assert.deepEqual(body.doc.rules, []); assert.equal(body.doc.vacation.subject, '부재중입니다'); }
     if (state === 'import_pending') { assert.equal(body.importReport.sourceName, 'legacy'); assert.equal(body.importReport.sourceSha256, hash(legacy)); }
   });

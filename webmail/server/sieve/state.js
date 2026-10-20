@@ -13,6 +13,6 @@ export function classifyState({ activeName = null, webmailScript = null, folders
     return { state, activeName, doc: null, rev: null, missingFolders: [], ...(importReport === undefined ? {} : { importReport }) };
   }
   const parsed = parseScript(webmailScript);
-  const missingFolders = [...new Set((parsed.doc?.rules ?? []).map(rule => rule.actions.move).filter(path => path && !folders.some(folder => folder.path === path && allowedMoveFolder(folder))))];
+  const missingFolders = [...new Set((parsed.state === 'newer_version' ? [] : parsed.doc?.rules ?? []).map(rule => rule.actions.move).filter(path => path && !folders.some(folder => folder.path === path && allowedMoveFolder(folder))))];
   return { ...parsed, state: parsed.state === 'ok' && activeName !== SCRIPT_NAME ? 'inactive_other' : parsed.state, activeName, missingFolders };
 }

@@ -56,7 +56,8 @@ export default function FiltersPage() {
       {!tab && data && !sieveDisabled && <>
         <RulesBanner data={data} busy={busy || reloadNeeded} onAction={setConfirmation}/>
         {['ok', 'none'].includes(data.state) && <div class="lead"><p>받은 메일은 위에서부터 차례로 규칙에 맞춰 봅니다. 맞는 규칙이 여러 개면 모두 적용되고, ‘이후 규칙 멈춤’이 붙은 규칙에서 멈춥니다. 손잡이를 끌거나 화살표로 순서를 바꾸세요.</p>{editable && !busy && <a class="btn pri" href="#rule"><Icon name="plus" size="s"/>새 규칙</a>}</div>}
-        {data.doc && <>{data.doc.rules.length ? <RuleList rules={data.doc.rules} editable={editable} busy={busy} missingFolders={data.missingFolders} onChange={rules => mutate('', {baseRev: data.rev, doc: {...data.doc, rules}}, 'PUT')}/> : <p>아직 규칙이 없어요.</p>}</>}
+        {data.state === 'newer_version' && <p>이 버전에서는 규칙 조건을 표시할 수 없어요.</p>}
+        {data.doc && data.state !== 'newer_version' && <>{data.doc.rules.length ? <RuleList rules={data.doc.rules} editable={editable} busy={busy} missingFolders={data.missingFolders} onChange={rules => mutate('', {baseRev: data.rev, doc: {...data.doc, rules}}, 'PUT')}/> : <p>아직 규칙이 없어요.</p>}</>}
         {data.importReport && <ImportReview report={data.importReport} pending={data.state === 'import_pending'} busy={busy || reloadNeeded} onConfirm={() => mutate('/import', {confirm: true, sourceName: data.importReport.sourceName, sourceSha256: data.importReport.sourceSha256})}/>}
         <div class="hint"><Icon name="funnel" size="s"/>회사 정책상 회사 밖 주소로 자동 전달하는 규칙은 만들 수 없습니다. 사내 주소{data.internalDomains?.length > 0 && `(@${data.internalDomains[0]}${data.internalDomains.length > 1 ? ' 등' : ''})`}로만 전달됩니다. 전달은 앞으로 오는 메일에만 해요.</div>
       </>}

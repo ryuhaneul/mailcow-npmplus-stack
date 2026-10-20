@@ -7,6 +7,7 @@ export default function RulesBanner({ data, busy, onAction }) {
     import_blocked: '관리자가 기존 필터를 옮겨 드린 뒤 여기서 고칠 수 있어요.',
     inactive_other: activeName ? '필터가 다른 프로그램에서 바뀌었어요' : '필터가 꺼져 있어요',
     modified_externally: '다른 곳에서 필터 내용을 고쳤어요. 저장된 웹메일 규칙은 읽기 전용으로 보여요.',
+    newer_version: '새 버전 웹메일에서 만든 필터예요. 지금은 볼 수만 있어요. 필터는 서버에서 계속 동작해요.',
     damaged: '저장된 필터 데이터를 읽을 수 없어요. 지금은 규칙을 고칠 수 없어요.',
   };
   const action = state === 'inactive_other' ? {label: '다시 켜기', path: 'reactivate', detail: activeName ? `지금 켜진 ‘${activeName}’ 필터는 꺼집니다. 지우지는 않아요.` : '저장된 웹메일 필터를 다시 켭니다.'}

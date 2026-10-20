@@ -1,4 +1,6 @@
 import { AppError } from '../errors.js';
+import { encodePath, hasCapability } from 'imapflow/lib/tools.js';
+import { checkBudget, matchesFolderFilters, sortUids } from './list-query.js';
 import { decodeRef, assertUidValidity } from './ref.js';
 import { mailboxRights } from './folders.js';
 
@@ -77,5 +79,114 @@ export function createActionService({ imap }) {
     if (failed.length === refs.length && failed.every(item => item.code === 'FOLDER_READONLY')) throw readonly();
     return { done, failed };
   }
-  return { run };
+  // Scope callers supply one immutable source group and Q's resolved conditions.
+  // archive/move destinations are fixed by S; this primitive never creates folders.
+  // onOutcome({ ref, status, code?, retryable? }) is synchronous and must not throw.
+  // unknown is disjoint from failed; each input ref occupies exactly one result array.
+  async function runScopedGroup(session, {
+    refs, action, resolvedTarget, resolvedScope, budget, minStartRemainingMs = 10000, onOutcome = () => {},
+  }) {
+    const group = validate({ refs, action, target: resolvedTarget });
+    const path = group[0].ref.path;
+    if (group.some(item => item.ref.path !== path) || new Set(refs).size !== refs.length ||
+        !resolvedScope || !Array.isArray(resolvedScope.filters) || !Array.isArray(resolvedScope.imap) ||
+        typeof budget?.remainingMs !== 'function' || !Number.isFinite(minStartRemainingMs) || minStartRemainingMs < 0) throw invalid();
+    const moving = !['seen', 'unseen', 'flag', 'unflag', 'delete-forever'].includes(action);
+    const target = { move: resolvedTarget, archive: resolvedTarget, trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[action];
+    if (moving && (typeof target !== 'string' || !target || /[\0\r\n]/.test(target) || special(target))) {
+      throw new AppError(422, 'FOLDER_NOT_ALLOWED', '이동할 폴더를 확인해 주세요.');
+    }
+    const result = { processed: [], skipped: [], failed: [], unknown: [], remaining: [], reason: 'complete' };
+    const pending = new Map(group.map(item => [item.token, item]));
+    let sent = false, mutated = false, finished = false;
+    const exhausted = () => Object.assign(new AppError(503, 'MAIL_UNAVAILABLE', '메일 처리 시간이 다 됐어요.'), { budgetExhausted: true });
+    const check = () => { if (finished) throw exhausted(); checkBudget(budget); };
+    const settle = (status, code) => {
+      if (finished) return;
+      for (const token of pending.keys()) {
+        const outcome = code ? { ref: token, code, retryable: status === 'failed' && code === 'MAIL_UNAVAILABLE' } : token;
+        result[status].push(outcome);
+        pending.delete(token);
+        onOutcome({ ref: token, status, ...(code ? { code, retryable: outcome.retryable } : {}) });
+      }
+    };
+    const skip = item => {
+      if (finished || !pending.delete(item.token)) return;
+      result.skipped.push(item.token);
+      onOutcome({ ref: item.token, status: 'skipped' });
+    };
+    try {
+      await imap.withMailbox(session, path, async client => {
+        check();
+        // A replacement mailbox must stop the selection before any mutation.
+        try { for (const item of group) assertUidValidity(client, item.ref); }
+        catch { throw new AppError(409, 'STALE_SCOPE', '메일함이 바뀌었어요. 다시 선택해 주세요.'); }
+        if (path === 'Shared' || path.startsWith('Shared/')) throw readonly();
+        const rights = await mailboxRights(client, path);
+        check();
+        const seen = action === 'seen' || action === 'unseen';
+        if (!(seen ? rights.seen : ['flag', 'unflag'].includes(action) ? rights.write : rights.delete)) throw readonly();
+        const existing = new Set();
+        for await (const row of client.fetch(group.map(item => item.ref.uid).join(','), { uid: true }, { uid: true })) {
+          check(); existing.add(row.uid);
+        }
+        check();
+        for (const item of group) if (!existing.has(item.ref.uid)) skip(item);
+        if (!matchesFolderFilters(path, resolvedScope.filters)) settle('skipped');
+        if (!pending.size) return;
+        if (resolvedScope.imap.length) {
+          const uids = new Set(await sortUids(client, [...resolvedScope.imap, { uid: [...pending.values()].map(item => item.ref.uid).join(',') }], resolvedScope.searching, { budget }));
+          check();
+          for (const item of pending.values()) if (!uids.has(item.ref.uid)) skip(item);
+        }
+        if (!pending.size) return;
+        if (moving) {
+          check();
+          if (!hasCapability(client, 'MOVE')) throw new AppError(422, 'MOVE_UNSUPPORTED', '메일 서버가 안전한 이동을 지원하지 않아요.');
+          const folders = await client.list({ listOnly: true });
+          check();
+          if (!folders.some(folder => folder.path === target && !folder.flags?.has('\\Noselect'))) {
+            throw new AppError(422, 'FOLDER_NOT_ALLOWED', '이동할 폴더를 확인해 주세요.');
+          }
+          if (!(await mailboxRights(client, target)).insert) throw readonly();
+          check();
+          if (target === path) { settle('processed'); return; }
+        }
+        const set = [...pending.values()].map(item => item.ref.uid).join(',');
+        const command = async (name, attributes) => {
+          check();
+          if (budget.remainingMs() < minStartRemainingMs) throw exhausted();
+          // Use raw commands: messageMove/Flags swallow transport errors as false.
+          // From this boundary onward any unconfirmed result is conservatively unknown.
+          sent = true;
+          const response = await client.exec(name, attributes);
+          response.next();
+          if (response.response?.command?.toUpperCase() !== 'OK') throw new Error('Unconfirmed command');
+          sent = false; mutated = true;
+        };
+        const sequence = { type: 'SEQUENCE', value: set };
+        if (['seen', 'unseen', 'flag', 'unflag'].includes(action)) {
+          const operation = ['seen', 'flag'].includes(action) ? '+FLAGS' : '-FLAGS';
+          await command('UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: seen ? '\\Seen' : '\\Flagged' }]]);
+        } else if (action === 'delete-forever') {
+          await command('UID STORE', [sequence, { type: 'ATOM', value: '+FLAGS' }, [{ type: 'ATOM', value: '\\Deleted' }]]);
+          await command('UID EXPUNGE', [sequence]);
+        } else {
+          await command('UID MOVE', [sequence, { type: 'ATOM', value: encodePath(client, target) }]);
+        }
+        settle('processed');
+      }, { budget });
+    } catch (error) {
+      if (error.code === 'STALE_SCOPE') throw error;
+      if (error.budgetExhausted) result.reason = 'budget';
+      if (sent || mutated) settle('unknown', 'ACTION_OUTCOME_UNKNOWN');
+      else if (!error.budgetExhausted) {
+        if (['SESSION_EXPIRED', 'NO_SESSION'].includes(error.code)) throw error;
+        settle('failed', error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE');
+      }
+    } finally { finished = true; }
+    result.remaining = [...pending.keys()];
+    return result;
+  }
+  return { run, runScopedGroup };
 }

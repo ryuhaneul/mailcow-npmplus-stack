@@ -1,6 +1,7 @@
 import { route, navigate } from './router.js';
-import { list, cursor, listLocation, isListRoute, runAction, deleteMessages, listDeleteFolder } from './state/list.js';
-import { toggleSelection, selection } from './state/selection.js';
+import { list, cursor, listLocation, isListRoute, runAction, acting } from './state/list.js';
+import { toggleSelection, selectionMode } from './state/selection.js';
+import { runSelectedAction, deleteSelectedMessages, scopedRequestPending, scopedListFrozen } from './state/scoped-actions.js';
 const scopes = new Map();
 // Example: registerShortcuts('read', { r: reply, a: replyAll, f: forward }).
 // Compose may register 'Ctrl+Enter' and 'Ctrl+Shift+H', including inside inputs.
@@ -40,13 +41,14 @@ export function initMailboxShortcuts() {
     if(key==='u'&&route.value.name==='read'){event.preventDefault();navigate(listLocation.value);return;}
     if(!isListRoute(route.value))return;
     const items=list.value.items,index=items.findIndex(item=>item.ref===cursor.value),item=items[index];
+    const selectable=item&&!item.unavailable&&item.retryable!==false,locked=acting.value||scopedRequestPending.value||scopedListFrozen();
     if(key==='j'||key==='k'){
       event.preventDefault();const next=items[Math.max(0,Math.min(items.length-1,index+(key==='j'?1:-1)))];
       if(next){cursor.value=next.ref;const row=document.getElementById(`mail-${next.ref}`);row?.focus({preventScroll:true});row?.scrollIntoView({block:'nearest'});}return;
     }
-    if(key==='enter'&&!event.target.closest('button,a,[role=checkbox]')&&item){event.preventDefault();navigate(`read/${encodeURIComponent(item.ref)}`);}
-    else if(key==='x'&&item){event.preventDefault();toggleSelection(item.ref);}
-    else if(key==='s'&&item){event.preventDefault();void runAction(item.flagged?'unflag':'flag',[item.ref]);}
-    else if(['e','#','!'].includes(key)&&item){event.preventDefault();const refs=selection.value.size?[...selection.value]:[item.ref];void (key==='#'?deleteMessages(refs,listDeleteFolder()):runAction(key==='e'?'archive':list.value.params.view==='spam'?'notspam':'spam',refs));}
+    if(key==='enter'&&!event.target.closest('button,a,[role=checkbox]')&&item&&!item.unavailable){event.preventDefault();navigate(`read/${encodeURIComponent(item.ref)}`);}
+    else if(key==='x'&&selectable&&!locked){event.preventDefault();toggleSelection(item.ref);}
+    else if(key==='s'&&selectable&&!locked){event.preventDefault();void runAction(item.flagged?'unflag':'flag',[item.ref]);}
+    else if(['e','#','!'].includes(key)&&(selectable||selectionMode.value!=='none')&&!locked){event.preventDefault();const fallback=selectable?[item.ref]:[];void (key==='#'?deleteSelectedMessages(fallback):runSelectedAction(key==='e'?'archive':list.value.params.view==='spam'?'notspam':'spam',undefined,fallback));}
   });
 }

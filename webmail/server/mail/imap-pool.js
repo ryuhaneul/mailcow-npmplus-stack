@@ -23,6 +23,7 @@ export function mailTlsOptions(config) {
 }
 
 const unavailable = () => new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
+const budgetExhausted = () => Object.assign(unavailable(), { budgetExhausted: true });
 const expired = () => new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
 const authRejected = error => error?.authenticationFailed === true || error?.code === 'AUTH_FAILED';
 
@@ -37,11 +38,31 @@ function deadline(promise, ms, client) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// The caller supplies one monotonic request budget, shared across all mailboxes.
+async function budgetDeadline(operation, maximumMs, budget, onTimeout = () => {}) {
+  const remaining = budget.remainingMs();
+  if (remaining <= 0) throw budgetExhausted();
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(remaining <= maximumMs ? budgetExhausted() : unavailable());
+    }, Math.min(maximumMs, remaining));
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => {
+      if (budget.remainingMs() <= 0) throw budgetExhausted();
+      return operation();
+    }), timeout]);
+  } finally { clearTimeout(timer); }
+}
+
 export function createImapPool({ config, destroySession, clientFactory = options => new ImapFlow(options), logger }) {
   const resources = new WeakMap();
   const delays = [5000, 10000, 30000, 60000];
 
-  async function connect(credentials, watching, onClient) {
+  async function connect(credentials, watching, onClient, budget) {
+    if (budget && budget.remainingMs() <= 0) throw budgetExhausted();
     const client = clientFactory({
       host: config.imapHost, port: config.imapPort, secure: true,
       servername: config.mailTlsServername, tls: mailTlsOptions(config),
@@ -54,7 +75,8 @@ export function createImapPool({ config, destroySession, clientFactory = options
     onClient?.(client);
     try {
       // Keep native connect/greeting at 10s; allow the 15s auth penalty + 2s failure delay below the 60s proxy limit.
-      await deadline(client.connect(), 40000, client);
+      if (budget) await budgetDeadline(() => client.connect(), 40000, budget, () => client.close());
+      else await deadline(client.connect(), 40000, client);
       return client;
     } catch (error) {
       client.close();
@@ -97,6 +119,7 @@ export function createImapPool({ config, destroySession, clientFactory = options
     return state;
   }
   async function connectionFailure(error, session) {
+    if (error?.budgetExhausted) throw error;
     if (authRejected(error)) {
       await destroySession(session, 'SESSION_EXPIRED');
       throw expired();
@@ -112,13 +135,13 @@ export function createImapPool({ config, destroySession, clientFactory = options
     }
     await verified.connection.logout();
   }
-  async function workFor(session, state) {
+  async function workFor(session, state, budget) {
     if (state.work?.usable) return state.work;
     if (!state.workPending) {
       state.work?.close();
       state.workPending = (async () => {
         try {
-          const client = await connect(state, false, client => { state.work = client; });
+          const client = await connect(state, false, client => { state.work = client; }, budget);
           if (state.closed) { client.close(); throw expired(); }
           return client;
         } catch (error) {
@@ -175,11 +198,15 @@ export function createImapPool({ config, destroySession, clientFactory = options
   }
   async function withMailbox(session, path, operation, options = {}) {
     const state = stateFor(session);
-    while (state.workRefresh && !state.closed) await state.workRefresh;
+    while (state.workRefresh && !state.closed) {
+      if (options.budget) await budgetDeadline(() => state.workRefresh, Infinity, options.budget);
+      else await state.workRefresh;
+    }
     if (state.closed) throw expired();
     state.workActive++;
     let client, lock;
     try {
+      if (options.budget) return await withBudgetMailbox(session, state, path, operation, options);
       client = await workFor(session, state);
       lock = await client.getMailboxLock(path, { ...options, acquireTimeout: 60000 });
       return await deadline(Promise.resolve().then(() => operation(client)), 60000, client);
@@ -191,6 +218,33 @@ export function createImapPool({ config, destroySession, clientFactory = options
       lock?.release();
       state.workActive--;
       if (!state.workActive && state.workRefresh) retireWork(state);
+    }
+  }
+
+  async function withBudgetMailbox(session, state, path, operation, { budget, ...lockOptions }) {
+    // Waiting for another caller's reconnect or lock must not close its connection.
+    const client = await budgetDeadline(() => workFor(session, state, budget), Infinity, budget);
+    let lock;
+    let cancelled = false;
+    try {
+      await budgetDeadline(async () => {
+        const acquired = await client.getMailboxLock(path, {
+          ...lockOptions, acquireTimeout: Math.min(60000, budget.remainingMs()),
+        });
+        if (cancelled || budget.remainingMs() <= 0) {
+          acquired.release();
+          throw budgetExhausted();
+        }
+        lock = acquired;
+      }, 60000, budget, () => { cancelled = true; });
+      return await budgetDeadline(() => operation(client), 60000, budget, () => client.close());
+    } catch (error) {
+      if (authRejected(error)) return connectionFailure(error, session);
+      if (!client.usable && !(error instanceof AppError)) throw unavailable();
+      throw error;
+    } finally {
+      cancelled = true;
+      lock?.release();
     }
   }
 

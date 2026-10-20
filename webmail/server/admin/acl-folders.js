@@ -5,7 +5,7 @@ export function createAclFolders({ doveadm, config, dockerapi }) {
   const enabled = Boolean(config.doveadmUrl && config.doveadmKey);
   async function list(owner) {
     if (!enabled) return ['INBOX'];
-    const rows = await doveadm.call('mailboxStatus', { user: owner, field: ['guid'], mailboxMask: ['*'] });
+    const rows = await doveadm.call('mailboxList', { user: owner });
     return [...new Set(rows.map(row => row.mailbox).filter(mailbox => mailbox !== 'Shared' && !mailbox.startsWith('Shared/')))];
   }
   async function assertExist(owner, mailboxes) {
@@ -17,7 +17,11 @@ export function createAclFolders({ doveadm, config, dockerapi }) {
     if (!enabled) return (await dockerapi.getAcl(owner)).filter(row => row.user.toLowerCase() === owner.toLowerCase() && row.mailbox === 'INBOX');
     const result = [];
     for (const mailbox of await list(owner)) {
-      const rows = await doveadm.call('aclGet', { user: owner, mailbox });
+      let rows;
+      try { rows = await doveadm.call('aclGet', { user: owner, mailbox }); } catch (error) {
+        if (error instanceof AppError && error.code === 'MAILBOX_NOT_FOUND') continue;
+        throw error;
+      }
       for (const { id, global, rights } of rows) {
         if (typeof global !== 'string') throw new AppError(502, 'DOVEADM_REJECTED', 'doveadm이 요청을 거절했어요.');
         result.push({ user: owner, id: id.slice(id.indexOf('=') + 1), mailbox, rights: [...(global ? ['global'] : []), ...rights.split(/\s+/).filter(Boolean)] });

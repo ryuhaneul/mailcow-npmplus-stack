@@ -4,6 +4,8 @@ import { connectManageSieve } from './managesieve.js';
 import { SCRIPT_NAME, canonicalJSON, allowedMoveFolder, validateText, validateDocument } from './model.js';
 import { generateScript } from './generate.js';
 import { parseScript } from './parse.js';
+import { readGmailXml as readXml } from './gmail-xml.js';
+import { convertGmailEntries as convertEntries } from './import-xml.js';
 import { classifyState } from './state.js';
 import { importScript, rulesDocument } from './import.js';
 import { invalidateInboxHeaders, loadInboxHeaders, matches, preview as previewMatches } from './match.js';
@@ -25,7 +27,7 @@ function object(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))) invalid('$', 'request');
 }
 
-export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now, readGmailXml, convertGmailEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }) }) {
+export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now, readGmailXml = readXml, convertGmailEntries = convertEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }) }) {
   const locks = new Map();
   function serial(session, operation) {
     const key = session.email.toLowerCase();
@@ -70,9 +72,7 @@ export function createRulesService({ config, imap, directory, connect = connectM
       for (const item of report.items) {
         if (!['same', 'changed'].includes(item.status)) continue;
         const rule = report.rules[nextRule++];
-        const doc = rulesDocument([...selected, rule]);
-        doc.rev = 1;
-        doc.importedFrom = { name: activeName, sha256: sha256(source), at: new Date(now()).toISOString() };
+        const doc = importDocument({ script: null, rev: null }, [...selected, rule], 'new', { name: activeName, sha256: sha256(source) });
         if (!limit) {
           try { generateScript(doc, policy); selected.push(rule); continue; }
           catch (error) { if (error.reason !== 'script_too_large') throw error; limit = true; }
@@ -179,6 +179,17 @@ export function createRulesService({ config, imap, directory, connect = connectM
       ids.add(rule.id); return rule;
     });
   }
+  // Preview and apply budget the same final envelope, including preserved fields
+  // and provenance. Imported ids always occupy eight bytes in both calculations.
+  function importDocument(current, rules, mode, source, at = new Date(now()).toISOString()) {
+    const doc = current.script === null ? rulesDocument([]) : structuredClone(current.doc);
+    const incoming = importRuleIds(rules, mode === 'append' ? doc.rules : []);
+    doc.rules = mode === 'append' ? [...doc.rules, ...incoming] : incoming;
+    doc.v = rulesDocument(doc.rules).v;
+    doc.rev = (current.rev ?? 0) + 1;
+    doc.importedFrom = { name: source.name, sha256: source.sha256, at };
+    return doc;
+  }
   async function xmlPlan(client, current, policy, body, entries, plannedFolders = []) {
     allowed(current, ['none', 'ok', 'import_pending', 'import_blocked', 'inactive_other']);
     const existing = current.script === null ? [] : current.doc.rules;
@@ -189,10 +200,7 @@ export function createRulesService({ config, imap, directory, connect = connectM
     const conversionFolders = policy.folders.filter(folder => !plannedFolders.includes(folder.path));
     const converted = convertGmailEntries(entries, { policy: { ...policy, folders: conversionFolders }, folders: conversionFolders, existingRules: existing, mode, stage: 1 });
     const newFolders = [], rules = [], items = [];
-    const doc = current.script === null ? rulesDocument([]) : structuredClone(current.doc);
-    doc.rules = mode === 'append' ? doc.rules : [];
-    doc.rev = (current.rev ?? 0) + 1;
-    doc.importedFrom = { name: body.fileName, sha256: sha256(body.xml), at: new Date(now()).toISOString() };
+    const source = { name: body.fileName, sha256: sha256(body.xml) };
     let nextRule = 0, folderLimit = false, documentLimit = false;
     for (const original of converted.items) {
       const item = structuredClone(original);
@@ -209,11 +217,10 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (folderLimit || newFolders.length + missing.length > 100) {
         folderLimit = true; item.status = 'no'; item.reason = '새 폴더 100개 한도'; delete item.rule; delete item.newFolder;
       } else {
-        const [copy] = importRuleIds([rule], doc.rules);
         try {
           if (documentLimit) throw new Error('Document limit reached');
-          generateScript({ ...doc, rules: [...doc.rules, copy] }, { ...policy, folders: [...conversionFolders, ...newFolders.map(path => ({ path })), ...missing.map(path => ({ path }))] });
-          doc.rules.push(copy); newFolders.push(...missing); rules.push(rule);
+          generateScript(importDocument(current, [...rules, rule], mode, source), { ...policy, folders: [...conversionFolders, ...newFolders.map(path => ({ path })), ...missing.map(path => ({ path }))] });
+          newFolders.push(...missing); rules.push(rule);
         } catch (error) {
           if (!documentLimit && error.reason !== 'script_too_large' && error.reason !== 'array_length' && error.code !== 'TOO_MANY_FORWARDS') throw error;
           documentLimit = true; item.status = 'no'; item.reason = '반영 안 됨 — 한도 초과'; delete item.rule; delete item.newFolder;
@@ -265,13 +272,9 @@ export function createRulesService({ config, imap, directory, connect = connectM
   }
   async function applyImport(session, client, current, policy, { rules, items, mode, source, createdFolders = [] }) {
     if (!rules.length) throw nothing();
-    const doc = current.script === null ? rulesDocument([]) : structuredClone(current.doc);
-    const incoming = importRuleIds(rules, mode === 'append' ? doc.rules : []);
-    doc.rules = mode === 'append' ? [...doc.rules, ...incoming] : incoming;
-    doc.rev = (current.rev ?? 0) + 1;
     const previousImport = await readImportRecord(client, current.scripts);
     const at = new Date(Math.max(now(), previousImport ? Date.parse(previousImport.at) + 1 : 0)).toISOString();
-    doc.importedFrom = { name: source.name, sha256: source.sha256, at };
+    const doc = importDocument(current, rules, mode, source, at);
     const script = generateScript(doc, policy);
     const activeScript = current.activeName === SCRIPT_NAME ? current.script : current.activeName ? await client.getScript(current.activeName) : null;
     const record = importRecord({ at, source, mode, items, webmailScript: current.script, activeName: current.activeName, activeScript, afterScript: script });

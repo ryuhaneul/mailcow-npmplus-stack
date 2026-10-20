@@ -388,9 +388,9 @@ test('vacation body: other controls stay 422, LF is allowed only in body, normal
   doc.vacation.body += 'a'; expectInvalid(doc);
 });
 
-// Stage one must recognize future data without offering destructive recovery.
+// Unknown versions must not offer destructive recovery.
 test('intact future-version envelopes are newer_version; damaged future envelopes stay damaged', () => {
-  const doc = { ...document(), v: 2 };
+  const doc = { ...document(), v: 3 };
   doc.rules[0].conditions[0].op = 'matches';
   const script = envelope(doc);
   assert.deepEqual(parseScript(script), { state: 'newer_version', doc, rev: doc.rev });

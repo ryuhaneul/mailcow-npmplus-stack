@@ -6,7 +6,10 @@ import { rainloopBlocks } from './import-rainloop.js';
 import { unknownItems } from './import-syntax.js';
 import { generateScript } from './generate.js';
 
-export const rulesDocument = rules => ({ v: 1, rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
+export const rulesDocument = rules => ({
+  v: rules.some(rule => Array.isArray(rule?.conditions) && rule.conditions.some(condition => condition && (Object.hasOwn(condition, 'conditions') || condition.op === 'matches'))) ? 2 : 1,
+  rev: 0, rules, blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' }
+});
 
 /** Only explicit administrator/server policy is accepted; never infer permissions from imported data. */
 export function importPolicy(input) {

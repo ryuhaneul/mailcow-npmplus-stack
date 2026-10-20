@@ -21,12 +21,12 @@ export function parseScript(script) {
     if (bytes.toString('base64url') !== encoded) return damaged();
     doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (!Number.isSafeInteger(doc?.v) || doc.v < 1) return damaged();
-    if (doc.v === 1) validateDocument(doc, { checkPolicy: false });
+    if (doc.v <= 2) validateDocument(doc, { checkPolicy: false });
   } catch { return damaged(); }
   const hashLine = lines[i];
   const body = lines.slice(i + 1).join('\n');
   const hash = /^# WEBMAIL-HASH ([a-f0-9]{64})$/.exec(hashLine ?? '')?.[1];
-  if (doc.v > 1) {
+  if (doc.v >= 3) {
     if (!hash || hashBody(body) !== hash || !Number.isSafeInteger(doc.rev) || doc.rev < 0 || !Array.isArray(doc.rules) || !Array.isArray(doc.blocked) || !doc.vacation || typeof doc.vacation !== 'object') return damaged();
     return { state: 'newer_version', doc, rev: doc.rev };
   }

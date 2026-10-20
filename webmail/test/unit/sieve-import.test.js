@@ -259,3 +259,12 @@ test('a generated envelope over 1MB drops the overflow and trailing source block
   assert.equal(report.items[1].reason, report.items[0].reason);
   assert.ok(Buffer.byteLength(generateScript(rulesDocument(report.rules), importPolicy(unchecked))) <= 1024 * 1024);
 });
+
+
+test('import documents select the minimum wire version without changing stage-one rules', () => {
+  const base = { id: 'version1', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'synthetic' }], actions: { read: true }, stop: false };
+  assert.equal(rulesDocument([]).v, 1); assert.equal(rulesDocument([base]).v, 1);
+  assert.equal(rulesDocument([{ ...base, conditions: [{ field: 'subject', op: 'matches', value: '*synthetic*' }] }]).v, 2);
+  assert.equal(rulesDocument([{ ...base, conditions: [{ match: 'any', conditions: base.conditions }] }]).v, 2);
+  assert.equal(rulesDocument([undefined]).v, 1);
+});

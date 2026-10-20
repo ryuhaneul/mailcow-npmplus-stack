@@ -181,9 +181,9 @@ for (const [user, format] of [['user6', 'gmail2sieve'], ['user7', 'rainloop']]) 
     assert.equal((await client.listScripts()).find(row => row.active)?.name, snapshot.active);
     assert.equal(await client.getScript(snapshot.active), snapshot.originals.get(snapshot.active));
     const report = before.importReport;
-    await web.request('POST', '/api/rules/import', { confirm: false, sourceName: report.sourceName, sourceSha256: report.sourceSha256 }, 422);
+    await web.request('POST', '/api/rules/import', { confirm: false, sourceName: report.sourceName, sourceSha256: report.sourceSha256, planSha256: report.planSha256 }, 422);
     assert.equal((await client.listScripts()).find(row => row.active)?.name, snapshot.active);
-    await web.request('POST', '/api/rules/import', { confirm: true, sourceName: report.sourceName, sourceSha256: report.sourceSha256 });
+    await web.request('POST', '/api/rules/import', { confirm: true, sourceName: report.sourceName, sourceSha256: report.sourceSha256, planSha256: report.planSha256 });
     const imported = await web.get('/api/rules');
     assert.equal(imported.state, 'ok');
     assert.equal(imported.doc.rules.length, report.rules.length);

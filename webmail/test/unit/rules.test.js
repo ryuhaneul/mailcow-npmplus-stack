@@ -601,7 +601,7 @@ test('a concurrent save during folder creation changes the plan and prevents Sie
 
 test('future-version get is read-only and suppresses prev/undo; save, restore and undo refuse it', async () => {
   const f = importFixture(); await f.apply(); const body = await undoBody(f);
-  const future = { ...document(), v: 2 };
+  const future = { ...document(), v: 3 };
   const executable = 'require ["fileinto"];\n';
   const data = Buffer.from(JSON.stringify(future)).toString('base64url').match(/.{1,120}/g).map(chunk => `# WEBMAIL-DATA ${chunk}`).join('\n');
   f.scripts.set(web, `${MAGIC}\n${data}\n# WEBMAIL-HASH ${hashBody(executable)}\n${executable}`);

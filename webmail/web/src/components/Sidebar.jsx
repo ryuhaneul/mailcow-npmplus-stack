@@ -9,6 +9,7 @@ import { route } from '../router.js';
 import Brand from './Brand.jsx';
 import Icon from './Icon.jsx';
 import QuotaMeter from './QuotaMeter.jsx';
+import { formatSidebarUnread } from '../format.js';
 
 const special = [
   ['\\Inbox','받은편지함','inbox','inbox'],['\\Sent','보낸편지함','send','f'],['\\Drafts','임시보관함','file','f'],['\\Archive','보관함','archive','f'],['\\Junk','스팸','spam','spam'],['\\Trash','휴지통','trash','f'],
@@ -18,7 +19,7 @@ function NavItem({ href, title, icon, folder }) {
   const active = href === `#${current.name}` || current.name === 'f' && folder?.path === current.value;
   return <a href={href} class="nv" title={folder?.shared ? title : undefined} aria-current={active ? 'page' : undefined}>
     {folder?.shared ? <span class="sh"><Icon name="users"/></span> : icon ? <Icon name={icon} size="s"/> : <span class={`dot c${folderColor(folder)}`}/>}
-    {folder?.shared ? <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{title}</span> : title}{folder?.unseen > 0 && <span class="n u num">{folder.unseen}</span>}
+    <span class="nv-title">{title}</span>{folder?.unseen > 0 && <span class="n u num"><span class="sr">읽지 않음 </span>{formatSidebarUnread(folder.unseen)}</span>}
   </a>;
 }
 export default function Sidebar() {

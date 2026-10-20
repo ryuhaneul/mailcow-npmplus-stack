@@ -20,3 +20,7 @@ export function folderLabel(folder) {
   }
   return folder.name===folder.path?(names[folder.path]||folder.name):folder.name;
 }
+
+export function formatSidebarUnread(value) {
+  return value.toLocaleString('en-US');
+}

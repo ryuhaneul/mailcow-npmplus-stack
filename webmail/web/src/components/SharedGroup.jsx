@@ -5,6 +5,7 @@ import { setSharedViewMode, toggleSharedFolder, setSharedOwnerHidden } from '../
 import { route } from '../router.js';
 import { radioKeys } from './AppearanceSettings.jsx';
 import Icon from './Icon.jsx';
+import { formatSidebarUnread } from '../format.js';
 
 const modes = [['inbox','받은편지함만'],['all','전부'],['custom','직접 고름']];
 const notes = {inbox:'받은편지함만 보입니다. 처음 공유받으면 이 방식입니다.',all:'모든 폴더가 보입니다. 나중에 만든 폴더도 자동으로 보입니다.',custom:'고른 폴더만 보입니다. 나중에 생긴 폴더는 숨겨집니다.'};
@@ -29,7 +30,7 @@ export function SharedFolderList({ group }) {
 export function SharedHideButton({ group, onHide, popup=false }) {
   return <button class={popup?'sp-plink':'btn sm sp-hide'} type="button" onClick={()=>{onHide?.();updateSharedView(setSharedOwnerHidden(prefs.value.sharedView,group.owner,!group.hidden));}}><Icon name={group.hidden?'eye':'eyeoff'} size="xs"/>{group.hidden?'다시 보이기':'사이드바에서 숨기기'}</button>;
 }
-function Unread({ value }) { return value>0&&<span class="n u num"><span class="sr">읽지 않음 </span>{value}</span>; }
+function Unread({ value }) { return value>0&&<span class="n u num"><span class="sr">읽지 않음 </span>{formatSidebarUnread(value)}</span>; }
 function Popup({ group, anchor, onClose }) {
   const popup=useRef(null);
   useLayoutEffect(()=>{

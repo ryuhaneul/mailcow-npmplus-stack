@@ -1,5 +1,6 @@
 import { AppError } from '../errors.js';
 import { fetchOriginals, mailboxStatus } from './imap-raw.js';
+import { checkBudget } from './list-query.js';
 
 const invalid = () => new AppError(400, 'INVALID_REF', '메일 참조를 확인해 주세요.');
 const validUint = n => Number.isInteger(n) && n > 0 && n <= 0xffffffff;
@@ -27,19 +28,47 @@ export function assertUidValidity(client, ref) {
   }
 }
 const validityCache = new WeakMap();
-export async function originalRefs(client, session, set, { now = Date.now } = {}) {
-  const rows = await fetchOriginals(client, set);
-  let cache = validityCache.get(session);
-  if (!cache) { cache = new Map(); validityCache.set(session, cache); }
-  const refs = [];
-  for (const row of rows) {
-    let record = cache.get(row.path);
-    if (!record || now() - record.at >= 60000) {
-      const { uidvalidity } = await mailboxStatus(client, row.path, ['UIDVALIDITY']);
-      record = { value: uidvalidity, at: now() };
-      cache.set(row.path, record);
+export async function originalRefs(client, session, set, { now = Date.now, freshValidity = false, budget } = {}) {
+  const stale = () => new AppError(409, 'STALE_SCOPE', '메일함이 바뀌었어요. 다시 선택해 주세요.');
+  const virtualValidity = Number(client.mailbox?.uidValidity);
+  const current = new Map();
+  if (freshValidity) {
+    // Capture validity before discovering mappings, including a source recreated with the same UID.
+    checkBudget(budget);
+    const folders = await client.list({ listOnly: true });
+    const paths = new Set(folders.filter(folder => folder.path !== 'WebmailVirtual' && !folder.path.startsWith('WebmailVirtual/') && !folder.flags?.has('\\Noselect')).map(folder => folder.path));
+    for (const path of paths) {
+      checkBudget(budget);
+      const { uidvalidity } = await mailboxStatus(client, path, ['UIDVALIDITY']);
+      current.set(path, { value: uidvalidity, at: now() });
     }
-    refs.push({ ...row, ref: encodeRef(row.path, record.value, row.uid) });
   }
-  return refs;
+  checkBudget(budget);
+  const rows = await fetchOriginals(client, set);
+  if (freshValidity) {
+    if (rows.some(row => !current.has(row.path))) throw stale();
+    for (const [path, record] of current) {
+      checkBudget(budget);
+      const { uidvalidity } = await mailboxStatus(client, path, ['UIDVALIDITY']);
+      if (uidvalidity !== record.value) throw stale();
+    }
+    if (Number(client.mailbox?.uidValidity) !== virtualValidity) throw stale();
+  } else {
+    let cache = validityCache.get(session);
+    if (!cache) { cache = new Map(); validityCache.set(session, cache); }
+    for (const path of new Set(rows.map(row => row.path))) {
+      let record = cache.get(path);
+      if (!record || now() - record.at >= 60000) {
+        checkBudget(budget);
+        const { uidvalidity } = await mailboxStatus(client, path, ['UIDVALIDITY']);
+        record = { value: uidvalidity, at: now() };
+        cache.set(path, record);
+      }
+      current.set(path, record);
+    }
+  }
+  return rows.map(row => {
+    const uidValidity = current.get(row.path).value;
+    return { ...row, uidValidity, ref: encodeRef(row.path, uidValidity, row.uid) };
+  });
 }

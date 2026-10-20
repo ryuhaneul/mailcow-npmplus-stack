@@ -1,76 +1,9 @@
-import { searchCompiler } from 'imapflow/lib/search-compiler.js';
 import { AppError } from '../errors.js';
-import { parseSearchQuery } from './search-query.js';
-import { encodeRef, originalRefs } from './ref.js';
+import { decodeRef, assertUidValidity } from './ref.js';
+import { allmail, listOptions, resolveListScope, sortUids, resolveCandidateSources, matchesFolderFilters, checkBudget } from './list-query.js';
+export { listOptions } from './list-query.js';
 
-const allmail = 'WebmailVirtual/AllMail';
-// Leave 10 seconds before the measured 60-second proxy limit.
-const searchTimeout = 50000;
-const slowSearch = () => new AppError(503, 'SEARCH_SLOW', '메일함 검색 색인을 만드는 중이에요. 잠시 뒤 다시 검색해 주세요.');
-const atom = value => ({ type: 'ATOM', value });
-const invalid = () => new AppError(400, 'LIST_QUERY_INVALID', '메일 목록 조회 조건을 확인해 주세요.');
 const unavailable = () => new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
-function number(value, fallback) {
-  if (value === undefined) return fallback;
-  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw invalid();
-  return Number(value);
-}
-export function listOptions(query = {}, folders = []) {
-  for (const key of ['view', 'folder', 'quick', 'q', 'in']) if (query[key] !== undefined && (typeof query[key] !== 'string' || !query[key].isWellFormed() || /[\x00-\x1f\x7f]/.test(query[key]))) throw invalid();
-  const view = query.view ?? 'inbox', quick = query.quick ?? 'all';
-  if (!['inbox', 'allmail', 'folder', 'spam'].includes(view) || !['all', 'unread', 'starred', 'attach'].includes(quick)) throw invalid();
-  if (view === 'folder' && !query.folder) throw invalid();
-  const parsed = parseSearchQuery(query.q ?? '');
-  const page = number(query.page, 1), pageSize = number(query.pageSize, 50);
-  if (!Number.isSafeInteger((page - 1) * pageSize)) throw invalid();
-  const junk = folders.find(folder => folder.specialUse === '\\Junk')?.path ?? 'Junk';
-  const trash = folders.find(folder => folder.specialUse === '\\Trash')?.path ?? 'Trash';
-  const selected = view === 'spam' ? junk : view === 'folder' ? query.folder : 'INBOX';
-  // K13: 스팸·휴지통에서의 검색은 그 폴더 안에 머문다.
-  const scoped = [junk, trash].includes(selected) && (view === 'spam' || view === 'folder');
-  const mailbox = !scoped && (view === 'allmail' || query.q?.trim()) ? allmail : selected;
-  const filters = [...parsed.folderFilters, ...(query.in ? [query.in] : [])];
-  const imap = [...parsed.imap];
-  if (quick === 'unread') imap.push({ seen: false });
-  if (quick === 'starred') imap.push({ flagged: true });
-  if (quick === 'attach') imap.push({ header: { 'Content-Type': 'multipart/mixed' } });
-  return { mailbox, page, pageSize, filters, imap };
-}
-async function sortUids(client, conditions, searching = false) {
-  const search = conditions.flatMap(condition => {
-    const compiled = searchCompiler(client, condition);
-    return compiled[0]?.value === 'CHARSET' ? compiled.slice(2) : compiled;
-  });
-  if (!search.length) search.push(atom('ALL'));
-  const uids = [];
-  const request = client.exec('UID SORT', [[atom('REVERSE'), atom('ARRIVAL')], atom('UTF-8'), ...search], {
-    untagged: { SORT: row => { for (const token of row.attributes ?? []) uids.push(Number(token.value)); } },
-  });
-  let timer;
-  try {
-    const response = await (searching ? Promise.race([request, new Promise((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(slowSearch());
-        // Drop this command connection; Dovecot's separate indexer can keep indexing.
-        client.close();
-      }, searchTimeout);
-    })]) : request);
-    response.next();
-  } finally { clearTimeout(timer); }
-  if (uids.some(uid => !Number.isInteger(uid) || uid < 1 || uid > 0xffffffff)) throw unavailable();
-  return uids;
-}
-async function resolveFilters(client, filters) {
-  if (!filters.length) return [];
-  const folders = await client.list({ listOnly: true });
-  return filters.map(value => {
-    const exact = folders.find(folder => folder.path === value);
-    if (exact) return exact.path;
-    const found = folders.filter(folder => folder.name === value);
-    if (found.length > 1) throw new AppError(400, 'SEARCH_FOLDER_AMBIGUOUS', '같은 이름의 폴더가 있어요. 폴더 전체 경로를 입력해 주세요.');
-    return found[0]?.path ?? value;
-  });
-}
 function attachment(headers) {
   const text = Buffer.isBuffer(headers) ? headers.toString('utf8') : headers ?? '';
   return /^content-type:\s*multipart\/mixed(?:\s*;|\s*$)/im.test(text.replace(/\r?\n[ \t]+/g, ' '));
@@ -89,18 +22,23 @@ export function item(message, source) {
   };
 }
 
+async function fetchMetadata(client, uids, { budget } = {}) {
+  const fetched = new Map();
+  if (!uids.length) return fetched;
+  checkBudget(budget);
+  for await (const message of client.fetch(uids.join(','), { envelope: true, flags: true, internalDate: true, size: true, headers: ['CONTENT-TYPE'] }, { uid: true })) fetched.set(message.uid, message);
+  return fetched;
+}
+
 export function createListService({ imap, now = Date.now }) {
   const sessions = new WeakMap();
   const invalidate = session => sessions.delete(session);
   async function messages(session, query = {}) {
-    let options = listOptions(query);
-    let { mailbox, page, pageSize } = options;
+    const { page, pageSize } = listOptions(query);
+    let mailbox;
     try {
-      if (query.view === 'spam' || (query.view === 'folder' && query.q?.trim())) {
-        const folders = await imap.withMailbox(session, 'INBOX', client => client.list({ listOnly: true }));
-        options = listOptions(query, folders);
-        mailbox = options.mailbox;
-      }
+      const options = await resolveListScope(session, query, { imap });
+      mailbox = options.mailbox;
       return await imap.withMailbox(session, mailbox, async client => {
         const key = JSON.stringify([mailbox, options.imap, options.filters]);
         let cache = sessions.get(session);
@@ -108,16 +46,15 @@ export function createListService({ imap, now = Date.now }) {
         let result = cache.get(key);
         const validity = Number(client.mailbox.uidValidity);
         if (!result || now() - result.at >= 60000 || result.validity !== validity) {
-          const filters = await resolveFilters(client, options.filters);
-          let uids = await sortUids(client, options.imap, Boolean(query.q?.trim()));
+          let uids = await sortUids(client, options.imap, options.searching);
           const originals = new Map();
-          if (filters.length && mailbox === allmail) {
+          if (options.filters.length && mailbox === allmail) {
             for (let start = 0; start < uids.length; start += 1000) {
-              const rows = await originalRefs(client, session, uids.slice(start, start + 1000).join(','), { now });
+              const rows = await resolveCandidateSources(client, session, uids.slice(start, start + 1000), options, { now });
               for (const row of rows) originals.set(row.virtualUid, row);
             }
-            uids = uids.filter(uid => filters.every(path => originals.get(uid)?.path === path));
-          } else if (filters.some(path => path !== mailbox)) uids = [];
+            uids = uids.filter(uid => originals.has(uid));
+          } else if (!matchesFolderFilters(mailbox, options.filters)) uids = [];
           result = { at: now(), validity, uids, originals };
           for (const [oldKey, old] of cache) if (now() - old.at >= 60000) cache.delete(oldKey);
           cache.set(key, result);
@@ -126,15 +63,15 @@ export function createListService({ imap, now = Date.now }) {
         if (!selected.length) return { total: result.uids.length, page, pageSize, items: [] };
         if (mailbox === allmail) {
           const missing = selected.filter(uid => !result.originals.has(uid));
-          if (missing.length) for (const row of await originalRefs(client, session, missing.join(','), { now })) result.originals.set(row.virtualUid, row);
+          if (missing.length) for (const row of await resolveCandidateSources(client, session, missing, options, { now })) result.originals.set(row.virtualUid, row);
         }
-        const fetched = new Map();
-        for await (const message of client.fetch(selected.join(','), { envelope: true, flags: true, internalDate: true, size: true, headers: ['CONTENT-TYPE'] }, { uid: true })) fetched.set(message.uid, message);
+        const fetched = await fetchMetadata(client, selected);
+        const direct = mailbox === allmail ? null : new Map((await resolveCandidateSources(client, session, selected, options)).map(source => [source.uid, source]));
         const items = [];
         for (const uid of selected) {
           const message = fetched.get(uid);
           if (!message) continue; // 다른 IMAP 클라이언트가 그 사이 지운 메시지.
-          const source = mailbox === allmail ? result.originals.get(uid) : { path: mailbox, ref: encodeRef(mailbox, validity, uid) };
+          const source = mailbox === allmail ? result.originals.get(uid) : direct.get(uid);
           if (!source) throw unavailable();
           items.push(item(message, source));
         }
@@ -146,5 +83,30 @@ export function createListService({ imap, now = Date.now }) {
       throw unavailable();
     }
   }
-  return { messages, invalidate };
+  async function metadata(session, refs, { budget } = {}) {
+    const groups = new Map(), items = new Map();
+    for (const token of refs) {
+      const source = { ...decodeRef(token), ref: token };
+      if (!groups.has(source.path)) groups.set(source.path, []);
+      groups.get(source.path).push(source);
+    }
+    for (const [path, sources] of groups) {
+      checkBudget(budget);
+      try {
+        await imap.withMailbox(session, path, async client => {
+          for (const source of sources) assertUidValidity(client, source);
+          const fetched = await fetchMetadata(client, sources.map(source => source.uid), { budget });
+          for (const source of sources) {
+            const message = fetched.get(source.uid);
+            if (message) items.set(source.ref, item(message, source));
+          }
+        }, { budget });
+      } catch (error) {
+        if (error.code === 'NotFound' || error.serverResponseCode === 'NONEXISTENT') throw new AppError(409, 'STALE_REF', '메일함이 바뀌었어요. 화면을 새로 고쳐 주세요.');
+        throw error;
+      }
+    }
+    return refs.filter(ref => items.has(ref)).map(ref => items.get(ref));
+  }
+  return { messages, metadata, invalidate };
 }

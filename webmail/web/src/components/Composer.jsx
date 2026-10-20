@@ -9,7 +9,7 @@ import { config } from '../state/config.js';
 import { listLocation } from '../state/list.js';
 import { toast } from '../state/toast.js';
 import { initialComposition, composePayload, selectCompositionSignature, changeCompositionFrom, updateCompositionHtml, defaultCompositionSignature, attachmentLimitMessage, sendWarnings } from '../compose.js';
-import { getSignatures, signatureError } from '../signatures.js';
+import { getSignatures, normalizeSignature, signatureError } from '../signatures.js';
 import { getSignatureImages, createSignatureImageMap } from '../signature-images.js';
 import { formatBytes } from '../format.js';
 import SignatureDialog from './SignatureDialog.jsx';
@@ -26,7 +26,7 @@ export default function Composer() {
   const [model,setModel]=useState(null),[identity,setIdentity]=useState(null),[domain,setDomain]=useState(''),[raw,setRaw]=useState(false),[error,setError]=useState(null),[busy,setBusy]=useState(''),[saving,setSaving]=useState(false),[savedTime,setSavedTime]=useState(null),[result,setResult]=useState(null),[showCc,setShowCc]=useState(false),[showBcc,setShowBcc]=useState(false);
   const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0);
   const [signatureMenu,setSignatureMenu]=useState(false),[replacement,setReplacement]=useState(null),[imageUrls,setImageUrls]=useState(new Map());
-  const signatureSnapshot=useRef(null),imageSnapshot=useRef(null),imageMap=useRef(null),signatureRoot=useRef(null),signatureButton=useRef(null),signaturePopup=useRef(null);
+  const signatureSnapshot=useRef(null),imageSnapshot=useRef(null),imageMap=useRef(null),signatureRoot=useRef(null),signatureButton=useRef(null),signaturePopup=useRef(null),signatureChange=useRef(0),signaturePromise=useRef(null);
   const open=route.value.name==='compose',seed=composeSeed.value,disabled=Boolean(busy||result);
   function active(){return live.current&&session.value===owner.current;}
   function fail(value){if(active()&&!['NO_SESSION','SESSION_EXPIRED'].includes(value.code))setError(['SIGNATURE_IMAGE_NOT_FOUND','SIGNATURE_INVALID'].includes(value.code)?signatureError(value):value);}
@@ -46,7 +46,7 @@ export default function Composer() {
     try{await pending;}catch(value){throw {...value,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
   }
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
-  function reset(){clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;}
+  function reset(){signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;}
   useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap();return()=>{live.current=false;clearTimeout(timer.current);imageMap.current.dispose();};},[]);
   useEffect(()=>{
     if(!open||current.current&&!seed)return;
@@ -59,14 +59,16 @@ export default function Composer() {
         const signatures=assets.signatures||{items:[],defaults:{}},images=assets.images||{images:[]};
         signatureSnapshot.current=signatures;imageSnapshot.current=images;
         if(assets.error)setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
-        const value=initialComposition(seed,identities,prefs.value,owner.current.user.email,{signatures,images});
-        let urls=new Map();
+        let value,urls=new Map();
         try{
+          const from=identities.defaultFrom||identities.identities[0]?.address||owner.current.user.email;
+          const prepared=await normalizedSignatures(defaultCompositionSignature(signatures,from,seed?.kind||'new'));
+          value=initialComposition(seed,identities,prefs.value,owner.current.user.email,{signatures:prepared,images});
           const ids=[...new Set(value.signatureImages.map(entry=>entry.assetId))];
           urls=new Map(await Promise.all(ids.map(async id=>[id,await imageMap.current.urlFor(id)])));
         }catch(error){
           if(cancelled||!active())return;
-          Object.assign(value,selectCompositionSignature(value,null,signatures,images).patch);
+          value=initialComposition(seed,identities,prefs.value,owner.current.user.email,{signatures:{items:[],defaults:{}},images});
           setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
         }
         if(cancelled||!active())return;
@@ -80,7 +82,7 @@ export default function Composer() {
     if(sending.current||closing.current||completed.current||!current.current)return;
     sending.current=true;clearTimeout(timer.current);setBusy('send');setError(null);
     try{
-      await savePromise.current;await uploads.current;if(!active())return;
+      await signaturePromise.current;await savePromise.current;await uploads.current;if(!active())return;
       const body=composePayload(current.current,true),value=await api('/api/send',{method:'POST',body});if(!active())return;
       completed.current=true;
       if(value.rejected?.length||value.warnings?.length)setResult(value);
@@ -91,6 +93,7 @@ export default function Composer() {
     if(sending.current||closing.current)return;
     closing.current=true;clearTimeout(timer.current);setBusy('close');
     try{
+      await signaturePromise.current;
       if(current.current&&!completed.current){
         const value=composePayload(current.current,true);patch({to:value.to,cc:value.cc,bcc:value.bcc,pendingTo:'',pendingCc:'',pendingBcc:''},Boolean(current.current.pendingTo||current.current.pendingCc||current.current.pendingBcc));
         while(savedVersion.current!==version.current){await saveDraft();if(!active())return;}
@@ -101,7 +104,7 @@ export default function Composer() {
   }
   async function discard(){
     if(sending.current||closing.current||completed.current||!current.current)return;
-    closing.current=true;clearTimeout(timer.current);setBusy('discard');
+    signatureChange.current++;closing.current=true;clearTimeout(timer.current);setBusy('discard');
     try{
       await savePromise.current;await uploads.current;
       for(const file of current.current.attachments){await api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'});patch({attachments:current.current.attachments.filter(item=>item.id!==file.id)},false);}
@@ -124,14 +127,49 @@ export default function Composer() {
   async function removeFile(file){
     try{if(file.id){await api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'});patch({attachments:current.current.attachments.filter(item=>item.id!==file.id)});}else patch({forwardFiles:current.current.forwardFiles.filter(item=>!(item.ref===file.ref&&item.partId===file.partId))});}catch(value){fail(value);}
   }
-  function changeSignature(action,confirm=false){
-    if(!current.current||disabled)return;
+  async function normalizedSignatures(id){
+    const document=signatureSnapshot.current,item=document.items.find(item=>item.id===id);
+    if(!item)return document;
+    const {html}=await normalizeSignature(item.html);
+    return {...document,items:document.items.map(value=>value.id===id?{...value,html}:value)};
+  }
+  async function changeSignature(action,confirm=false){
+    if(!current.current||disabled||sending.current||closing.current)return;
+    const change=++signatureChange.current,composeId=current.current.composeId;
+    signaturePromise.current=null;
+    const valid=()=>active()&&change===signatureChange.current&&current.current?.composeId===composeId&&!completed.current;
+    const select=(model,document)=>action.type==='from'?changeCompositionFrom(model,action.from,document,imageSnapshot.current,{confirm}):selectCompositionSignature(model,action.id,document,imageSnapshot.current,{confirm});
     try{
-      const value=action.type==='from'?changeCompositionFrom(current.current,action.from,signatureSnapshot.current,imageSnapshot.current,{confirm}):selectCompositionSignature(current.current,action.id,signatureSnapshot.current,imageSnapshot.current,{confirm});
+      const value=select(current.current,signatureSnapshot.current);
       setSignatureMenu(false);
       if(value.confirmationRequired){setReplacement(action);return;}
-      if(Object.keys(value.patch).length)patch(value.patch);
       setReplacement(null);
+      if(!Object.keys(value.patch).length)return;
+      const pending=(async()=>{
+        let prepared;
+        try{
+          prepared=await normalizedSignatures(value.patch.selectedSignatureId);
+          if(!valid())return;
+          const candidate=select(current.current,prepared);
+          if(candidate.confirmationRequired){if(valid())setReplacement(action);return;}
+          const ids=[...new Set(candidate.patch.signatureImages.map(entry=>entry.assetId))];
+          const entries=await Promise.all(ids.map(async id=>[id,await imageMap.current.urlFor(id)]));
+          await editor.current?.whenIdle();
+          if(!valid())return;
+          const latest=select(current.current,prepared);
+          if(latest.confirmationRequired){setReplacement(action);return;}
+          setImageUrls(previous=>new Map([...previous,...entries]));patch(latest.patch);
+        }catch(error){
+          await editor.current?.whenIdle();
+          if(!valid())return;
+          const fallback=selectCompositionSignature(current.current,null,signatureSnapshot.current,imageSnapshot.current,{confirm});
+          if(fallback.confirmationRequired){setReplacement(action);return;}
+          patch({...fallback.patch,...(action.type==='from'?{from:action.from}:{})});
+          setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
+        }
+      })();
+      signaturePromise.current=pending;
+      try{await pending;}finally{if(signaturePromise.current===pending)signaturePromise.current=null;}
     }catch(value){fail(value);}
   }
   function from(value){changeSignature({type:'from',from:value});}
@@ -205,7 +243,7 @@ export default function Composer() {
       <div class="fld"><label for="compose-subject">제목</label><div class="val"><input id="compose-subject" value={model.subject} disabled={disabled} onInput={event=>patch({subject:event.currentTarget.value})}/></div><span/></div>
       <FormatBar raw={raw} toggle={()=>setRaw(value=>!value)} editor={editor} disabled={disabled}/><div class="code-note"><Icon name="info" size="s"/>HTML 원문을 직접 고치는 중입니다. 서식 단추는 원문 모드에서 쉬어요. 다시 누르면 서식 편집으로 돌아갑니다.</div>
       {model.internalImages&&<div class="code-note always" role="status">원문 본문 속 이미지는 함께 가지 않아요.{model.kind==='forward'?'(첨부는 전달됨)':''}</div>}
-      <ComposeEditor html={editorHtml()} onChange={html=>editHtml(html,true)} disabled={disabled} editor={editor}/><HtmlSource html={model.html} onChange={html=>editHtml(html)} disabled={disabled}/>
+      <ComposeEditor signatureNonce={model.signatureNonce} html={editorHtml()} onChange={html=>editHtml(html,true)} disabled={disabled} editor={editor}/><HtmlSource html={model.html} onChange={html=>editHtml(html)} disabled={disabled}/>
       <div class="compose-signature-bar" ref={signatureRoot} onKeyDown={signatureKeyboard} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget))setSignatureMenu(false);}}><span>서명</span><button ref={signatureButton} class="signature-picker" type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={signatureMenu} aria-controls="compose-signature-menu" onClick={()=>setSignatureMenu(!signatureMenu)}>서명: {signature?.name||'없음'} <Icon name="down" size="xs"/></button>{model.signatureDirty&&<small>이 메일에서 수정함</small>}{signatureMenu&&<div ref={signaturePopup} id="compose-signature-menu" class="signature-menu" role="menu" aria-label="서명 바꾸기">{signatureItems.map(item=><button key={item.id??'none'} type="button" role="menuitemradio" tabIndex={-1} aria-checked={model.selectedSignatureId===item.id} onClick={()=>{changeSignature({type:'signature',id:item.id});signatureButton.current.focus();}}>{item.name}{model.selectedSignatureId===item.id&&<Icon name="check" size="s"/>}</button>)}</div>}</div>
       <AttachDrop files={[...model.attachments,...model.forwardFiles]} limit={config.value.attachMaxMb} disabled={disabled} onFiles={addFiles} onRemove={removeFile} inputRef={fileInput}/><small class="compose-grants" role="status">첨부 {formatBytes(totalBytes)} / {config.value.attachMaxMb}MB · 서명 이미지 포함</small>
     </div><div class="c-foot"><div class="send"><button type="button" disabled={disabled||model.attachments.some(file=>file.uploading)} onClick={()=>void send()}><Icon name="send" size="s"/>{busy==='send'?'보내는 중…':'보내기'}</button></div><div class="r"><button class="ib" type="button" aria-label="파일 첨부" disabled={disabled} onClick={()=>fileInput.current.click()}><Icon name="clip" size="s"/></button><button class="ib" type="button" aria-label="임시 메일 삭제" disabled={disabled} onClick={()=>void discard()}><Icon name="trash" size="s"/></button></div></div></>:<div class="empty-read" role="status">{error?'': '보낼 주소를 불러오는 중…'}</div>}

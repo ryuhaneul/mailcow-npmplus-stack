@@ -6,6 +6,7 @@ import { createServer } from 'vite';
 import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import { createFakeApi } from '../../web/dev/fake-api.js';
+import { createSignatureNormalizer } from '../../server/routes/signatures.js';
 
 const assetA='A'.repeat(32),assetB='B'.repeat(32),revision='R'.repeat(32),at='2026-10-20T12:00:00.000Z';
 const sigA='S'.repeat(32),sigB='T'.repeat(32),sigC='U'.repeat(32);
@@ -27,17 +28,22 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
   await server.listen();t.after(()=>server.close());t.after(()=>fake.close());
   const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});t.after(()=>browser.close());
   const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
+  const normalize=createSignatureNormalizer({config:{publicHostnames:['localhost','127.0.0.1']},images:{read:async()=>({images:{[assetA]:{},[assetB]:{}}})}});
   async function open(options={}){
     const page=await browser.newPage({viewport:{width:options.width||1280,height:900}}),errors=[],consoleErrors=[],requests=[],contents=[];
     page.setDefaultTimeout(5000);
     page.on('pageerror',error=>errors.push(error.message));
     page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text());});
+    await page.route('**/api/signatures/normalize',async route=>{try{await route.fulfill({json:{html:await normalize({html:route.request().postDataJSON().html})}});}catch(error){await route.fulfill({status:error.statusCode||422,json:{error:{code:error.code,message:error.message}}});}});
     await page.route('**/api/signatures',route=>route.fulfill({status:options.failList?503:200,json:options.failList?{error:{code:'SIGNATURE_SAVE_RETRY',message:'합성 실패'}}:options.signatures||signatures}));
     await page.route('**/api/signature-images',route=>route.fulfill({status:options.failImages?503:200,json:options.failImages?{error:{code:'MAIL_UNAVAILABLE',message:'합성 실패'}}:images}));
+    await page.route('https://images.example.invalid/**',route=>route.fulfill({status:200,contentType:'image/png',body:bytes}));
     await page.route('**/api/signature-images/*/content',async route=>{
       contents.push(route.request().url());
       if(options.imageGate)await options.imageGate;
-      return route.fulfill(options.failContent?{status:404,json:{error:{code:'SIGNATURE_IMAGE_NOT_FOUND',message:'합성 이미지 없음'}}}:{status:200,contentType:'image/png',body:bytes});
+      const changing=route.request().url().includes(assetB);
+      if(changing&&options.changeImageGate)await options.changeImageGate;
+      return route.fulfill(options.failContent||changing&&options.failChangeContent?{status:404,json:{error:{code:'SIGNATURE_IMAGE_NOT_FOUND',message:'합성 이미지 없음'}}}:{status:200,contentType:'image/png',body:bytes});
     });
     let draftUid=1000;
     await page.route('**/api/drafts',async route=>{
@@ -99,6 +105,65 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
       await c.body.fill('이미지 실패 뒤 본문');await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();
       await expect.poll(()=>c.requests.filter(r=>r.path==='send').length).toBe(1);
       const sent=c.requests.find(r=>r.path==='send').body;assert.deepEqual(sent.signatureImages,[]);assert.match(sent.html,/이미지 실패 뒤 본문/);assert.doesNotMatch(sent.html,/wm-compose-v1|blob:/);assert.deepEqual(c.errors,[]);
+    }finally{await c.page.close();}
+  });
+  for(const width of [1280,390])for(const action of ['signature','from'])for(const failed of [false,true])await t.test(`${action} image replacement ${failed?'failure':'delay'} keeps live images and authored caret safe at ${width}`,async()=>{
+    let release;const changeImageGate=new Promise(resolve=>release=resolve);
+    const document=structuredClone(signatures);document.defaults['sales@example.com'].newDefault=sigB;
+    const c=await open({width,signatures:document,changeImageGate,failChangeContent:failed});
+    try{
+      await c.body.evaluate(body=>{const p=body.ownerDocument.createElement('p');p.textContent='본문 유지';body.prepend(p);body._authored=p.firstChild;body.dispatchEvent(new Event('input',{bubbles:true}));});
+      if(action==='signature')await c.choose('짧은 서명');
+      else{await c.page.getByRole('button',{name:'보낸 사람 선택'}).click();await c.page.getByRole('option',{name:/sales@example.com/}).click();}
+      await expect.poll(()=>c.contents.filter(url=>url.includes(assetB)).length).toBe(1);
+      await expect(c.button).toHaveText('서명: 외부 연락용');await expect(c.body.locator('.sig')).toContainText('예시 담당자');
+      assert.equal(await c.body.locator('img').evaluateAll(imgs=>imgs.every(img=>img.getAttribute('src').startsWith('blob:')&&img.naturalWidth>0)),true);
+      await c.body.evaluate(body=>{body.focus();body.ownerDocument.getSelection().collapse(body._authored,2);});await c.page.keyboard.type('추가');
+      const caret=await c.body.evaluate(body=>({offset:body.ownerDocument.getSelection().anchorOffset,text:body._authored.textContent}));
+      assert.deepEqual(c.consoleErrors,[]);
+      if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR)await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/${action}-${failed?'failure':'delay'}-pending-${width}.png`});
+      release();
+      if(failed){await expect(c.button).toHaveText('서명: 없음');await expect(c.page.getByRole('alert')).toHaveText('서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.');await expect(c.body.locator('.sig')).toHaveCount(0);}
+      else{await expect(c.button).toHaveText('서명: 짧은 서명');await expect(c.body.locator('.sig')).toContainText('예시 팀');await expect.poll(()=>c.body.locator('img').evaluateAll(imgs=>imgs.every(img=>img.complete&&img.naturalWidth>0&&img.getAttribute('src').startsWith('blob:')))).toBe(true);assert.deepEqual(c.consoleErrors,[]);}
+      assert.deepEqual(await c.body.evaluate(body=>({offset:body.ownerDocument.getSelection().anchorOffset,text:body._authored.textContent,same:body.ownerDocument.getSelection().anchorNode===body._authored,connected:body.contains(body._authored)})),{...caret,same:true,connected:true});
+      assert.equal(c.consoleErrors.some(value=>value.includes('ERR_UNKNOWN_URL_SCHEME')),false);assert.deepEqual(c.errors,[]);
+      if(action==='from')await expect(c.page.getByRole('button',{name:'보낸 사람 선택'})).toContainText('sales@example.com');
+      if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR)await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/${action}-${failed?'failure':'delay'}-ready-${width}.png`});
+      await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();await expect.poll(()=>c.requests.filter(r=>r.path==='send').length).toBe(1);
+      const sent=c.requests.find(r=>r.path==='send').body;assert.match(sent.html,/본문추가 유지/);
+      if(failed)assert.deepEqual(sent.signatureImages,[]);else payload(sent,assetB);
+    }finally{release();await c.page.close();}
+  });
+  await t.test('replacement waits for active body composition before preserving its final node and caret',async()=>{
+    let release;const changeImageGate=new Promise(resolve=>release=resolve),c=await open({changeImageGate});
+    try{
+      await c.choose('짧은 서명');await expect.poll(()=>c.contents.filter(url=>url.includes(assetB)).length).toBe(1);
+      await c.body.evaluate(body=>{const doc=body.ownerDocument,p=doc.createElement('p');p.textContent='한';body.prepend(p);body._imeNode=p.firstChild;body.focus();doc.getSelection().collapse(body._imeNode,1);body.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));body.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'한',isComposing:true}));});
+      const response=c.page.waitForResponse(value=>value.url().includes(assetB)&&value.url().endsWith('/content'));release();await(await response).finished();
+      await expect(c.button).toHaveText('서명: 외부 연락용');
+      if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR)await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/replacement-composition-pending.png`});
+      await c.body.evaluate(body=>{body._imeNode.textContent='한글';body.ownerDocument.getSelection().collapse(body._imeNode,2);body.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'글',isComposing:true}));body.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'한글'}));});
+      await expect(c.button).toHaveText('서명: 짧은 서명');
+      assert.deepEqual(await c.body.evaluate(body=>({text:body._imeNode.textContent,connected:body.contains(body._imeNode),same:body.ownerDocument.getSelection().anchorNode===body._imeNode,offset:body.ownerDocument.getSelection().anchorOffset})),{text:'한글',connected:true,same:true,offset:2});assert.deepEqual(c.consoleErrors,[]);assert.deepEqual(c.errors,[]);
+    }finally{release();await c.page.close();}
+  });
+  await t.test('legacy raw HTML remains byte-identical while initial and replacement signatures use server normalization',async()=>{
+    const raw='<p onclick="window.legacyExecuted=true">legacy unsafe</p><iframe srcdoc="<input>"></iframe><form><input value="unsafe"><button>unsafe</button></form><script>window.legacyExecuted=true</script><img src="https://images.example.invalid/legacy.png" onerror="window.legacyExecuted=true"><style>p{color:red}</style>';
+    const document=structuredClone(signatures);document.items[0].html=raw;document.items[1].html=raw;
+    const original=JSON.stringify(document),c=await open({signatures:document});
+    try{
+      await expect(c.body.locator('.sig')).toContainText('legacy unsafe');
+      for(const scene of ['initial','replacement']){
+        if(scene==='replacement'){await c.choose('짧은 서명');await expect(c.button).toHaveText('서명: 짧은 서명');}
+        await expect(c.body.locator('iframe,form,input,script,button,select,textarea')).toHaveCount(0);
+        assert.equal(await c.body.evaluate(body=>[...body.querySelectorAll('*')].some(el=>[...el.attributes].some(attr=>/^on/i.test(attr.name)))),false);
+        assert.equal(await c.page.evaluate(()=>window.legacyExecuted),undefined);
+        if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR)await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/legacy-${scene}.png`});
+      }
+      assert.equal(JSON.stringify(document),original);
+      assert.equal(await c.page.evaluate(async()=>JSON.stringify(await(await fetch('/api/signatures')).json())),original);
+      assert.equal(fake.state.requests.some(req=>req.path==='/api/signatures'&&req.method==='PUT'),false);
+      assert.deepEqual(c.errors,[]);
     }finally{await c.page.close();}
   });
   await t.test('new default projects only registered images; rich editing and send retain exact manifest tokens',async()=>{

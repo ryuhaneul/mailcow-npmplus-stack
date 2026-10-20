@@ -213,7 +213,8 @@ export function createScopedActionService({ imap, now = Date.now }) {
     if (record && (record.scopeKey !== scopeKey || record.action !== body.action || record.target !== body.target || record.retryFrom !== body.selectionId)) throw mismatch();
     if (!record) {
       if (body.cursor != null) throw mismatch();
-      if (store.records.size >= 3 || [...store.records.values()].some(item => !['completed', 'error'].includes(item.phase))) throw limit();
+      const closed = item => ['completed', 'error', 'stopped'].includes(item.phase);
+      if ([...store.records.values()].some(item => !closed(item) && (item.busy || item.readers))) throw fail(409, 'SCOPE_BUSY', '선택을 처리 중이에요. 잠시 뒤 다시 시도해 주세요.');
       record = { selectionId: token(), selectionKey: body.selectionKey, scope, scopeKey, action: body.action, target: body.target,
         resolvedTarget: { move: body.target, trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[body.action] ?? null,
         targetNeedsCreate: false, targetCreateAttempted: false, targetReady: false,
@@ -236,11 +237,21 @@ export function createScopedActionService({ imap, now = Date.now }) {
         record.cutoff = structuredClone(source.cutoff); record.totalEstimate = record.manifest.reduce((sum, group) => sum + group.uids.length, 0);
         record.resolvedTarget = source.resolvedTarget; record.targetNeedsCreate = source.targetNeedsCreate && !source.targetReady;
       }
+      for (const item of store.records.values()) if (!closed(item)) {
+        item.phase = 'stopped'; item.reserveBytes = 0;
+      }
+      while (store.records.size >= 3) {
+        // Map insertion order is the immutable creation order, independent of reads.
+        const oldest = [...store.records.values()].find(item => closed(item) && !item.busy && !item.readers);
+        if (!oldest) throw limit();
+        store.records.delete(oldest.selectionId); store.keys.delete(oldest.selectionKey); scrub(oldest);
+      }
       if (checkStorage(session) + Buffer.byteLength(JSON.stringify(record)) + 1024 > memoryLimit) throw limit();
       store.records.set(record.selectionId, record); store.keys.set(record.selectionKey, record.selectionId);
     }
     touch(store, record);
     if (record.busy) throw fail(409, 'SCOPE_BUSY', '선택을 준비 중이에요. 잠시 뒤 다시 시도해 주세요.');
+    if (record.phase === 'stopped') throw expired();
     const key = body.cursor ?? 'initial';
     if (record.receipts[key]) return structuredClone(record.receipts[key]);
     if (record.error) throw fail(record.error.statusCode, record.error.code, record.error.message);
@@ -333,6 +344,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
     if (record.scopeKey !== scopeKey || record.action !== body.action || record.target !== body.target) throw mismatch();
     touch(store, record);
     if (record.busy) throw fail(409, 'SCOPE_BUSY', '메일을 처리 중이에요. 잠시 뒤 다시 시도해 주세요.');
+    if (record.phase === 'stopped') throw expired();
     if (record.runReceipts?.[body.cursor]) return replay(record.runReceipts[body.cursor]);
     if (record.phase === 'preparing') throw fail(409, 'SELECTION_NOT_READY', '전체 선택 준비를 마쳐 주세요.');
     if (!['ready', 'running'].includes(record.phase) || record.cursor !== body.cursor) throw invalid();
@@ -411,26 +423,29 @@ export function createScopedActionService({ imap, now = Date.now }) {
     const pagination = Object.fromEntries(Object.entries(query).map(([key, value]) => [key, typeof value === 'number' ? String(value) : value]));
     const { page, pageSize } = listOptions(pagination);
     const record = getSelection(session, id), store = storeFor(session);
-    const source = (record.failures ?? []).slice((page - 1) * pageSize, page * pageSize);
-    const groups = new Map(), metadata = new Map();
-    for (const failure of source) {
-      const ref = decodeRef(failure.ref), key = JSON.stringify([ref.path, ref.uidValidity]);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(failure.ref);
-    }
-    for (const refs of groups.values()) {
-      live(store, record); checkBudget(budget);
-      try {
-        for (const item of await listService.metadata(session, refs, { budget })) metadata.set(item.ref, item);
-      } catch (error) {
-        if (!['STALE_REF', 'MESSAGE_NOT_FOUND'].includes(error.code)) {
-          if (error instanceof AppError) throw error;
-          throw fail(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요.');
-        }
+    record.readers = (record.readers ?? 0) + 1;
+    try {
+      const source = (record.failures ?? []).slice((page - 1) * pageSize, page * pageSize);
+      const groups = new Map(), metadata = new Map();
+      for (const failure of source) {
+        const ref = decodeRef(failure.ref), key = JSON.stringify([ref.path, ref.uidValidity]);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(failure.ref);
       }
-      live(store, record);
-    }
-    return { total: record.failures?.length ?? 0, page, pageSize, items: source.map(failure => ({ ...(metadata.get(failure.ref) ?? { ref: failure.ref, unavailable: true }), ...failure })) };
+      for (const refs of groups.values()) {
+        live(store, record); checkBudget(budget);
+        try {
+          for (const item of await listService.metadata(session, refs, { budget })) metadata.set(item.ref, item);
+        } catch (error) {
+          if (!['STALE_REF', 'MESSAGE_NOT_FOUND'].includes(error.code)) {
+            if (error instanceof AppError) throw error;
+            throw fail(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요.');
+          }
+        }
+        live(store, record);
+      }
+      return { total: record.failures?.length ?? 0, page, pageSize, items: source.map(failure => ({ ...(metadata.get(failure.ref) ?? { ref: failure.ref, unavailable: true }), ...failure })) };
+    } finally { if (!record.disposed) record.readers--; }
   }
   return { prepare, execute, failures, getSelection, ensureTarget, checkStorage };
 }

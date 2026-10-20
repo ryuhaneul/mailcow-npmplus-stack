@@ -1,0 +1,50 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile, mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'vite';
+import preact from '@preact/preset-vite';
+import { chromium, expect } from '@playwright/test';
+import { createFakeApi } from '../../web/dev/fake-api.js';
+import { rulesFixture } from '../../web/dev/fake-rules.js';
+import { parseScript } from '../../server/sieve/parse.js';
+
+await test('newer filter versions hide unsupported summaries and all write controls', async t => {
+  const doc = parseScript(await readFile(new URL('../fixtures/sieve/webmail-v2.sieve', import.meta.url), 'utf8')).doc;
+  const fake = createFakeApi({ authenticated: true });
+  fake.state.rules = rulesFixture('newer_version', { doc, rev: doc.rev, prevAvailable: false });
+  const server = await createServer({ configFile: false, root: fileURLToPath(new URL('../../web', import.meta.url)), logLevel: 'error', plugins: [preact(), { name: 'rules-version-test-api', configureServer(server) { server.middlewares.use(fake.middleware); } }], server: { host: '127.0.0.1', port: 0 } });
+  await server.listen();
+  t.after(() => server.close());
+  const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}), args: ['--no-sandbox'] });
+  t.after(() => browser.close());
+  const captures = process.env.V2G_CAPTURE_DIR || '/tmp/webmail-v2g-captures';
+  await mkdir(captures, { recursive: true });
+  for (const width of [1280, 768, 375]) {
+    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/#filters`);
+    await expect(page.locator('.rules-banner')).toHaveAttribute('data-state', 'newer_version');
+    await expect(page.locator('.rules-banner')).toContainText('새 버전 웹메일에서 만든 필터예요. 지금은 볼 수만 있어요.');
+    await expect(page.locator('.filters-view')).toContainText('이 버전에서는 규칙 조건을 표시할 수 없어요.');
+    await expect(page.locator('.rules-banner button')).toHaveCount(0);
+    await expect(page.locator('.filters-view a[href="#rule"]')).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '필터 규칙' })).toHaveCount(0);
+    await expect(page.locator('.filters-view')).not.toContainText('Synthetic meeting');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: `${captures}/newer-version-${width}.png` });
+    assert.deepEqual(errors, []);
+    await context.close();
+  }
+  assert.equal(fake.state.requests.some(request => request.path.startsWith('/api/rules') && request.method !== 'GET'), false);
+  fake.state.rules = rulesFixture('ok');
+  const page = await browser.newPage();
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/#filters`);
+  await expect(page.locator('.filters-view a[href="#rule"]')).toBeVisible();
+  await expect(page.locator('.filters-view')).toContainText('명세서');
+  await expect(page.getByRole('list', { name: '필터 규칙' })).toBeVisible();
+  await expect(page.locator('.rules-banner')).toHaveCount(0);
+});

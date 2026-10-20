@@ -92,7 +92,7 @@ export function createRulesService({ config, imap, directory, connect = connectM
   async function get(session) {
     return perform(session, null, async (client, current, policy) => {
       const { state, rev, doc, activeName, missingFolders, importReport } = current;
-      const prevAvailable = current.scripts.some(script => script.name === previousName)
+      const prevAvailable = state !== 'newer_version' && current.scripts.some(script => script.name === previousName)
         && parseScript(await client.getScript(previousName)).state === 'ok';
       return { state, rev, doc, activeName, activeScript: activeName, missingFolders, prevAvailable, internalDomains: policy.internalDomains, ...(importReport ? { importReport } : {}) };
     });

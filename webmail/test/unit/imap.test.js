@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { ImapFlow } from 'imapflow';
 import { createImapPool, mailTlsOptions } from '../../server/mail/imap-pool.js';
-import { fetchOriginals, mailboxStatus, getMetadata, setMetadata } from '../../server/mail/imap-raw.js';
+import { fetchOriginals, mailboxStatus, getMetadata, setMetadata, setMetadataEntries } from '../../server/mail/imap-raw.js';
 import { encodeRef, decodeRef, assertUidValidity, originalRefs } from '../../server/mail/ref.js';
 import { createApp } from '../../server/app.js';
 
@@ -454,4 +454,44 @@ test('pool: temporary connection authentication rejection expires session', asyn
   });
   await assert.rejects(f.pool.withFreshConnection(f.session, () => true), { statusCode: 403, code: 'SESSION_EXPIRED' });
   assert.equal(f.session.connection, null); assert.ok(f.clients.every(client => !client.usable));
+});
+
+
+test('metadata: GET MAXSIZE emits the protocol option and LONGENTRIES never looks like a missing key', async () => {
+  let args, next = 0;
+  const response = { attributes: [{ section: [{ value: 'METADATA' }, { value: 'LONGENTRIES' }, { value: '1572865' }] }] };
+  const client = { enabled: new Set(), capabilities: new Map(), async exec(_command, received) {
+    args = received;
+    return { response, next() { next++; } };
+  } };
+  await assert.rejects(getMetadata(client, '', '/private/vendor/mailstack-webmail/signature-images-v1', { maxSize: 1572864 }), error => error.statusCode === 503 && error.code === 'METADATA_TOO_LARGE' && error.metadataCode === 'LONGENTRIES' && error.longEntries === 1572865);
+  assert.deepEqual(args, [[{ type: 'ATOM', value: 'MAXSIZE' }, { type: 'ATOM', value: '1572864' }], { type: 'STRING', value: '' }, { type: 'STRING', value: '/private/vendor/mailstack-webmail/signature-images-v1' }]);
+  assert.equal(next, 1);
+  await assert.rejects(getMetadata(client, '', 'key', { maxSize: -1 }), { statusCode: 400 });
+});
+test('metadata: server METADATA error codes survive NO/BAD safely without private response text', async () => {
+  for (const code of ['MAXSIZE', 'TOOMANY', 'NOPRIVATE', 'LONGENTRIES']) {
+    const client = { enabled: new Set(), capabilities: new Map(), async exec() {
+      throw Object.assign(new Error('synthetic private message'), { responseStatus: 'NO', response: { attributes: [{ section: [{ value: 'METADATA' }, { value: code }, { value: '999' }] }] } });
+    } };
+    await assert.rejects(setMetadataEntries(client, [['/private/vendor/mailstack-webmail/prefs', '{}']]), error => error.statusCode === 503 && error.metadataCode === code && !error.message.includes('synthetic private'));
+  }
+});
+test('metadata: multiple fixed entries use one SET with UTF-8 literals and NIL', async () => {
+  const calls = [];
+  const client = { enabled: new Set(), capabilities: new Map(), async exec(command, args) { calls.push({ command, args }); return { next() {} }; } };
+  const entries = [['/private/vendor/mailstack-webmail/prefs', '{"html":"합성"}'], ['/private/vendor/mailstack-webmail/signatures-v1', '{}'], ['/private/vendor/mailstack-webmail/signature-images-v1', null]];
+  await setMetadataEntries(client, entries);
+  assert.equal(calls.length, 1); assert.equal(calls[0].command, 'SETMETADATA'); assert.deepEqual(calls[0].args[0], { type: 'STRING', value: '' });
+  assert.equal(calls[0].args[1].length, 6);
+  assert.deepEqual(calls[0].args[1][1], { type: 'LITERAL', value: Buffer.from(entries[0][1]) });
+  assert.equal(calls[0].args[1][5], null);
+  for (const invalid of [[], [['/private/foreign', '{}']], [entries[0], entries[0]], [[entries[0][0], {}]], [['/private/vendor/mailstack-webmail/prefs\r\n', '{}']]]) await assert.rejects(setMetadataEntries(client, invalid), { statusCode: 400 });
+  assert.equal(calls.length, 1);
+});
+test('metadata: one failed multi-key SET is not retried as individual writes', async () => {
+  let calls = 0;
+  const client = { async exec(command, args) { calls++; assert.equal(command, 'SETMETADATA'); assert.equal(args[1].length, 4); throw Object.assign(new Error('synthetic rejection'), { responseStatus: 'NO' }); } };
+  await assert.rejects(setMetadataEntries(client, [['/private/vendor/mailstack-webmail/prefs', '{}'], ['/private/vendor/mailstack-webmail/signatures-v1', '{}']]), { statusCode: 502 });
+  assert.equal(calls, 1);
 });

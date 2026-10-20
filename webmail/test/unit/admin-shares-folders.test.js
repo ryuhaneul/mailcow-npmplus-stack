@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AppError } from '../../server/errors.js';
 import { createAclFolders } from '../../server/admin/acl-folders.js';
 import { createSharesService } from '../../server/admin/services/shares.js';
 import { createHistoryService } from '../../server/admin/services/history.js';
@@ -18,25 +19,30 @@ const revertOptions = { confirm: true, actor: 'admin', ip: '192.0.2.1', session:
 async function fixture(t, initial = [], options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'webmail-share-folders-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const f = { rows: structuredClone(initial), folders: new Set(['INBOX', 'Archive', 'Archive/2026', 'Shared', 'Shared/other@example.com/INBOX']), writes: [], lists: 0 };
+  const f = { rows: structuredClone(initial), folders: new Set(['INBOX', 'Archive', 'Archive/2026', 'Shared', 'Shared/other@example.com/INBOX']), writes: [], reads: [], placeholders: new Set(['Projects', 'Projects/Branch']), lists: 0 };
   const doveadm = { async call(command, args) {
     assert.equal(args.user, owner);
-    if (command === 'mailboxList') {
+    if (command === 'mailboxList') return [...f.folders, ...f.placeholders].map(mailbox => ({ mailbox }));
+    if (command === 'mailboxStatus') {
+      if (args.mailboxMask.some(mailbox => f.placeholders.has(mailbox))) throw new AppError(502, 'DOVEADM_REJECTED', 'synthetic doveadm exit 68');
+      assert.deepEqual(args, { user: owner, field: ['guid'], mailboxMask: ['*'] });
       f.lists++; f.onList?.();
       return [...f.folders].map(mailbox => ({ mailbox }));
     }
     assert.equal(command, 'aclGet');
+    f.reads.push(args.mailbox);
+    if (f.placeholders.has(args.mailbox)) throw new AppError(502, 'DOVEADM_REJECTED', 'synthetic doveadm exit 68');
     return f.rows.filter(item => item.mailbox === args.mailbox).map(item => ({ id: `user=${item.id}`, global: '', rights: item.rights.join(' ') }));
   } };
   const dockerapi = {
     async getAcl() { return f.rows; },
     async setAcl(who, id, mailbox) {
-      assert.equal(who, owner); f.writes.push(['set', id, mailbox]);
+      assert.equal(who, owner); assert.equal(f.placeholders.has(mailbox), false); f.writes.push(['set', id, mailbox]);
       f.rows = f.rows.filter(item => item.id !== id || item.mailbox !== mailbox);
       f.rows.push(row(mailbox, id));
     },
     async deleteAcl(who, id, mailbox) {
-      assert.equal(who, owner); f.writes.push(['delete', id, mailbox]);
+      assert.equal(who, owner); assert.equal(f.placeholders.has(mailbox), false); f.writes.push(['delete', id, mailbox]);
       f.rows = f.rows.filter(item => item.id !== id || item.mailbox !== mailbox);
       f.onDelete?.();
     },
@@ -51,7 +57,7 @@ async function fixture(t, initial = [], options = {}) {
   const service = createSharesService({ dockerapi, aclFolders, mailcow, audit, lock, history, config: { wholeMailbox: options.wholeMailbox === true } });
   const item = async () => (await service.list({}, { q: owner })).items[0];
   const change = async (grant, expected) => service.change({ owner, grantee, grant, etag: expected ?? (await item()).etag, actor: 'admin', ip: '192.0.2.1', session: {} });
-  return Object.assign(f, { dir, aclFolders, audit, history, service, item, change });
+  return Object.assign(f, { dir, doveadm, aclFolders, audit, history, service, item, change });
 }
 
 for (const wholeMailbox of [false, true]) test(`shares: history title is mode independent wholeMailbox=${wholeMailbox}`, async t => {
@@ -232,4 +238,43 @@ test('shares: revoke preserves exact quoted, spaced and Korean folder names', as
   const result = await f.change(false);
   assert.equal(result.applied, true); assert.deepEqual(f.rows, []);
   assert.ok(f.writes.some(call => call[2] === mailbox));
+});
+
+test('shares: placeholder parents are excluded from reads, grant, revoke and both reverts', async t => {
+  const children = ['Projects/Leaf', 'Projects/Branch/Leaf'];
+  const f = await fixture(t, children.map(mailbox => row(mailbox)));
+  children.forEach(mailbox => f.folders.add(mailbox));
+  const listed = await f.doveadm.call('mailboxList', { user: owner });
+  for (const mailbox of f.placeholders) {
+    assert.ok(listed.some(row => row.mailbox === mailbox));
+    await assert.rejects(f.doveadm.call('mailboxStatus', { user: owner, field: ['guid'], mailboxMask: [mailbox] }), { code: 'DOVEADM_REJECTED' });
+    await assert.rejects(f.doveadm.call('aclGet', { user: owner, mailbox }), { code: 'DOVEADM_REJECTED' });
+  }
+  f.reads = [];
+  const item = await f.item();
+  assert.deepEqual(item.grants[0].folders.map(folder => folder.mailbox), children.toSorted((a, b) => a.localeCompare(b)));
+  assert.deepEqual(await f.aclFolders.list(owner), ['INBOX', 'Archive', 'Archive/2026', ...children]);
+  await assert.rejects(f.aclFolders.assertExist(owner, ['Projects']), { statusCode: 409, code: 'CONFLICT' });
+  const granted = await f.change(true, item.etag);
+  assert.deepEqual(f.rows, [...children.map(mailbox => row(mailbox)), row('INBOX')]);
+  await f.history.revert(granted.auditId, revertOptions);
+  assert.deepEqual(f.rows, children.map(mailbox => row(mailbox)));
+  const removed = await f.change(false);
+  assert.deepEqual(f.rows, []);
+  await f.history.revert(removed.auditId, revertOptions);
+  assert.deepEqual(f.rows.toSorted((a, b) => a.mailbox.localeCompare(b.mailbox)), children.map(mailbox => row(mailbox)).toSorted((a, b) => a.mailbox.localeCompare(b.mailbox)));
+  assert.deepEqual(new Set(f.writes.map(call => call[2])), new Set(['INBOX', ...children]));
+  assert.ok(children.every(mailbox => f.reads.includes(mailbox)));
+  assert.equal(f.reads.some(mailbox => f.placeholders.has(mailbox)), false);
+});
+
+test('history: a deleted folder still listed as a placeholder is skipped during restore', async t => {
+  const f = await fixture(t, [row('INBOX'), row('Projects')]);
+  f.placeholders.delete('Projects'); f.folders.add('Projects'); f.folders.add('Projects/Leaf');
+  const removed = await f.change(false);
+  f.folders.delete('Projects'); f.placeholders.add('Projects'); f.writes = [];
+  const result = await f.history.revert(removed.auditId, revertOptions);
+  assert.deepEqual(result.skipped, ['Projects']);
+  assert.deepEqual(f.writes, [['set', grantee, 'INBOX']]);
+  assert.deepEqual(f.rows, [row('INBOX')]);
 });

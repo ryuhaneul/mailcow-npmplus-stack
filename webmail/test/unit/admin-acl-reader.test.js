@@ -38,19 +38,19 @@ test('ACL reader: owned rows match dockerapi, excluding Shared/ with sequential 
   const doveadm = { async call(command, args) {
     calls.push({ command, args }); active++; peak = Math.max(peak, active);
     await new Promise(resolve => setImmediate(resolve)); active--;
-    return command === 'mailboxList' ? folders.map(mailbox => ({ mailbox })) : acl[args.mailbox];
+    return command === 'mailboxStatus' ? folders.map(mailbox => ({ mailbox })) : acl[args.mailbox];
   } };
   const legacy = createAclReader({ dockerapi, doveadm, config: {} });
   const reader = createAclReader({ dockerapi, doveadm, config: enabled });
   assert.deepEqual(await reader.getAcl(owner), (await legacy.getAcl(owner)).filter(row => row.user === owner));
   assert.equal(peak, 1);
-  assert.deepEqual(calls, [{ command: 'mailboxList', args: { user: owner } }, ...folders.filter(mailbox => !mailbox.startsWith('Shared/')).map(mailbox => ({ command: 'aclGet', args: { user: owner, mailbox } }))]);
+  assert.deepEqual(calls, [{ command: 'mailboxStatus', args: { user: owner, field: ['guid'], mailboxMask: ['*'] } }, ...folders.filter(mailbox => !mailbox.startsWith('Shared/')).map(mailbox => ({ command: 'aclGet', args: { user: owner, mailbox } }))]);
 });
 
 test('ACL reader: received namespace root and descendants are skipped, user folders remain', async () => {
   const calls = [];
   const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command, args) {
-    if (command === 'mailboxList') return ['INBOX', 'Shared', 'Shared/other@example.com', 'Shared/other@example.com/INBOX', 'MySharedDocs'].map(mailbox => ({ mailbox }));
+    if (command === 'mailboxStatus') return ['INBOX', 'Shared', 'Shared/other@example.com', 'Shared/other@example.com/INBOX', 'MySharedDocs'].map(mailbox => ({ mailbox }));
     calls.push(args.mailbox);
     if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
     return [];
@@ -84,7 +84,7 @@ for (const failure of [new AppError(502, 'DOVEADM_REJECTED', '거부'), new AppE
     const calls = [];
     const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command, args) {
       calls.push({ command, args });
-      if (command === 'mailboxList') return ['INBOX', 'Archive', 'Later'].map(mailbox => ({ mailbox }));
+      if (command === 'mailboxStatus') return ['INBOX', 'Archive', 'Later'].map(mailbox => ({ mailbox }));
       if (args.mailbox === 'Archive') throw failure;
       return acl.INBOX;
     } } });
@@ -102,7 +102,7 @@ for (const failure of [new AppError(502, 'DOVEADM_REJECTED', '거부'), new AppE
 
 test('ACL reader: mailbox listing failure is propagated without fallback or ACL calls', async () => {
   const failure = new AppError(404, 'NOT_FOUND', '없는 사용자'); let calls = 0;
-  const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command) { calls++; assert.equal(command, 'mailboxList'); throw failure; } } });
+  const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command) { calls++; assert.equal(command, 'mailboxStatus'); throw failure; } } });
   await assert.rejects(reader.getAcl(owner), error => error === failure); assert.equal(calls, 1);
 });
 
@@ -135,6 +135,22 @@ test('doveadm aclGet: bad inputs get 422 with zero HTTP; only user/mailbox accep
   assert.equal(f.requests.length, 2);
 });
 
+test('doveadm mailboxStatus: only fixed guid and wildcard arguments reach HTTP', async t => {
+  const f = await httpFixture(t);
+  const valid = { user: owner, field: ['guid'], mailboxMask: ['*'] };
+  for (const args of [undefined, {}, { user: owner }, ...[
+    { field: 'guid' }, { field: [] }, { field: ['messages'] }, { field: ['guid', 'messages'] },
+    { mailboxMask: '*' }, { mailboxMask: [] }, { mailboxMask: ['INBOX'] }, { mailboxMask: ['*', 'INBOX'] },
+    { user: '*@example.com' }, { user: 'user?@example.com' }, { allUsers: true }, { mailbox: 'INBOX' },
+  ].map(overrides => ({ ...valid, ...overrides }))]) {
+    await assert.rejects(f.client.call('mailboxStatus', args), { statusCode: 422, code: 'INVALID_INPUT' });
+  }
+  assert.equal(f.requests.length, 0);
+  f.state.response = [{ mailbox: 'INBOX', guid: '0123456789abcdef0123456789abcdef' }, { mailbox: 'Projects/Leaf', guid: '1123456789abcdef0123456789abcdef' }];
+  assert.deepEqual(await f.client.call('mailboxStatus', valid), f.state.response);
+  assert.deepEqual(f.requests, [{ command: 'mailboxStatus', args: valid }]);
+});
+
 for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'doveadm reader' : 'dockerapi fallback'}; writes remain dockerapi`, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'webmail-acl-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const grants = new Set(), calls = [];
@@ -145,8 +161,11 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
   };
   const doveadm = { async call(command, args) {
     assert.ok(on); calls.push(command);
-    if (command === 'mailboxList') return (args.user === grantee && grants.has(owner) ? ['INBOX', 'Shared', `Shared/${owner}`, `Shared/${owner}/INBOX`] : ['INBOX']).map(mailbox => ({ mailbox }));
+    if (command === 'mailboxList') return ['INBOX', 'Projects', 'Projects/Branch', 'Projects/Branch/Leaf'].map(mailbox => ({ mailbox }));
+    if (command === 'mailboxStatus') return (args.user === grantee && grants.has(owner) ? ['INBOX', 'Shared', `Shared/${owner}`, `Shared/${owner}/INBOX`, 'Projects/Branch/Leaf'] : ['INBOX', 'Projects/Branch/Leaf']).map(mailbox => ({ mailbox }));
     assert.equal(command, 'aclGet');
+    if (args.mailbox === 'Projects/Branch/Leaf') return [];
+    if (['Projects', 'Projects/Branch'].includes(args.mailbox)) throw new AppError(502, 'DOVEADM_REJECTED', 'synthetic doveadm exit 68');
     if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
     return grants.has(args.user) ? [{ id: `user=${grantee}`, global: '', rights: 'lookup read' }] : [];
   } };
@@ -179,7 +198,7 @@ for (const on of [false, true]) test(`global INBOX ACL: ${on ? 'doveadm' : 'dock
     async deleteAcl() { writes++; },
   };
   const doveadm = { async call(command, args) {
-    if (command === 'mailboxList') return [{ mailbox: 'INBOX' }];
+    if (command === 'mailboxStatus') return [{ mailbox: 'INBOX' }];
     assert.equal(command, 'aclGet');
     return args.user === owner ? [{ id: `user=${grantee}`, global: 'global', rights: 'lookup read' }] : [];
   } };
@@ -200,7 +219,7 @@ test('ACL reader: missing or non-string global rejects the whole result after a 
     const row = { id: `user=${grantee}`, rights: 'lookup read' };
     if (global !== undefined) row.global = global;
     const reader = createAclReader({ config: enabled, dockerapi: { getAcl() { assert.fail('no fallback'); } }, doveadm: { async call(command) {
-      return command === 'mailboxList' ? [{ mailbox: 'INBOX' }] : [acl.INBOX[0], row];
+      return command === 'mailboxStatus' ? [{ mailbox: 'INBOX' }] : [acl.INBOX[0], row];
     } } });
     await assert.rejects(reader.getAcl(owner), { statusCode: 502, code: 'DOVEADM_REJECTED' });
   }

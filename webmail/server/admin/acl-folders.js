@@ -5,7 +5,7 @@ export function createAclFolders({ doveadm, config, dockerapi }) {
   const enabled = Boolean(config.doveadmUrl && config.doveadmKey);
   async function list(owner) {
     if (!enabled) return ['INBOX'];
-    const rows = await doveadm.call('mailboxList', { user: owner });
+    const rows = await doveadm.call('mailboxStatus', { user: owner, field: ['guid'], mailboxMask: ['*'] });
     return [...new Set(rows.map(row => row.mailbox).filter(mailbox => mailbox !== 'Shared' && !mailbox.startsWith('Shared/')))];
   }
   async function assertExist(owner, mailboxes) {

@@ -134,7 +134,21 @@ async function installSelectionApi(page, {inbox = 1848, handlers = {}} = {}) {
   return model;
 }
 
-await test('select-all V1: selection and confirmation', async t => {
+// Explicit gates keep progress and stop assertions tied to an in-flight request.
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => {resolve = done;});
+  return {promise,resolve};
+}
+function ready(selectionId, initialTotal) {
+  return {selectionId,phase:'ready',cursor:`${selectionId}-execute-0`,totalEstimate:initialTotal,initialTotal,expiresAt:Date.now()+1800000,cutoff:{kind:'uid-fences',capturedAt:Date.now()}};
+}
+function receipt(selectionId, sequence, initialTotal, totals, {delta = totals, failed = [], completed = false} = {}) {
+  const remainingEstimate = initialTotal - totals.processed - totals.skipped - totals.failed;
+  return {selectionId,batchId:`${selectionId}:${sequence}`,sequence,state:completed?'completed':'running',reason:completed?'complete':'batch',initialTotal,delta,totals,failed,nextCursor:completed?null:`${selectionId}-execute-${sequence+1}`,remainingEstimate,elapsedMs:1};
+}
+
+await test('select-all: selection, confirmation and recovery', async t => {
   const fake = createFakeApi({authenticated:true});
   const server = await createServer({configFile:false,root:fileURLToPath(new URL('../../web',import.meta.url)),logLevel:'error',plugins:[preact(),{name:'select-all-test-api',configureServer(server) {server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
   await server.listen();
@@ -330,4 +344,319 @@ await test('select-all V1: selection and confirmation', async t => {
     const params = new URL(latestList.url).searchParams;
     assert.equal(params.get('view'),view);assert.equal(params.get('folder') || '',view === 'folder' ? folder : '');assert.equal(params.get('q'),q);
   });
+
+  const actionCases = [
+    ['seen','읽음 표시','읽음으로 표시할까요?','읽음 표시 중','읽음 표시를 마쳤어요'],
+    ['unseen','읽지 않음 표시','읽지 않음으로 표시할까요?','읽지 않음 표시 중','읽지 않음 표시를 마쳤어요'],
+    ['flag','별표','별표를 붙일까요?','별표 추가 중','별표를 붙였어요'],
+    ['unflag','별표 해제','별표를 해제할까요?','별표 해제 중','별표를 해제했어요'],
+    ['move','폴더로 옮기기','다른 폴더로 옮길까요?','폴더로 옮기는 중','폴더로 옮겼어요'],
+    ['archive','보관','보관할까요?','보관 중','보관을 마쳤어요'],
+    ['trash','휴지통으로 옮기기','휴지통으로 옮길까요?','휴지통으로 옮기는 중','휴지통으로 옮겼어요'],
+    ['spam','스팸 신고','스팸으로 신고할까요?','스팸 신고 중','스팸으로 신고했어요'],
+    ['notspam','스팸 아님','스팸 아님으로 처리할까요?','스팸 아님 처리 중','스팸 아님으로 처리했어요'],
+    ['delete-forever','영구 삭제','영구 삭제할까요?','영구 삭제 중','영구 삭제를 마쳤어요'],
+  ];
+  async function chooseAction(page, action) {
+    if (['unseen','flag','unflag'].includes(action)) {
+      await page.locator('.sa-tools').getByRole('button',{name:'더 보기',exact:true}).click();
+      await page.locator(`[data-sa-action="${action}"]`).click();
+    } else if (action === 'move') {
+      await page.locator('[data-sa-action="move"]').click();
+      await page.getByRole('menuitem',{name:'거래처',exact:true}).click();
+    } else await page.locator(`[data-sa-action="${action}"]`).click();
+  }
+  async function startAction(page, action = 'seen') {
+    await selectAll(page);await chooseAction(page,action);
+    await page.getByRole('dialog').locator('button[type="submit"]').click();
+  }
+  async function progress(page, attempted, total, processed, skipped, failed) {
+    const root = page.locator('.sa-progress'), bar = root.getByRole('progressbar');
+    await expect(root).toContainText(`시도 ${attempted} / ${total}`);
+    await expect(bar).toHaveAttribute('aria-valuenow',String(attempted));
+    await expect(bar).toHaveAttribute('aria-valuemax',String(total));
+    await expect(bar).toHaveAttribute('aria-valuetext',`${attempted} / ${total}통 시도`);
+    await expect(root).toContainText(`처리 ${processed}통 · 건너뜀 ${skipped}통 · 실패 ${failed}통`);
+  }
+  // Let a completed route response reach the fetch continuation and paint. There
+  // is no elapsed-time grace period in the next-request-count assertions.
+  async function painted(page) {
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
+
+  for (const [action,label,question,running,done] of actionCases) await t.test(`${action}: confirmation, progress, result and scope contract`,async t => {
+    const first = deferred(), second = deferred();
+    t.after(() => {first.resolve();second.resolve();});
+    let calls = 0;
+    const scope = scopeOf(action === 'notspam' ? {view:'spam'} : action === 'delete-forever' ? {view:'folder',folder:'Trash'} : {});
+    const expected = {scope,action,...(action === 'move'?{target:'거래처'}:{})};
+    const {page,model} = await pageFor(t,{inbox:51,route:action === 'notspam'?'spam':action === 'delete-forever'?'f/Trash':'inbox',handlers:{execute:async ({record,reply}) => {
+      const sequence = calls++;
+      assertActionRequest(record,{...expected,cursor:`synthetic-selection-1-execute-${sequence}`});
+      await (sequence === 0 ? first.promise : second.promise);
+      return reply(sequence === 0
+        ? receipt('synthetic-selection-1',0,51,{processed:20,skipped:3,failed:0})
+        : receipt('synthetic-selection-1',1,51,{processed:48,skipped:3,failed:0},{delta:{processed:28,skipped:0,failed:0},completed:true}));
+    }}});
+    await selectAll(page);await chooseAction(page,action);
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading')).toHaveText(`51통을 ${question}`);
+    await expect(dialog.locator('button[type="submit"]')).toHaveText(`51통 ${label}`);
+    if (action === 'move') await expect(dialog.locator('dd').last()).toHaveText('거래처');
+    noPosts(model);
+    await dialog.locator('button[type="submit"]').click();
+    await expect.poll(() => calls).toBe(1);
+    await expect(page.locator('.sa-progress')).toContainText(running);
+    await progress(page,0,51,0,0,0);
+    first.resolve();await expect.poll(() => calls).toBe(2);
+    await progress(page,23,51,20,3,0);
+    if (action === 'move') await page.screenshot({path:`${captures}/v2-move-progress.png`});
+    second.resolve();
+    const result = page.locator('.sa-result');
+    await expect(result).toContainText(done);
+    await expect(result.locator('.sa-counts')).toHaveText('처리 48통 · 건너뜀 3통 · 실패 0통');
+    await expect(result).toContainText('그새 조건에서 벗어났거나 이미 없어진 메일');
+    assert.equal(model.prepares().length,1);assert.equal(model.executions().length,2);
+    assertActionRequest(model.prepares()[0],{...expected,cursor:null});
+    assert.equal(model.posts().filter(record => record.path === '/api/messages/actions').length,0);
+  });
+
+  await t.test('attempted progress includes successes, skips and failures while processed stays successes only',async t => {
+    const gate = deferred();t.after(() => gate.resolve());
+    let calls = 0;
+    const failed = [
+      {ref:message('INBOX',110).ref,code:'MAIL_UNAVAILABLE',retryable:true},
+      {ref:message('INBOX',111).ref,code:'ACTION_OUTCOME_UNKNOWN',retryable:false},
+    ];
+    const {page,model} = await pageFor(t,{inbox:120,handlers:{execute:async ({reply}) => {
+      const sequence = calls++;
+      if (sequence === 0) return reply(receipt('synthetic-selection-1',0,120,{processed:20,skipped:2,failed:2},{failed}));
+      await gate.promise;
+      return reply(receipt('synthetic-selection-1',1,120,{processed:40,skipped:2,failed:2},{delta:{processed:20,skipped:0,failed:0}}));
+    }}});
+    await startAction(page);await expect.poll(() => calls).toBe(2);
+    await progress(page,24,120,20,2,2);
+    await page.screenshot({path:`${captures}/v2-mixed-progress.png`});
+    await page.getByRole('button',{name:'멈추기',exact:true}).click();gate.resolve();
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 40통 · 건너뜀 2통 · 실패 2통');
+    await painted(page);assert.equal(model.executions().length,2);
+  });
+
+  function stoppedFixture() {
+    const first = deferred();
+    const id = 'synthetic-selection-1';
+    let calls = 0;
+    return {first,id,get calls() {return calls;},handlers:{execute:async ({model,record,reply}) => {
+      const sequence = calls++;
+      assertActionRequest(record,{scope:scopeOf(),action:'seen',cursor:`${id}-execute-${sequence}`});
+      const failed = [
+        {ref:message('INBOX',110).ref,code:'MAIL_UNAVAILABLE',retryable:true},
+        {ref:message('INBOX',111).ref,code:'ACTION_OUTCOME_UNKNOWN',retryable:false},
+      ];
+      if (sequence === 0) {
+        await first.promise;
+        return reply(receipt(id,0,120,{processed:20,skipped:2,failed:2},{failed}));
+      }
+      return reply(receipt(id,1,120,{processed:116,skipped:2,failed:2},{delta:{processed:96,skipped:0,failed:0},completed:true}));
+    },failed:async ({reply}) => reply({total:2,page:1,pageSize:50,items:[
+      {...message('INBOX',110),code:'MAIL_UNAVAILABLE',retryable:true},
+      {...message('INBOX',111),code:'ACTION_OUTCOME_UNKNOWN',retryable:false},
+    ]})}};
+  }
+  async function stopAfterFirst(page,model,fixture) {
+    await startAction(page);await expect.poll(() => fixture.calls).toBe(1);
+    await page.getByRole('button',{name:'멈추기',exact:true}).click();
+    await expect(page.locator('.sa-progress')).toContainText('멈추는 중');
+    fixture.first.resolve();
+    const result = page.locator('.sa-result');
+    await expect(result).toContainText('읽음 표시 중단');
+    await expect(result.locator('.sa-counts')).toHaveText('처리 20통 · 건너뜀 2통 · 실패 2통');
+    await expect(result).toContainText('남은 96통은 처리하지 않았어요.');
+    await expect(result.getByRole('button',{name:'남은 것 이어서',exact:true})).toBeVisible();
+    await expect(result.getByRole('button',{name:'실패만 다시',exact:true})).toBeVisible();
+    await painted(page);assert.equal(model.executions().length,1);
+  }
+
+  await t.test('stop sends no next request; resume uses the same record and excludes settled failures',async t => {
+    const fixture = stoppedFixture();t.after(() => fixture.first.resolve());
+    const {page,model} = await pageFor(t,{inbox:120,handlers:fixture.handlers});
+    await stopAfterFirst(page,model,fixture);
+    await page.screenshot({path:`${captures}/v2-stopped.png`});
+    await page.getByRole('button',{name:'남은 것 이어서',exact:true}).click();
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 116통 · 건너뜀 2통 · 실패 2통');
+    await expect(page.locator('#page-title')).toHaveText('실패한 메일');
+    await expect(page.locator('.m')).toHaveCount(2);
+    assert.equal(model.prepares().length,1);assert.equal(model.executions().length,2);
+    assert.equal(model.executions()[1].body.cursor,`${fixture.id}-execute-1`);
+    assert.deepEqual(await page.locator('.m').evaluateAll(elements => elements.map(element => element.dataset.ref)),[message('INBOX',110).ref,message('INBOX',111).ref]);
+    await expect(page.locator('.sa-result')).toContainText('실제 적용되었을 수 있어요');
+    await expect(page.locator('.sa-result')).toContainText('이 메일은 다시 실행하지 않아요');
+  });
+
+  await t.test('stopped failures retry through a new record and key, preserving scope/action and excluding unknown',async t => {
+    const fixture = stoppedFixture();t.after(() => fixture.first.resolve());
+    const handlers = {...fixture.handlers};
+    let retry = false;
+    handlers.prepare = async ({model,record,reply}) => {
+      retry = record.body.retry === 'failed';
+      if (!retry) return reply(ready(fixture.id,120));
+      assert.equal(record.body.selectionId,fixture.id);
+      assert.equal(record.body.cursor,null);
+      assert.notEqual(record.body.selectionKey,model.prepares()[0].body.selectionKey);
+      return reply(ready('synthetic-retry-2',1));
+    };
+    handlers.execute = async input => {
+      if (!retry) return fixture.handlers.execute(input);
+      assertActionRequest(input.record,{scope:scopeOf(),action:'seen',cursor:'synthetic-retry-2-execute-0'});
+      return input.reply(receipt('synthetic-retry-2',0,1,{processed:1,skipped:0,failed:0},{completed:true}));
+    };
+    const {page,model} = await pageFor(t,{inbox:120,handlers});
+    await stopAfterFirst(page,model,fixture);
+    await page.getByRole('button',{name:'실패만 다시',exact:true}).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading')).toHaveText('1통을 읽음으로 표시할까요?');
+    await expect(dialog).toContainText('다시 실행할 수 있는 실패 메일만');
+    await expect(dialog).toContainText('결과가 불명확한 메일은 제외해요.');
+    assert.equal(model.prepares().length,1);
+    await dialog.locator('button[type="submit"]').click();
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 1통 · 건너뜀 0통 · 실패 0통');
+    assert.equal(model.prepares().length,2);assert.equal(model.executions().length,2);
+    const body = model.prepares()[1].body;
+    assertActionRequest(model.prepares()[1],{scope:scopeOf(),action:'seen',cursor:null});
+    assert.equal(body.retry,'failed');assert.equal(body.selectionId,fixture.id);
+    // The browser sends the server failure-record identity, never a new search
+    // result or a client-supplied refs list. Filtering is the server's contract.
+    assert.equal(Object.hasOwn(body,'refs'),false);
+    assert.equal(model.executions()[1].body.cursor,'synthetic-retry-2-execute-0');
+  });
+
+  await t.test('completed failures retry a new record while retaining original search and move destination',async t => {
+    const q = 'from:sender@example.com in:INBOX', scope = scopeOf({view:'allmail',q});
+    const expected = {scope,action:'move',target:'거래처'};
+    let retry = false;
+    const failed = {ref:message('INBOX',50).ref,code:'MAIL_UNAVAILABLE',retryable:true};
+    const {page,model} = await pageFor(t,{inbox:51,route:`search/${encodeURIComponent(q)}`,handlers:{
+      prepare:async ({record,model,reply}) => {
+        assertActionRequest(record,{...expected,cursor:null});
+        retry = record.body.retry === 'failed';
+        if (retry) {
+          assert.equal(record.body.selectionId,'synthetic-original');
+          assert.notEqual(record.body.selectionKey,model.prepares()[0].body.selectionKey);
+        }
+        return reply(ready(retry?'synthetic-retry':'synthetic-original',retry?1:51));
+      },
+      execute:async ({record,reply}) => {
+        const id = retry?'synthetic-retry':'synthetic-original';
+        assertActionRequest(record,{...expected,cursor:`${id}-execute-0`});
+        return reply(receipt(id,0,retry?1:51,{processed:retry?1:50,skipped:0,failed:retry?0:1},{failed:retry?[]:[failed],completed:true}));
+      },
+      failed:async ({reply}) => reply({total:1,page:1,pageSize:50,items:[{...message('INBOX',50),...failed}]}),
+    }});
+    await startAction(page,'move');
+    await expect(page.locator('#page-title')).toHaveText('실패한 메일');
+    await page.getByRole('button',{name:'실패만 다시',exact:true}).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading')).toHaveText('1통을 다른 폴더로 옮길까요?');
+    await expect(dialog.locator('dl')).toContainText(q);
+    await expect(dialog.locator('dd').last()).toHaveText('거래처');
+    assert.equal(model.prepares().length,1);
+    await dialog.locator('button[type="submit"]').click();
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 1통 · 건너뜀 0통 · 실패 0통');
+    assert.equal(model.prepares().length,2);assert.equal(model.executions().length,2);
+    assert.equal(model.prepares()[1].body.retry,'failed');
+    assert.equal(model.prepares()[1].body.selectionId,'synthetic-original');
+  });
+
+  await t.test('completed failure-only view paginates server failures beyond the original second page',async t => {
+    const failures = Array.from({length:52},(_,index) => ({...message('INBOX',index+68),code:'MAIL_UNAVAILABLE',retryable:true}));
+    const {page,model} = await pageFor(t,{inbox:120,handlers:{
+      execute:async ({reply}) => reply(receipt('synthetic-selection-1',0,120,{processed:68,skipped:0,failed:52},{failed:failures.map(({ref,code,retryable}) => ({ref,code,retryable})),completed:true})),
+      failed:async ({record,reply}) => {
+        const params = new URL(record.url).searchParams, number = Number(params.get('page'));
+        assert.equal(params.get('pageSize'),'50');
+        return reply({total:52,page:number,pageSize:50,items:failures.slice((number-1)*50,number*50)});
+      },
+    }});
+    await startAction(page);
+    await expect(page.locator('#page-title')).toHaveText('실패한 메일');
+    await expect(page.locator('.m')).toHaveCount(50);
+    assert.deepEqual(await page.locator('.m').evaluateAll(elements => elements.map(element => element.dataset.ref)),failures.slice(0,50).map(item => item.ref));
+    await expect(page.locator(`.m[data-ref="${message('INBOX',110).ref}"]`)).toBeVisible();
+    const ordinaryReads = model.requests.filter(record => record.path === '/api/messages').length;
+    await page.getByRole('button',{name:'다음 페이지',exact:true}).click();
+    await expect(page.locator('.m')).toHaveCount(2);
+    assert.deepEqual(await page.locator('.m').evaluateAll(elements => elements.map(element => element.dataset.ref)),failures.slice(50).map(item => item.ref));
+    assert.equal(model.requests.filter(record => record.path === '/api/messages').length,ordinaryReads);
+    assert.equal(model.requests.filter(record => /\/failed$/.test(record.path)).length,2);
+    await page.screenshot({path:`${captures}/v2-failures-page-2.png`});
+    await page.getByRole('button',{name:'메일함으로 돌아가기',exact:true}).click();
+    await expect(page.locator('#page-title')).toHaveText('받은편지함');
+    await expect(page.locator('.sa-result')).toHaveCount(0);
+    await expect.poll(() => model.requests.filter(record => record.path === '/api/messages').length).toBe(ordinaryReads+1);
+  });
+
+  await t.test('unknown-only result warns, has no retry button, and sends no automatic execution',async t => {
+    const failed = {ref:message('INBOX',110).ref,code:'ACTION_OUTCOME_UNKNOWN',retryable:false};
+    const {page,model} = await pageFor(t,{inbox:120,handlers:{
+      execute:async ({reply}) => reply(receipt('synthetic-selection-1',0,120,{processed:119,skipped:0,failed:1},{failed:[failed],completed:true})),
+      failed:async ({reply}) => reply({total:1,page:1,pageSize:50,items:[{...message('INBOX',110),...failed}]}),
+    }});
+    await startAction(page);
+    await expect(page.locator('.sa-result')).toContainText('결과가 불명확한 메일 1통');
+    await expect(page.locator('.sa-result')).toContainText('실제 적용되었을 수 있어요');
+    await expect(page.locator('.sa-result')).toContainText('이 메일은 다시 실행하지 않아요');
+    await expect(page.getByRole('button',{name:'실패만 다시',exact:true})).toHaveCount(0);
+    await expect(page.locator('.m')).toContainText('결과 확인 필요');
+    await expect(rowChecks(page)).toBeDisabled();
+    await painted(page);assert.equal(model.executions().length,1);assert.equal(model.prepares().length,1);
+  });
+
+  await t.test('lost response reuses the exact last cursor and assigns cumulative totals once',async t => {
+    const id = 'synthetic-selection-1', hits = new Map();
+    const {page,model} = await pageFor(t,{inbox:51,handlers:{execute:async ({route,record,reply}) => {
+      const cursor = record.body.cursor, count = (hits.get(cursor)||0)+1;hits.set(cursor,count);
+      if (cursor === `${id}-execute-0`) return reply(receipt(id,0,51,{processed:20,skipped:0,failed:0}));
+      if (cursor === `${id}-execute-1`) {
+        if (count === 1) return route.abort('failed');
+        return reply(receipt(id,1,51,{processed:40,skipped:0,failed:0},{delta:{processed:20,skipped:0,failed:0}}));
+      }
+      assert.equal(cursor,`${id}-execute-2`);
+      return reply(receipt(id,2,51,{processed:51,skipped:0,failed:0},{delta:{processed:11,skipped:0,failed:0},completed:true}));
+    }}});
+    await startAction(page);
+    await expect(page.locator('.sa-result')).toContainText('응답을 받지 못했어요');
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 20통 · 건너뜀 0통 · 실패 0통');
+    assert.equal(model.executions().length,2);
+    await page.getByRole('button',{name:'남은 것 이어서',exact:true}).click();
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 40통 · 건너뜀 0통 · 실패 0통');
+    await painted(page);assert.equal(model.executions().length,3);
+    assert.deepEqual(model.executions()[1].body,model.executions()[2].body);
+    await page.getByRole('button',{name:'남은 것 이어서',exact:true}).click();
+    await expect(page.locator('.sa-result')).toContainText('읽음 표시를 마쳤어요');
+    await expect(page.locator('.sa-result .sa-counts')).toHaveText('처리 51통 · 건너뜀 0통 · 실패 0통');
+    assert.equal(model.prepares().length,1);assert.equal(model.executions().length,4);
+    assert.deepEqual([...hits.values()],[1,2,1]);
+  });
+
+  for (const change of ['condition','screen']) await t.test(`${change} change during execution prevents the next batch`,async t => {
+    const gate = deferred();t.after(() => gate.resolve());
+    const {page,model} = await pageFor(t,{inbox:120,handlers:{execute:async ({reply}) => {
+      await gate.promise;
+      return reply(receipt('synthetic-selection-1',0,120,{processed:20,skipped:0,failed:0}));
+    }}});
+    await startAction(page);await expect.poll(() => model.executions().length).toBe(1);
+    if (change === 'condition') {
+      await waitList(page,() => page.getByRole('group',{name:'빠른 보기'}).getByRole('button',{name:'읽지 않음',exact:true}).click());
+      await allCleared(page);
+    } else {
+      await page.locator('a.nv[href="#storage"]').click();
+      await expect(page.locator('[data-page="storage"]')).toBeVisible();
+    }
+    const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/messages/actions/scope');
+    gate.resolve();await response;await painted(page);
+    assert.equal(model.executions().length,1);assert.equal(model.prepares().length,1);
+    if (change === 'condition') await allCleared(page);
+    else await expect(page.locator('[data-page="storage"]')).toBeVisible();
+  });
+
 });

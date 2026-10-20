@@ -16,7 +16,7 @@
 .sp-mode .sp-quick{margin-left:0}
 .sp-fl{list-style:none;margin:0;padding:6px}
 .sp-fl.sp-cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:4px}
-.sp-f{display:flex;align-items:center;gap:9px;height:34px;padding:0 8px 0 calc(8px + var(--d,0) * 20px);border-radius:var(--r-ctl);font-size:13.5px;color:var(--ink-2);cursor:pointer}
+.sp-f{position:relative;display:flex;align-items:center;gap:9px;height:34px;padding:0 8px 0 calc(8px + var(--d,0) * 20px);border-radius:var(--r-ctl);font-size:13.5px;color:var(--ink-2);cursor:pointer}
 .sp-f:hover{background:var(--hover);color:var(--ink)}
 .sp-f:has(input:checked){color:var(--ink)}
 .sp-f:has(input:focus-visible){outline:2px solid var(--accent-ui);outline-offset:-2px}

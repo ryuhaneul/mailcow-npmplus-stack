@@ -428,6 +428,27 @@ test('fresh original conversion rejects an initially missing virtual UID', async
   await assert.rejects(resolveCandidateSources(f.client, f.session, [4], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { freshValidity: true }), { code: 'STALE_SCOPE' });
 });
 
+for (const [phase, failure, code] of [
+  ['after', 'NO', 'STALE_SCOPE'], ['after', 'BAD', 'STALE_SCOPE'],
+  ['before', 'NO', 'MAIL_REJECTED'], ['after', 'transport', 'ETIMEDOUT'],
+]) {
+  test(`fresh original conversion ${phase}-mapping STATUS ${failure} returns ${code}`, async () => {
+    const f = fixture(); await f.client.getMailboxLock('WebmailVirtual/AllMail');
+    const exec = f.client.exec.bind(f.client);
+    let mapped = false;
+    f.client.exec = async (command, attributes, options) => {
+      if (command === 'STATUS' && attributes[0].value === 'INBOX' && mapped === (phase === 'after')) {
+        throw Object.assign(new Error('synthetic source STATUS failure'), failure === 'transport' ? { code: 'ETIMEDOUT' } : { responseStatus: failure });
+      }
+      const result = await exec(command, attributes, options);
+      if (command === 'UID FETCH') mapped = true;
+      return result;
+    };
+    await assert.rejects(originalRefs(f.client, f.session, '5', { freshValidity: true }), error => error.code === code && (code !== 'STALE_SCOPE' || error.statusCode === 409));
+    assert.equal(f.client.rawFetches, phase === 'after' ? 1 : 0);
+  });
+}
+
 test('shared budget: forwards the same budget, rejects before I/O and preserves upstream errors', async () => {
   const f = fixture(), expired = { remainingMs: () => 0 }, budget = { remainingMs: () => 1000 };
   for (const operation of [

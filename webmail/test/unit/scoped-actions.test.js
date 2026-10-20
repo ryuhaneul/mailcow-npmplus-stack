@@ -42,7 +42,9 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
         state.mutations.push({ command, path: client.mailbox.path, uids: selected });
         for (const uid of selected) {
           if (command === 'UID STORE') {
-            const flag = attributes[2][0].value, collection = flag === '\Seen' ? state.seen : flag === '\Flagged' ? state.flagged : state.deleted;
+            const flag = attributes[2][0].value;
+            assert.equal(flag.codePointAt(0), 92, 'system flag atom starts with a literal backslash');
+            const collection = flag === '\\Seen' ? state.seen : flag === '\\Flagged' ? state.flagged : state.deleted;
             if (attributes[1].value === '+FLAGS') collection.add(identity(uid)); else collection.delete(identity(uid));
           } else if (command === 'UID EXPUNGE') {
             if (state.deleted.has(identity(uid))) state.live.get(client.mailbox.path).delete(uid);

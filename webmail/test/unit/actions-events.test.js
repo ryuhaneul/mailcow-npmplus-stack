@@ -252,11 +252,12 @@ for (const action of scopedActions) {
       // notspam originates in INBOX in this fixture, and is a verified no-op.
       assert.deepEqual(f.client.calls, action === 'notspam' ? [] : [['UID MOVE', [sequence, { type: 'ATOM', value: target }]]]);
     } else {
-      const flag = action === 'delete-forever' ? '\Deleted' : ['seen', 'unseen'].includes(action) ? '\Seen' : '\Flagged';
+      const flag = action === 'delete-forever' ? '\\Deleted' : ['seen', 'unseen'].includes(action) ? '\\Seen' : '\\Flagged';
       const operation = ['unseen', 'unflag'].includes(action) ? '-FLAGS' : '+FLAGS';
       const expected = [['UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: flag }]]]];
       if (action === 'delete-forever') expected.push(['UID EXPUNGE', [sequence]]);
       assert.deepEqual(f.client.calls, expected);
+      assert.equal(f.client.calls[0][1][2][0].value.codePointAt(0), 92, 'system flag atom starts with a literal backslash');
     }
   });
   test(`scoped ${action}: missing UID and changed condition are skipped`, async () => {
@@ -333,7 +334,7 @@ test('scoped: shared source and revoked destination insert rights fail before mu
   }
 });
 test('scoped: missing/nonselectable archive target fails without creating a folder', async () => {
-  for (const rows of [[], [{ path: 'Saved', flags: new Set(['\Noselect']) }]]) {
+  for (const rows of [[], [{ path: 'Saved', flags: new Set(['\\Noselect']) }]]) {
     const f = scopedFixture('archive'); f.client.list = async () => rows;
     assert.equal((await f.run()).failed[0].code, 'FOLDER_NOT_ALLOWED'); assert.deepEqual(f.client.calls, []);
   }

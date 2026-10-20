@@ -49,7 +49,13 @@ export async function originalRefs(client, session, set, { now = Date.now, fresh
     if (rows.some(row => !current.has(row.path))) throw stale();
     for (const [path, record] of current) {
       checkBudget(budget);
-      const { uidvalidity } = await mailboxStatus(client, path, ['UIDVALIDITY']);
+      let uidvalidity;
+      try { ({ uidvalidity } = await mailboxStatus(client, path, ['UIDVALIDITY'])); }
+      catch (error) {
+        // A rejected post-mapping STATUS cannot establish the captured source identity.
+        if (error.code === 'MAIL_REJECTED') throw stale();
+        throw error;
+      }
       if (uidvalidity !== record.value) throw stale();
     }
     if (Number(client.mailbox?.uidValidity) !== virtualValidity) throw stale();

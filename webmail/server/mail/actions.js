@@ -145,7 +145,7 @@ export function createActionService({ imap }) {
           if (!hasCapability(client, 'MOVE')) throw new AppError(422, 'MOVE_UNSUPPORTED', '메일 서버가 안전한 이동을 지원하지 않아요.');
           const folders = await client.list({ listOnly: true });
           check();
-          if (!folders.some(folder => folder.path === target && !folder.flags?.has('\Noselect'))) {
+          if (!folders.some(folder => folder.path === target && !folder.flags?.has('\\Noselect'))) {
             throw new AppError(422, 'FOLDER_NOT_ALLOWED', '이동할 폴더를 확인해 주세요.');
           }
           if (!(await mailboxRights(client, target)).insert) throw readonly();
@@ -167,9 +167,9 @@ export function createActionService({ imap }) {
         const sequence = { type: 'SEQUENCE', value: set };
         if (['seen', 'unseen', 'flag', 'unflag'].includes(action)) {
           const operation = ['seen', 'flag'].includes(action) ? '+FLAGS' : '-FLAGS';
-          await command('UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: seen ? '\Seen' : '\Flagged' }]]);
+          await command('UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: seen ? '\\Seen' : '\\Flagged' }]]);
         } else if (action === 'delete-forever') {
-          await command('UID STORE', [sequence, { type: 'ATOM', value: '+FLAGS' }, [{ type: 'ATOM', value: '\Deleted' }]]);
+          await command('UID STORE', [sequence, { type: 'ATOM', value: '+FLAGS' }, [{ type: 'ATOM', value: '\\Deleted' }]]);
           await command('UID EXPUNGE', [sequence]);
         } else {
           await command('UID MOVE', [sequence, { type: 'ATOM', value: encodePath(client, target) }]);

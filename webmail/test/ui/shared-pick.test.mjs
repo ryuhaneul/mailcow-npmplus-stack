@@ -21,10 +21,10 @@ await test('shared folder picker and grouped sidebar',async t=>{
   const card=(page,owner)=>page.getByRole('region',{name:`${owner} 공유 메일함`,exact:true});
   const more=(page,owner=sales)=>page.getByRole('button',{name:`${owner} 폴더 고르기`,exact:true});
   const checkbox=(scope,owner,name,n=0)=>scope.getByRole('checkbox',{name:`${owner} ${name} 읽지 않음 ${n}`,exact:true});
-  async function start({route='inbox',width=1280,theme='ink',mode='light',setup}={}){
+  async function start({route='inbox',width=1280,theme='ink',mode='light',setup,folderCounts=false}={}){
     fake.state.prefs={...structuredClone(initialPrefs),theme,mode};fake.state.folders=structuredClone(initialFolders);setup?.();
     const context=await browser.newContext({viewport:{width,height:width<700?844:900},colorScheme:mode});
-    const page=await context.newPage(),errors=[];page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));await page.goto(`${origin}/#${route}`);await expect(page.locator('#page-title')).toBeVisible();await expect(page.locator('#sp-shared .sp-grp')).toHaveCount(new Set(fake.state.folders.filter(f=>f.shared&&f.path.startsWith(`Shared/${f.owner}/`)&&!fake.state.prefs.sharedView[f.owner]?.hidden).map(f=>f.owner)).size);
+    const page=await context.newPage(),errors=[];page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));if(folderCounts)await page.route('**/api/folders',route=>route.fulfill({json:{folders:fake.state.folders,virtualAllMail:'WebmailVirtual/AllMail'}}));await page.goto(`${origin}/#${route}`);await expect(page.locator('#page-title')).toBeVisible();await expect(page.locator('#sp-shared .sp-grp')).toHaveCount(new Set(fake.state.folders.filter(f=>f.shared&&f.path.startsWith(`Shared/${f.owner}/`)&&!fake.state.prefs.sharedView[f.owner]?.hidden).map(f=>f.owner)).size);
     return {page,context,errors};
   }
   async function menu(page){const open=page.getByRole('button',{name:'메일함 열기'});if(await open.isVisible())await open.click();}
@@ -106,6 +106,37 @@ await test('shared folder picker and grouped sidebar',async t=>{
       for(const owner of [sales,support])fake.state.folders.push({...initialFolders.find(f=>f.owner===owner),path:path(owner,'나중 폴더'),name:'나중 폴더',unseen:0});
       await page.reload();await expect(group(page,support).getByRole('link',{name:'나중 폴더',exact:true})).toBeVisible();await expect(group(page,sales).getByRole('link',{name:'나중 폴더',exact:true})).toHaveCount(0);await expect(checkbox(card(page,sales),sales,'나중 폴더')).not.toBeChecked();
     }finally{await context.close();}
+  });
+  await t.test('long shared settings keep the outer shell still when lower folder checkboxes receive focus',async()=>{
+    const owners=['consulting@example.com','security@example.com','server@example.com','new-team-a@example.com','new-team-b@example.com'];
+    for(const width of [1280,768,375]){
+      const {page,context,errors}=await start({width,route:'shared',folderCounts:true,setup(){
+        fake.state.folders=fake.state.folders.filter(folder=>!folder.shared);
+        fake.state.prefs.sharedView=Object.fromEntries(owners.slice(0,3).map(owner=>[owner,{mode:'inbox',folders:[],hidden:false}]));
+        for(const [index,owner] of owners.entries())for(const name of ['INBOX','Sent','Drafts','Archive','Junk','Trash',...(index!==1?['바이러스 격리']:[])]){
+          fake.state.folders.push({...initialFolders.find(folder=>folder.shared),owner,path:path(owner,name),name,parent:`Shared/${owner}`,unseen:name==='INBOX'?103212+index*10000:0,total:name==='INBOX'?130117+index*20000:20});
+        }
+      }});try{
+        const consoleErrors=[];page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text());});
+        await expect(page.locator('.sp-owner')).toHaveCount(5);
+        for(const [index,owner] of owners.entries()){
+          const ownerCard=card(page,owner);
+          for(let round=0;round<2;round++)for(const label of ['보낸편지함',index===1?'휴지통':'바이러스 격리']){
+            const input=checkbox(ownerCard,owner,label),row=input.locator('..');
+            await row.scrollIntoViewIfNeeded();
+            for(const on of [true,false]){
+              await row.click();await expect(input).toBeFocused();await expect(input).toBeChecked({checked:on});
+              assert.equal(await page.locator('main').evaluate(node=>node.scrollTop),0);
+              await expect(page.locator('#page-title')).toBeVisible();await expect(row).toBeInViewport();
+            }
+          }
+          await saved(owner,'custom');
+        }
+        assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+        await capture(page,`webmail-shared-lower-folders-${width}`);
+        assert.deepEqual(errors,[]);assert.deepEqual(consoleErrors,[]);
+      }finally{await context.close();}
+    }
   });
   await t.test('long owner titles, tablet and narrow mobile fit',async()=>{
     const long='a-very-long-shared-mailbox-address-for-testing@example.com';

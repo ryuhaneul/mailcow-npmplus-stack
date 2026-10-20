@@ -262,7 +262,7 @@ test('a generated envelope over 1MB drops the overflow and trailing source block
   const source = (await read('gmail-basic.sieve')).replace('fileinto :create :copy "Archive";', `fileinto :create :copy "${'A'.repeat(500000)}";`);
   const report = importScript(source, { policy: unchecked });
   assert.equal(report.rules.length, 0); assert.equal(report.items[0].status, 'unconvertible');
-  assert.ok(report.items[0].reason.includes('script_too_large')); assert.equal(report.items[1].status, 'unconvertible');
+  assert.equal(report.items[0].reason, '생성 스크립트 1MB 한도'); assert.equal(report.items[1].status, 'unconvertible');
   assert.equal(report.items[1].reason, report.items[0].reason);
   assert.ok(Buffer.byteLength(generateScript(rulesDocument(report.rules), importPolicy(unchecked))) <= 1024 * 1024);
 });
@@ -274,4 +274,15 @@ test('import documents select the minimum wire version without changing stage-on
   assert.equal(rulesDocument([{ ...base, conditions: [{ field: 'subject', op: 'matches', value: '*synthetic*' }] }]).v, 2);
   assert.equal(rulesDocument([{ ...base, conditions: [{ match: 'any', conditions: base.conditions }] }]).v, 2);
   assert.equal(rulesDocument([undefined]).v, 1);
+});
+
+test('all pattern and validation failures in server import reports use Korean reasons', async () => {
+  const source = await read('gmail-wildcards.sieve');
+  for (const pattern of ['a?b', 'a' + '\\', '*a'.repeat(21), 'unsafe${value}']) {
+    const input = source.replace('"a*b"', '"' + pattern.replaceAll('\\', '\\\\') + '"');
+    const report = importScript(input, { policy });
+    assert.equal(report.items[0].status, 'unconvertible');
+    assert.match(report.items[0].reason, /[가-힣]/);
+    assert.doesNotMatch(report.items[0].reason, /\b[a-z]+_[a-z_]+\b/);
+  }
 });

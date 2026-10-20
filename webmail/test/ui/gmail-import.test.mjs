@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { createFakeApi } from '../../web/dev/fake-api.js';
+import { createApp } from '../../server/app.js';
+import { generateScript } from '../../server/sieve/generate.js';
+import { parseScript } from '../../server/sieve/parse.js';
 import { validateDocument, minimumDocumentVersion } from '../../server/sieve/model.js';
 import { rulesFixture, gmailImportFixture } from '../../web/dev/fake-rules.js';
 
@@ -46,6 +49,86 @@ await test('Gmail import preview and explicit partial apply', async t => {
     await page.getByLabel('Gmail 필터 파일 고르기',{exact:true}).setInputFiles(value);
     await expect(page.locator('.gi-table')).toBeVisible();
   }
+  await t.test('Gate D authenticated API: zero rules and incomplete undo/apply recover after reload', async st => {
+    const scripts = new Map(), failures = [];
+    const web = 'webmail-rules'; let active;
+    const execute = (command, name, operation) => {
+      const i = failures.findIndex(f => f.command === command && f.name === name);
+      if (i >= 0) {
+        const [failure] = failures.splice(i, 1);
+        if (failure.after) operation();
+        throw Error('synthetic storage failure');
+      }
+      return operation();
+    };
+    const connect = async () => ({
+      listScripts: async () => [...scripts.keys()].map(name => ({ name, active: name === active })),
+      getScript: async name => { assert.ok(scripts.has(name)); return scripts.get(name); },
+      putScript: async (name, value) => scripts.set(name, value), checkScript: async () => {},
+      setActive: async name => execute('SETACTIVE', name, () => { active = name || null; }),
+      deleteScript: async name => { assert.notEqual(name, active); scripts.delete(name); },
+      logout: async () => {}, close() {},
+    });
+    const tempRoot = await mkdtemp('/tmp/gmail-fix1-ui-');
+    const app = await createApp({ logger: false, staticDir: '/nonexistent-gmail-fixture', auth: { tempRoot },
+      config: { publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
+        dbHost: '127.0.0.1', dbName: 'mailcow', dbUser: 'webmail_ro', dbPassword: 'synthetic-only', internalDomains: [] },
+      rules: { connect } });
+    st.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
+    app.directory.internalDomains = async () => ['example.com'];
+    app.directory.identities = async () => ({ identities: [{ address: 'user@example.com' }] });
+    app.imap.withMailbox = async (_session, _path, fn) => fn({ list: async () => [{ path: 'INBOX', flags: new Set() }] });
+    const { token, session } = app.sessions.create({ email: 'user@example.com', name: '합성 사용자', password: Buffer.from('synthetic-only'), connection: { logout: async () => {} }, ip: '198.51.100.9' });
+    const headers = { cookie: `webmail_sid=${token}`, origin: 'https://newmail.example.com', 'x-webmail-csrf': session.csrf };
+    const get = async () => (await app.inject({ method: 'GET', url: '/api/rules', headers })).json();
+    const original = { v: 1, rev: 1, rules: [], blocked: ['blocked@example.com'],
+      vacation: { enabled: true, start: null, end: null, subject: '합성 부재중', body: '합성 안내' } };
+    const input = { ...file, buffer: Buffer.from(xml.replace('name="label" value="거래처"', 'name="shouldMarkAsRead" value="true"')) };
+    for (const scenario of ['zero-ok', 'zero-inactive', 'undo', 'apply']) {
+      scripts.clear(); failures.length = 0;
+      const before = generateScript(original, { addresses: ['user@example.com'] });
+      scripts.set(web, before); scripts.set('legacy', 'keep;\n');
+      active = scenario === 'zero-ok' ? web : 'legacy';
+      const { page, context } = await pageFor(); const recorded = [];
+      await page.route('**/api/rules**', async route => {
+        const request = route.request();
+        const payload = request.postData() ? request.postDataJSON() : undefined;
+        const response = await app.inject({ method: request.method(), url: new URL(request.url()).pathname, payload, headers });
+        recorded.push({ path: new URL(request.url()).pathname, payload, status: response.statusCode });
+        await route.fulfill({ status: response.statusCode, contentType: 'application/json', body: response.body });
+      });
+      await page.reload(); await pick(page, input);
+      const preview = recorded.find(r => r.path === paths.preview);
+      assert.equal(preview.status, 200); assert.equal(Object.hasOwn(preview.payload, 'mode'), false);
+      await expect(page.getByRole('radio')).toHaveCount(0);
+      if (scenario === 'apply') failures.push({ command: 'SETACTIVE', name: web, after: true }, { command: 'SETACTIVE', name: 'legacy' });
+      await page.locator('.gi-confirm input').check(); await page.getByRole('button', { name: '1개 적용', exact: true }).click();
+      if (scenario.startsWith('zero')) {
+        await expect(page.locator('.gi-result')).toContainText('1개를 반영했어요');
+        const after = parseScript(scripts.get(web)).doc;
+        assert.deepEqual(after.blocked, original.blocked); assert.deepEqual(after.vacation, original.vacation);
+        await page.screenshot({ path: `${captures}/gate-d-${scenario}-applied.png` });
+      } else {
+        if (scenario === 'undo') {
+          await expect(page.locator('.gi-result')).toContainText('1개를 반영했어요');
+          failures.push({ command: 'SETACTIVE', name: 'legacy' });
+          await page.locator('.gi-result button').click(); await page.locator('.gi-undo button.pri').click();
+          await expect(page.locator('.gi-undo [role="alert"]')).toContainText('확인할 수 없어요');
+        } else await expect(page.getByRole('alert')).toContainText('확인할 수 없어요');
+        assert.equal(scripts.get(web), before); assert.equal(active, web);
+        await page.goto(`${origin}/#filters`); await page.reload();
+        await expect(page.locator('.gi-result button')).toBeVisible();
+        assert.deepEqual((await get()).importInfo.undo, { available: true, edited: false });
+        await page.screenshot({ path: `${captures}/gate-d-${scenario}-reload-retry.png` });
+        await page.locator('.gi-result button').click(); await page.locator('.gi-undo button.pri').click();
+        await expect(page.locator('.gi-result')).toContainText('되돌렸어요.');
+        assert.equal(scripts.get(web), before); assert.equal(active, 'legacy');
+        assert.equal((await get()).importInfo?.undo.available ?? false, false);
+        await expect(page.getByRole('button', { name: '되돌리기', exact: true })).toHaveCount(0);
+      }
+      assert.deepEqual(failures, []); await context.close();
+    }
+  });
   await t.test('entry beside new rule, raw values, three statuses, grouped exclusions, folders and filters',async()=>{
     const {page,context,errors}=await pageFor({route:'filters'});
     await page.getByRole('link',{name:'Gmail 필터 가져오기',exact:true}).click();

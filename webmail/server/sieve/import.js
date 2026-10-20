@@ -71,7 +71,7 @@ export function importScript(source, { name = '', policy } = {}) {
       if (!context.checkFolders && entry.rule.actions.move) entry.item.warnings = ['폴더 존재 미확인'];
     } catch (error) {
       entry.item.status = 'unconvertible';
-      entry.item.reason = error.code === 'FORWARD_EXTERNAL' ? '외부 주소 전달은 가져올 수 없어요.' : `규칙 문서 검사 실패: ${error.reason ?? 'invalid'}`;
+      entry.item.reason = error.code === 'FORWARD_EXTERNAL' ? '외부 주소 전달은 가져올 수 없어요.' : '규칙의 값이나 형식을 옮길 수 없어요.';
       delete entry.rule;
     }
   }
@@ -84,7 +84,7 @@ export function importScript(source, { name = '', policy } = {}) {
         generateScript(rulesDocument([...rules, entry.rule]), context);
         rules.push(entry.rule); continue;
       } catch (error) {
-        limitReason = rules.length >= 100 ? '규칙 100개 한도' : `전체 규칙 제한을 넘었어요: ${error.reason ?? error.code}`;
+        limitReason = rules.length >= 100 ? '규칙 100개 한도' : error.reason === 'script_too_large' ? '생성 스크립트 1MB 한도' : error.code === 'TOO_MANY_FORWARDS' ? '전달 주소 수 한도' : '전체 규칙 제한을 넘었어요.';
       }
     }
     entry.item.status = 'unconvertible'; entry.item.reason = limitReason;

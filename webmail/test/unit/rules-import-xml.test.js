@@ -233,3 +233,53 @@ test('stage-two XML previews groups and patterns, applies v2, and undoes exact p
   assert.equal(f.activeName, web); assert.equal(f.scripts.get(web), originalBytes);
   assert.equal((await f.get()).state, 'ok'); assert.equal(f.scripts.has(importName), false);
 });
+
+for (const active of [web, 'legacy']) {
+  test(`Gate D1 zero-rule webmail accepts omitted mode and preserves blocked/vacation: ${active}`, async t => {
+    const f = await fixture(t, { active });
+    const doc = { v: 1, rev: 3, rules: [], blocked: ['blocked@example.com'],
+      vacation: { enabled: true, start: null, end: null, subject: '합성 부재중', body: '합성 안내' } };
+    f.scripts.set(web, generateScript(doc, { addresses: ['user@example.com'], folders: f.folders }));
+    const p = await f.preview();
+    assert.equal(p.plan.existing, 0); assert.equal(p.plan.mode, 'new');
+    assert.equal(p.plan.applied, 2); assert.equal(p.plan.total, 2);
+    status(await f.apply(), 200);
+    const after = parseScript(f.scripts.get(web)).doc;
+    assert.equal(after.rules.length, 2);
+    assert.deepEqual(after.blocked, doc.blocked); assert.deepEqual(after.vacation, doc.vacation);
+  });
+}
+for (const failure of ['undo', 'apply']) {
+  test(`Gate D2 GET keeps retry available after ${failure} restores bytes but fails active selection`, async t => {
+    const f = await fixture(t);
+    const before = generateScript({ v: 1, rev: 1, rules: [], blocked: ['blocked@example.com'],
+      vacation: { enabled: false, start: null, end: null, subject: '', body: '' } });
+    f.scripts.set(web, before);
+    if (failure === 'apply') {
+      f.failures.push({ command: 'SETACTIVE', name: web, after: true }, { command: 'SETACTIVE', name: 'legacy' });
+      const response = await f.apply(); status(response, 502, 'IMPORT_WRITE_FAILED');
+      assert.equal(response.json().error.detail.restored, false);
+    } else {
+      status(await f.apply(), 200);
+      f.failures.push({ command: 'SETACTIVE', name: 'legacy' });
+      status(await f.request('/undo', { at: (await f.get()).importInfo.at }), 502, 'IMPORT_WRITE_FAILED');
+    }
+    assert.equal(f.scripts.get(web), before); assert.equal(f.activeName, web);
+    assert.ok(f.scripts.has(importName));
+    const refreshed = await f.get();
+    assert.deepEqual(refreshed.importInfo.undo, { available: true, edited: false });
+    status(await f.request('/undo', { at: refreshed.importInfo.at }), 200);
+    assert.equal(f.scripts.get(web), before); assert.equal(f.activeName, 'legacy');
+    assert.equal((await f.get()).importInfo?.undo.available ?? false, false);
+  });
+}
+for (const label of ['.hidden', 'A'.repeat(101), ' Work ', 'Parent/ Work ', 'Parent/.hidden', 'Parent/']) {
+  test(`invalid new folder excluded in preview does not abort other rules: ${label}`, async t => {
+    const f = await fixture(t); f.body.xml = xml.replace('value="News"', `value="${label}"`);
+    const p = await f.preview();
+    assert.deepEqual(p.counts, { same: 1, changed: 0, no: 1 });
+    assert.match(p.items[1].reason, /폴더 이름/); assert.deepEqual(p.plan.newFolders, []);
+    const response = await f.apply(); status(response, 200);
+    assert.equal(response.json().applied, 1); assert.deepEqual(response.json().createdFolders, []);
+  });
+}

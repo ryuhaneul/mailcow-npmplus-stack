@@ -193,8 +193,8 @@ export function createRulesService({ config, imap, directory, connect = connectM
   async function xmlPlan(client, current, policy, body, entries, plannedFolders = []) {
     allowed(current, ['none', 'ok', 'import_pending', 'import_blocked', 'inactive_other']);
     const existing = current.script === null ? [] : current.doc.rules;
-    if (current.script !== null && !body.mode) invalid('mode', 'required');
-    const mode = current.script === null ? 'new' : body.mode;
+    if (existing.length && !body.mode) invalid('mode', 'required');
+    const mode = existing.length ? body.mode : 'new';
     // Keep the preview's missing-folder view during the second plan calculation;
     // folders created by this request must not change its own approved hash.
     const conversionFolders = policy.folders.filter(folder => !plannedFolders.includes(folder.path));

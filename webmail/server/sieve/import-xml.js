@@ -4,6 +4,7 @@ import { allowedMoveFolder, asciiLower, validateAddress, validateDocument } from
 import { generateScript } from './generate.js';
 import { normalizeConditionTree, validateConditionTree } from './condition-tree.js';
 import { patternProblem } from './glob.js';
+import { validateFolderName } from '../mail/folders.js';
 
 const SEARCH = ['from', 'to', 'subject', 'hasTheWord', 'doesNotHaveTheWord'];
 const CONDITIONS = new Set([...SEARCH, 'hasAttachment', 'size', 'sizeOperator', 'sizeUnit', 'excludeChats']);
@@ -141,6 +142,16 @@ function convertActions(props, changes, policy, folders) {
     else {
       const folder = folders.find(folder => folder.path === props.label) ?? { path: props.label };
       if (!allowedMoveFolder(folder)) fail('옮길 수 없는 폴더예요');
+      if (!folders.some(folder => folder.path === props.label)) {
+        const parts = props.label.split('/');
+        for (let i = 0; i < parts.length; i++) {
+          if (folders.some(folder => folder.path === parts.slice(0, i + 1).join('/'))) continue;
+          let name;
+          try { name = validateFolderName(parts[i]); }
+          catch { fail('폴더 이름에 쓸 수 없는 글자가 있거나 이름이 너무 길어 반영 안 됨'); }
+          if (name !== parts[i]) fail('폴더 이름 앞뒤에 공백이 있어 반영 안 됨');
+        }
+      }
       actions.move = props.label;
       if (props.shouldArchive !== 'true') changes.push('받은편지함에 남지 않고 폴더로만 옮겨요');
     }
@@ -212,7 +223,7 @@ export function convertGmailEntries(entries, { policy = {}, folders = [], existi
       item.status = item.changes.length ? 'changed' : 'same';
       if (actions.move && !folders.some(folder => folder.path === actions.move)) item.newFolder = actions.move;
     } catch (error) {
-      item.reason = limitReason ?? (error.reason ? `규칙 문서 검사 실패: ${error.reason}` : error.message);
+      item.reason = limitReason ?? (error.reason ? '규칙의 값이나 형식을 옮길 수 없어요' : error.message);
     }
   }
   const moves = new Set([...base, ...rules].map(rule => rule.actions.move).filter(Boolean));

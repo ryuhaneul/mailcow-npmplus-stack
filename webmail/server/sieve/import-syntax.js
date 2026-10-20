@@ -99,7 +99,9 @@ export function readConditions(reader, depth = 0) {
       let op = { ':contains': 'has', ':is': 'eq', ':matches': 'matches' }[comparator];
       if (op === 'matches') {
         const reason = patternProblem(value);
-        if (reason) unsupported(reason);
+        if (reason) unsupported({ pattern_question: '물음표 패턴은 옮길 수 없어요.',
+          pattern_escape: '패턴의 이스케이프 형식을 확인해 주세요.',
+          pattern_complexity: '패턴이 너무 복잡해요.' }[reason] ?? '지원하지 않는 패턴이에요.');
         // Preserve the legacy v:1 representation for an exact literal prefix.
         try { const literal = prefix(value); op = 'start'; value = literal; } catch { /* General glob stays matches. */ }
       }

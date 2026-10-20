@@ -132,7 +132,7 @@ const cases = [
   ['nested condition', { from: '(notice OR news)', subject: 'weekly' }, { shouldStar: 'true' }, 'no', /2단/],
   ['negative pattern', { from: '-notice*' }, { shouldStar: 'true' }, 'no', /별표/],
   ['no conditions', {}, { shouldStar: 'true' }, 'no', /조건/],
-  ['unsafe variable value', { subject: '"${example}"' }, { shouldStar: 'true' }, 'no', /unsafe_text/],
+  ['unsafe variable value', { subject: '"${example}"' }, { shouldStar: 'true' }, 'no', /값이나 형식/],
   ['protected folder', { from: 'notice@example.com' }, { label: 'INBOX' }, 'no', /폴더/],
 ];
 for (const [name, conditions, actions, status, expected] of cases) {
@@ -327,4 +327,23 @@ test('stage2 escapes Gmail backslashes only in patterns, retains v1 simple rules
   const report = convert([props(valid)], { stage: 2, mode: 'append', existingRules: [pattern] });
   assert.equal(report.rules.length, 1);
   assert.equal(report.items[0].status, 'same');
+});
+
+test('XML model validation reasons never expose internal codes', () => {
+  for (const subject of ['unsafe${value}', 'a'.repeat(201), 'a?b', '*a'.repeat(21)]) {
+    const item = one(props({ subject, shouldMarkAsRead: 'true' }), { stage: 2 });
+    assert.equal(item.status, 'no'); assert.match(item.reason, /[가-힣]/);
+    assert.doesNotMatch(item.reason, /\b[a-z]+_[a-z_]+\b/);
+  }
+});
+test('new folder validation shares creation limits and preserves existing names', () => {
+  for (const label of ['.hidden', 'a'.repeat(101), ' Work ', 'Parent/ Work ', 'Parent/.hidden', 'Parent/', 'WebmailVirtualOther', 'SharedOther', 'unsafe${value}']) {
+    const item = one(props({ ...valid, label }));
+    assert.equal(item.status, 'no', label); assert.match(item.reason, /[가-힣]/);
+    assert.doesNotMatch(item.reason, /\b[a-z]+_[a-z_]+\b/);
+  }
+  for (const label of ['a'.repeat(100), '업무/견적', '.existing', ' Existing ', '.parent/New', '.old/Existing']) {
+    const existing = [{ path: '.existing' }, { path: ' Existing ' }, { path: '.parent' }, { path: '.old/Existing' }];
+    assert.notEqual(one(props({ ...valid, label }), { folders: existing }).status, 'no', label);
+  }
 });

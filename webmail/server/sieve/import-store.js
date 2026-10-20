@@ -66,12 +66,14 @@ export async function importInfo(client, current) {
   const has = name => current.scripts.some(script => script.name === name);
   const before = record.undo.webmail;
   const currentHash = current.script === null ? null : scriptHash(current.script);
-  const unapplied = currentHash !== record.undo.afterSha256 && currentHash === (before.present ? before.sha256 : null);
+  const beforeBytes = currentHash === (before.present ? before.sha256 : null);
+  const unapplied = currentHash !== record.undo.afterSha256 && beforeBytes
+    && current.activeName === (record.undo.active.name ?? null);
   let available = !unapplied && current.state !== 'newer_version';
   if (available && before.present) available = has(undoWebmailName) && scriptHash(await client.getScript(undoWebmailName)) === before.sha256;
   const active = record.undo.active;
   if (available && active.name && active.name !== SCRIPT_NAME) available = has(undoActiveName) && scriptHash(await client.getScript(undoActiveName)) === active.sha256;
   return { at: record.at, source: { kind: record.source.kind, name: record.source.name }, mode: record.mode, dropped: record.dropped,
     ...(record.droppedTruncated ? { droppedTruncated: record.droppedTruncated } : {}),
-    undo: { available, edited: !unapplied && currentHash !== record.undo.afterSha256 } };
+    undo: { available, edited: !beforeBytes && currentHash !== record.undo.afterSha256 } };
 }

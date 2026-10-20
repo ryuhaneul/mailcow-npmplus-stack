@@ -12,7 +12,7 @@ const credentials = { email: 'user1@mail.example.com', password: 'synthetic-pass
 const original = { v: 1, rev: 1, rules: [], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
 
 for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
-  test(`WAF ${mode} YAML limits Gmail XML exclusions to three IDs, POST and webmail hosts`, () => {
+  test(`WAF ${mode} YAML limits XML and signature HTML exclusions to exact paths, methods and webmail hosts`, () => {
     const root = fileURLToPath(new URL('../../../', import.meta.url));
     const render = enabled => execFileSync('bash', ['-c', 'source scripts/lib/webmail-env.sh; source scripts/lib/waf.sh; waf_render_appsec_config'], {
       cwd: root,
@@ -27,8 +27,16 @@ for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
       assert.equal(xmlBlocks[index], `  - filter: Is${band}Band == true && req.Host == "${host}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]\n    apply:\n      - Remove${band}BandRuleByID(941100)\n      - Remove${band}BandRuleByID(941130)\n      - Remove${band}BandRuleByID(941310)\n`);
     }
     assert.ok(blocks.filter(block => !xmlBlocks.includes(block)).every(block => !/RuleByID\(941(?:100|130|310)\)/.test(block)));
+    const signatureBlocks = blocks.filter(block => block.includes('/api/signatures'));
+    assert.equal(signatureBlocks.length, 2);
+    for (const [index, host] of ['newmail.example.com', 'other.example.com'].entries()) {
+      assert.equal(signatureBlocks[index].split('\n')[0], `  - filter: Is${band}Band == true && req.Host == "${host}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules", "/api/signatures"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing", "/api/signatures/normalize"]))`);
+      assert.ok(signatureBlocks[index].includes(`Remove${band}BandRuleByTag("attack-xss")`));
+    }
+    assert.ok(!yaml.includes('/api/signature-images'));
     const disabled = render('false');
     assert.ok(!disabled.includes('/api/rules/import/xml'));
+    assert.ok(!disabled.includes('/api/signatures'));
     assert.ok(!/RuleByID\(941(?:100|130|310)\)/.test(disabled));
   });
 }
@@ -55,6 +63,7 @@ async function fakeServer(options = {}) {
       if (options.save && (rev === 1 || !options.restoreFail)) data = { rev: ++rev };
       else { res.statusCode = 422; data = { error: { code: 'RULES_INVALID', message: '합성 거절' } }; }
     }
+    else if (req.url === '/api/signatures/normalize') data = { html: body.html };
     else if (req.url === '/api/drafts') data = { draftRef: 'synthetic-ref' };
     else if (req.url === '/api/send') data = { ok: true };
     else if (req.url === '/api/attachments') data = { id: 'synthetic-attachment', size: 20 * 1024 * 1024 };
@@ -84,6 +93,11 @@ test('real fake-server probe sends the full R-WAF bundle with cookies/CSRF and r
     const requests = server.requests;
     assert.ok(requests.find(req => req.path === '/api/drafts').body.html.includes('<script>'));
     assert.ok(requests.some(req => req.body?.subject?.includes('SELECT *')));
+    const signature = requests.find(req => req.path === '/api/signatures/normalize');
+    assert.equal(signature.method, 'POST');
+    assert.deepEqual(signature.body, { html: `<p>합성 서명</p><img src="cid:wm-sig-v1.${'W'.repeat(32)}@signature.invalid" alt="합성 로고">` });
+    assert.ok(!requests.some(req => ['/api/signatures', '/api/signature-images'].includes(req.path)));
+
     const xmlRequests = requests.filter(req => ['/api/rules/import/xml/preview', '/api/rules/import/xml'].includes(req.path));
     assert.equal(xmlRequests.length, 2);
     for (const { body } of xmlRequests) {

@@ -9,6 +9,9 @@ import { AppError } from '../errors.js';
 import { encodeRef, decodeRef } from './ref.js';
 import { bodyParts, attachmentHeaders } from './read.js';
 import { sanitizeComposeHtml } from './sanitize.js';
+import { prepareSignatureInline } from './signature-inline.js';
+import { createSignatureImagesService } from '../signature-images.js';
+import { withSignatureStoreLock } from '../signature-store-lock.js';
 
 const invalid = () => new AppError(422, 'BAD_REQUEST', '작성 내용을 확인해 주세요.');
 const tooLarge = () => new AppError(413, 'ATTACH_TOO_LARGE', '첨부 파일 합계가 허용 크기를 넘었어요.');
@@ -22,7 +25,7 @@ function address(value) {
   if (!item || typeof item.address !== 'string' || !/^[^\s<>@,;:"()[\]\\\x00-\x1f\x7f]+@[^\s<>@,;:"()[\]\\\x00-\x1f\x7f]+$/.test(item.address) || !header(item.name ?? '')) throw badAddress();
   return { address: item.address.toLowerCase(), name: item.name || '' };
 }
-function validate(body, sending, publicHostnames) {
+function validate(body, sending) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw invalid();
   const from = address(body.from).address;
   const result = { from };
@@ -35,14 +38,15 @@ function validate(body, sending, publicHostnames) {
   if (count > 100) throw new AppError(422, 'TOO_MANY_RECIPIENTS', '받는 사람은 100명까지 입력할 수 있어요.');
   if (!header(body.subject ?? '') || typeof (body.html ?? '') !== 'string') throw invalid();
   for (const key of ['inReplyTo', 'references']) if (body[key] !== undefined && !header(body[key])) throw invalid();
+  if (body.signatureImages !== undefined && !Array.isArray(body.signatureImages)) throw new AppError(422, 'SIGNATURE_INVALID', '서명 형식을 확인해 주세요.');
   if (body.attachmentIds !== undefined && (!Array.isArray(body.attachmentIds) || body.attachmentIds.some(value => typeof value !== 'string'))) throw invalid();
   if (body.forwardParts !== undefined && (!Array.isArray(body.forwardParts) || body.forwardParts.some(part => !part || typeof part.partId !== 'string' || !/^\d+(?:\.\d+)*$/.test(part.partId)))) throw invalid();
   for (const part of body.forwardParts || []) decodeRef(part.ref);
   for (const key of ['draftRef', 'replyToRef']) if (body[key] !== undefined) decodeRef(body[key]);
-  return { ...result, subject: body.subject ?? '', html: sanitizeComposeHtml(body.html ?? '', { publicHostnames }), inReplyTo: body.inReplyTo, references: body.references };
+  return { ...result, subject: body.subject ?? '', html: body.html ?? '', inReplyTo: body.inReplyTo, references: body.references };
 }
 
-export function createComposeService({ config, imap, directory, smtp, logger, tempRoot = '/tmp/webmail' }) {
+export function createComposeService({ config, imap, directory, smtp, logger, images = createSignatureImagesService({ imap }), tempRoot = '/tmp/webmail' }) {
   const states = new WeakMap();
   const maxBytes = config.attachMaxMb * 1024 * 1024;
   function stateFor(session) {
@@ -132,7 +136,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
     const temporary = [], streams = [];
     try {
       let total = 0;
-      const attachments = [];
+      const attachments = [], existingCids = [];
       for (const attachmentId of new Set(body.attachmentIds || [])) {
         const file = state.attachments.get(attachmentId);
         if (!file) throw notFound();
@@ -148,6 +152,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
           const row = await client.fetchOne(ref.uid, { bodyStructure: true }, { uid: true });
           const node = bodyParts(row?.bodyStructure).find(node => node.part === part.partId);
           if (!node) throw notFound();
+          if (typeof node.id === 'string') existingCids.push(node.id);
           const download = await client.download(ref.uid, part.partId, { uid: true, binary: true });
           if (!download.content) throw notFound();
           await pipeline(download.content, limiter(bytes => { total += bytes; if (total > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
@@ -157,12 +162,20 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
         });
         attachments.push({ ...metadata, path });
       }
+      const prepare = stored => prepareSignatureInline({ html: mail.html, signatureImages: body.signatureImages, images: stored, existingCids, nonce: id() });
+      // Take owned bytes while holding the account queue, before any deletion can win.
+      const inline = body.signatureImages === undefined || (Array.isArray(body.signatureImages) && body.signatureImages.length === 0)
+        ? prepare({})
+        : await withSignatureStoreLock(session.email, () => imap.withMailbox(session, 'INBOX', async client => prepare((await images.read(client)).images)));
+      total += inline.totalBytes;
+      if (total > maxBytes) throw tooLarge();
+      mail.html = sanitizeComposeHtml(inline.html, { publicHostnames: config.publicHostnames });
       active(session);
       // Explicit streams prevent nodemailer from treating user content as a URL/path.
       const compiled = new MailComposer({ ...mail, attachments: attachments.map(file => {
         const content = createReadStream(file.path); streams.push(content);
         return { filename: file.filename, contentType: file.contentType, content };
-      }), disableFileAccess: true, disableUrlAccess: true }).compile();
+      }).concat(inline.parts), disableFileAccess: true, disableUrlAccess: true }).compile();
       compiled.keepBcc = true;
       return await compiled.build();
     } finally {
@@ -172,8 +185,10 @@ export function createComposeService({ config, imap, directory, smtp, logger, te
     }
   }
   async function write(session, body, sending) {
+    // A queued save owns its HTML and manifest, even if the caller edits the model.
+    body = structuredClone(body);
     return serial(session, async state => {
-      const mail = validate(body, sending, config.publicHostnames);
+      const mail = validate(body, sending);
       await directory.assertFrom(session, mail.from);
       const { identities } = await directory.identities(session);
       const name = identities.find(item => item.address === mail.from)?.name || identities.find(item => item.kind === 'self')?.name || '';

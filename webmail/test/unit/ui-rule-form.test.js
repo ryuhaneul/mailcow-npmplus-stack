@@ -100,6 +100,8 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
     if (path === '/api/storage?quotaOnly=1') return Response.json({ quota: null });
     if (path === '/api/rules') return Response.json({ error: { code: 'SIEVE_DISABLED', message } }, { status: 409 });
     if (path === '/api/compose/identities') return Response.json({ identities: [{ address: 'user@example.com', kind: 'self' }], defaultFrom: 'user@example.com', anyAtDomains: [], anyAddress: false });
+    if (path === '/api/signatures') return Response.json({ revision: 'S'.repeat(32), items: [], defaults: {}, usedBytes: 0, maxBytes: 262144, notices: [] });
+    if (path === '/api/signature-images') return Response.json({ revision: 'I'.repeat(32), images: [], usedBytes: 0, maxBytes: 1048576, maxFileBytes: 204800, maxCount: 20 });
     assert.fail(`unexpected API request: ${path}`);
   };
   for (const [name, Component] of [['filters', FiltersPage], ['rule', RuleBuilder], ['compose', Composer]]) {

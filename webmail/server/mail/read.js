@@ -81,7 +81,7 @@ export function createReadService({ imap }) {
       const addresses = list => (list || []).map(item => ({ ...item, name: decodeWords(item.name) }));
       const sender = envelope.from?.[0]?.address?.toLowerCase();
       const senderAlwaysShow = Boolean(sender && session.prefs?.imageAllow?.some(address => address.toLowerCase() === sender));
-      const cidParts = new Map(parts.filter(part => part.id && inlineTypes.has(part.type)).map(part => [part.id.replace(/^<|>$/g, ''), part.part]));
+      const cidParts = new Map(parts.filter(part => part.id && inlineTypes.has(part.type)).map(part => [part.id.trim().replace(/^<|>$/g, ''), part.part]));
       const attachments = parts.filter(part => part !== body && (part.attachment || !['text/html', 'text/plain'].includes(part.type))).map(part => ({ partId: part.part, filename: decodeWords(part.dispositionParameters?.filename || part.parameters?.name || `attachment-${part.part}`), size: part.size || 0, contentType: part.type, inline: part.disposition === 'inline' && inlineTypes.has(part.type) }));
       const headers = libmime.decodeHeaders(row.headers?.toString('latin1') || '');
       const result = { ref: token, folder: ref.path, subject: decodeWords(envelope.subject), from: addresses(envelope.from), to: addresses(envelope.to), cc: addresses(envelope.cc), replyTo: addresses(envelope.replyTo), date: envelope.date ? new Date(envelope.date).toISOString() : null, messageId: envelope.messageId || null, inReplyTo: envelope.inReplyTo || headers['in-reply-to']?.[0] || null, references: headers.references?.join(' ') || '', attachments, blockedImages: 0, senderAlwaysShow, seen: row.flags?.has('\\Seen') || false, flagged: row.flags?.has('\\Flagged') || false, spam: ref.path === 'Junk' };

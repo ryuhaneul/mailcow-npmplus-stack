@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 
 const successKeys = {
   '/api/auth/login': ['user', 'csrf'], '/api/drafts': ['draftRef'], '/api/send': ['ok'],
-  '/api/attachments': ['id', 'size'], '/api/messages': ['items', 'total'],
+  '/api/attachments': ['id', 'size'], '/api/messages': ['items', 'total'], '/api/signatures/normalize': ['html'],
   '/api/rules': ['rev'], '/api/rules/import/xml/preview': ['items', 'counts', 'plan', 'expect'],
   '/api/rules/import/xml': ['rev', 'applied', 'dropped', 'createdFolders'], '/api/password': ['relogin'],
 };
@@ -57,6 +57,8 @@ export async function runProbe(base, { email, password, request = fetch, timeout
   await send('HTML 본문 임시저장', 'PUT', '/api/drafts', draft);
   await send('HTML 본문 보내기', 'POST', '/api/send', draft);
   await send('SQL 모양 제목 보내기', 'POST', '/api/send', { ...draft, subject: "SELECT * FROM messages WHERE subject = 'quote'; -- 합성 시험" });
+  // A synthetic CID may be rejected by the app; normalization never saves a signature.
+  await send('서명 HTML 정규화', 'POST', '/api/signatures/normalize', { html: `<p>합성 서명</p><img src="cid:wm-sig-v1.${'W'.repeat(32)}@signature.invalid" alt="합성 로고">` });
   // Both routes must reach the app through AppSec. Leave confirmation false
   // for the write probe so it cannot replace the account's import/undo archive.
   const xml = `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="subject" value="&quot;&lt;태그&gt; ' OR - 합성*&quot;"/><apps:property name="shouldMarkAsRead" value="true"/></entry><entry><apps:property name="subject" value="쾌속 배송"/><apps:property name="label" value="알림/공지"/></entry></feed>`;

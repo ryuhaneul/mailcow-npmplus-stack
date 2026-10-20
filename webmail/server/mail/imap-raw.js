@@ -8,6 +8,16 @@ const string = value => ({ type: 'STRING', value });
 function validPath(path) {
   if (typeof path !== 'string' || /[\0\r\n]/.test(path)) throw new AppError(400, 'INVALID_MAILBOX', '메일함 경로를 확인해 주세요.');
 }
+function metadataFailure(response) {
+  const section = response?.attributes?.[0]?.section;
+  if (text(section?.[0])?.toUpperCase() !== 'METADATA') return null;
+  const code = text(section?.[1])?.toUpperCase();
+  if (!code) return null;
+  const error = new AppError(503, code === 'LONGENTRIES' ? 'METADATA_TOO_LARGE' : 'METADATA_UNAVAILABLE', '메일 서버의 설정을 읽거나 저장할 수 없어요.');
+  error.metadataCode = code;
+  if (code === 'LONGENTRIES') error.longEntries = uint(text(section[2]));
+  return error;
+}
 async function command(client, name, attributes, responseType) {
   const rows = [];
   if (typeof client.preCheck === 'function') await client.preCheck();
@@ -16,7 +26,15 @@ async function command(client, name, attributes, responseType) {
       untagged: responseType ? { [responseType]: row => { rows.push(row); } } : {},
     });
     response.next();
+    if (name.endsWith('METADATA')) {
+      const failure = metadataFailure(response.response);
+      if (failure) throw failure;
+    }
   } catch (error) {
+    if (name.endsWith('METADATA')) {
+      const failure = metadataFailure(error.response);
+      if (failure) throw failure;
+    }
     if (['NO', 'BAD'].includes(error.responseStatus)) throw badResponse();
     throw error;
   }
@@ -61,10 +79,12 @@ export async function mailboxStatus(client, path, fields = ['MESSAGES', 'SIZE'])
   return Object.fromEntries(fields.map(field => [field.toLowerCase(), uint(values.get(field))]));
 }
 
-export async function getMetadata(client, path, entry) {
+export async function getMetadata(client, path, entry, { maxSize } = {}) {
   validPath(path);
   validPath(entry);
-  const rows = await command(client, 'GETMETADATA', [string(encodePath(client, path)), string(entry)], 'METADATA');
+  if (maxSize !== undefined && (!Number.isSafeInteger(maxSize) || maxSize < 0)) throw new AppError(400, 'INVALID_METADATA', '설정 크기를 확인해 주세요.');
+  const options = maxSize === undefined ? [] : [[atom('MAXSIZE'), atom(String(maxSize))]];
+  const rows = await command(client, 'GETMETADATA', [...options, string(encodePath(client, path)), string(entry)], 'METADATA');
   for (const row of rows) {
     if (decodePath(client, text(row.attributes?.[0])) !== path) continue;
     const list = row.attributes?.[1];
@@ -78,4 +98,13 @@ export async function setMetadata(client, path, entry, value) {
   validPath(entry);
   if (value !== null && typeof value !== 'string') throw new AppError(400, 'INVALID_METADATA', '설정 값을 확인해 주세요.');
   await command(client, 'SETMETADATA', [string(encodePath(client, path)), [string(entry), value === null ? null : { type: 'LITERAL', value: Buffer.from(value, 'utf8') }]]);
+}
+
+// Only application-owned private server keys may participate in an atomic write.
+const metadataEntries = new Set(['prefs', 'signature-images-v1', 'signatures-v1'].map(key => `/private/vendor/mailstack-webmail/${key}`));
+export async function setMetadataEntries(client, entries) {
+  if (!Array.isArray(entries) || !entries.length || entries.some(pair => !Array.isArray(pair) || pair.length !== 2 || !metadataEntries.has(pair[0]) || (pair[1] !== null && typeof pair[1] !== 'string')) || new Set(entries.map(([key]) => key)).size !== entries.length) {
+    throw new AppError(400, 'INVALID_METADATA', '설정 값을 확인해 주세요.');
+  }
+  await command(client, 'SETMETADATA', [string(''), entries.flatMap(([entry, value]) => [string(entry), value === null ? null : { type: 'LITERAL', value: Buffer.from(value, 'utf8') }])]);
 }

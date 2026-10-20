@@ -1,0 +1,180 @@
+/* Signature D: existing application tokens, one selected editor and a shared library. */
+.signature-settings{min-width:0;max-width:1120px;container:signature / inline-size}
+.signature-settings [hidden]{display:none!important}
+.signature-settings h3{margin:0;font-size:15px;font-weight:650}
+.signature-settings .sig-heading{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.signature-settings .sig-heading h2{font-size:20px;letter-spacing:-.025em;margin:0}
+.signature-settings .sig-heading p{margin:4px 0 0;font-size:16px;color:var(--ink-2);line-height:1.65}
+.signature-settings .d-section-nav{display:flex;gap:20px;border-bottom:1px solid var(--line);margin:-4px 0 22px;overflow:auto;white-space:nowrap}
+.signature-settings .d-section-nav button{display:block;font-size:13px;color:var(--ink-2);padding:8px 0 10px;border-bottom:2px solid transparent}
+.signature-settings .d-section-nav button[aria-current=page]{color:var(--ink);font-weight:650;border-bottom-color:var(--ink)}
+.signature-settings .signature-list{border:1px solid var(--line);border-radius:9px;padding:15px 16px;margin-bottom:16px}
+.signature-settings .list-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px}
+.signature-settings .list-heading h3{font-size:14px}
+.signature-settings .list-heading h3 span{font-size:12px;font-weight:500;color:var(--ink-3);margin-left:5px}
+.signature-settings .signature-items{display:flex;gap:8px;overflow-x:auto;scrollbar-width:thin;padding:3px 2px 7px}
+.signature-settings .signature-items>button{border:1px solid var(--line-2);padding:9px 12px;border-radius:6px;display:flex;gap:8px;align-items:center;min-width:160px;max-width:240px;flex:none;font-size:13px;text-align:left}
+.signature-settings .signature-items>button>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.signature-settings .signature-items>button[aria-pressed=true]{background:var(--l7-bg);border-color:var(--l7-dot);color:var(--l7-ink);font-weight:650}
+.signature-settings .signature-items>button:hover{background:var(--hover)}
+.signature-settings .signature-items .i{width:14px;height:14px}
+.signature-settings .signature-actions{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px;font-size:13px;color:var(--ink-2)}
+.signature-settings .signature-actions>span{min-width:0;overflow-wrap:anywhere}
+.signature-settings .signature-actions>div{display:flex;gap:15px;flex-shrink:0}
+.signature-settings .signature-actions button{font-size:12px;text-decoration:underline;text-underline-offset:3px}
+.signature-settings .signature-actions b{color:var(--ink)}
+.signature-settings .danger-link{color:var(--danger)}
+.signature-settings .sig-grid{display:grid;grid-template-columns:minmax(0,1fr) 274px;gap:20px;align-items:start}
+.signature-settings .signature-editors,.signature-settings .sig-work{min-width:0}
+.signature-settings .sig-address{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.signature-settings .sig-address h3{overflow-wrap:anywhere}
+.signature-settings .sig-address .text-action{margin-left:auto}
+.signature-settings .target-badge{color:var(--l7-ink);background:var(--l7-bg);font-size:11px;padding:2px 7px;border-radius:4px}
+.signature-settings .sig-card{border:1px solid var(--line-2);border-radius:9px;background:var(--surface);overflow:hidden}
+.signature-settings .is-target .sig-card{border-color:var(--l7-dot);box-shadow:0 0 0 3px var(--l7-bg)}
+.signature-settings .sig-modebar{padding:8px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;min-height:49px}
+.signature-settings .sig-modebar .seg{margin:0;margin-right:auto}
+.signature-settings .sig-modebar .seg [aria-selected=true]{background:var(--surface);color:var(--ink);box-shadow:var(--sheet)}
+.signature-settings .sig-modebar .hint{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.signature-settings .sig-format{padding:6px 10px;display:flex;gap:3px;align-items:center;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.signature-settings .sig-format .ib{width:32px;height:32px}
+.signature-settings .paste-hint{font-size:12px;color:var(--ink-3);padding:10px 14px 0}
+.signature-settings .sig-content{padding:18px 22px;min-height:254px;font-size:16px;line-height:1.65;outline-offset:-3px;overflow-wrap:anywhere}
+.signature-settings .sig-content p{margin:0 0 13px}
+.signature-settings .sig-content a{color:var(--code-tag)}
+.signature-settings .sig-content img{max-width:100%;height:auto;cursor:pointer}
+.signature-settings .sig-content table{max-width:100%}
+.signature-settings .sig-content:empty::before{content:attr(aria-placeholder);color:var(--ink-3);pointer-events:none}
+.signature-settings .image-controls{border-top:1px solid var(--line);background:var(--sunken);padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
+.signature-settings .image-controls label{display:flex;align-items:center;gap:6px;max-width:100%}
+.signature-settings .image-controls .inp{width:74px;height:32px;padding:4px 7px}
+.signature-settings .image-controls .image-alt{width:130px;min-width:0}
+.signature-settings .image-controls .remove{color:var(--danger);text-decoration:underline}
+.signature-settings .sig-notice{font-size:13px;line-height:1.7;color:var(--ink-3);margin:13px 0 20px;overflow-wrap:anywhere}
+.signature-settings .sig-save{margin-top:24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.signature-settings .sig-save .btn{min-width:80px;height:36px}
+.signature-settings .sig-status{font-size:13px;color:var(--ok)}
+.signature-settings .signature-bytes{font-size:12px;color:var(--ink-3);margin-left:auto}
+.signature-settings .source-help{font-size:13px;color:var(--ink-2);padding:11px 14px;border-top:1px solid var(--line);line-height:1.6;margin:0}
+.signature-settings .compose-source-shell{display:block;position:relative;padding:0;overflow:hidden;height:300px;min-width:0;background:var(--sunken)}
+.signature-settings .compose-source-pre,.signature-settings .compose-source-input{position:absolute;top:0;left:0;box-sizing:border-box;margin:0;border:0;padding:14px 20px 14px 54px;font:13px/1.8 var(--mono);letter-spacing:0;tab-size:2;white-space:pre;word-break:normal;overflow-wrap:normal;font-variant-ligatures:none;text-align:left;direction:ltr}
+.signature-settings .compose-source-input{width:100%;height:100%;resize:none;overflow:auto;background:transparent;color:var(--ink);-webkit-text-fill-color:transparent;caret-color:var(--ink);outline-offset:-3px}
+.signature-settings .compose-source-pre{width:100%;height:100%;overflow:auto;scrollbar-width:none;pointer-events:none;color:var(--ink);background:var(--sunken)}
+.signature-settings .compose-source-pre::-webkit-scrollbar{display:none}
+.signature-settings .compose-source-line{position:relative;display:block;min-height:1.8em;width:max-content;min-width:100%}
+.signature-settings .compose-source-line::before{content:attr(data-line);position:absolute;left:-40px;width:26px;text-align:right;color:var(--ink-3);user-select:none}
+.signature-settings .compose-source-shell.is-composing .compose-source-pre{visibility:hidden}
+.signature-settings .compose-source-shell.is-composing .compose-source-input{-webkit-text-fill-color:var(--ink)}
+.signature-settings .sig-library{background:var(--sunken);border:1px solid var(--line);border-radius:10px;padding:17px;min-width:0}
+.signature-settings .sig-library h3{display:flex;gap:7px;align-items:center}
+.signature-settings .sig-library p{font-size:13px;line-height:1.65;color:var(--ink-2);margin:8px 0 14px}
+.signature-settings .insert-target{font-size:12px;line-height:1.7;padding:10px 11px;background:var(--l7-bg);color:var(--l7-ink);border-radius:6px;margin-bottom:18px;overflow-wrap:anywhere}
+.signature-settings .insert-target>span{display:block}
+.signature-settings .insert-target strong{font-size:13px;font-weight:650}
+.signature-settings .library-meter{height:4px;background:var(--line-2);border-radius:8px;margin:12px 0 6px}
+.signature-settings .library-meter span{display:block;height:100%;background:var(--ink-2)}
+.signature-settings .usage{font-size:12px;color:var(--ink-3);display:flex;justify-content:space-between;gap:8px}
+.signature-settings .asset{margin:14px 0 10px;padding:14px;background:var(--surface);border:1px solid var(--line-2);border-radius:7px}
+.signature-settings .asset img{width:140px;max-width:100%;height:auto;margin-bottom:15px}
+.signature-settings .asset b{display:block;font-size:13px;overflow-wrap:anywhere}
+.signature-settings .asset small{display:block;font-size:12px;color:var(--ink-3);margin:4px 0 9px;line-height:1.7}
+.signature-settings .asset-actions{display:flex;gap:12px}
+.signature-settings .asset-actions button{font-size:12px;text-decoration:underline;text-underline-offset:3px}
+.signature-settings .sig-library>.btn{width:100%;margin:5px 0}
+.signature-settings .text-action{display:inline-flex;gap:7px;align-items:center;padding:6px 8px;border-radius:5px;font-size:13px}
+.signature-settings .text-action:hover{background:var(--hover)}
+.signature-settings .library-note{border-top:1px solid var(--line-2);padding-top:12px!important;margin-top:15px!important;font-size:12px!important}
+.signature-settings .panel-head{display:flex;align-items:center;gap:10px;margin:18px 0 14px}
+.signature-settings .panel-head h3{flex:1;font-size:16px}
+.signature-settings .panel-head .ib{width:28px;height:28px}
+.signature-settings .upload-tabs{display:flex;gap:12px;border-bottom:1px solid var(--line);margin-bottom:16px}
+.signature-settings .upload-tabs button{padding:0 0 10px;font-size:13px;color:var(--ink-2)}
+.signature-settings .upload-tabs button[aria-pressed=true]{border-bottom:2px solid var(--ink);font-weight:650;color:var(--ink)}
+.signature-settings .dropzone{padding:22px 12px;border:1px dashed var(--ink-3);border-radius:8px;text-align:center;background:var(--sunken)}
+.signature-settings .dropzone>.i{width:27px;height:27px;margin-bottom:10px}
+.signature-settings .dropzone p{font-size:14px;line-height:1.6;margin:0 0 10px}
+.signature-settings .dropzone .btn{background:var(--surface)}
+.signature-settings .sig-library .limits{font-size:12px;color:var(--ink-3);line-height:1.65;margin:12px 0}
+.signature-settings .upload-result,.signature-settings .paste-message{background:var(--sunken);padding:12px;display:flex;gap:12px;border:1px solid var(--line-2);border-radius:8px;margin:0 0 12px;font-size:13px;line-height:1.7}
+.signature-settings .url-form label{display:block;font-size:13px;margin-bottom:7px}
+.signature-settings .url-form .inp{width:100%;font-size:13px;height:38px;margin-top:7px}
+.signature-settings .url-form .btn{margin-top:13px}
+.signature-settings .sig-error{color:var(--danger);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.signature-settings .preview-panel{margin-top:20px}
+.signature-settings .preview-panel h3{margin-bottom:12px}
+.signature-settings .mail-paper{background:#fff;color:#232326;padding:24px;font-size:15px;line-height:1.7;border:1px solid var(--line-2);border-radius:9px;overflow-wrap:anywhere}
+.signature-settings .mail-paper img{max-width:100%;height:auto}
+.signature-settings .preview-foot{font-size:12px;color:var(--ink-3);line-height:1.6;margin-top:10px}
+.signature-settings .defaults-note{font-size:15px;line-height:1.7;color:var(--ink-2);margin:0 0 24px;max-width:750px}
+.signature-settings .defaults-table{border:1px solid var(--line-2);border-radius:9px;overflow:hidden}
+.signature-settings .defaults-table-head,.signature-settings .default-row{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) minmax(0,1fr);gap:22px;padding:16px 20px;align-items:center}
+.signature-settings .defaults-table-head{font-size:12px;color:var(--ink-3);background:var(--sunken)}
+.signature-settings .default-row{border-top:1px solid var(--line);min-height:93px}
+.signature-settings .default-row h3{font-size:14px;overflow-wrap:anywhere}
+.signature-settings .default-row label>span{display:none}
+.signature-settings .default-row .dd{width:100%;font-size:14px;height:38px}
+.signature-settings .default-help{font-size:13px;color:var(--ink-2);margin:18px 0}
+.signature-settings button:disabled{opacity:.5;cursor:not-allowed}
+.sig-dialog.d-dialog{overflow-wrap:anywhere;padding:24px;width:min(560px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid var(--line-2);border-radius:12px;background:var(--surface);color:var(--ink);box-shadow:var(--float)}
+.sig-dialog.d-dialog::backdrop{background:var(--scrim)}
+.sig-dialog.d-dialog>h2{margin:0;font-size:20px;line-height:1.5}
+.sig-dialog.d-dialog>p{font-size:16px;line-height:1.75;margin:18px 0}
+.sig-dialog.d-dialog .name-label{display:block;margin:20px 0 8px;font-size:14px;font-weight:600}
+.sig-dialog.d-dialog>.inp{width:100%;height:40px;padding:8px 10px}
+.sig-dialog.d-dialog .dialog-note{font-size:13px;color:var(--ink-2);line-height:1.7}
+.sig-dialog.d-dialog .delete-default-warning{background:var(--warn-bg);color:var(--warn);padding:14px;border-radius:7px}
+.sig-dialog.d-dialog .delete-users{padding:0;list-style:none;border:1px solid var(--line);border-radius:7px}
+.sig-dialog.d-dialog .delete-users li{padding:11px 14px;border-bottom:1px solid var(--line);font-size:14px;overflow-wrap:anywhere}
+.sig-dialog.d-dialog .delete-users li:last-child{border:0}
+.sig-dialog.d-dialog .delete-users small{display:block;font-size:12px;color:var(--ink-3);margin-top:3px}
+.sig-dialog.d-dialog .dialog-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+/* Composer uses the same picker and replacement dialog as Signature D. */
+.composer .compose-signature-bar{display:flex;align-items:center;gap:12px;position:relative;font-size:12px;color:var(--ink-3);padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:19px;flex-wrap:wrap}
+.composer .signature-picker{display:flex;align-items:center;gap:7px;max-width:100%;font-size:13px;font-weight:550;color:var(--ink-2);border:1px solid var(--line-2);border-radius:5px;padding:5px 9px;overflow-wrap:anywhere;text-align:left}
+.composer .signature-picker .i{flex:none}
+.composer .signature-picker:hover{background:var(--hover)}
+.composer .compose-signature-bar>small{font-size:11px;color:var(--warn)}
+.composer .signature-menu{position:absolute;left:37px;top:auto;bottom:calc(100% + 6px);z-index:10;width:220px;max-width:calc(100% - 37px);max-height:320px;overflow:auto;padding:5px;background:var(--surface);border:1px solid var(--line-2);border-radius:8px;box-shadow:var(--float)}
+.composer .signature-menu>button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:9px;text-align:left;padding:9px 12px;border-radius:5px;font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+.composer .signature-menu>button .i{flex:none}
+.composer .signature-menu>button:hover,.composer .signature-menu>button[aria-checked=true]{background:var(--sunken)}
+.composer .signature-picker:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:1050px){
+  .signature-settings .sig-modebar .hint{display:none}
+}
+/* 420px editor + 274px library + 20px gap: stack below 714px of actual space. */
+@container signature (max-width:713px){
+  .signature-settings .sig-grid{grid-template-columns:minmax(0,1fr);gap:18px}
+  .signature-settings .sig-library{grid-row:2}
+}
+@media(max-width:700px){
+  .composer .compose-signature-bar{gap:9px}
+  .composer .signature-picker{font-size:12px}
+  .composer .signature-menu{left:33px;max-width:calc(100% - 33px);width:205px}
+  .signature-settings .signature-list{padding:14px 12px;margin-bottom:14px}
+  .signature-settings .signature-items>button{min-width:139px;max-width:185px;padding:9px 10px;font-size:12px}
+  .signature-settings .signature-actions{flex-direction:column;align-items:flex-start;gap:9px;margin-bottom:14px}
+  .signature-settings .signature-actions>span{min-width:0;overflow-wrap:anywhere}
+.signature-settings .signature-actions>div{gap:20px}
+  .signature-settings .signature-actions>span{font-size:12px}
+  .signature-settings .sig-content{min-height:230px;padding:20px}
+  .signature-settings .sig-format{padding:7px;gap:0}
+  .signature-settings .sig-format .ib{width:28px;height:34px}
+  .signature-settings .sig-modebar .seg{width:auto;flex:none}
+  .signature-settings .sig-address{gap:5px}
+  .signature-settings .sig-address h3{font-size:13px}
+  .signature-settings .target-badge{font-size:10px;padding:2px 5px}
+  .signature-settings .sig-library .asset{display:grid;grid-template-columns:90px minmax(0,1fr);gap:0 14px}
+  .signature-settings .sig-library .asset>img{grid-row:1/4;width:90px;align-self:center;margin:0}
+  .signature-settings .sig-library .asset-actions{gap:16px;flex-wrap:wrap}
+  .signature-settings .defaults-table-head{display:none}
+  .signature-settings .default-row{display:block;padding:18px 16px}
+  .signature-settings .default-row h3{margin-bottom:18px}
+  .signature-settings .default-row label{display:block;margin-top:13px}
+  .signature-settings .default-row label>span{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px}
+  .signature-settings .defaults-note{font-size:16px}
+  .sig-dialog.d-dialog{padding:20px;max-height:calc(100dvh - 24px)}
+  .sig-dialog.d-dialog>.inp{font-size:16px}
+}
+@media(forced-colors:active){.signature-settings .compose-source-pre{visibility:hidden}.signature-settings .compose-source-input{background:Canvas;color:CanvasText;-webkit-text-fill-color:CanvasText;caret-color:CanvasText}}
+@media(prefers-reduced-motion:reduce){.signature-settings *,.sig-dialog.d-dialog{transition:none!important;animation:none!important;scroll-behavior:auto!important}}

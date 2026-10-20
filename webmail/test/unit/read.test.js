@@ -95,6 +95,17 @@ test('read: only HTML part fetched, decoded envelope, references, CID, attachmen
   assert.deepEqual(f.client.downloads, [{uid:9,part:'1.2',options:{uid:true,binary:true}}]); assert.deepEqual(f.client.flags, [{uid:9,flags:['\\Seen'],options:{uid:true}}]);
   assert.ok(f.client.fetches.every(call => call.query.source === undefined && call.query.bodyParts === undefined)); assert.ok(f.client.released);
 });
+test('read: surrounding whitespace and folded Content-ID connect inline images without changing attachments', async () => {
+  const original = fixture(); const baseline = await original.service.read(original.session, token);
+  for (const id of ['<logo@example.com>', ' \t<logo@example.com> \t', '\r\n <logo@example.com>\r\n\t']) {
+    const f = fixture(); f.client.structure.childNodes[1].id = id;
+    const result = await f.service.read(f.session, token);
+    const doc = new JSDOM(result.html).window.document;
+    assert.equal(doc.querySelectorAll('img')[1].getAttribute('src'), `/api/messages/${token}/parts/2?inline=1`);
+    assert.equal(result.attachments.length, 3);
+    assert.deepEqual(result.attachments, baseline.attachments);
+  }
+});
 test('read: explicit images and saved sender allow-list; readonly skips seen; already seen skips MYRIGHTS', async () => {
   const f = fixture(); f.client.seenRight = false;
   assert.equal((await f.service.read(f.session, token, {images:'1'})).blockedImages, 0); assert.equal(f.client.flags.length, 0);

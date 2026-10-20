@@ -175,15 +175,19 @@ test('prepare: concurrent same selection is busy, never performs duplicate searc
   await assert.rejects(f.service.prepare(f.session, f.body), { code: 'SCOPE_BUSY' });
   release(); await pending; assert.equal(f.state.searches, 1);
 });
-test('store: ready is active, completed/error release active slot but retain three histories', async () => {
+test('store: idle ready closes for new prepare; fourth record evicts oldest closed history', async () => {
   const f = fixture(); const first = await ready(f);
-  await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-002' }), { code: 'SCOPE_LIMIT' });
-  first.record.phase = 'completed';
-  const second = await ready(f, { ...f.body, selectionKey: 'synthetic-002' }); second.record.phase = 'error';
+  const second = await ready(f, { ...f.body, selectionKey: 'synthetic-002' });
+  assert.equal(first.record.phase, 'stopped'); second.record.phase = 'error';
   const third = await ready(f, { ...f.body, selectionKey: 'synthetic-003' }); third.record.phase = 'completed';
-  await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-004' }), { code: 'SCOPE_LIMIT' });
-  assert.deepEqual((await f.service.prepare(f.session, f.body)).selectionId, first.result.selectionId);
+  // A later read does not turn the earliest created history into the newest one.
+  f.service.getSelection(f.session, first.result.selectionId);
+  const fourth = await ready(f, { ...f.body, selectionKey: 'synthetic-004' });
+  assert.throws(() => f.service.getSelection(f.session, first.result.selectionId), { code: 'SCOPE_EXPIRED' });
+  assert.equal(first.record.disposed, true);
   assert.equal(f.service.getSelection(f.session, second.result.selectionId), second.record);
+  assert.equal(f.service.getSelection(f.session, third.result.selectionId), third.record);
+  assert.equal(f.service.getSelection(f.session, fourth.result.selectionId), fourth.record);
 });
 test('store: 30-minute idle TTL touches on access, expires and clears held manifest references', async () => {
   const f = fixture(); const { result, record } = await ready(f);
@@ -596,4 +600,82 @@ test('retry failed: a partial failure retries only failed refs and never success
   const count = f.state.mutations.length;
   const retriedResult = await f.service.execute(f.session, runBody(body, retried.result.cursor)); assert.equal(retriedResult.totals.processed, 1);
   assert.equal(f.state.mutations.length - count, 1); assert.deepEqual(f.state.mutations.at(-1).uids, [2]);
+});
+
+test('S3: superseded ready record stays queryable but all its execution/preparation cursors expire', async () => {
+  const f = fixture(); const first = await ready(f);
+  const second = await ready(f, { ...f.body, selectionKey: 'synthetic-new-scope', scope: { quick: 'unread' } });
+  assert.equal(first.record.phase, 'stopped'); assert.equal(first.record.reserveBytes, 0); assert.equal(second.record.phase, 'ready');
+  assert.deepEqual(await f.service.failures(f.session, first.result.selectionId), { total: 0, page: 1, pageSize: 50, items: [] });
+  const calls = f.state.commands.length;
+  await assert.rejects(f.service.execute(f.session, runBody(f.body, first.result.cursor)), { statusCode: 409, code: 'SCOPE_EXPIRED' });
+  await assert.rejects(f.service.prepare(f.session, f.body), { code: 'SCOPE_EXPIRED' }); assert.equal(f.state.commands.length, calls);
+});
+test('S3: paused running record closes for new prepare, retains failures, rejects next and settled cursors', async () => {
+  const f = fixture({ uids: Array.from({ length: 120 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 121 }]]) });
+  const first = await ready(f); let fetches = 0;
+  f.state.onFetch = async () => { if (++fetches === 1) throw new Error('synthetic first-group failure'); };
+  const paused = await f.service.execute(f.session, runBody(f.body, first.result.cursor), { budget: f.budget(19000) });
+  assert.equal(paused.state, 'running'); assert.deepEqual(paused.totals, { processed: 50, skipped: 0, failed: 50 });
+  f.state.onFetch = null;
+  await ready(f, { ...f.body, selectionKey: 'synthetic-after-pause' }); assert.equal(first.record.phase, 'stopped');
+  const failures = await f.service.failures(f.session, first.result.selectionId); assert.equal(failures.total, 50); assert.ok(failures.items.every(item => item.retryable));
+  const changes = f.state.mutations.length;
+  for (const cursor of [first.result.cursor, paused.nextCursor]) await assert.rejects(f.service.execute(f.session, runBody(f.body, cursor)), { code: 'SCOPE_EXPIRED' });
+  assert.equal(f.state.mutations.length, changes);
+});
+test('S3: failed-only prepare can replace a paused running source without waiting for TTL', async () => {
+  const f = fixture({ uids: Array.from({ length: 60 }, (_, i) => i + 1), boxes: new Map([['INBOX', { validity: 11, next: 61 }]]) });
+  const first = await ready(f); f.state.onFetch = async () => { throw new Error('synthetic read failure'); };
+  const paused = await f.service.execute(f.session, runBody(f.body, first.result.cursor), { budget: f.budget(12000) });
+  assert.equal(paused.state, 'running'); assert.equal(paused.totals.failed, 50); f.state.onFetch = null;
+  const searches = f.state.searches;
+  const retry = await ready(f, { ...f.body, selectionKey: 'synthetic-retry-paused', selectionId: first.result.selectionId, retry: 'failed' });
+  assert.equal(first.record.phase, 'stopped'); assert.equal(retry.result.initialTotal, 50); assert.equal(f.state.searches, searches);
+  assert.equal((await f.service.failures(f.session, first.result.selectionId)).total, 50);
+});
+test('S3: partially prepared idle selection closes and its old preparation cursor cannot resume', async () => {
+  const f = fixture(); const body = { ...f.body, scope: { view: 'allmail' } };
+  const first = await f.service.prepare(f.session, body, { budget: f.budget(2500) }); assert.equal(first.phase, 'preparing');
+  const old = f.service.getSelection(f.session, first.selectionId);
+  await ready(f, { ...f.body, selectionKey: 'synthetic-replace-preparing' }); assert.equal(old.phase, 'stopped');
+  await assert.rejects(f.service.prepare(f.session, { ...body, cursor: first.cursor }), { code: 'SCOPE_EXPIRED' });
+});
+test('S3: new preparation during an in-flight prepare is BUSY and does not close the old selection', async () => {
+  const f = fixture(); let entered, release;
+  const started = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  f.state.hook = async command => { if (command === 'UID SORT') { entered(); await gate; } };
+  const pending = f.service.prepare(f.session, f.body); await started;
+  const selects = f.state.selects.length;
+  await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-during-preparing' }), { statusCode: 409, code: 'SCOPE_BUSY' });
+  assert.equal(f.state.selects.length, selects); release(); assert.equal((await pending).phase, 'ready');
+});
+test('S3: fourth preparation during in-flight execution preserves the active record and all histories', async () => {
+  const f = fixture(); const first = await ready(f); first.record.phase = 'completed';
+  const second = await ready(f, { ...f.body, selectionKey: 'synthetic-history-2' }); second.record.phase = 'error';
+  const thirdBody = { ...f.body, selectionKey: 'synthetic-active-3' }, third = await ready(f, thirdBody);
+  let entered, release; const started = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  f.state.hook = async command => { if (command === 'UID STORE') { entered(); await gate; } };
+  const pending = f.service.execute(f.session, runBody(thirdBody, third.result.cursor)); await started;
+  await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-busy-fourth' }), { code: 'SCOPE_BUSY' });
+  assert.equal(f.service.getSelection(f.session, first.result.selectionId), first.record);
+  assert.equal(f.service.getSelection(f.session, second.result.selectionId), second.record);
+  assert.equal(f.service.getSelection(f.session, third.result.selectionId), third.record); assert.equal(third.record.phase, 'running');
+  release(); assert.equal((await pending).totals.processed, 4);
+});
+test('S3: eviction skips a closed record whose failures metadata request is still in flight', async () => {
+  const f = fixture(); const first = await ready(f);
+  f.state.onFetch = async () => { throw new Error('synthetic failure'); };
+  await f.service.execute(f.session, runBody(f.body, first.result.cursor)); f.state.onFetch = null;
+  const second = await ready(f, { ...f.body, selectionKey: 'synthetic-closed-2' }); second.record.phase = 'completed';
+  const third = await ready(f, { ...f.body, selectionKey: 'synthetic-closed-3' }); third.record.phase = 'error';
+  let entered, release; const started = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  f.state.onFetch = async () => { entered(); await gate; };
+  const reading = f.service.failures(f.session, first.result.selectionId); await started;
+  // No new mailbox operation can start with this exhausted request budget.
+  await assert.rejects(f.service.prepare(f.session, { ...f.body, selectionKey: 'synthetic-fourth-reader' }, { budget: f.budget(0) }), { code: 'MAIL_UNAVAILABLE' });
+  assert.equal(f.service.getSelection(f.session, first.result.selectionId), first.record);
+  assert.throws(() => f.service.getSelection(f.session, second.result.selectionId), { code: 'SCOPE_EXPIRED' });
+  assert.equal(f.service.getSelection(f.session, third.result.selectionId), third.record);
+  release(); assert.equal((await reading).items.length, 4); assert.equal(first.record.readers, 0);
 });

@@ -495,3 +495,237 @@ test('metadata: one failed multi-key SET is not retried as individual writes', a
   await assert.rejects(setMetadataEntries(client, [['/private/vendor/mailstack-webmail/prefs', '{}'], ['/private/vendor/mailstack-webmail/signatures-v1', '{}']]), { statusCode: 502 });
   assert.equal(calls, 1);
 });
+
+function requestBudget(t, limit = 50000) {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let elapsed = 0;
+  return {
+    budget: { remainingMs: () => limit - elapsed },
+    async advance(ms) { elapsed += ms; t.mock.timers.tick(ms); await flush(); },
+  };
+}
+
+test('pool budget: expired request starts neither reconnect nor mailbox callback', async t => {
+  const f = await fakeFixture(t);
+  f.clients[0].close();
+  let called = 0;
+  await assert.rejects(f.pool.withMailbox(f.session, 'INBOX', () => { called++; }, {
+    budget: { remainingMs: () => 0 },
+  }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  assert.equal(called, 0);
+  assert.equal(f.clients.length, 1);
+});
+
+test('pool budget: connect, acquire and operation consume one request deadline', async t => {
+  const clock = requestBudget(t);
+  const f = await fakeFixture(t, (client, index) => {
+    if (index > 1) client.connect = async () => {
+      await new Promise(resolve => setTimeout(resolve, 20000));
+      client.usable = true;
+    };
+  });
+  f.clients[0].close();
+  let called = 0;
+  const pending = f.pool.withMailbox(f.session, 'INBOX', () => {
+    called++;
+    return new Promise(() => {});
+  }, { budget: clock.budget, readOnly: true });
+  const rejected = assert.rejects(pending, { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  const client = f.clients[1];
+  const acquire = client.getMailboxLock.bind(client);
+  client.getMailboxLock = async (...args) => {
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    return acquire(...args);
+  };
+  await clock.advance(20000);
+  assert.equal(called, 0);
+  await clock.advance(10000);
+  assert.equal(called, 1);
+  assert.deepEqual(client.lockOptions, { readOnly: true, acquireTimeout: 30000 });
+  await clock.advance(19999);
+  assert.equal(client.usable, true);
+  await clock.advance(1);
+  await rejected;
+  assert.equal(client.usable, false);
+  assert.equal(client.locks, 0);
+});
+
+test('pool budget: late lock is released without callback or closing another operation', async t => {
+  const clock = requestBudget(t);
+  const f = await fakeFixture(t);
+  let finish, called = 0;
+  const active = f.pool.withMailbox(f.session, 'INBOX', () => new Promise(resolve => { finish = resolve; }));
+  await flush();
+  const waiting = assert.rejects(f.pool.withMailbox(f.session, 'Archive', () => { called++; }, {
+    budget: clock.budget,
+  }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  await clock.advance(50000);
+  await waiting;
+  assert.equal(f.clients[0].usable, true);
+  assert.equal(f.clients[0].locks, 1);
+  finish('active completed');
+  assert.equal(await active, 'active completed');
+  await flush();
+  assert.equal(called, 0);
+  assert.equal(f.clients[0].locks, 0);
+  assert.equal(await f.pool.withMailbox(f.session, 'Sent', () => 'next'), 'next');
+  assert.equal(f.clients.length, 1);
+});
+
+test('pool budget: owned reconnect times out and late connect never runs callback', async t => {
+  const clock = requestBudget(t, 1000);
+  let finish;
+  const f = await fakeFixture(t, (client, index) => {
+    if (index === 2) client.connect = () => new Promise(resolve => { finish = resolve; });
+  });
+  f.clients[0].close();
+  let called = 0;
+  const pending = assert.rejects(f.pool.withMailbox(f.session, 'INBOX', () => { called++; }, {
+    budget: clock.budget,
+  }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  await clock.advance(1000);
+  await pending;
+  assert.equal(f.clients[1].isClosed, true);
+  finish(); await flush();
+  assert.equal(called, 0);
+  assert.equal(f.clients[1].options.auth.pass, '');
+  assert.equal(await f.pool.withMailbox(f.session, 'INBOX', () => 'reconnected'), 'reconnected');
+  assert.equal(f.clients.length, 3);
+});
+
+test('pool budget: waiting for shared reconnect times out without closing its connection', async t => {
+  const clock = requestBudget(t, 1000);
+  let finish;
+  const f = await fakeFixture(t, (client, index) => {
+    if (index === 2) client.connect = async () => {
+      await new Promise(resolve => { finish = resolve; });
+      client.usable = true;
+    };
+  });
+  f.clients[0].close();
+  const active = f.pool.withMailbox(f.session, 'INBOX', () => 'connected');
+  await flush();
+  let called = 0;
+  const waiting = assert.rejects(f.pool.withMailbox(f.session, 'Archive', () => { called++; }, {
+    budget: clock.budget,
+  }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  await clock.advance(1000);
+  await waiting;
+  assert.equal(f.clients[1].isClosed, false);
+  finish();
+  assert.equal(await active, 'connected');
+  await flush();
+  assert.equal(called, 0);
+  assert.equal(f.clients[1].usable, true);
+  assert.equal(f.clients.length, 2);
+});
+
+test('pool budget: active timeout closes work only, preserves SSE and reconnects next work', async t => {
+  const clock = requestBudget(t, 1000);
+  const f = await fakeFixture(t);
+  const events = [];
+  const stop = f.pool.watch(f.session, event => events.push(event));
+  t.after(stop);
+  await flush();
+  let finish;
+  const pending = assert.rejects(f.pool.withMailbox(f.session, 'INBOX', () => new Promise(resolve => {
+    finish = resolve;
+  }), { budget: clock.budget }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  await clock.advance(1000);
+  await pending;
+  assert.equal(f.clients[0].isClosed, true);
+  assert.equal(f.clients[0].locks, 0);
+  assert.equal(f.clients[1].usable, true);
+  finish('late result'); await flush();
+  f.clients[1].emit('exists', { count: 3 });
+  assert.equal(events.length, 1);
+  assert.equal(await f.pool.withMailbox(f.session, 'INBOX', () => 'next'), 'next');
+  assert.equal(f.clients.length, 3);
+  assert.equal(f.clients[1].usable, true);
+});
+
+test('pool budget: moving to another mailbox does not reset remaining request time', async t => {
+  const clock = requestBudget(t);
+  const f = await fakeFixture(t);
+  const first = f.pool.withMailbox(f.session, 'INBOX', () => new Promise(resolve => setTimeout(() => resolve('first'), 30000)), { budget: clock.budget });
+  await flush();
+  await clock.advance(30000);
+  assert.equal(await first, 'first');
+  const second = assert.rejects(f.pool.withMailbox(f.session, 'Archive', () => new Promise(() => {}), {
+    budget: clock.budget,
+  }), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  await flush();
+  assert.equal(f.clients[0].lockOptions.acquireTimeout, 20000);
+  await clock.advance(20000);
+  await second;
+  assert.equal(f.clients[0].usable, false);
+});
+
+test('pool budget: existing command cap still applies when budget is longer', async t => {
+  const clock = requestBudget(t, 90000);
+  const f = await fakeFixture(t);
+  const pending = assert.rejects(f.pool.withMailbox(f.session, 'INBOX', () => new Promise(() => {}), {
+    budget: clock.budget,
+  }), error => error.code === 'MAIL_UNAVAILABLE' && error.budgetExhausted === undefined);
+  await flush();
+  assert.equal(f.clients[0].lockOptions.acquireTimeout, 60000);
+  await clock.advance(60000);
+  await pending;
+  assert.equal(f.clients[0].usable, false);
+});
+
+test('pool: default mailbox options and 60 second acquisition cap remain unchanged', async t => {
+  const f = await fakeFixture(t);
+  assert.equal(await f.pool.withMailbox(f.session, 'INBOX', () => 42, { readOnly: true, acquireTimeout: 5 }), 42);
+  assert.deepEqual(f.clients[0].lockOptions, { readOnly: true, acquireTimeout: 60000 });
+  assert.equal(f.clients[0].usable, true);
+});
+
+test('pool budget: callback result confirmed at deadline is returned without closing work', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fakeFixture(t);
+  let remaining = 50000;
+  const confirmed = { processed: 1 };
+  const result = await f.pool.withMailbox(f.session, 'INBOX', () => {
+    // The command finishes before the timeout timer runs; monotonic time has elapsed.
+    remaining = 0;
+    return confirmed;
+  }, { budget: { remainingMs: () => remaining } });
+  assert.equal(result, confirmed);
+  assert.equal(f.clients[0].usable, true);
+  assert.equal(f.clients[0].locks, 0);
+  t.mock.timers.tick(60000);
+  assert.equal(f.clients[0].usable, true);
+  assert.equal(await f.pool.withMailbox(f.session, 'INBOX', () => 'next'), 'next');
+  assert.equal(f.clients.length, 1);
+});
+
+
+test('pool mutation guard: request expiry preserves the held lock and excludes the next caller until ACK', async t => {
+  const clock = requestBudget(t);
+  const f = await fakeFixture(t);
+  const mutation = { active: false };
+  let finish, entered, nextRan = false, responded = false;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = f.pool.withMailbox(f.session, 'INBOX', async () => {
+    mutation.active = true; entered();
+    await new Promise(resolve => { finish = resolve; });
+    mutation.active = false;
+    return 'acknowledged';
+  }, { budget: clock.budget, mutation });
+  pending.then(() => { responded = true; });
+  await started;
+  const next = f.pool.withMailbox(f.session, 'INBOX', () => { nextRan = true; return 'next'; });
+  await clock.advance(50000);
+  assert.equal(responded, false); assert.equal(nextRan, false);
+  assert.equal(f.clients[0].usable, true); assert.equal(f.clients[0].locks, 1);
+  assert.equal(f.clients[0].lockOptions.mutation, undefined, 'guard does not leak into IMAP lock options');
+  finish(); assert.equal(await pending, 'acknowledged'); assert.equal(await next, 'next');
+  assert.equal(f.clients[0].locks, 0); assert.equal(f.clients[0].maxLocks, 1);
+  assert.equal(f.clients.length, 1);
+});

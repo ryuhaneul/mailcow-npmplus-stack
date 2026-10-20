@@ -6,9 +6,11 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createScopedActionService } from '../../server/mail/scoped-actions.js';
 import { createActionService } from '../../server/mail/actions.js';
+import { createImapPool } from '../../server/mail/imap-pool.js';
 import { createEventService } from '../../server/mail/events.js';
-import { encodeRef } from '../../server/mail/ref.js';
+import { encodeRef, scopedBatchState } from '../../server/mail/ref.js';
 import { createApp } from '../../server/app.js';
 
 const ref = (path = 'INBOX', uid = 7) => encodeRef(path, 123, uid);
@@ -191,4 +193,389 @@ test('actions: grouped permanent delete stores Deleted and expunges the same UID
   const f = fixture();
   assert.deepEqual(await f.service.run({}, { refs: [ref('Trash', 1), ref('Trash', 2)], action: 'delete-forever' }), { done: 2, failed: [] });
   assert.deepEqual(f.client.calls, [['add', '1,2', ['\\Deleted'], { uid: true }], ['UID EXPUNGE', [{ type: 'SEQUENCE', value: '1,2' }]], ['next']]);
+});
+
+const scopedActions = ['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever'];
+const movingActions = ['move', 'archive', 'trash', 'spam', 'notspam'];
+function scopedFixture(action = 'seen') {
+  const client = new ActionImap();
+  client.capabilities.set('MOVE', true);
+  client.list = async () => ['INBOX', 'Trash', 'Junk', 'Saved', 'Projects', 'Projects/합성'].map(path => ({ path }));
+  client.exec = async (command, attrs, options) => {
+    if (command === 'MYRIGHTS') {
+      client.rightsQueries.push(attrs[0].value);
+      options.untagged.MYRIGHTS({ attributes: [attrs[0], { value: client.access.get(attrs[0].value) ?? 'lrswite' }] });
+    } else if (command === 'UID SEARCH') {
+      client.sortCalls ??= []; client.sortCalls.push(attrs);
+      options.untagged.SEARCH({ attributes: (client.matches ?? [7, 8]).filter(uid => !client.missingUids?.has(uid)).map(value => ({ value: String(value) })) });
+    } else {
+      client.calls.push([command, attrs]);
+      await client.mutation?.(command, attrs);
+    }
+    return { response: { command: 'OK' }, next() {} };
+  };
+  let remainingMs = 50000;
+  const budget = { remainingMs: () => remainingMs };
+  const outcomes = [];
+  const options = {
+    refs: [ref(action === 'delete-forever' ? 'Trash' : 'INBOX')], action,
+    resolvedTarget: action === 'archive' ? 'Saved' : 'Projects',
+    resolvedScope: { filters: [], imap: [], searching: false }, budget,
+    onOutcome: outcome => outcomes.push(outcome),
+  };
+  const imap = { async withMailbox(_session, path, operation, received) {
+    assert.equal(received.budget, budget);
+    const lock = await client.getMailboxLock(path);
+    try { return await operation(client); } finally { lock.release(); }
+  } };
+  const service = createActionService({ imap });
+  return { client, budget, options, outcomes, service, run: () => service.runScopedGroup({}, options), time: value => { remainingMs = value; } };
+}
+function assertScopedPartition(result, refs, outcomes) {
+  const settled = [...result.processed, ...result.skipped, ...result.failed.map(row => row.ref), ...result.unknown.map(row => row.ref)];
+  assert.deepEqual([...settled, ...result.remaining].sort(), [...refs].sort());
+  assert.equal(new Set([...settled, ...result.remaining]).size, refs.length);
+  assert.equal(new Set(outcomes.map(row => row.ref)).size, outcomes.length);
+  assert.deepEqual(outcomes.map(row => row.ref).sort(), settled.sort());
+  for (const status of ['processed', 'skipped', 'failed', 'unknown']) {
+    assert.deepEqual(outcomes.filter(row => row.status === status).map(row => row.ref).sort(), result[status].map(row => typeof row === 'string' ? row : row.ref).sort());
+  }
+}
+for (const action of scopedActions) {
+  test(`scoped ${action}: native UID command success and disjoint outcome`, async () => {
+    const f = scopedFixture(action);
+    const result = await f.run();
+    assert.deepEqual(result, { processed: f.options.refs, skipped: [], failed: [], unknown: [], remaining: [], reason: 'complete' });
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+    const sequence = { type: 'SEQUENCE', value: '7' };
+    if (movingActions.includes(action)) {
+      const target = { move: 'Projects', archive: 'Saved', trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[action];
+      // notspam originates in INBOX in this fixture, and is a verified no-op.
+      assert.deepEqual(f.client.calls, action === 'notspam' ? [] : [['UID MOVE', [sequence, { type: 'ATOM', value: target }]]]);
+    } else {
+      const flag = action === 'delete-forever' ? '\\Deleted' : ['seen', 'unseen'].includes(action) ? '\\Seen' : '\\Flagged';
+      const operation = ['unseen', 'unflag'].includes(action) ? '-FLAGS' : '+FLAGS';
+      const expected = [['UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: flag }]]]];
+      if (action === 'delete-forever') expected.push(['UID EXPUNGE', [sequence]]);
+      assert.deepEqual(f.client.calls, expected);
+      assert.equal(f.client.calls[0][1][2][0].value.codePointAt(0), 92, 'system flag atom starts with a literal backslash');
+    }
+  });
+  test(`scoped ${action}: missing UID and changed condition are skipped`, async () => {
+    const f = scopedFixture(action), path = action === 'delete-forever' ? 'Trash' : 'INBOX';
+    f.options.refs = [ref(path, 7), ref(path, 8), ref(path, 9)];
+    f.client.missingUids = new Set([7]); f.client.matches = [8, 1000];
+    f.options.resolvedScope.imap = [{ seen: false }];
+    const result = await f.run();
+    assert.deepEqual(result.skipped, [ref(path, 7), ref(path, 9)]);
+    assert.deepEqual(result.processed, [ref(path, 8)]);
+    assert.equal(f.client.sortCalls.length, 1);
+    assert.deepEqual(f.client.sortCalls[0].slice(0, 2), [{ type: 'ATOM', value: 'UID' }, { type: 'SEQUENCE', value: '7:9' }]);
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+  });
+  test(`scoped ${action}: source ACL denial is a confirmed failure`, async () => {
+    const f = scopedFixture(action);
+    f.client.access.set(action === 'delete-forever' ? 'Trash' : 'INBOX', 'lr');
+    const result = await f.run();
+    assert.deepEqual(result.failed, [{ ref: f.options.refs[0], code: 'FOLDER_READONLY', retryable: false }]);
+    assert.deepEqual(f.client.calls, []);
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+  });
+  test(`scoped ${action}: MOVE capability only required for moving actions`, async () => {
+    const f = scopedFixture(action); f.client.capabilities.clear();
+    const result = await f.run();
+    if (movingActions.includes(action)) {
+      assert.deepEqual(result.failed, [{ ref: f.options.refs[0], code: 'MOVE_UNSUPPORTED', retryable: false }]);
+      assert.deepEqual(f.client.calls, []);
+    } else assert.deepEqual(result.processed, f.options.refs);
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+  });
+  test(`scoped ${action}: below start threshold leaves candidates unsettled`, async () => {
+    const f = scopedFixture(action);
+    if (action === 'notspam') f.options.refs = [ref('Junk')];
+    f.time(9999);
+    const result = await f.run();
+    assert.deepEqual(result.remaining, f.options.refs); assert.equal(result.reason, 'budget');
+    assert.deepEqual(f.client.calls, []);
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+  });
+  test(`scoped ${action}: unconfirmed mutation is unknown and never retryable`, async () => {
+    const f = scopedFixture(action);
+    if (action === 'notspam') f.options.refs = [ref('Junk')];
+    f.client.mutation = async () => { throw new Error('synthetic disconnected command'); };
+    const result = await f.run();
+    assert.deepEqual(result.unknown, [{ ref: f.options.refs[0], code: 'ACTION_OUTCOME_UNKNOWN', retryable: false }]);
+    assert.deepEqual(result.failed, []); assert.equal(f.client.calls.length, 1);
+    assertScopedPartition(result, f.options.refs, f.outcomes);
+  });
+}
+
+test('scoped: notspam from Junk and UTF-8 destination use native MOVE without library fallback', async () => {
+  const f = scopedFixture('notspam'); f.options.refs = [ref('Junk')];
+  assert.deepEqual((await f.run()).processed, f.options.refs);
+  assert.equal(f.client.calls[0][0], 'UID MOVE');
+  assert.equal(f.client.calls[0][1][1].value, 'INBOX');
+  const g = scopedFixture('move'); g.client.enabled.add('UTF8=ACCEPT'); g.options.resolvedTarget = 'Projects/합성';
+  assert.deepEqual((await g.run()).processed, g.options.refs);
+  assert.equal(g.client.calls[0][1][1].value, 'Projects/합성');
+});
+test('scoped: source folder filters use every resolved path; no mutation or condition broadening', async () => {
+  const f = scopedFixture(); f.options.resolvedScope.filters = ['INBOX', 'Other'];
+  const result = await f.run(); assert.deepEqual(result.skipped, f.options.refs); assert.deepEqual(f.client.calls, []);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+test('scoped: shared source and revoked destination insert rights fail before mutation', async () => {
+  const f = scopedFixture(); f.options.refs = [ref('Shared/synthetic@example.com')];
+  assert.equal((await f.run()).failed[0].code, 'FOLDER_READONLY'); assert.deepEqual(f.client.calls, []);
+  for (const action of movingActions) {
+    const g = scopedFixture(action); if (action === 'notspam') g.options.refs = [ref('Junk')];
+    const target = { move: 'Projects', archive: 'Saved', trash: 'Trash', spam: 'Junk', notspam: 'INBOX' }[action];
+    g.client.access.set(target, 'lr');
+    assert.equal((await g.run()).failed[0].code, 'FOLDER_READONLY'); assert.deepEqual(g.client.calls, []);
+  }
+});
+test('scoped: missing/nonselectable archive target fails without creating a folder', async () => {
+  for (const rows of [[], [{ path: 'Saved', flags: new Set(['\\Noselect']) }]]) {
+    const f = scopedFixture('archive'); f.client.list = async () => rows;
+    assert.equal((await f.run()).failed[0].code, 'FOLDER_NOT_ALLOWED'); assert.deepEqual(f.client.calls, []);
+  }
+});
+test('scoped: stale identity stops entire group, including mixed validity, before any mutation', async () => {
+  const f = scopedFixture(); f.options.refs = [ref(), encodeRef('INBOX', 124, 8)];
+  await assert.rejects(f.run(), { statusCode: 409, code: 'STALE_SCOPE' });
+  assert.deepEqual(f.client.calls, []); assert.deepEqual(f.client.rightsQueries, []); assert.deepEqual(f.outcomes, []);
+});
+test('scoped: validation rejects unsafe destinations, virtual sources, multiple folders and duplicate refs', async () => {
+  const f = scopedFixture('move');
+  for (const target of ['', 'Shared/x', 'WebmailVirtual/AllMail', 'x\r\n']) {
+    f.options.resolvedTarget = target; await assert.rejects(f.run(), { code: 'FOLDER_NOT_ALLOWED' });
+  }
+  f.options.resolvedTarget = 'Projects';
+  f.options.refs = [ref('WebmailVirtual/AllMail')]; await assert.rejects(f.run(), { code: 'FOLDER_NOT_ALLOWED' });
+  for (const refs of [[ref(), ref('Other')], [ref(), ref()]]) {
+    f.options.refs = refs; await assert.rejects(f.run(), { code: 'INVALID_ACTION' });
+  }
+  const g = scopedFixture('delete-forever'); g.options.refs = [ref()];
+  await assert.rejects(g.run(), { code: 'DELETE_NOT_ALLOWED' }); assert.deepEqual(g.client.calls, []);
+  assert.deepEqual(f.client.calls, []);
+});
+test('scoped: first minimum probe allows start-margin equality, larger caller reserve remains enforced', async () => {
+  const f = scopedFixture(); f.time(10000); assert.equal((await f.run()).processed.length, 1);
+  const above = scopedFixture(); above.time(10001); assert.equal((await above.run()).processed.length, 1);
+  const g = scopedFixture(); g.options.minStartRemainingMs = 15000; g.time(14999);
+  assert.deepEqual((await g.run()).remaining, g.options.refs); assert.deepEqual(g.client.calls, []);
+});
+test('scoped: read checks consume the same budget; no mutation starts after ACL or search delay', async () => {
+  for (const stage of ['rights', 'search']) {
+    const f = scopedFixture(); const exec = f.client.exec;
+    f.options.resolvedScope.imap = [{ flagged: true }];
+    f.client.exec = async (...args) => {
+      const result = await exec(...args);
+      if (args[0] === (stage === 'rights' ? 'MYRIGHTS' : 'UID SEARCH')) f.time(9999);
+      return result;
+    };
+    const result = await f.run(); assert.deepEqual(result.remaining, f.options.refs); assert.equal(result.reason, 'budget');
+    assert.deepEqual(f.client.calls, []); assertScopedPartition(result, f.options.refs, f.outcomes);
+  }
+});
+test('scoped: pre-command budget exhaustion preserves already skipped refs', async () => {
+  const f = scopedFixture(); f.options.refs = [ref('INBOX', 7), ref('INBOX', 8)]; f.client.missingUids = new Set([7]);
+  f.options.onOutcome = outcome => { f.outcomes.push(outcome); if (outcome.status === 'skipped') f.time(0); };
+  const result = await f.run();
+  assert.deepEqual(result.skipped, [ref('INBOX', 7)]); assert.deepEqual(result.remaining, [ref('INBOX', 8)]);
+  assert.deepEqual(f.client.calls, []); assert.equal(result.reason, 'budget'); assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+test('scoped: Deleted ACK followed by EXPUNGE failure is unknown for the whole remaining set', async () => {
+  const f = scopedFixture('delete-forever'); f.options.refs.push(ref('Trash', 8));
+  f.client.mutation = async command => { if (command === 'UID EXPUNGE') throw new Error('synthetic expunge failure'); };
+  const result = await f.run(); assert.equal(f.client.calls.length, 2); assert.equal(result.unknown.length, 2);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+test('scoped: admitted delete unit finishes EXPUNGE after STORE even below request reserve', async () => {
+  const f = scopedFixture('delete-forever'); f.client.mutation = async () => f.time(9999);
+  const result = await f.run(); assert.equal(f.client.calls.length, 2); assert.equal(result.unknown.length, 0); assert.equal(result.processed.length, 1);
+  assert.equal(result.reason, 'complete'); assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+test('scoped: missing or BYE ACK and explicit server rejection cannot claim success', async () => {
+  for (const response of [undefined, { command: 'BYE' }]) {
+    const f = scopedFixture(); const exec = f.client.exec;
+    f.client.exec = async (...args) => {
+      const result = await exec(...args); if (args[0] === 'UID STORE') result.response = response; return result;
+    };
+    assert.equal((await f.run()).unknown.length, 1);
+  }
+  const f = scopedFixture(); f.client.mutation = async () => { throw Object.assign(new Error('synthetic NO'), { responseStatus: 'NO' }); };
+  assert.equal((await f.run()).unknown.length, 1);
+});
+test('scoped: partial application before command failure never retries a subset automatically', async () => {
+  const f = scopedFixture('move'); f.options.refs.push(ref('INBOX', 8)); let applied;
+  f.client.mutation = async (_command, attrs) => { applied = attrs[0].value.split(/[,:]/)[0]; throw new Error('synthetic partial application'); };
+  const result = await f.run(); assert.equal(applied, '7'); assert.equal(result.unknown.length, 2);
+  assert.equal(f.client.calls.length, 1); assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+test('scoped: read transport failure is retryable failed, not unknown; session errors propagate before sending', async () => {
+  const f = scopedFixture(); const exec = f.client.exec; f.client.exec = async (...args) => { if (args[0] === 'UID SEARCH') throw new Error('synthetic search failed'); return exec(...args); };
+  const result = await f.run(); assert.deepEqual(result.failed, [{ ref: ref(), code: 'MAIL_UNAVAILABLE', retryable: true }]);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+  const g = scopedFixture(); const next = g.client.exec; g.client.exec = async (...args) => { if (args[0] === 'UID SEARCH') throw Object.assign(new Error('synthetic expiry'), { code: 'SESSION_EXPIRED' }); return next(...args); };
+  await assert.rejects(g.run(), { code: 'SESSION_EXPIRED' }); assert.deepEqual(g.client.calls, []);
+});
+
+for (const action of ['seen', 'move', 'delete-forever']) test(`scoped ${action}: sent mutation survives request/proxy deadline with no close and confirms ACK`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture(action); let release, started, commands = 0, closed = 0;
+  const commandStarted = new Promise(resolve => { started = resolve; });
+  const timeouts = [];
+  f.client.socket = { timeout: 60000, setTimeout(ms) { this.timeout = ms; timeouts.push(ms); } };
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
+  f.client.mutation = async () => { if (++commands === 1) { started(); await new Promise(resolve => { release = resolve; }); } };
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  const running = createActionService({ imap: pool }).runScopedGroup({ connection: logged.connection }, f.options);
+  let completed = false; running.then(() => { completed = true; });
+  await commandStarted;
+  f.time(0); t.mock.timers.tick(65000); await nextTurn();
+  assert.equal(completed, false); assert.equal(closed, 0); assert.equal(f.client.usable, true);
+  assert.equal(f.client.socket.timeout, 120000);
+  release(); const result = await running;
+  assert.deepEqual(result.processed, f.options.refs); assert.equal(result.unknown.length, 0);
+  assert.equal(closed, 0); assert.deepEqual(timeouts, [120000, 60000]);
+  assert.equal(commands, action === 'delete-forever' ? 2 : 1);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+  await logged.connection.logout();
+});
+test('scoped: 120-second mutation cap closes once, records unknown and rejects late continuation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture('delete-forever'); let release, started, closed = 0;
+  const commandStarted = new Promise(resolve => { started = resolve; });
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
+  f.client.mutation = async () => { started(); await new Promise(resolve => { release = resolve; }); };
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  const running = createActionService({ imap: pool }).runScopedGroup({ connection: logged.connection }, f.options);
+  await commandStarted; f.time(0); t.mock.timers.tick(50000); await nextTurn(); assert.equal(closed, 0);
+  t.mock.timers.tick(70000); const result = await running;
+  assert.equal(closed, 1); assert.equal(result.unknown.length, 1); assert.equal(result.unknown[0].retryable, false);
+  release(); await nextTurn(); assert.deepEqual(f.client.calls.map(call => call[0]), ['UID STORE']);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+  await logged.connection.logout();
+});
+test('scoped: a completed ACK and outcome survive deadline exhaustion immediately afterward', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture();
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  f.options.onOutcome = outcome => { f.outcomes.push(outcome); f.time(0); };
+  const result = await createActionService({ imap: pool }).runScopedGroup({ connection: logged.connection }, f.options);
+  assert.deepEqual(result.processed, f.options.refs); assert.deepEqual(result.unknown, []);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+  await logged.connection.logout();
+});
+test('scoped: native MOVE is available with active IMAP4rev2 without a separate MOVE token', async () => {
+  const f = scopedFixture('move'); f.client.capabilities.clear(); f.client.enabled.add('IMAP4REV2');
+  const result = await f.run(); assert.deepEqual(result.processed, f.options.refs);
+  assert.equal(f.client.calls[0][0], 'UID MOVE'); assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+
+
+test('scoped service: MOVE ACK after proxy deadline is retained for same-cursor receipt replay', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture('move'); const exec = f.client.exec, lock = f.client.getMailboxLock.bind(f.client);
+  f.client.exec = async (command, attributes, options) => {
+    if (command === 'UID SORT') { options.untagged.SORT({ attributes: [{ value: '7' }] }); return { next() {} }; }
+    return exec(command, attributes, options);
+  };
+  f.client.getMailboxLock = async (...args) => { const held = await lock(...args); f.client.mailbox.uidNext = 8; return held; };
+  let closed = 0, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  t.after(() => logged.connection.logout());
+  const session = { connection: logged.connection, scanAbort: new AbortController() };
+  const service = createScopedActionService({ imap: pool });
+  const body = { selectionKey: 'synthetic-late-move', scope: {}, action: 'move', target: 'Projects' };
+  const ready = await service.prepare(session, body, { budget: f.budget });
+  f.client.mutation = async () => { entered(); await new Promise(resolve => { release = resolve; }); };
+  const request = { scope: {}, action: 'move', target: 'Projects', cursor: ready.cursor };
+  const running = service.execute(session, request, { budget: f.budget });
+  let responded = false; running.then(() => { responded = true; });
+  await started; f.time(0); t.mock.timers.tick(65000); await nextTurn();
+  assert.equal(responded, false); assert.equal(closed, 0);
+  await assert.rejects(service.execute(session, request, { budget: f.budget }), { code: 'SCOPE_BUSY' });
+  release(); const receipt = await running;
+  assert.deepEqual(receipt.totals, { processed: 1, skipped: 0, failed: 0 });
+  assert.equal(receipt.state, 'completed');
+  const count = f.client.calls.length;
+  assert.deepEqual(await service.execute(session, request, { budget: f.budget }), receipt);
+  assert.equal(f.client.calls.length, count); assert.equal(closed, 0);
+});
+
+
+for (const remaining of [42000, 42001]) test(`scoped adaptive admission: ${remaining}ms applies strict reserve after a prior mutation`, async () => {
+  const f = scopedFixture('move');
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 20000, lastCount: 1 };
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
+  f.time(remaining);
+  const result = await f.run();
+  assert.equal(result.processed.length, remaining > 42000 ? 1 : 0);
+  assert.equal(result.remaining.length, remaining > 42000 ? 0 : 1);
+  assert.equal(f.client.calls.length, remaining > 42000 ? 1 : 0);
+});
+
+
+for (const action of ['seen', 'move']) for (const remaining of [9999, 10000, 10001, 37999, 38000, 38001, 50000]) test(`minimum probe ${action}: first mutation with ${remaining}ms remaining ignores an oversized old estimate`, async () => {
+  const f = scopedFixture(action);
+  f.options.refs = Array.from({ length: 100 }, (_, index) => ref('INBOX', index + 1));
+  f.client.matches = Array.from({ length: 100 }, (_, index) => index + 1);
+  f.options.batchState = { ...scopedBatchState(action), lastMs: 60000, lastCount: 50 };
+  f.time(remaining); f.client.mutation = async () => f.time(0);
+  const result = await f.run();
+  assert.equal(result.processed.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 50 : 0);
+  assert.equal(result.remaining.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 50 : 100);
+  assert.equal(f.client.calls.length, remaining >= (action === 'seen' ? 10000 : 38000) ? 1 : 0);
+  if (remaining >= (action === 'seen' ? 10000 : 38000)) assert.equal(f.client.calls[0][1][0].value, '1:50');
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+
+test('minimum probe: another source group cannot force a second mutation in the same request', async () => {
+  const f = scopedFixture('move');
+  f.options.batchState = { ...scopedBatchState('move'), lastMs: 60000, lastCount: 1 };
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
+  const result = await f.run();
+  assert.equal(result.processed.length, 0); assert.deepEqual(result.remaining, f.options.refs);
+  assert.equal(f.client.calls.length, 0);
+});
+
+
+for (const action of scopedActions) for (const remaining of [37999, 38000, 38001]) test(`stall allowance ${action}: remaining ${remaining}ms`, async () => {
+  const f = scopedFixture(action);
+  if (action === 'notspam') f.options.refs = [ref('Junk')];
+  f.time(remaining);
+  const result = await f.run();
+  const protectedAction = movingActions.includes(action) || action === 'delete-forever';
+  const allowed = !protectedAction || remaining >= 38000;
+  assert.equal(result.processed.length, allowed ? 1 : 0);
+  assert.equal(result.remaining.length, allowed ? 0 : 1);
+  assert.equal(f.client.calls.length, allowed ? action === 'delete-forever' ? 2 : 1 : 0);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+for (const action of ['seen', 'unseen', 'flag', 'unflag']) for (const remaining of [10000, 10001]) test(`flags preserve start reserve ${action}: ${remaining}ms after prior mutation`, async () => {
+  const f = scopedFixture(action);
+  f.options.checks = { rights: new Map(), folders: null, mutationsStarted: 1 };
+  f.time(remaining); const result = await f.run();
+  assert.equal(result.processed.length, remaining > 10000 ? 1 : 0);
+  assert.equal(f.client.calls.length, remaining > 10000 ? 1 : 0);
 });

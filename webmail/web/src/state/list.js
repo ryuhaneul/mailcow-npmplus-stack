@@ -1,6 +1,8 @@
-import { signal } from '@preact/signals';
+import { effect, signal, untracked } from '@preact/signals';
 import { api, endSession } from '../api.js';
-import { selection } from './selection.js';
+import { selection, scopeSelection, selectionScopeKey, updateSelectionPage } from './selection.js';
+import { interruptScopedAction, resetScopedAction, scopedListFrozen } from './scoped-actions.js';
+import { session } from './session.js';
 import { folders } from './folders.js';
 import { storage } from './storage.js';
 import { toast } from './toast.js';
@@ -35,23 +37,48 @@ function context(value) {return JSON.stringify(value);}
 export function notify(error) {
   if (!['NO_SESSION','SESSION_EXPIRED'].includes(error.code))toast.value={kind:'error',message:error.message};
 }
-export function cancelListLoad() {requestId++;controller?.abort();}
-export async function loadMessages(patch = {}) {
-  controller?.abort();controller=new AbortController();const id=++requestId;
+export function cancelListLoad() {requestId++;controller?.abort();if(list.value.loading)list.value={...list.value,loading:false};}
+export async function loadMessages(patch = {}, {preserveScopeResult=false} = {}) {
   const params={...list.value.params,...patch};
+  const scopeChanged=selectionScopeKey(params)!==selectionScopeKey(list.value.params);
+  if(!scopeChanged && ['preparing','running','stopping'].includes(scopeSelection.value?.status) && !preserveScopeResult)return;
+  if(scopeChanged || (!preserveScopeResult && ['stopped','error','completed'].includes(scopeSelection.value?.status)))resetScopedAction();
+  controller?.abort();controller=new AbortController();const id=++requestId;
   const changed=context(params)!==context(list.value.params);
   if(changed){selection.value=new Set();cursor.value=null;}
-  list.value={...list.value,params,loading:true,error:null,...(changed?{items:[],total:0}:{})};
+  list.value={...list.value,params,loading:true,error:null,resultView:'mailbox',...(changed?{items:[],total:0}:{})};
   const query=new URLSearchParams(Object.entries(params).filter(([,value])=>value!==''));
   try {
     const result=await api(`/api/messages?${query}`,{signal:controller.signal});
     if(id!==requestId)return;
-    list.value={...list.value,...result,loading:false};
+    list.value={...list.value,...result,loading:false,resultView:'mailbox'};
+    updateSelectionPage(result.items);
     selection.value=new Set([...selection.value].filter(ref=>result.items.some(item=>item.ref===ref)));
     if(!result.items.some(item=>item.ref===cursor.value))cursor.value=result.items[0]?.ref ?? null;
   } catch(error) {
     if(id!==requestId || error.name==='AbortError')return;
-    list.value={...list.value,loading:false,error,items:[],total:0};selection.value=new Set();notify(error);
+    list.value={...list.value,loading:false,error,items:[],total:0};updateSelectionPage([]);selection.value=new Set();notify(error);
+  }
+}
+// Failed rows come from the server's receipt record, never from the original query.
+export async function loadFailureMessages(page=1,pageSize=50) {
+  const value=scopeSelection.value;
+  if(!value?.selectionId)return;
+  cancelListLoad();const id=requestId,selectionId=value.selectionId;
+  scopeSelection.value={...value,selected:false,failureView:true};
+  selection.value=new Set();cursor.value=null;
+  list.value={...list.value,items:[],total:0,loading:true,error:null,resultView:'failed'};
+  updateSelectionPage([]);
+  try {
+    const result=await api(`/api/messages/selections/${encodeURIComponent(selectionId)}/failed?page=${page}&pageSize=${pageSize}`);
+    if(id!==requestId || scopeSelection.value?.selectionId!==selectionId)return;
+    scopeSelection.value={...scopeSelection.value,failurePage:result};
+    list.value={...list.value,items:result.items,total:result.total,loading:false};
+    updateSelectionPage(result.items);cursor.value=result.items[0]?.ref??null;
+    return result;
+  } catch(error) {
+    if(id!==requestId || scopeSelection.value?.selectionId!==selectionId)return;
+    list.value={...list.value,loading:false,error};notify(error);
   }
 }
 export async function runAction(action, refs = [...selection.value], target) {
@@ -84,14 +111,24 @@ export function connectMailboxEvents() {
     const value=JSON.parse(event.data);
     folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
     const params=list.value.params;
-    if(isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
+    if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
   });
   source.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
-  source.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired'){source.close();endSession('SESSION_EXPIRED');}});
+  source.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired'){source.close();resetMailbox();endSession('SESSION_EXPIRED');}});
   return ()=>source.close();
 }
 
 export function resetMailbox() {
-  settleDeleteConfirmation();cancelListLoad();mailboxGeneration++;searchRuleSeed.value=null;listLocation.value='inbox';acting.value=false;selection.value=new Set();cursor.value=null;
+  settleDeleteConfirmation();cancelListLoad();resetScopedAction();updateSelectionPage([]);mailboxGeneration++;searchRuleSeed.value=null;listLocation.value='inbox';acting.value=false;selection.value=new Set();cursor.value=null;
   list.value={params:{...defaults},items:[],total:0,loading:false,error:null};
 }
+
+// Route changes stop automatic work even when a split-view list stays mounted.
+effect(()=>{
+  const current=route.value;
+  untracked(()=>{
+    if(!isListRoute(current))interruptScopedAction();
+    else if(scopeSelection.value && selectionScopeKey(paramsForRoute(current))!==scopeSelection.value.scopeKey)resetScopedAction();
+  });
+});
+effect(()=>{if(!session.value)untracked(()=>{if(scopeSelection.value)resetMailbox();});});

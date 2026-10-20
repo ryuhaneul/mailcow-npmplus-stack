@@ -28,7 +28,7 @@ const cases = [
   ['gmail-basic', 'gmail2sieve', ['same', 'same'], 2],
   ['gmail-labels', 'gmail2sieve', ['changed', 'changed'], 2],
   ['gmail-unsupported', 'gmail2sieve', ['unconvertible', 'unconvertible', 'unconvertible'], 0],
-  ['gmail-wildcards', 'gmail2sieve', ['unconvertible', 'same', 'changed'], 1],
+  ['gmail-wildcards', 'gmail2sieve', ['unconvertible', 'same', 'unconvertible'], 1],
   ['gmail-mixed', 'gmail2sieve', ['unconvertible', 'same', 'unconvertible', 'unconvertible'], 1],
   ['rainloop-move', 'rainloop', ['same'], 1],
   ['rainloop-actions', 'rainloop', ['changed', 'same'], 2],
@@ -45,6 +45,7 @@ for (const [name, format, statuses, count] of cases) {
     assert.deepEqual(report.items.map(item => item.status), statuses);
     assert.deepEqual(report.items.map(item => item.n), statuses.map((_, i) => i + 1));
     assert.equal(report.rules.length, count);
+    assert.equal(report.items.filter(item => ['same', 'changed'].includes(item.status)).length, count);
     assert.equal(report.uncheckedFolders, 0);
     assert.equal(validateDocument(rulesDocument(report.rules), policy).rules.length, count);
     assert.equal(await read(`${name}.sieve`), source);
@@ -56,7 +57,7 @@ for (const [name, format, statuses, count] of cases) {
       if (item.status === 'changed') assert.ok(item.changes.length);
     }
     const state = classifyState({ activeName: 'legacy', importReport: report });
-    assert.equal(state.state, format === 'unknown' || statuses.includes('unconvertible') ? 'import_blocked' : 'import_pending');
+    assert.equal(state.state, format === 'unknown' || count === 0 ? 'import_blocked' : 'import_pending');
   });
 }
 
@@ -84,6 +85,7 @@ test('Gmail import discloses label copy removal, first-folder behavior and spam 
   const special = importScript(await read('gmail-wildcards.sieve'), { policy });
   assert.deepEqual(special.items[2].changes, ['스팸 예외 처리는 옮기지 않아요']);
   assert.equal(special.rules.length, 1);
+  assert.equal(special.items[2].reason, '동작이 없어 반영 안 됨');
   const mixed = importScript(await read('gmail-mixed.sieve'), { policy });
   assert.deepEqual(mixed.rules[0].actions, { trash: true });
   assert.deepEqual(mixed.rules[0].conditions, [{ field: 'from', op: 'not', value: 'blocked@example.com' }]);
@@ -179,7 +181,7 @@ test('policy permissions are explicit and cannot be inferred or overridden by ex
   for (const bad of [undefined, {}, { internalDomains: 'example.com' }, { internalDomains: ['bad domain'] }, { internalDomains: [], checkPolicy: false }, { internalDomains: [], folders: ['Archive'] }, { internalDomains: [], addresses: 'user@example.com' }]) assert.throws(() => importPolicy(bad));
 });
 
-test('unsafe imported values fail W10 validation and aggregate rule limits block activation', async () => {
+test('unsafe imported values fail W10 validation and aggregate rule limits keep the first 100', async () => {
   const source = await read('gmail-basic.sieve');
   const unsafe = source.replace('"sender@example.com"', '"${wm_stop}"');
   const report = importScript(unsafe, { policy });
@@ -190,8 +192,10 @@ test('unsafe imported values fail W10 validation and aggregate rule limits block
     + source.slice(source.indexOf('# 받은편지함 처리'));
   const tooMany = importScript(many, { policy });
   assert.equal(tooMany.items.length, 101);
-  assert.equal(tooMany.rules.length, 0);
-  assert.ok(tooMany.items.every(item => item.status === 'unconvertible'));
+  assert.equal(tooMany.rules.length, 100);
+  assert.ok(tooMany.items.slice(0, 100).every(item => item.status === 'same'));
+  assert.equal(tooMany.items[100].status, 'unconvertible');
+  assert.equal(tooMany.items[100].reason, '규칙 100개 한도');
 });
 
 test('CLI import and gen both exit zero, preserve the source and emit usable outputs', async () => {
@@ -245,4 +249,13 @@ test('CLI rejects invalid options, unreadable files, malformed JSON and invalid 
     assert.equal(result.stderr.includes('synthetic-private-value'), false);
   }
   const help = cli(['--help']); assert.equal(help.status, 0); assert.ok(help.stdout.includes('doveadm mailbox list -u <주소>'));
+});
+
+test('a generated envelope over 1MB drops the overflow and trailing source blocks', async () => {
+  const source = (await read('gmail-basic.sieve')).replace('fileinto :create :copy "Archive";', `fileinto :create :copy "${'A'.repeat(500000)}";`);
+  const report = importScript(source, { policy: unchecked });
+  assert.equal(report.rules.length, 0); assert.equal(report.items[0].status, 'unconvertible');
+  assert.ok(report.items[0].reason.includes('script_too_large')); assert.equal(report.items[1].status, 'unconvertible');
+  assert.equal(report.items[1].reason, report.items[0].reason);
+  assert.ok(Buffer.byteLength(generateScript(rulesDocument(report.rules), importPolicy(unchecked))) <= 1024 * 1024);
 });

@@ -328,8 +328,8 @@ test('state classification covers all seven states and the approved inactive-wit
   const script = generateScript(document(), context);
   const cases = [
     [{}, 'none'],
-    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [], items: [{ status: 'changed' }] } }, 'import_pending'],
-    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [], items: [{ status: 'same' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [rule()], items: [{ status: 'changed' }, { status: 'unconvertible' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [rule()], items: [{ status: 'same' }] } }, 'import_pending'],
     [{ activeName: 'legacy', importReport: { format: 'unknown', items: [] } }, 'import_blocked'],
     [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', items: [{ status: 'unconvertible' }] } }, 'import_blocked'],
     [{ activeName: 'legacy' }, 'import_blocked'],
@@ -386,4 +386,15 @@ test('vacation body: other controls stay 422, LF is allowed only in body, normal
   validateDocument(doc, context);
   assert.equal([...doc.vacation.body].length, 4000);
   doc.vacation.body += 'a'; expectInvalid(doc);
+});
+
+// Stage one must recognize future data without offering destructive recovery.
+test('intact future-version envelopes are newer_version; damaged future envelopes stay damaged', () => {
+  const doc = { ...document(), v: 2 };
+  doc.rules[0].conditions[0].op = 'matches';
+  const script = envelope(doc);
+  assert.deepEqual(parseScript(script), { state: 'newer_version', doc, rev: doc.rev });
+  assert.equal(classifyState({ activeName: 'legacy', webmailScript: script }).state, 'newer_version');
+  assert.equal(parseScript(`${script}# external\n`).state, 'damaged');
+  assert.equal(parseScript(envelope({ ...doc, rev: -1 })).state, 'damaged');
 });

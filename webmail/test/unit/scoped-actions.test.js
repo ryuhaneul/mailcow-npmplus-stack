@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { uidSet, scopedUidBatches, scopedUidLimit, scopedSetLimit } from '../../server/mail/ref.js';
+import { uidSet, scopedUidBatches, scopedUidLimit, scopedSetLimit, scopedBatchPolicy, scopedBatchState, scopedBatchReserve, updateScopedBatch } from '../../server/mail/ref.js';
 import { createScopedActionService } from '../../server/mail/scoped-actions.js';
 
 function expandSet(set) {
@@ -76,7 +76,7 @@ function fixture({ uids = [9, 2, 7, 1], boxes, mapping } = {}) {
     nested = true;
     try { return await operation(client); } finally { nested = false; }
   } };
-  const service = createScopedActionService({ imap, now: () => clock });
+  const service = createScopedActionService({ imap, now: () => clock, measureNow: () => clock });
   const body = { selectionKey: 'synthetic-001', scope: {}, action: 'seen', cursor: null };
   return { state, folders, client, session, service, body, advance(ms) { clock += ms; }, budget(ms) { const end = clock + ms; return { remainingMs: () => end - clock }; } };
 }
@@ -720,7 +720,7 @@ test('UID sets: range compression preserves gaps, uint32 edge and the 5000/16KiB
     else { assert.equal(batches.length, 4); assert.equal(uidSet(batches[0]).length, 16378); }
   }
 });
-for (const action of ['trash', 'move']) test(`PERF 50k ${action}: ten SEARCH/MOVE pairs, one source/target rights and LIST per request`, async t => {
+for (const action of ['trash', 'move']) test(`PERF 50k ${action}: adaptive SEARCH/MOVE pairs, one source/target rights and LIST per request`, async t => {
   const f = fixture({ uids: Array.from({ length: 50000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 50001 }], ['Trash', { validity: 22, next: 1 }], ['Projects', { validity: 33, next: 1 }]]) });
   const body = { ...f.body, action, scope: { quick: 'unread' }, ...(action === 'move' ? { target: 'Projects' } : {}) };
   const { result: prepared } = await ready(f, body);
@@ -730,10 +730,12 @@ for (const action of ['trash', 'move']) test(`PERF 50k ${action}: ten SEARCH/MOV
   const result = await f.service.execute(f.session, runBody(body, prepared.cursor), { budget: { remainingMs: () => 50000 } });
   assert.equal(result.totals.processed, 50000); assert.equal(result.state, 'completed');
   const wire = f.state.commands.slice(commands);
-  assert.equal(wire.filter(command => command === 'UID SEARCH').length, 10);
-  assert.equal(wire.filter(command => command === 'UID MOVE').length, 10);
+  assert.equal(wire.filter(command => command === 'UID SEARCH').length, 27);
+  assert.equal(wire.filter(command => command === 'UID MOVE').length, 27);
   assert.equal(wire.filter(command => command === 'MYRIGHTS').length, 2); assert.equal(lists, 1);
   assert.equal(wire.filter(command => ['UID SORT', 'UID FETCH'].includes(command)).length, 0);
+  assert.deepEqual(f.state.mutations.slice(0, 3).map(row => row.uids.length), [500, 1000, 2000]);
+  assert.ok(f.state.mutations.every(row => row.uids.length <= 2000));
   assert.equal(f.state.live.get('INBOX').size, 0);
   assert.equal(f.state.live.get(action === 'trash' ? 'Trash' : 'Projects').size, 50000);
   t.diagnostic(`50k ${action}: ${wire.length + lists} IMAP commands excluding SELECT, storage ${f.service.checkStorage(f.session)} bytes`);
@@ -859,4 +861,39 @@ test('sparse recheck: budget after first subgroup ACK preserves success and resu
   const second = await f.service.execute(f.session, runBody(f.body, first.nextCursor));
   assert.equal(second.totals.processed, 2500); assert.equal(second.state, 'completed');
   assert.deepEqual(f.state.mutations.at(-1).uids, batches[1]);
+});
+
+
+test('adaptive policy: initial/min/max/growth bounds and size-scaled strict start reserve', () => {
+  const state = scopedBatchState('move'); assert.equal(state.size, 500);
+  updateScopedBatch(state, 500, 100); assert.equal(state.size, 1000);
+  updateScopedBatch(state, 1000, 100); assert.equal(state.size, 2000);
+  updateScopedBatch(state, 2000, 1); assert.equal(state.size, 2000);
+  updateScopedBatch(state, 2000, 80000); assert.equal(state.size, 50);
+  assert.equal(scopedBatchReserve(state, 50), 10000, 'smaller next group can resume after a slow large command');
+  updateScopedBatch(state, 50, 6000); assert.equal(state.size, 50);
+  assert.equal(scopedBatchReserve(state, 50), 14000);
+  assert.equal(scopedBatchReserve(state, 100), 26000);
+  for (const action of ['seen', 'unseen', 'flag', 'unflag']) {
+    const fixed = scopedBatchState(action); updateScopedBatch(fixed, 5000, 80000); assert.equal(fixed.size, 5000);
+  }
+  for (const action of ['move', 'trash', 'archive', 'spam', 'notspam', 'delete-forever']) assert.equal(scopedBatchState(action).size, scopedBatchPolicy.initial);
+});
+
+test('adaptive MOVE: size and previous cost survive cursor boundaries, slow commands reduce next group', async () => {
+  const f = fixture({ uids: Array.from({ length: 3000 }, (_, index) => index + 1), boxes: new Map([['INBOX', { validity: 11, next: 3001 }], ['Projects', { validity: 22, next: 1 }]]) });
+  const body = { ...f.body, action: 'move', target: 'Projects' };
+  const { result: prepared, record } = await ready(f, body);
+  let first = true;
+  f.state.hook = async command => { if (command === 'UID MOVE' && first) { first = false; f.advance(29000); } };
+  const response = await f.service.execute(f.session, runBody(body, prepared.cursor), { budget: f.budget(50000) });
+  assert.equal(f.state.mutations[0].uids.length, 500);
+  assert.equal(record.batchStates[0].lastMs, 1000, 'subsequent smaller fast groups replace the initial 30s observation');
+  assert.ok(f.state.mutations.some(row => row.uids.length === 50), 'slow first unit shrinks to minimum');
+  assert.ok(response.nextCursor); assert.ok(response.totals.processed > 500);
+  const state = structuredClone(record.batchStates[0]);
+  const count = f.state.mutations.length;
+  const resumed = await f.service.execute(f.session, runBody(body, response.nextCursor));
+  assert.equal(f.state.mutations[count].uids.length, state.size);
+  assert.equal(resumed.state, 'completed'); assert.equal(resumed.totals.processed, 3000);
 });

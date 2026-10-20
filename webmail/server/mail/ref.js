@@ -93,12 +93,12 @@ export function uidSet(uids) {
   if (first !== undefined) ranges.push(first === last ? String(first) : `${first}:${last}`);
   return ranges.join(',');
 }
-export function* scopedUidBatches(uids) {
+export function* scopedUidBatches(uids, limit = scopedUidLimit) {
   let batch = [], length = 0, first, last;
   for (const uid of uids) {
     const contiguous = batch.length && uid === last + 1;
     const added = contiguous ? (first === last ? 1 + String(uid).length : String(uid).length - String(last).length) : (batch.length ? 1 : 0) + String(uid).length;
-    if (batch.length && (batch.length === scopedUidLimit || length + added > scopedSetLimit)) {
+    if (batch.length && (batch.length === limit || length + added > scopedSetLimit)) {
       yield batch;
       batch = []; length = 0; first = last = undefined;
     }
@@ -107,4 +107,22 @@ export function* scopedUidBatches(uids) {
     length += extra; batch.push(uid); last = uid;
   }
   if (batch.length) yield batch;
+}
+
+export const scopedBatchPolicy = Object.freeze({
+  initial: 500, min: 50, max: 2000, targetMs: 2000, growth: 2,
+  safety: 2, marginMs: 2000, minStartMs: 10000, mutationTimeoutMs: 120000,
+});
+export function scopedBatchState(action) {
+  const adaptive = !['seen', 'unseen', 'flag', 'unflag'].includes(action);
+  return { adaptive, size: adaptive ? scopedBatchPolicy.initial : scopedUidLimit, lastMs: 0, lastCount: 0 };
+}
+export function scopedBatchReserve(state, count) {
+  const estimate = state.lastCount ? state.lastMs * count / state.lastCount : 0;
+  return Math.max(scopedBatchPolicy.minStartMs, estimate * scopedBatchPolicy.safety + scopedBatchPolicy.marginMs);
+}
+export function updateScopedBatch(state, count, elapsedMs) {
+  state.lastMs = elapsedMs; state.lastCount = count;
+  if (state.adaptive) state.size = Math.max(scopedBatchPolicy.min, Math.min(scopedBatchPolicy.max,
+    state.size * scopedBatchPolicy.growth, Math.floor(count * scopedBatchPolicy.targetMs / Math.max(1, elapsedMs))));
 }

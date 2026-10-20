@@ -6,6 +6,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createScopedActionService } from '../../server/mail/scoped-actions.js';
 import { createActionService } from '../../server/mail/actions.js';
 import { createImapPool } from '../../server/mail/imap-pool.js';
 import { createEventService } from '../../server/mail/events.js';
@@ -358,8 +359,9 @@ test('scoped: validation rejects unsafe destinations, virtual sources, multiple 
   await assert.rejects(g.run(), { code: 'DELETE_NOT_ALLOWED' }); assert.deepEqual(g.client.calls, []);
   assert.deepEqual(f.client.calls, []);
 });
-test('scoped: exact start threshold allows mutation and S can require a larger reserve', async () => {
-  const f = scopedFixture(); f.time(10000); assert.equal((await f.run()).processed.length, 1);
+test('scoped: strict start threshold and S larger reserve reject equality', async () => {
+  const f = scopedFixture(); f.time(10000); assert.equal((await f.run()).processed.length, 0);
+  const above = scopedFixture(); above.time(10001); assert.equal((await above.run()).processed.length, 1);
   const g = scopedFixture(); g.options.minStartRemainingMs = 15000; g.time(14999);
   assert.deepEqual((await g.run()).remaining, g.options.refs); assert.deepEqual(g.client.calls, []);
 });
@@ -389,10 +391,10 @@ test('scoped: Deleted ACK followed by EXPUNGE failure is unknown for the whole r
   const result = await f.run(); assert.equal(f.client.calls.length, 2); assert.equal(result.unknown.length, 2);
   assertScopedPartition(result, f.options.refs, f.outcomes);
 });
-test('scoped: Deleted ACK cannot start EXPUNGE below reserve; partial mutation stays unknown', async () => {
+test('scoped: admitted delete unit finishes EXPUNGE after STORE even below request reserve', async () => {
   const f = scopedFixture('delete-forever'); f.client.mutation = async () => f.time(9999);
-  const result = await f.run(); assert.equal(f.client.calls.length, 1); assert.equal(result.unknown.length, 1);
-  assert.equal(result.reason, 'budget'); assertScopedPartition(result, f.options.refs, f.outcomes);
+  const result = await f.run(); assert.equal(f.client.calls.length, 2); assert.equal(result.unknown.length, 0); assert.equal(result.processed.length, 1);
+  assert.equal(result.reason, 'complete'); assertScopedPartition(result, f.options.refs, f.outcomes);
 });
 test('scoped: missing or BYE ACK and explicit server rejection cannot claim success', async () => {
   for (const response of [undefined, { command: 'BYE' }]) {
@@ -419,26 +421,48 @@ test('scoped: read transport failure is retryable failed, not unknown; session e
   await assert.rejects(g.run(), { code: 'SESSION_EXPIRED' }); assert.deepEqual(g.client.calls, []);
 });
 
-test('scoped: actual pool deadline seals unknown outcomes; late STORE ACK cannot send EXPUNGE', async t => {
+for (const action of ['seen', 'move', 'delete-forever']) test(`scoped ${action}: sent mutation survives request/proxy deadline with no close and confirms ACK`, async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const f = scopedFixture('delete-forever'); let release, started;
+  const f = scopedFixture(action); let release, started, commands = 0, closed = 0;
   const commandStarted = new Promise(resolve => { started = resolve; });
+  const timeouts = [];
+  f.client.socket = { timeout: 60000, setTimeout(ms) { this.timeout = ms; timeouts.push(ms); } };
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
+  f.client.mutation = async () => { if (++commands === 1) { started(); await new Promise(resolve => { release = resolve; }); } };
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  const running = createActionService({ imap: pool }).runScopedGroup({ connection: logged.connection }, f.options);
+  let completed = false; running.then(() => { completed = true; });
+  await commandStarted;
+  f.time(0); t.mock.timers.tick(65000); await nextTurn();
+  assert.equal(completed, false); assert.equal(closed, 0); assert.equal(f.client.usable, true);
+  assert.equal(f.client.socket.timeout, 120000);
+  release(); const result = await running;
+  assert.deepEqual(result.processed, f.options.refs); assert.equal(result.unknown.length, 0);
+  assert.equal(closed, 0); assert.deepEqual(timeouts, [120000, 60000]);
+  assert.equal(commands, action === 'delete-forever' ? 2 : 1);
+  assertScopedPartition(result, f.options.refs, f.outcomes);
+  await logged.connection.logout();
+});
+test('scoped: 120-second mutation cap closes once, records unknown and rejects late continuation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture('delete-forever'); let release, started, closed = 0;
+  const commandStarted = new Promise(resolve => { started = resolve; });
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
   f.client.mutation = async () => { started(); await new Promise(resolve => { release = resolve; }); };
   const pool = createImapPool({
     config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
     destroySession: async () => {}, clientFactory: () => f.client,
   });
   const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
-  const session = { connection: logged.connection };
-  const running = createActionService({ imap: pool }).runScopedGroup(session, f.options);
-  await commandStarted;
-  f.time(0); t.mock.timers.tick(50000);
-  const result = await running;
-  assert.equal(result.unknown.length, 1); assert.equal(result.reason, 'budget'); assert.equal(f.client.usable, false);
-  const saved = structuredClone(result), savedOutcomes = structuredClone(f.outcomes);
-  release(); await nextTurn();
-  assert.deepEqual(result, saved); assert.deepEqual(f.outcomes, savedOutcomes);
-  assert.deepEqual(f.client.calls.map(call => call[0]), ['UID STORE']);
+  const running = createActionService({ imap: pool }).runScopedGroup({ connection: logged.connection }, f.options);
+  await commandStarted; f.time(0); t.mock.timers.tick(50000); await nextTurn(); assert.equal(closed, 0);
+  t.mock.timers.tick(70000); const result = await running;
+  assert.equal(closed, 1); assert.equal(result.unknown.length, 1); assert.equal(result.unknown[0].retryable, false);
+  release(); await nextTurn(); assert.deepEqual(f.client.calls.map(call => call[0]), ['UID STORE']);
   assertScopedPartition(result, f.options.refs, f.outcomes);
   await logged.connection.logout();
 });
@@ -460,4 +484,52 @@ test('scoped: native MOVE is available with active IMAP4rev2 without a separate 
   const f = scopedFixture('move'); f.client.capabilities.clear(); f.client.enabled.add('IMAP4REV2');
   const result = await f.run(); assert.deepEqual(result.processed, f.options.refs);
   assert.equal(f.client.calls[0][0], 'UID MOVE'); assertScopedPartition(result, f.options.refs, f.outcomes);
+});
+
+
+test('scoped service: MOVE ACK after proxy deadline is retained for same-cursor receipt replay', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = scopedFixture('move'); const exec = f.client.exec, lock = f.client.getMailboxLock.bind(f.client);
+  f.client.exec = async (command, attributes, options) => {
+    if (command === 'UID SORT') { options.untagged.SORT({ attributes: [{ value: '7' }] }); return { next() {} }; }
+    return exec(command, attributes, options);
+  };
+  f.client.getMailboxLock = async (...args) => { const held = await lock(...args); f.client.mailbox.uidNext = 8; return held; };
+  let closed = 0, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const close = f.client.close.bind(f.client); f.client.close = () => { closed++; close(); };
+  const pool = createImapPool({
+    config: { imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com' },
+    destroySession: async () => {}, clientFactory: () => f.client,
+  });
+  const logged = await pool.verifyLogin({ email: 'synthetic@example.com', password: Buffer.from('synthetic-password') });
+  t.after(() => logged.connection.logout());
+  const session = { connection: logged.connection, scanAbort: new AbortController() };
+  const service = createScopedActionService({ imap: pool });
+  const body = { selectionKey: 'synthetic-late-move', scope: {}, action: 'move', target: 'Projects' };
+  const ready = await service.prepare(session, body, { budget: f.budget });
+  f.client.mutation = async () => { entered(); await new Promise(resolve => { release = resolve; }); };
+  const request = { scope: {}, action: 'move', target: 'Projects', cursor: ready.cursor };
+  const running = service.execute(session, request, { budget: f.budget });
+  let responded = false; running.then(() => { responded = true; });
+  await started; f.time(0); t.mock.timers.tick(65000); await nextTurn();
+  assert.equal(responded, false); assert.equal(closed, 0);
+  await assert.rejects(service.execute(session, request, { budget: f.budget }), { code: 'SCOPE_BUSY' });
+  release(); const receipt = await running;
+  assert.deepEqual(receipt.totals, { processed: 1, skipped: 0, failed: 0 });
+  assert.equal(receipt.state, 'completed');
+  const count = f.client.calls.length;
+  assert.deepEqual(await service.execute(session, request, { budget: f.budget }), receipt);
+  assert.equal(f.client.calls.length, count); assert.equal(closed, 0);
+});
+
+
+for (const remaining of [14000, 14001]) test(`scoped adaptive admission: ${remaining}ms applies strict previous-cost reserve`, async () => {
+  const f = scopedFixture('move');
+  f.options.batchState = { adaptive: true, size: 500, lastMs: 6000, lastCount: 1 };
+  f.time(remaining);
+  const result = await f.run();
+  assert.equal(result.processed.length, remaining > 14000 ? 1 : 0);
+  assert.equal(result.remaining.length, remaining > 14000 ? 0 : 1);
+  assert.equal(f.client.calls.length, remaining > 14000 ? 1 : 0);
 });

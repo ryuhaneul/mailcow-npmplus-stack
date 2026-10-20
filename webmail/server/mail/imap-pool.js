@@ -39,12 +39,14 @@ function deadline(promise, ms, client) {
 }
 
 // The caller supplies one monotonic request budget, shared across all mailboxes.
-async function budgetDeadline(operation, maximumMs, budget, onTimeout = () => {}) {
+async function budgetDeadline(operation, maximumMs, budget, onTimeout = () => {}, deferTimeout = () => false) {
   const remaining = budget.remainingMs();
   if (remaining <= 0) throw budgetExhausted();
   let timer;
   const timeout = new Promise((_resolve, reject) => {
     timer = setTimeout(() => {
+      // A sent mutation retains its lock until ACK, transport failure or its own cap.
+      if (deferTimeout()) return;
       onTimeout();
       reject(remaining <= maximumMs ? budgetExhausted() : unavailable());
     }, Math.min(maximumMs, remaining));
@@ -221,7 +223,7 @@ export function createImapPool({ config, destroySession, clientFactory = options
     }
   }
 
-  async function withBudgetMailbox(session, state, path, operation, { budget, ...lockOptions }) {
+  async function withBudgetMailbox(session, state, path, operation, { budget, mutation, ...lockOptions }) {
     // Waiting for another caller's reconnect or lock must not close its connection.
     const client = await budgetDeadline(() => workFor(session, state, budget), Infinity, budget);
     let lock;
@@ -237,7 +239,7 @@ export function createImapPool({ config, destroySession, clientFactory = options
         }
         lock = acquired;
       }, 60000, budget, () => { cancelled = true; });
-      return await budgetDeadline(() => operation(client), 60000, budget, () => client.close());
+      return await budgetDeadline(() => operation(client), 60000, budget, () => client.close(), () => mutation?.active === true);
     } catch (error) {
       if (authRejected(error)) return connectionFailure(error, session);
       if (!client.usable && !(error instanceof AppError)) throw unavailable();

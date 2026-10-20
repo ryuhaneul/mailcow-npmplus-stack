@@ -6,7 +6,7 @@ import { mailboxRights } from './folders.js';
 import { createActionService } from './actions.js';
 import { createListService } from './list.js';
 import { listOptions } from './list-query.js';
-import { encodeRef, decodeRef, scopedUidBatches } from './ref.js';
+import { encodeRef, decodeRef, scopedUidBatches, scopedBatchState } from './ref.js';
 
 const ttlMs = 30 * 60_000, memoryLimit = 32 * 1024 * 1024;
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -46,7 +46,7 @@ function scrub(record) {
   record.runReceipts = {}; record.failures = [];
 }
 
-export function createScopedActionService({ imap, now = Date.now }) {
+export function createScopedActionService({ imap, now = Date.now, measureNow = () => performance.now() }) {
   const stores = new WeakMap();
   function runCursor(store) {
     const nonce = randomBytes(16);
@@ -58,7 +58,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
     const signature = createHmac('sha256', store.cursorKey).update(bytes.subarray(0, 16)).digest().subarray(0, 16);
     return timingSafeEqual(signature, bytes.subarray(16));
   }
-  const actionService = createActionService({ imap }), listService = createListService({ imap, now });
+  const actionService = createActionService({ imap, measureNow }), listService = createListService({ imap, now });
   function sweep(store) {
     for (const [id, record] of store.records) if (now() - record.lastSeen >= ttlMs) {
       store.records.delete(id); store.keys.delete(record.selectionKey); scrub(record);
@@ -301,6 +301,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
   // Request overhead is admitted separately, including requests that settle nothing.
   const candidateBytes = ref => 256 + 4 * Buffer.byteLength(JSON.stringify(ref));
   function initializeRun(record) {
+    record.batchStates = record.manifest.map(() => scopedBatchState(record.action));
     record.outcomes = record.manifest.map(group => group.uids.map(() => 0));
     record.totals = { processed: 0, skipped: 0, failed: 0 };
     record.failures = []; record.runReceipts = {}; record.sequence = 0;
@@ -329,7 +330,11 @@ export function createScopedActionService({ imap, now = Date.now }) {
       const group = record.manifest[g];
       const positions = new Map(group.uids.map((uid, index) => [uid, index]));
       const pending = group.uids.filter((_uid, index) => !record.outcomes[g][index]);
-      for (const uids of scopedUidBatches(pending)) yield { g, indices: uids.map(uid => positions.get(uid)) };
+      for (let offset = 0; offset < pending.length;) {
+        const uids = scopedUidBatches(pending.slice(offset), record.batchStates[g].size).next().value;
+        yield { g, indices: uids.map(uid => positions.get(uid)) };
+        offset += uids.length;
+      }
     }
   }
   async function execute(session, body, { budget = requestBudget() } = {}) {
@@ -382,7 +387,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
         const onOutcome = settle(g, indices, refs);
         const result = await actionService.runScopedGroup(session, {
           refs, action: record.action, resolvedTarget: record.resolvedTarget,
-          resolvedScope: record.resolvedScope, checks, budget, minStartRemainingMs: 10000, onOutcome,
+          resolvedScope: record.resolvedScope, batchState: record.batchStates[g], checks, budget, minStartRemainingMs: 10000, onOutcome,
         });
         live(store, record);
         if (result.reason === 'budget' || result.remaining.length) { reason = 'budget'; break; }

@@ -664,3 +664,28 @@ test('pool budget: callback result confirmed at deadline is returned without clo
   assert.equal(await f.pool.withMailbox(f.session, 'INBOX', () => 'next'), 'next');
   assert.equal(f.clients.length, 1);
 });
+
+
+test('pool mutation guard: request expiry preserves the held lock and excludes the next caller until ACK', async t => {
+  const clock = requestBudget(t);
+  const f = await fakeFixture(t);
+  const mutation = { active: false };
+  let finish, entered, nextRan = false, responded = false;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = f.pool.withMailbox(f.session, 'INBOX', async () => {
+    mutation.active = true; entered();
+    await new Promise(resolve => { finish = resolve; });
+    mutation.active = false;
+    return 'acknowledged';
+  }, { budget: clock.budget, mutation });
+  pending.then(() => { responded = true; });
+  await started;
+  const next = f.pool.withMailbox(f.session, 'INBOX', () => { nextRan = true; return 'next'; });
+  await clock.advance(50000);
+  assert.equal(responded, false); assert.equal(nextRan, false);
+  assert.equal(f.clients[0].usable, true); assert.equal(f.clients[0].locks, 1);
+  assert.equal(f.clients[0].lockOptions.mutation, undefined, 'guard does not leak into IMAP lock options');
+  finish(); assert.equal(await pending, 'acknowledged'); assert.equal(await next, 'next');
+  assert.equal(f.clients[0].locks, 0); assert.equal(f.clients[0].maxLocks, 1);
+  assert.equal(f.clients.length, 1);
+});

@@ -1,7 +1,8 @@
+import { performance } from 'node:perf_hooks';
 import { AppError } from '../errors.js';
 import { encodePath, hasCapability } from 'imapflow/lib/tools.js';
 import { checkBudget, matchesFolderFilters, searchUids } from './list-query.js';
-import { decodeRef, assertUidValidity, uidSet, scopedUidLimit, scopedSetLimit, scopedUidBatches } from './ref.js';
+import { decodeRef, assertUidValidity, uidSet, scopedUidLimit, scopedSetLimit, scopedUidBatches, scopedBatchPolicy, scopedBatchState, scopedBatchReserve, updateScopedBatch } from './ref.js';
 import { mailboxRights } from './folders.js';
 
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -16,7 +17,7 @@ function validate(body, maxRefs = 1000) {
   if (body.action === 'delete-forever' && refs.some(({ ref }) => !['Trash', 'Junk'].includes(ref.path))) throw new AppError(422, 'DELETE_NOT_ALLOWED', '영구 삭제는 휴지통이나 스팸함에서만 할 수 있어요.');
   return refs;
 }
-export function createActionService({ imap }) {
+export function createActionService({ imap, measureNow = () => performance.now() }) {
   async function run(session, body) {
     const refs = validate(body); const failed = []; let done = 0;
     const groups = new Map();
@@ -84,7 +85,7 @@ export function createActionService({ imap }) {
   // onOutcome({ ref, status, code?, retryable? }) is synchronous and must not throw.
   // unknown is disjoint from failed; each input ref occupies exactly one result array.
   async function runScopedGroup(session, {
-    refs, action, resolvedTarget, resolvedScope, budget, checks = { rights: new Map(), folders: null }, minStartRemainingMs = 10000, onOutcome = () => {},
+    refs, action, resolvedTarget, resolvedScope, budget, batchState = scopedBatchState(action), checks = { rights: new Map(), folders: null }, minStartRemainingMs = scopedBatchPolicy.minStartMs, onOutcome = () => {},
   }) {
     const group = validate({ refs, action, target: resolvedTarget }, scopedUidLimit);
     const path = group[0].ref.path;
@@ -101,6 +102,7 @@ export function createActionService({ imap }) {
     const result = { processed: [], skipped: [], failed: [], unknown: [], remaining: [], reason: 'complete' };
     const pending = new Map(group.map(item => [item.token, item]));
     let sent = false, mutated = false, finished = false;
+    const mutation = { active: false, timedOut: false };
     const exhausted = () => Object.assign(new AppError(503, 'MAIL_UNAVAILABLE', '메일 처리 시간이 다 됐어요.'), { budgetExhausted: true });
     const check = () => { if (finished) throw exhausted(); checkBudget(budget); };
     const settle = (status, code, tokens = pending.keys()) => {
@@ -150,33 +152,55 @@ export function createActionService({ imap }) {
           if (target === path) { settle('processed'); return; }
         }
         const command = async (name, attributes) => {
-          check();
-          if (budget.remainingMs() < minStartRemainingMs) throw exhausted();
+          if (finished || mutation.timedOut) throw exhausted();
           // Use raw commands: messageMove/Flags swallow transport errors as false.
           // From this boundary onward any unconfirmed result is conservatively unknown.
           sent = true;
           const response = await client.exec(name, attributes);
           response.next();
+          if (mutation.timedOut) throw exhausted();
           if (response.response?.command?.toUpperCase() !== 'OK') throw new Error('Unconfirmed command');
           sent = false; mutated = true;
         };
         // Removing nonmatching UIDs can turn a short range into a long sparse set.
         const byUid = new Map([...pending.values()].map(item => [item.ref.uid, item.token]));
-        for (const uids of scopedUidBatches([...byUid.keys()].sort((a, b) => a - b))) {
+        for (const uids of scopedUidBatches([...byUid.keys()].sort((a, b) => a - b), batchState.size)) {
+          check();
+          if (budget.remainingMs() <= Math.max(minStartRemainingMs, scopedBatchReserve(batchState, uids.length))) throw exhausted();
           const sequence = { type: 'SEQUENCE', value: uidSet(uids) };
-          if (['seen', 'unseen', 'flag', 'unflag'].includes(action)) {
-            const operation = ['seen', 'flag'].includes(action) ? '+FLAGS' : '-FLAGS';
-            await command('UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: seen ? '\\Seen' : '\\Flagged' }]]);
-          } else if (action === 'delete-forever') {
-            await command('UID STORE', [sequence, { type: 'ATOM', value: '+FLAGS' }, [{ type: 'ATOM', value: '\\Deleted' }]]);
-            await command('UID EXPUNGE', [sequence]);
-          } else {
-            await command('UID MOVE', [sequence, { type: 'ATOM', value: encodePath(client, target) }]);
+          const socket = client.socket, previousTimeout = socket?.timeout ?? client.socketTimeout ?? 60000;
+          const started = measureNow();
+          let timer;
+          mutation.active = true;
+          socket?.setTimeout(scopedBatchPolicy.mutationTimeoutMs);
+          try {
+            const execute = async () => {
+              if (['seen', 'unseen', 'flag', 'unflag'].includes(action)) {
+                const operation = ['seen', 'flag'].includes(action) ? '+FLAGS' : '-FLAGS';
+                await command('UID STORE', [sequence, { type: 'ATOM', value: operation }, [{ type: 'ATOM', value: seen ? '\\Seen' : '\\Flagged' }]]);
+              } else if (action === 'delete-forever') {
+                // Admission and protection cover the whole STORE + EXPUNGE unit.
+                await command('UID STORE', [sequence, { type: 'ATOM', value: '+FLAGS' }, [{ type: 'ATOM', value: '\\Deleted' }]]);
+                await command('UID EXPUNGE', [sequence]);
+              } else {
+                await command('UID MOVE', [sequence, { type: 'ATOM', value: encodePath(client, target) }]);
+              }
+            };
+            await Promise.race([execute(), new Promise((_resolve, reject) => {
+              timer = setTimeout(() => {
+                mutation.timedOut = true; client.close();
+                reject(new Error('Mutation acknowledgement timeout'));
+              }, scopedBatchPolicy.mutationTimeoutMs);
+            })]);
+            settle('processed', undefined, uids.map(uid => byUid.get(uid)));
+            mutated = false;
+            updateScopedBatch(batchState, uids.length, Math.max(0, measureNow() - started));
+          } finally {
+            clearTimeout(timer); mutation.active = false;
+            if (!socket?.destroyed) socket?.setTimeout(previousTimeout);
           }
-          settle('processed', undefined, uids.map(uid => byUid.get(uid)));
-          mutated = false;
         }
-      }, { budget });
+      }, { budget, mutation });
     } catch (error) {
       if (error.code === 'STALE_SCOPE') throw error;
       if (error.budgetExhausted) result.reason = 'budget';

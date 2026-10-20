@@ -41,6 +41,24 @@ await test('condition group editor',async t=>{
     assert.equal(doc.v,minimumDocumentVersion(doc.rules));return doc.rules[0];
   }
   const combination=page=>page.getByRole('group',{name:'묶음 1 조건 결합',exact:true});
+  await t.test('newer-version banner reports only the actual active filter',async()=>{
+    for(const [activeName,label,message] of [['webmail-rules','active','필터는 서버에서 계속 동작해요.'],[null,'inactive','필터가 꺼져 있어요'],['legacy','other','필터가 다른 프로그램에서 바뀌었어요']]) {
+      for(const width of [1280,768,375]) {
+        const context=await browser.newContext({viewport:{width,height:900}});
+        const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+        const fixture=rulesFixture('newer_version',{activeName,activeScript:activeName,prevAvailable:false});
+        await page.route('**/api/rules',route=>route.fulfill({json:fixture}));
+        await page.goto(`${origin}/#filters`);
+        await expect(page.locator('.rules-banner')).toHaveText(`새 버전 웹메일에서 만든 필터예요. 지금은 볼 수만 있어요. ${message}`);
+        if(activeName!=='webmail-rules')await expect(page.locator('.rules-banner')).not.toContainText('계속 동작');
+        await expect(page.locator('.rules-banner button')).toHaveCount(0);
+        assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+        await page.evaluate(()=>document.fonts.ready);
+        await page.screenshot({path:`${captures}/newer-version-${label}-${width}.png`});
+        assert.deepEqual(errors,[]);await context.close();
+      }
+    }
+  });
   await t.test('flat rules retain condition rows, labels and saved request',async()=>{
     const {page,context,errors}=await open();await expect(page.locator('.rule-condition-group')).toHaveCount(0);
     await expect(page.getByLabel('1번 조건 값',{exact:true})).toHaveValue('견적');

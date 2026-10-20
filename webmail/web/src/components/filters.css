@@ -96,7 +96,7 @@
 .gi-confirm input{width:17px;height:17px;margin:3px 0 0;accent-color:var(--accent-ui);flex:none}
 .gi-save{margin-top:14px}
 .gi-total{font-size:13px;color:var(--ink-2)}
-.gi-body button:disabled{opacity:.45;cursor:not-allowed}
+.gi-body button:disabled,.gi-undo button:disabled{opacity:.45;cursor:not-allowed}
 
 /* 결과 글자 칸이 180px 아래로 줄기 전(표 폭 720px)에 세로 배치 */
 @container gitab (max-width:720px){
@@ -137,3 +137,21 @@
 @media(prefers-reduced-motion:reduce){.gi-body *{transition:none!important}}
 
 .gi-body a[aria-disabled=true],.filters-view .crumb a[aria-disabled=true]{cursor:not-allowed;opacity:.45}
+
+.gi-result>div{min-width:0;flex:1 1 260px;overflow-wrap:anywhere}
+.gi-result p+p{margin-top:2px}
+.gi-result b{color:var(--ink)}
+.gi-dropped{margin:0 0 14px;border:1px solid var(--line);border-radius:var(--r-card);font-size:13px;color:var(--ink-2)}
+.gi-dropped summary{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;list-style:none;overflow-wrap:anywhere}
+.gi-dropped summary::-webkit-details-marker{display:none}
+.gi-dropped summary svg{color:var(--warn);flex:none}
+.gi-dropped summary span{margin-left:auto;color:var(--accent-ink);font-weight:600;flex:none}
+.gi-dropped[open] summary span{visibility:hidden}
+.gi-dropped ul{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.gi-dropped li{padding:10px 14px;border-bottom:1px solid var(--line);line-height:1.6;overflow-wrap:anywhere}
+.gi-dropped li b{display:block;color:var(--ink);font-weight:var(--fw-strong)}
+.gi-dropped li span{color:var(--ink-2)}
+.gi-dropped .rule-note{margin:0;padding:8px 14px 10px;color:var(--ink-2);line-height:1.65}
+.dlg.gi-undo{max-width:calc(100% - 32px);overflow-wrap:anywhere}
+.gi-undo p{line-height:1.65}
+.gi-undo-edited{margin:14px 0}

@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import Icon from './Icon.jsx';
 import { ImportTable, ImportConsent } from './ImportReview.jsx';
+import { importErrorMessage } from './ImportResult.jsx';
 
 const xmlErrors = {too_large:'파일은 512KiB까지 올릴 수 있어요.',not_utf8:'UTF-8로 저장한 Gmail 필터 파일을 골라 주세요.',dtd:'DTD가 있는 XML은 가져올 수 없어요.',pi:'처리 명령이 있는 XML은 가져올 수 없어요.',malformed:'XML 형식이 올바르지 않아요.',not_gmail:'Gmail에서 내보낸 필터 XML 파일을 골라 주세요.',too_many_entries:'한 파일에서 필터 1000개까지 읽을 수 있어요.'};
 function errorMessage(error) {
   if (error.code === 'XML_INVALID') return xmlErrors[error.detail?.reason ?? error.reason] ?? 'Gmail 필터 파일 형식을 확인해 주세요.';
-  if (error.code === 'IMPORT_PREVIEW_CHANGED') return '미리보기 뒤 필터 상태가 바뀌었어요. 미리보기를 다시 불러온 뒤 확인해 주세요.';
-  if (error.code === 'FOLDER_CREATE_FAILED' && error.detail?.created?.length) return `폴더를 만들지 못했어요. 이미 만든 폴더 ${error.detail.created.length}개(${error.detail.created.join(', ')})는 남아 있어요. 다시 확인한 뒤 적용해 주세요.`;
+  if (['IMPORT_PREVIEW_CHANGED','FOLDER_CREATE_FAILED','IMPORT_WRITE_FAILED'].includes(error.code)) return importErrorMessage(error);
   if (error.code === 'IMPORT_NOTHING') return '반영할 수 있는 규칙이 없어요.';
   return error.message ?? '파일을 읽을 수 없어요. 다시 골라 주세요.';
 }

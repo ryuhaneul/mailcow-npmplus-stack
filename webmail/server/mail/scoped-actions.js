@@ -1,8 +1,12 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { AppError } from '../errors.js';
 import { allmail, scopeOptions, resolveListScope, sortUids, resolveCandidateSources, checkBudget } from './list-query.js';
 import { mailboxRights } from './folders.js';
+import { createActionService } from './actions.js';
+import { createListService } from './list.js';
+import { listOptions } from './list-query.js';
+import { encodeRef, decodeRef } from './ref.js';
 
 const ttlMs = 30 * 60_000, memoryLimit = 32 * 1024 * 1024;
 const actions = new Set(['seen', 'unseen', 'flag', 'unflag', 'move', 'archive', 'trash', 'spam', 'notspam', 'delete-forever']);
@@ -44,6 +48,17 @@ function scrub(record) {
 
 export function createScopedActionService({ imap, now = Date.now }) {
   const stores = new WeakMap();
+  function runCursor(store) {
+    const nonce = randomBytes(16);
+    return Buffer.concat([nonce, createHmac('sha256', store.cursorKey).update(nonce).digest().subarray(0, 16)]).toString('base64url');
+  }
+  function ownsCursor(store, cursor) {
+    const bytes = Buffer.from(cursor, 'base64url');
+    if (bytes.length !== 32 || bytes.toString('base64url') !== cursor) return false;
+    const signature = createHmac('sha256', store.cursorKey).update(bytes.subarray(0, 16)).digest().subarray(0, 16);
+    return timingSafeEqual(signature, bytes.subarray(16));
+  }
+  const actionService = createActionService({ imap }), listService = createListService({ imap, now });
   function sweep(store) {
     for (const [id, record] of store.records) if (now() - record.lastSeen >= ttlMs) {
       store.records.delete(id); store.keys.delete(record.selectionKey); scrub(record);
@@ -60,10 +75,10 @@ export function createScopedActionService({ imap, now = Date.now }) {
     if (session.scanAbort?.signal.aborted) throw fail(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
     let store = stores.get(session);
     if (!store) {
-      store = { records: new Map(), keys: new Map(), timer: null, closed: false };
+      store = { records: new Map(), keys: new Map(), timer: null, closed: false, cursorKey: randomBytes(32) };
       stores.set(session, store);
       session.scanAbort?.signal.addEventListener('abort', () => {
-        store.closed = true; clearTimeout(store.timer);
+        store.closed = true; clearTimeout(store.timer); store.cursorKey.fill(0);
         for (const record of store.records.values()) scrub(record);
         store.records.clear(); store.keys.clear(); stores.delete(session);
       }, { once: true });
@@ -80,7 +95,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
   // S2 must call this after adding run receipts/failures and before returning a cursor.
   function checkStorage(session) {
     const store = storeFor(session);
-    const bytes = [...store.records.values()].reduce((total, record) => total + Buffer.byteLength(JSON.stringify(record)) + 1024, 0);
+    const bytes = [...store.records.values()].reduce((total, record) => total + Buffer.byteLength(JSON.stringify(record)) + 1024 + (record.reserveBytes ?? 0), 0);
     if (bytes > memoryLimit) throw limit();
     return bytes;
   }
@@ -130,7 +145,9 @@ export function createScopedActionService({ imap, now = Date.now }) {
       });
       record.resolvedTarget = destination.path; record.targetNeedsCreate = destination.create;
     }
-    record.phase = 'ready'; record.cursor = token(); record.stage = 'done';
+    initializeRun(record);
+    record.phase = 'ready'; record.cursor = runCursor(store); record.stage = 'done';
+    checkStorage(session);
   }
   async function advance(session, store, record, budget) {
     if (!record.resolvedScope) {
@@ -187,13 +204,13 @@ export function createScopedActionService({ imap, now = Date.now }) {
     return { selectionId: record.selectionId, phase: record.phase, cursor: record.cursor, totalEstimate: record.totalEstimate, initialTotal: record.initialTotal, expiresAt: record.expiresAt, ...(record.phase === 'ready' ? { cutoff: record.cutoff } : {}) };
   }
   async function prepare(session, body, { budget = requestBudget() } = {}) {
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['selectionKey', 'scope', 'action', 'target', 'cursor'].includes(key)) || typeof body.selectionKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(body.selectionKey) || (body.cursor != null && (typeof body.cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.cursor)))) throw invalid();
-    if (typeof budget?.remainingMs !== 'function') throw invalid();
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['selectionKey', 'scope', 'action', 'target', 'cursor', 'selectionId', 'retry'].includes(key)) || typeof body.selectionKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(body.selectionKey) || (body.cursor != null && (typeof body.cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.cursor)))) throw invalid();
+    if (typeof budget?.remainingMs !== 'function' || (body.retry !== undefined && body.retry !== 'failed') || ((body.retry === 'failed') !== (typeof body.selectionId === 'string')) || (body.selectionId !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(body.selectionId))) throw invalid();
     const scope = canonicalScope(body.scope), scopeKey = JSON.stringify(scope);
     validateAction(body.action, body.target);
     const store = storeFor(session);
     let record = store.records.get(store.keys.get(body.selectionKey));
-    if (record && (record.scopeKey !== scopeKey || record.action !== body.action || record.target !== body.target)) throw mismatch();
+    if (record && (record.scopeKey !== scopeKey || record.action !== body.action || record.target !== body.target || record.retryFrom !== body.selectionId)) throw mismatch();
     if (!record) {
       if (body.cursor != null) throw mismatch();
       if (store.records.size >= 3 || [...store.records.values()].some(item => !['completed', 'error'].includes(item.phase))) throw limit();
@@ -202,7 +219,23 @@ export function createScopedActionService({ imap, now = Date.now }) {
         targetNeedsCreate: false, targetCreateAttempted: false, targetReady: false,
         phase: 'preparing', stage: 'search', resolvedScope: null, boundary: null, manifest: [], sources: Object.create(null), pendingUids: [],
         mappingIndex: 0, fenceIndex: 0, preflightIndex: 0, writable: false, totalEstimate: 0, initialTotal: null,
-        receipts: {}, cursor: null, busy: false, lastSeen: now(), expiresAt: null };
+        receipts: {}, cursor: null, busy: false, lastSeen: now(), expiresAt: null, retryFrom: body.selectionId };
+      if (body.retry === 'failed') {
+        const source = getSelection(session, body.selectionId);
+        if (source.scopeKey !== scopeKey || source.action !== body.action || source.target !== body.target) throw mismatch();
+        const groups = new Map();
+        for (const item of source.failures ?? []) if (item.retryable) {
+          const ref = decodeRef(item.ref);
+          let group = groups.get(ref.path);
+          if (!group) { group = { path: ref.path, uidValidity: ref.uidValidity, uids: [] }; groups.set(ref.path, group); }
+          if (group.uidValidity !== ref.uidValidity) throw stale();
+          group.uids.push(ref.uid);
+        }
+        record.manifest = [...groups.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(group => ({ ...group, uids: [...new Set(group.uids)].sort((a, b) => a - b) }));
+        record.stage = 'fences'; record.resolvedScope = structuredClone(source.resolvedScope); record.boundary = structuredClone(source.boundary);
+        record.cutoff = structuredClone(source.cutoff); record.totalEstimate = record.manifest.reduce((sum, group) => sum + group.uids.length, 0);
+        record.resolvedTarget = source.resolvedTarget; record.targetNeedsCreate = source.targetNeedsCreate && !source.targetReady;
+      }
       if (checkStorage(session) + Buffer.byteLength(JSON.stringify(record)) + 1024 > memoryLimit) throw limit();
       store.records.set(record.selectionId, record); store.keys.set(record.selectionKey, record.selectionId);
     }
@@ -230,7 +263,7 @@ export function createScopedActionService({ imap, now = Date.now }) {
     } catch (error) {
       if (!record.disposed) {
         record.phase = 'error'; record.error = { statusCode: error instanceof AppError ? error.statusCode : 503, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE', message: error instanceof AppError ? error.message : '메일 서버에 연결할 수 없어요.' };
-        record.manifest = []; record.pendingUids = []; record.sources = {}; delete record.receipts[key];
+        record.manifest = []; record.pendingUids = []; record.sources = {}; record.reserveBytes = 0; delete record.receipts[key];
       }
       if (error instanceof AppError) throw error;
       throw fail(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요.');
@@ -252,5 +285,152 @@ export function createScopedActionService({ imap, now = Date.now }) {
     }
     live(store, record); record.targetReady = true; return record.resolvedTarget;
   }
-  return { prepare, getSelection, ensureTarget, checkStorage };
+
+  // Reserve the largest per-candidate failure, cursor and receipt representation.
+  // Request overhead is admitted separately, including requests that settle nothing.
+  const candidateBytes = ref => 1024 + 4 * Buffer.byteLength(JSON.stringify(ref));
+  function initializeRun(record) {
+    record.outcomes = record.manifest.map(group => group.uids.map(() => 0));
+    record.totals = { processed: 0, skipped: 0, failed: 0 };
+    record.failures = []; record.runReceipts = {}; record.sequence = 0;
+    record.errorCounts = {}; record.reserveBytes = 8192;
+    for (const group of record.manifest) for (const uid of group.uids) record.reserveBytes += candidateBytes(encodeRef(group.path, group.uidValidity, uid));
+  }
+  function remaining(record) {
+    return record.initialTotal - record.totals.processed - record.totals.skipped - record.totals.failed;
+  }
+  function replay(entry) {
+    if (entry.statusCode !== 200) {
+      const error = fail(entry.statusCode, entry.receipt.error.code, '전체 선택 처리가 중단됐어요. 결과를 확인해 주세요.');
+      error.detail = structuredClone(entry.receipt); throw error;
+    }
+    return structuredClone(entry.receipt);
+  }
+  function findCursor(store, cursor) {
+    for (const record of store.records.values()) {
+      if (record.cursor === cursor || record.runReceipts?.[cursor] || Object.values(record.receipts).some(receipt => receipt.cursor === cursor)) return record;
+    }
+    if (ownsCursor(store, cursor)) throw expired();
+    throw mismatch();
+  }
+  function plannedGroups(record) {
+    const groups = []; let count = 0;
+    for (let g = 0; g < record.manifest.length && count < 1000; g++) {
+      const group = record.manifest[g]; let indices = [];
+      for (let index = 0; index < group.uids.length && count < 1000; index++) {
+        if (record.outcomes[g][index]) continue;
+        indices.push(index); count++;
+        if (indices.length === 50) { groups.push({ g, indices }); indices = []; }
+      }
+      if (indices.length) groups.push({ g, indices });
+    }
+    return groups;
+  }
+  async function execute(session, body, { budget = requestBudget() } = {}) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['scope', 'cursor', 'action', 'target'].includes(key)) || typeof body.cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.cursor) || typeof budget?.remainingMs !== 'function') throw invalid();
+    const scopeKey = JSON.stringify(canonicalScope(body.scope));
+    const store = storeFor(session), record = findCursor(store, body.cursor);
+    if (record.scopeKey !== scopeKey || record.action !== body.action || record.target !== body.target) throw mismatch();
+    touch(store, record);
+    if (record.busy) throw fail(409, 'SCOPE_BUSY', '메일을 처리 중이에요. 잠시 뒤 다시 시도해 주세요.');
+    if (record.runReceipts?.[body.cursor]) return replay(record.runReceipts[body.cursor]);
+    if (record.phase === 'preparing') throw fail(409, 'SELECTION_NOT_READY', '전체 선택 준비를 마쳐 주세요.');
+    if (!['ready', 'running'].includes(record.phase) || record.cursor !== body.cursor) throw invalid();
+    // This overhead admission precedes CREATE and every mail mutation.
+    record.reserveBytes += 2048;
+    try { checkStorage(session); } catch (error) { record.reserveBytes -= 2048; throw error; }
+    record.busy = true;
+    const started = performance.now(), sequence = record.sequence;
+    const before = { ...record.totals }, newFailures = [];
+    let reservedUsed = 0, reason = 'batch', terminal, active = true;
+    const settle = (g, indices, refs) => {
+      const positions = new Map(refs.map((ref, index) => [ref, indices[index]]));
+      return outcome => {
+        if (!active || store.closed || record.disposed) return;
+        const index = positions.get(outcome.ref);
+        if (index === undefined || record.outcomes[g][index]) return;
+        record.outcomes[g][index] = { processed: 1, skipped: 2, failed: 3, unknown: 4 }[outcome.status];
+        if (outcome.status === 'processed' || outcome.status === 'skipped') record.totals[outcome.status]++;
+        else {
+          record.totals.failed++;
+          const failure = { ref: outcome.ref, code: outcome.code, retryable: outcome.status !== 'unknown' && outcome.retryable === true };
+          record.failures.push(failure); newFailures.push(failure);
+          record.errorCounts[failure.code] = (record.errorCounts[failure.code] ?? 0) + 1;
+        }
+        reservedUsed += candidateBytes(outcome.ref);
+      };
+    };
+    try {
+      for (const { g, indices } of plannedGroups(record)) {
+        live(store, record);
+        if (budget.remainingMs() < 10000) { reason = 'budget'; break; }
+        const group = record.manifest[g], refs = indices.map(index => encodeRef(group.path, group.uidValidity, group.uids[index]));
+        if (record.targetNeedsCreate && !record.targetReady) {
+          // Reject a replaced source before creating the deferred archive folder.
+          await mailbox(session, store, record, group.path, budget, client => assertFence(client, group));
+        }
+        await ensureTarget(session, record.selectionId, { budget });
+        live(store, record); record.phase = 'running';
+        const onOutcome = settle(g, indices, refs);
+        const result = await actionService.runScopedGroup(session, {
+          refs, action: record.action, resolvedTarget: record.resolvedTarget,
+          resolvedScope: record.resolvedScope, budget, minStartRemainingMs: 10000, onOutcome,
+        });
+        live(store, record);
+        if (result.reason === 'budget' || result.remaining.length) { reason = 'budget'; break; }
+      }
+    } catch (error) {
+      if (record.disposed || store.closed || ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) throw error;
+      if (error.budgetExhausted && !record.targetCreateAttempted) reason = 'budget';
+      else terminal = { statusCode: error instanceof AppError ? error.statusCode : 503, code: error instanceof AppError ? error.code : 'MAIL_UNAVAILABLE' };
+    } finally { active = false; record.busy = false; }
+    live(store, record);
+    const left = remaining(record), completed = left === 0 && !terminal;
+    const nextCursor = terminal || completed ? null : runCursor(store);
+    record.phase = terminal ? 'error' : completed ? 'completed' : 'running';
+    record.cursor = nextCursor; record.sequence++;
+    const receipt = {
+      selectionId: record.selectionId, batchId: `${record.selectionId}:${sequence}`, sequence,
+      state: terminal ? 'stopped' : completed ? 'completed' : 'running',
+      reason: terminal ? terminal.code === 'STALE_SCOPE' ? 'stale_scope' : 'error' : completed ? 'complete' : reason,
+      initialTotal: record.initialTotal,
+      delta: Object.fromEntries(Object.keys(before).map(key => [key, record.totals[key] - before[key]])),
+      totals: { ...record.totals }, failed: newFailures,
+      nextCursor, remainingEstimate: left, elapsedMs: Math.round(performance.now() - started),
+      ...(terminal ? { error: { code: terminal.code } } : {}),
+    };
+    record.runReceipts[body.cursor] = { statusCode: terminal?.statusCode ?? 200, receipt: structuredClone(receipt) };
+    record.reserveBytes = terminal || completed ? 0 : record.reserveBytes - reservedUsed - 2048;
+    touch(store, record);
+    // The admitted reserve includes all outcomes and this immutable receipt.
+    checkStorage(session);
+    return replay(record.runReceipts[body.cursor]);
+  }
+  async function failures(session, id, query = {}, { budget = requestBudget() } = {}) {
+    if (!query || typeof query !== 'object' || Array.isArray(query) || Object.keys(query).some(key => !['page', 'pageSize'].includes(key)) || typeof budget?.remainingMs !== 'function') throw invalid();
+    const pagination = Object.fromEntries(Object.entries(query).map(([key, value]) => [key, typeof value === 'number' ? String(value) : value]));
+    const { page, pageSize } = listOptions(pagination);
+    const record = getSelection(session, id), store = storeFor(session);
+    const source = (record.failures ?? []).slice((page - 1) * pageSize, page * pageSize);
+    const groups = new Map(), metadata = new Map();
+    for (const failure of source) {
+      const ref = decodeRef(failure.ref), key = JSON.stringify([ref.path, ref.uidValidity]);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(failure.ref);
+    }
+    for (const refs of groups.values()) {
+      live(store, record); checkBudget(budget);
+      try {
+        for (const item of await listService.metadata(session, refs, { budget })) metadata.set(item.ref, item);
+      } catch (error) {
+        if (!['STALE_REF', 'MESSAGE_NOT_FOUND'].includes(error.code)) {
+          if (error instanceof AppError) throw error;
+          throw fail(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요.');
+        }
+      }
+      live(store, record);
+    }
+    return { total: record.failures?.length ?? 0, page, pageSize, items: source.map(failure => ({ ...(metadata.get(failure.ref) ?? { ref: failure.ref, unavailable: true }), ...failure })) };
+  }
+  return { prepare, execute, failures, getSelection, ensureTarget, checkStorage };
 }

@@ -55,6 +55,12 @@ export function allowedMoveFolder(folder) {
     && !['\\Inbox', '\\Trash', '\\Junk', '\\Drafts'].includes(folder.specialUse);
 }
 
+/** Minimum wire version for the rule features in use. */
+export function minimumDocumentVersion(rules) {
+  return Array.isArray(rules) && rules.some(rule => Array.isArray(rule?.conditions)
+    && rule.conditions.some(condition => condition && (Object.hasOwn(condition, 'conditions') || condition.op === 'matches'))) ? 2 : 1;
+}
+
 /** Policy context: folders are {path, specialUse?, shared?, virtual?, personal?}.
  * checkPolicy:false is for decoding stored data, whose folders/domains may since have changed.
  * checkFolders:false skips only existence checks for an explicitly requested offline import.

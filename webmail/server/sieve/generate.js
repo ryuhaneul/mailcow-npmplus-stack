@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { AppError } from '../errors.js';
 import { quoteSieve } from './glob.js';
-import { asciiLower, canonicalJSON, MAX_SCRIPT_BYTES, validateAddress, validateDocument, validateText } from './model.js';
+import { asciiLower, canonicalJSON, MAX_SCRIPT_BYTES, minimumDocumentVersion, validateAddress, validateDocument, validateText } from './model.js';
 
 export const MAGIC = '# WEBMAIL-RULES 1 — 웹메일이 만든 필터입니다. 여기서 직접 고치면 웹메일에서 규칙을 고칠 수 없게 됩니다.';
 export const hashBody = body => createHash('sha256').update(body, 'utf8').digest('hex');
@@ -24,8 +24,7 @@ export function conditionTest(condition) {
 export function generateScript(doc, { addresses = [], trashPath = 'Trash', ...policy } = {}) {
   // Select the stored wire version on a copy, preserving the caller's document.
   doc = structuredClone(doc);
-  const extended = Array.isArray(doc?.rules) && doc.rules.some(rule => Array.isArray(rule?.conditions) && rule.conditions.some(c => c && (Object.hasOwn(c, 'conditions') || c.op === 'matches')));
-  if ([1, 2].includes(doc?.v)) doc.v = extended ? 2 : 1;
+  if ([1, 2].includes(doc?.v)) doc.v = minimumDocumentVersion(doc.rules);
   validateDocument(doc, policy);
   validateText(trashPath, 'trashPath', { min: 1 });
   addresses.forEach((address, i) => validateAddress(address, `addresses[${i}]`));

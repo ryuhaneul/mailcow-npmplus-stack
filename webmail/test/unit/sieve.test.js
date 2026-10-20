@@ -328,8 +328,8 @@ test('state classification covers all seven states and the approved inactive-wit
   const script = generateScript(document(), context);
   const cases = [
     [{}, 'none'],
-    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [], items: [{ status: 'changed' }] } }, 'import_pending'],
-    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [], items: [{ status: 'same' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', rules: [rule()], items: [{ status: 'changed' }, { status: 'unconvertible' }] } }, 'import_pending'],
+    [{ activeName: 'legacy', importReport: { format: 'rainloop', rules: [rule()], items: [{ status: 'same' }] } }, 'import_pending'],
     [{ activeName: 'legacy', importReport: { format: 'unknown', items: [] } }, 'import_blocked'],
     [{ activeName: 'legacy', importReport: { format: 'gmail2sieve', items: [{ status: 'unconvertible' }] } }, 'import_blocked'],
     [{ activeName: 'legacy' }, 'import_blocked'],
@@ -441,4 +441,34 @@ test('condition reader normalizes joins and De Morgan but rejects unsupported ex
     'header :matches "subject" "a?b"', 'header :matches "subject" "a\\\\q"',
     `allof(${h}, anyof(${h}, allof(${h}, ${h})))`,
   ]) assert.throws(() => read(text), text);
+});
+
+// Unknown versions must not offer destructive recovery.
+test('intact future-version envelopes are newer_version; damaged future envelopes stay damaged', () => {
+  const doc = { ...document(), v: 3 };
+  doc.rules[0].conditions[0].op = 'matches';
+  const script = envelope(doc);
+  assert.deepEqual(parseScript(script), { state: 'newer_version', doc, rev: doc.rev });
+  assert.equal(classifyState({ activeName: 'legacy', webmailScript: script }).state, 'newer_version');
+  assert.equal(parseScript(`${script}# external\n`).state, 'damaged');
+  assert.equal(parseScript(envelope({ ...doc, rev: -1 })).state, 'damaged');
+});
+
+
+test('import and generation share minimum versions for groups, patterns and flat rules', async () => {
+  const { minimumDocumentVersion } = await import('../../server/sieve/model.js');
+  const { rulesDocument } = await import('../../server/sieve/import.js');
+  for (const [conditions, expected] of [
+    [[{ field: 'subject', op: 'has', value: 'basic' }], 1],
+    [[{ field: 'from', op: 'matches', value: '*@example.com' }], 2],
+    [[{ field: 'subject', op: 'has', value: 'basic' }, { match: 'any', conditions: [
+      { field: 'from', op: 'has', value: 'notice@example.com' },
+      { field: 'subject', op: 'has', value: 'news' },
+    ] }], 2],
+  ]) {
+    const doc = document(); doc.rules[0].conditions = conditions;
+    assert.equal(minimumDocumentVersion(doc.rules), expected);
+    assert.equal(rulesDocument(doc.rules).v, expected);
+    assert.equal(parseScript(generateScript(doc, context)).doc.v, expected);
+  }
 });

@@ -8,7 +8,7 @@ import { parseScript } from './parse.js';
 export function classifyState({ activeName = null, webmailScript = null, folders = [], importReport } = {}) {
   if (webmailScript === null) {
     const canImport = ['gmail2sieve', 'rainloop'].includes(importReport?.format)
-      && Array.isArray(importReport.items) && importReport.items.every(item => ['same', 'changed'].includes(item.status));
+      && Array.isArray(importReport.items) && importReport.rules?.length > 0 && importReport.items.some(item => ['same', 'changed'].includes(item.status));
     const state = activeName === null ? 'none' : canImport ? 'import_pending' : 'import_blocked';
     return { state, activeName, doc: null, rev: null, missingFolders: [], ...(importReport === undefined ? {} : { importReport }) };
   }

@@ -28,12 +28,17 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
   const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});t.after(()=>browser.close());
   const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
   async function open(options={}){
-    const page=await browser.newPage({viewport:{width:1280,height:900}}),errors=[],requests=[],contents=[];
+    const page=await browser.newPage({viewport:{width:options.width||1280,height:900}}),errors=[],consoleErrors=[],requests=[],contents=[];
     page.setDefaultTimeout(5000);
     page.on('pageerror',error=>errors.push(error.message));
+    page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text());});
     await page.route('**/api/signatures',route=>route.fulfill({status:options.failList?503:200,json:options.failList?{error:{code:'SIGNATURE_SAVE_RETRY',message:'합성 실패'}}:options.signatures||signatures}));
     await page.route('**/api/signature-images',route=>route.fulfill({status:options.failImages?503:200,json:options.failImages?{error:{code:'MAIL_UNAVAILABLE',message:'합성 실패'}}:images}));
-    await page.route('**/api/signature-images/*/content',route=>{contents.push(route.request().url());return route.fulfill({status:200,contentType:'image/png',body:bytes});});
+    await page.route('**/api/signature-images/*/content',async route=>{
+      contents.push(route.request().url());
+      if(options.imageGate)await options.imageGate;
+      return route.fulfill(options.failContent?{status:404,json:{error:{code:'SIGNATURE_IMAGE_NOT_FOUND',message:'합성 이미지 없음'}}}:{status:200,contentType:'image/png',body:bytes});
+    });
     let draftUid=1000;
     await page.route('**/api/drafts',async route=>{
       requests.push({path:'draft',body:route.request().postDataJSON()});
@@ -50,12 +55,12 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
       await page.evaluate(async({kind,message})=>{const {composeSeed}=await import('/src/state/compose.js');const {navigate}=await import('/src/router.js');composeSeed.value={kind,message};navigate('compose');},{kind:options.kind,message});
     }else await page.goto(origin+'/#compose');
     const body=page.frameLocator('iframe.compose-editor').locator('body');
-    await expect(body).toHaveAttribute('contenteditable','true');
+    if(options.waitReady!==false)await expect(body).toHaveAttribute('contenteditable','true');
     const button=page.getByRole('button',{name:/^서명: /}),source=page.getByRole('textbox',{name:'HTML 원문 편집',exact:true});
     async function choose(name){await button.click();await page.getByRole('menuitemradio',{name,exact:true}).click();}
     async function html(){await page.getByRole('button',{name:'HTML 원문',exact:true}).click();const value=await source.inputValue();await page.getByRole('button',{name:'HTML 원문',exact:true}).click();return value;}
     async function recipient(){await page.getByRole('combobox',{name:'받는 사람 추가',exact:true}).fill('recipient@example.com');}
-    return {page,body,button,source,choose,html,recipient,requests,contents,errors};
+    return {page,body,button,source,choose,html,recipient,requests,contents,errors,consoleErrors};
   }
   function payload(body,id=assetA){
     assert.deepEqual(Object.keys(body).sort(),['from','to','cc','bcc','subject','html','signatureImages','attachmentIds',...(body.draftRef?['draftRef']:[])].sort());
@@ -65,6 +70,37 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     assert.equal((body.html.match(new RegExp(entry.token.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'))||[]).length,id===assetA?2:1);
     assert.equal(body.html.includes('blob:'),false);assert.equal(body.html.includes('cid:wm-sig-v1.'),false);
   }
+  for(const width of [1280,390])await t.test(`initial image projection waits without broken frames or console errors at ${width}`,async()=>{
+    let release;const imageGate=new Promise(resolve=>release=resolve),c=await open({width,imageGate,waitReady:false});
+    try{
+      await expect.poll(()=>c.contents.length).toBe(1);
+      await expect(c.page.locator('iframe.compose-editor')).toHaveCount(0);
+      await expect(c.page.getByRole('status').filter({hasText:'보낼 주소를 불러오는 중…'})).toBeVisible();
+      assert.deepEqual(c.consoleErrors,[]);assert.deepEqual(c.errors,[]);
+      if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR){await mkdir(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR,{recursive:true});await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/compose-initial-pending-${width}.png`});}
+      release();
+      await expect(c.body).toHaveAttribute('contenteditable','true');
+      await expect(c.body.locator('img')).toHaveCount(2);
+      await expect(c.body.locator('img').first()).toHaveAttribute('src',/^blob:/);
+      await expect.poll(()=>c.body.locator('img').evaluateAll(imgs=>imgs.every(img=>img.complete&&img.naturalWidth>0))).toBe(true);
+      assert.deepEqual(c.consoleErrors,[]);assert.deepEqual(c.errors,[]);
+      if(process.env.SIGNATURE_COMPOSE_CAPTURE_DIR)await c.page.screenshot({path:`${process.env.SIGNATURE_COMPOSE_CAPTURE_DIR}/compose-initial-ready-${width}.png`});
+      await c.body.evaluate(body=>{body.prepend(Object.assign(body.ownerDocument.createElement('p'),{textContent:'지연 뒤 본문'}));body.dispatchEvent(new Event('input',{bubbles:true}));});
+      await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();
+      await expect.poll(()=>c.requests.filter(r=>r.path==='send').length).toBe(1);
+      const sent=c.requests.find(r=>r.path==='send').body;payload(sent);assert.match(sent.html,/지연 뒤 본문/);
+    }finally{release();await c.page.close();}
+  });
+  await t.test('initial image mapping failure opens without signature and keeps writing and sending usable',async()=>{
+    const c=await open({failContent:true});try{
+      await expect(c.page.getByRole('alert')).toHaveText('서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.');
+      await expect(c.button).toHaveText('서명: 없음');await expect(c.body.locator('.sig')).toHaveCount(0);await expect(c.body.locator('img')).toHaveCount(0);
+      assert.equal(c.consoleErrors.some(message=>message.includes('ERR_UNKNOWN_URL_SCHEME')),false);
+      await c.body.fill('이미지 실패 뒤 본문');await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();
+      await expect.poll(()=>c.requests.filter(r=>r.path==='send').length).toBe(1);
+      const sent=c.requests.find(r=>r.path==='send').body;assert.deepEqual(sent.signatureImages,[]);assert.match(sent.html,/이미지 실패 뒤 본문/);assert.doesNotMatch(sent.html,/wm-compose-v1|blob:/);assert.deepEqual(c.errors,[]);
+    }finally{await c.page.close();}
+  });
   await t.test('new default projects only registered images; rich editing and send retain exact manifest tokens',async()=>{
     const c=await open();try{
       await expect(c.button).toHaveText('서명: 외부 연락용');await expect(c.body.locator('img').first()).toHaveAttribute('src',/^blob:/);

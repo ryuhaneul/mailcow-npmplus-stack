@@ -59,7 +59,18 @@ export default function Composer() {
         const signatures=assets.signatures||{items:[],defaults:{}},images=assets.images||{images:[]};
         signatureSnapshot.current=signatures;imageSnapshot.current=images;
         if(assets.error)setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
-        const value=initialComposition(seed,identities,prefs.value,owner.current.user.email,{signatures,images});current.current=value;setModel(value);setShowCc(value.cc.length>0);setShowBcc(false);composeSeed.value=null;
+        const value=initialComposition(seed,identities,prefs.value,owner.current.user.email,{signatures,images});
+        let urls=new Map();
+        try{
+          const ids=[...new Set(value.signatureImages.map(entry=>entry.assetId))];
+          urls=new Map(await Promise.all(ids.map(async id=>[id,await imageMap.current.urlFor(id)])));
+        }catch(error){
+          if(cancelled||!active())return;
+          Object.assign(value,selectCompositionSignature(value,null,signatures,images).patch);
+          setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
+        }
+        if(cancelled||!active())return;
+        setImageUrls(urls);current.current=value;setModel(value);setShowCc(value.cc.length>0);setShowBcc(false);composeSeed.value=null;
         if(seed){version.current=1;editedAt.current=Date.now();schedule();}
       }catch(value){if(!cancelled)fail(value);}
     })();

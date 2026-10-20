@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseSearchQuery } from '../../server/mail/search-query.js';
 import { createListService, listOptions } from '../../server/mail/list.js';
-import { decodeRef } from '../../server/mail/ref.js';
+import { decodeRef, encodeRef, originalRefs } from '../../server/mail/ref.js';
+import { scopeOptions, resolveListScope, sortUids, resolveCandidateSources, matchesFolderFilters } from '../../server/mail/list-query.js';
 import { validateDocument } from '../../server/sieve/model.js';
 import { createApp } from '../../server/app.js';
 
@@ -280,4 +281,211 @@ test('ordinary list SORT can exceed 50 seconds without SEARCH_SLOW or closing it
   t.mock.timers.tick(55000); await nextTurn();
   assert.equal(settled, false); assert.equal(closed, 0);
   resume(); assert.equal((await pending).total, 5); assert.equal(closed, 0);
+});
+
+
+async function scopeCandidates(f, query, options = {}) {
+  const scope = await resolveListScope(f.session, query, { imap: f.imap, budget: options.budget });
+  return f.imap.withMailbox(f.session, scope.mailbox, async client => {
+    const uids = await sortUids(client, scope.imap, scope.searching, { budget: options.budget });
+    return resolveCandidateSources(client, f.session, uids, scope, options);
+  }, { budget: options.budget });
+}
+
+test('shared scope: pagination is list-only, defaults and invalid conditions agree', async () => {
+  assert.deepEqual(scopeOptions(), { mailbox: 'INBOX', filters: [], imap: [], searching: false });
+  assert.deepEqual(scopeOptions({ page: 'invalid', pageSize: '-1' }), scopeOptions());
+  assert.throws(() => listOptions({ page: 'invalid' }), { code: 'LIST_QUERY_INVALID' });
+  for (const query of [{ view: 'bad' }, { view: 'folder' }, { quick: 'bad' }, { q: '\u0000' }, { in: [] }, { q: 'from:' }, { q: '"unclosed' }]) {
+    const f = fixture();
+    await assert.rejects(resolveListScope(f.session, query, { imap: f.imap }), { statusCode: 400 });
+    await assert.rejects(f.service.messages(f.session, query), { statusCode: 400 });
+  }
+});
+
+for (const view of ['inbox', 'allmail', 'folder', 'spam']) {
+  for (const quick of ['all', 'unread', 'starred', 'attach']) {
+    test(`shared candidates equal list: ${view}/${quick}, folder-only and combined filters`, async () => {
+      const variants = [
+        {}, { q: 'in:견적' }, { q: 'in:Projects/견적' }, { q: '폴더:견적', in: 'Projects/견적' },
+        { q: 'in:견적', in: 'INBOX' }, { in: '견적' }, { q: 'subject:견적', in: '견적' },
+        { q: 'from:sender@example.com' }, { q: 'in:missing' }, { q: 'in:INBOX in:견적' },
+      ];
+      for (const variant of variants) {
+        const f = fixture(), query = { view, quick, ...(view === 'folder' ? { folder: 'Projects/견적' } : {}), ...variant };
+        const listed = await f.service.messages(f.session, { ...query, pageSize: '100' });
+        const candidates = await scopeCandidates(f, query, { freshValidity: true });
+        assert.deepEqual(candidates.map(source => source.ref).sort(), listed.items.map(item => item.ref).sort(), JSON.stringify(query));
+        assert.equal(candidates.length, listed.total);
+        assert.ok(candidates.every(source => source.path !== 'WebmailVirtual/AllMail'));
+        const narrowed = quick === 'all' ? [5, 4, 3, 2, 1] : [4, 2];
+        const virtual = view === 'allmail' || (view !== 'spam' && Boolean(variant.q));
+        const mailbox = view === 'spam' ? 'Junk' : view === 'folder' ? 'Projects/견적' : 'INBOX';
+        const filters = [...(variant.q?.includes('in:INBOX') ? ['INBOX'] : []), ...(variant.q?.includes('견적') && !variant.q.startsWith('subject:') ? ['Projects/견적'] : []), ...(variant.q?.includes('in:missing') ? ['missing'] : []), ...(variant.in ? [variant.in === '견적' ? 'Projects/견적' : variant.in] : [])];
+        const expected = narrowed.filter(uid => filters.every(path => path === (virtual ? f.client.sources.get(uid) : mailbox)));
+        assert.deepEqual(candidates.map(source => source.uid), expected.map(uid => virtual ? uid + 100 : uid), JSON.stringify(query));
+      }
+    });
+  }
+}
+
+test('shared folders: exact path wins; ambiguous basename fails in both callers; filters use AND', async () => {
+  const f = fixture();
+  f.client.mailboxes.push('Other/견적');
+  for (const query of [{ q: 'in:견적' }, { view: 'allmail', in: '견적' }]) {
+    await assert.rejects(scopeCandidates(f, query), { code: 'SEARCH_FOLDER_AMBIGUOUS' });
+    await assert.rejects(f.service.messages(f.session, query), { code: 'SEARCH_FOLDER_AMBIGUOUS' });
+  }
+  assert.equal((await scopeCandidates(f, { q: 'in:Projects/견적' })).length, 2);
+  f.client.mailboxes.push('견적');
+  assert.deepEqual((await resolveListScope(f.session, { q: 'in:견적' }, { imap: f.imap })).filters, ['견적']);
+  assert.equal((await scopeCandidates(f, { q: 'in:견적' })).length, 0);
+  assert.equal(matchesFolderFilters('INBOX', ['INBOX', 'Projects/견적']), false);
+});
+
+test('shared special-use scope: Trash/Junk searches stay local; ordinary folders search actual virtual candidates', async () => {
+  const f = fixture();
+  f.client.mailboxes.push('Deleted Items', 'Spam Mail', 'Drafts', 'Shared/team', 'Excluded');
+  f.client.specialUses = new Map([['Deleted Items', '\\Trash'], ['Spam Mail', '\\Junk']]);
+  for (const query of [
+    { view: 'folder', folder: 'Deleted Items', q: 'in:"Deleted Items"' },
+    { view: 'folder', folder: 'Spam Mail', q: 'invoice' },
+    { view: 'spam', q: 'invoice' },
+    { view: 'folder', folder: 'Projects/견적', q: 'invoice' },
+    { view: 'folder', folder: 'Trash', q: 'invoice' },
+  ]) {
+    const scope = await resolveListScope(f.session, query, { imap: f.imap });
+    const listed = await f.service.messages(f.session, query), sources = await scopeCandidates(f, query);
+    assert.deepEqual(sources.map(source => source.ref), listed.items.map(item => item.ref));
+    const expected = query.folder === 'Deleted Items' ? 'Deleted Items' : query.view === 'spam' || query.folder === 'Spam Mail' ? 'Spam Mail' : 'WebmailVirtual/AllMail';
+    assert.equal(scope.mailbox, expected);
+    assert.ok(sources.every(source => !['Drafts', 'Shared/team', 'Excluded'].includes(source.path)));
+  }
+  const ordinary = await scopeCandidates(f, { view: 'folder', folder: 'Projects/견적', q: 'invoice' });
+  assert.ok(ordinary.some(source => source.path === 'INBOX'));
+  assert.deepEqual(scopeOptions({ q: '이전:2025-01-01' }).imap, [{ text: '이전:2025-01-01' }]);
+});
+
+test('list retains page-only original conversion; empty candidate input issues no FETCH', async () => {
+  const f = fixture();
+  await f.service.messages(f.session, { view: 'allmail', pageSize: '1' });
+  assert.equal(f.client.rawFetches, 1);
+  assert.deepEqual(await resolveCandidateSources(f.client, f.session, [], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { freshValidity: true }), []);
+  assert.equal(f.client.rawFetches, 1);
+});
+
+test('fresh original validity bypasses the display cache and brackets authoritative mapping FETCH', async () => {
+  const f = fixture(), exec = f.client.exec.bind(f.client);
+  let validity = 123, statuses = 0;
+  f.client.exec = async (command, attributes, options) => {
+    if (command !== 'STATUS') return exec(command, attributes, options);
+    statuses++;
+    options.untagged.STATUS({ attributes: [attributes[0], [{ value: 'UIDVALIDITY' }, { value: String(validity) }]] });
+    return { next() {} };
+  };
+  await f.client.getMailboxLock('WebmailVirtual/AllMail');
+  const old = await originalRefs(f.client, f.session, '4');
+  validity = 456;
+  assert.equal(decodeRef((await originalRefs(f.client, f.session, '4'))[0].ref).uidValidity, 123);
+  const fresh = await resolveCandidateSources(f.client, f.session, [4], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { freshValidity: true });
+  assert.equal(decodeRef(old[0].ref).uidValidity, 123);
+  assert.equal(fresh[0].uidValidity, 456);
+  assert.equal(decodeRef(fresh[0].ref).uidValidity, 456);
+  assert.equal(statuses, 9);
+});
+
+for (const race of ['source-recreated-same-uid', 'virtual-recreated', 'mapping-new-folder', 'mapping-missing']) {
+  test(`fresh original conversion rejects ${race} before a candidate can be changed`, async () => {
+    const f = fixture(), exec = f.client.exec.bind(f.client);
+    await f.client.getMailboxLock('WebmailVirtual/AllMail');
+    let validity = 123, fetches = 0, changes = 0;
+    f.client.exec = async (command, attributes, options) => {
+      if (command === 'STATUS') {
+        options.untagged.STATUS({ attributes: [attributes[0], [{ value: 'UIDVALIDITY' }, { value: String(validity) }]] });
+        return { next() {} };
+      }
+      if (command === 'UID FETCH' && ++fetches === 1) {
+        if (race === 'source-recreated-same-uid') validity = 456;
+        if (race === 'virtual-recreated') f.client.mailbox.uidValidity = 999n;
+        if (race === 'mapping-new-folder') f.client.sources.set(4, 'NewFolder');
+        if (race === 'mapping-missing') return { next() {} };
+      }
+      return exec(command, attributes, options);
+    };
+    await assert.rejects((async () => {
+      await resolveCandidateSources(f.client, f.session, [4], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { freshValidity: true });
+      changes++;
+    })(), { code: 'STALE_SCOPE' });
+    assert.equal(changes, 0);
+    assert.equal(fetches, 1);
+  });
+}
+
+test('fresh original conversion rejects an initially missing virtual UID', async () => {
+  const f = fixture(); await f.client.getMailboxLock('WebmailVirtual/AllMail');
+  const exec = f.client.exec.bind(f.client);
+  f.client.exec = async (...args) => args[0] === 'UID FETCH' ? { next() {} } : exec(...args);
+  await assert.rejects(resolveCandidateSources(f.client, f.session, [4], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { freshValidity: true }), { code: 'STALE_SCOPE' });
+});
+
+test('shared budget: forwards the same budget, rejects before I/O and preserves upstream errors', async () => {
+  const f = fixture(), expired = { remainingMs: () => 0 }, budget = { remainingMs: () => 1000 };
+  for (const operation of [
+    () => resolveListScope(f.session, { q: 'in:견적' }, { imap: f.imap, budget: expired }),
+    () => sortUids(f.client, [], false, { budget: expired }),
+    () => resolveCandidateSources(f.client, f.session, [4], { mailbox: 'WebmailVirtual/AllMail', filters: [] }, { budget: expired }),
+    () => f.service.metadata(f.session, [encodeRef('INBOX', 321, 4)], { budget: expired }),
+  ]) await assert.rejects(operation(), error => error.code === 'MAIL_UNAVAILABLE' && error.budgetExhausted === true);
+  assert.equal(f.client.sorts.length, 0); assert.equal(f.client.rawFetches, 0); assert.equal(f.client.fetches.length, 0);
+  const failure = Object.assign(new Error('synthetic exhausted'), { code: 'MAIL_UNAVAILABLE', budgetExhausted: true });
+  const imap = { async withMailbox(_session, _path, _operation, options) { assert.equal(options.budget, budget); throw failure; } };
+  await assert.rejects(resolveListScope(f.session, { view: 'spam' }, { imap, budget }), error => error === failure);
+  const metadata = createListService({ imap });
+  await assert.rejects(metadata.metadata(f.session, [encodeRef('INBOX', 321, 4)], { budget }), error => error === failure);
+});
+
+test('shared budget stops original conversion between I/O operations', async () => {
+  const f = fixture(); await f.client.getMailboxLock('WebmailVirtual/AllMail');
+  const exec = f.client.exec.bind(f.client);
+  let remaining = 1000, statuses = 0;
+  f.client.exec = async (...args) => {
+    if (args[0] === 'STATUS') statuses++;
+    const result = await exec(...args);
+    if (args[0] === 'UID FETCH') remaining = 0;
+    return result;
+  };
+  await assert.rejects(originalRefs(f.client, f.session, '4', { freshValidity: true, budget: { remainingMs: () => remaining } }), error => error.budgetExhausted === true);
+  assert.equal(statuses, 4);
+});
+
+test('shared SORT uses remaining request budget rather than a new search timeout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(); let remaining = 17, closed = 0;
+  f.client.exec = async () => new Promise(() => {});
+  f.client.close = () => { closed++; };
+  const pending = assert.rejects(sortUids(f.client, [], true, { budget: { remainingMs: () => remaining } }), error => error.code === 'MAIL_UNAVAILABLE' && error.budgetExhausted === true);
+  t.mock.timers.tick(16); await nextTurn(); assert.equal(closed, 0);
+  remaining = 0; t.mock.timers.tick(1); await pending; assert.equal(closed, 1);
+});
+
+test('failed-list metadata: minimal read-only FETCH, original identity/order, missing omitted and stale refused', async () => {
+  const f = fixture(), refs = [encodeRef('Projects/견적', 321, 2), encodeRef('INBOX', 321, 5), encodeRef('Projects/견적', 321, 4)];
+  const budget = { remainingMs: () => 1000 }, withMailbox = f.imap.withMailbox.bind(f.imap);
+  f.imap.withMailbox = async (session, path, operation, options) => {
+    assert.equal(options.budget, budget);
+    return withMailbox(session, path, operation);
+  };
+  f.client.disappeared = 4;
+  const rows = await f.service.metadata(f.session, refs, { budget });
+  assert.deepEqual(rows.map(row => row.ref), refs.slice(0, 2));
+  assert.deepEqual(rows.map(row => row.folder), ['Projects/견적', 'INBOX']);
+  assert.equal(f.client.fetches.length, 2);
+  assert.deepEqual(f.client.fetches[0].query, { envelope: true, flags: true, internalDate: true, size: true, headers: ['CONTENT-TYPE'] });
+  assert.deepEqual(f.client.fetches[0].options, { uid: true });
+  assert.equal(f.client.unflagged.size, 0); assert.equal(f.client.rawFetches, 0); assert.equal(f.client.sorts.length, 0);
+  f.client.fetches.length = 0;
+  await assert.rejects(f.service.metadata(f.session, [encodeRef('INBOX', 999, 5)], { budget }), { code: 'STALE_REF' });
+  await assert.rejects(f.service.metadata(f.session, [encodeRef('missing', 321, 5)], { budget }), { code: 'STALE_REF' });
+  assert.equal(f.client.fetches.length, 0);
+  assert.deepEqual(await f.service.metadata(f.session, [], { budget }), []);
 });

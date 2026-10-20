@@ -10,7 +10,12 @@ import SettingsTabs from './SettingsTabs.jsx';
 import { RuleSummary } from './RuleList.jsx';
 import RulePreview from './RulePreview.jsx';
 import { forwardStatus, personalFolder, ruleProblem, seededConditions } from './rule-form.js';
+import { normalizeConditionTree } from '../../../server/sieve/condition-tree.js';
 import './rule-builder.css';
+
+function rulesDocumentVersion(rules) {
+  return rules.some(rule => rule.conditions.some(c => c.conditions || c.op === 'matches')) ? 2 : 1;
+}
 
 export default function RuleBuilder({ id, query }) {
   const [data, setData] = useState(null);
@@ -24,6 +29,14 @@ export default function RuleBuilder({ id, query }) {
   const [pending, setPending] = useState(false);
   const live = useRef(true);
   const saving = useRef(false);
+  const conditionEditor = useRef(null);
+  const nextFocus = useRef(null);
+  useLayoutEffect(() => {
+    if (nextFocus.current) {
+      conditionEditor.current?.querySelector(nextFocus.current)?.focus();
+      nextFocus.current = null;
+    }
+  }, [draft]);
   useEffect(() => {live.current = true; return () => {live.current = false;};}, []);
   async function load() {
     setError(null); setBusy(true); setData(null); setDraft(null); setPreview(null);
@@ -43,7 +56,12 @@ export default function RuleBuilder({ id, query }) {
   }
   useEffect(() => {load();}, []);
   const choices = folders.value.folders.filter(personalFolder);
-  const rule = draft && {...draft,actions:{...draft.actions,...(draft.actions.forward ? {forward:forwardStatus(forwardText, data.internalDomains).addresses} : {})}};
+  let tree;
+  if (draft) {
+    try {tree = normalizeConditionTree({match:draft.match,conditions:draft.conditions});}
+    catch {tree = {match:draft.match,conditions:draft.conditions};}
+  }
+  const rule = draft && {...draft,...tree,actions:{...draft.actions,...(draft.actions.forward ? {forward:forwardStatus(forwardText, data.internalDomains).addresses} : {})}};
   const problem = rule ? ruleProblem(rule, folders.value.folders, data.internalDomains, forwardText) : null;
   const serialized = rule && JSON.stringify(rule);
   useLayoutEffect(() => {
@@ -65,8 +83,37 @@ export default function RuleBuilder({ id, query }) {
     timer = setTimeout(refresh, 300);
     return () => {current = false; clearTimeout(timer); controller.abort();};
   }, [serialized, problem]);
-  function updateCondition(index, patch) {
-    setDraft({...draft,conditions:draft.conditions.map((condition, i) => i === index ? {...condition,...patch} : condition)});
+  const leaves = draft?.conditions.flatMap(c => c.conditions ?? [c]) ?? [];
+  function changeConditions(conditions, focus) {
+    nextFocus.current = focus;
+    setDraft({...draft,conditions});
+  }
+  function updateCondition(index, patch, childIndex) {
+    changeConditions(draft.conditions.map((condition, i) => i !== index ? condition : childIndex === undefined ? {...condition,...patch} : {...condition,conditions:condition.conditions.map((child,j) => j === childIndex ? {...child,...patch} : child)}));
+  }
+  function addCondition(index) {
+    const condition = {field:'subject',op:'has',value:''};
+    if (index === undefined) changeConditions([...draft.conditions,condition], `[data-condition="${draft.conditions.length}"] select`);
+    else changeConditions(draft.conditions.map((c,i) => i === index ? {...c,conditions:[...c.conditions,condition]} : c), `[data-condition="${index}-${draft.conditions[index].conditions.length}"] select`);
+  }
+  function removeCondition(index, childIndex) {
+    if (childIndex === undefined) {
+      const conditions = draft.conditions.filter((_,i) => i !== index);
+      changeConditions(conditions, `[data-condition="${Math.min(index,conditions.length-1)}"] select, [data-group="${Math.min(index,conditions.length-1)}"] button`);
+    } else {
+      const children = draft.conditions[index].conditions.filter((_,i) => i !== childIndex);
+      changeConditions(draft.conditions.map((c,i) => i === index ? {...c,conditions:children} : c), `[data-condition="${index}-${Math.min(childIndex,children.length-1)}"] select`);
+    }
+  }
+  function conditionRow(condition,index,childIndex,groupNumber) {
+    const label = childIndex === undefined ? `${index+1}번 조건` : `묶음 ${groupNumber}의 ${childIndex+1}번 조건`;
+    const update = patch => updateCondition(index,patch,childIndex);
+    return <div class="cond" key={childIndex ?? index} data-condition={childIndex === undefined ? index : `${index}-${childIndex}`}>
+      <select class="dd" aria-label={`${label} 항목`} value={condition.field} onChange={e => update({field:e.currentTarget.value,...(e.currentTarget.value === 'attachment' ? {op:'has',value:''} : {})})}>{[['from','보낸 사람'],['to','받는 사람(To·Cc)'],['subject','제목'],['attachment','첨부파일']].map(([value,label]) => <option value={value}>{label}</option>)}</select>
+      <select class="dd" aria-label={`${label} 방식`} disabled={condition.field === 'attachment'} value={condition.op} onChange={e => update({op:e.currentTarget.value})}>{(condition.field === 'attachment' ? [['has','있음']] : [['has','포함'],['not','포함 안 됨'],['eq',condition.field === 'subject' ? '제목이 정확히' : '주소가 정확히'],['start',condition.field === 'subject' ? '제목이 시작' : '주소가 시작'],['matches','패턴(*)']]).map(([value,label]) => <option value={value}>{label}</option>)}</select>
+      <input class={`inp${condition.op === 'matches' ? ' rule-pattern-input' : ''}`} aria-label={`${label} 값`} aria-describedby={condition.op === 'matches' ? 'rule-pattern-note' : undefined} value={condition.value} disabled={condition.field === 'attachment'} placeholder={condition.field === 'attachment' ? '값 필요 없음' : '조건 값을 입력하세요'} onInput={e => update({value:e.currentTarget.value})}/>
+      <button class="ib remove-condition" type="button" aria-label={`${label} 빼기`} disabled={childIndex === undefined ? draft.conditions.length === 1 : draft.conditions[index].conditions.length <= 2} onClick={() => removeCondition(index,childIndex)}><Icon name="minus"/></button>
+    </div>;
   }
   function toggleAction(name, checked) {
     const actions = {...draft.actions};
@@ -81,7 +128,7 @@ export default function RuleBuilder({ id, query }) {
     let saved = false;
     try {
       const rules = id ? data.doc.rules.map(item => item.id === id ? rule : item) : [...data.doc.rules, rule];
-      await api('/api/rules', {method:'PUT',body:{baseRev:data.rev,doc:{...data.doc,rules}}});
+      await api('/api/rules', {method:'PUT',body:{baseRev:data.rev,doc:{...data.doc,v:rulesDocumentVersion(rules),rules}}});
       saved = true;
       if (applyOld) {
         try {
@@ -103,16 +150,24 @@ export default function RuleBuilder({ id, query }) {
       {rule && error?.code !== 'SIEVE_DISABLED' && <div class="builder"><form onSubmit={save}>
         <div class="summary"><small>이렇게 동작합니다</small><RuleSummary rule={rule}/></div>
         <fieldset class="rule-fields" disabled={busy || Boolean(error)}>
-          <div class="step"><h2><i aria-hidden="true">1</i>어떤 메일에<span class="seg" role="group" aria-label="조건 결합">{[['all','모두 맞을 때'],['any','하나라도 맞을 때']].map(([value,label]) => <button type="button" aria-pressed={rule.match === value} onClick={() => setDraft({...draft,match:value})}>{label}</button>)}</span></h2>
-            {rule.conditions.map((condition,index) => <div class="cond" key={index}>
-              <select class="dd" aria-label={`${index+1}번 조건 항목`} value={condition.field} onChange={e => updateCondition(index, {field:e.currentTarget.value,...(e.currentTarget.value === 'attachment' ? {op:'has',value:''} : {})})}>{[['from','보낸 사람'],['to','받는 사람(To·Cc)'],['subject','제목'],['attachment','첨부파일']].map(([value,label]) => <option value={value}>{label}</option>)}</select>
-              <select class="dd" aria-label={`${index+1}번 조건 방식`} disabled={condition.field === 'attachment'} value={condition.op} onChange={e => updateCondition(index,{op:e.currentTarget.value})}>{(condition.field === 'attachment' ? [['has','있음']] : [['has','포함'],['not','포함 안 됨'],['eq',condition.field === 'subject' ? '제목이 정확히' : '주소가 정확히'],['start',condition.field === 'subject' ? '제목이 시작' : '주소가 시작']]).map(([value,label]) => <option value={value}>{label}</option>)}</select>
-              <input class="inp" aria-label={`${index+1}번 조건 값`} value={condition.value} disabled={condition.field === 'attachment'} placeholder={condition.field === 'attachment' ? '값 필요 없음' : '조건 값을 입력하세요'} onInput={e => updateCondition(index,{value:e.currentTarget.value})}/>
-              <button class="ib remove-condition" type="button" aria-label={`${index+1}번 조건 빼기`} disabled={rule.conditions.length === 1} onClick={() => setDraft({...draft,conditions:draft.conditions.filter((_,i) => i !== index)})}><Icon name="minus"/></button>
-            </div>)}
-            <button class="addc" type="button" disabled={rule.conditions.length >= 10} onClick={() => setDraft({...draft,conditions:[...draft.conditions,{field:'subject',op:'has',value:''}]})}><Icon name="plus" size="s"/>조건 추가</button>
+          <div class="step" ref={conditionEditor}><h2><i aria-hidden="true">1</i>어떤 메일에<span class="seg" role="group" aria-label="조건 결합">{[['all',draft.conditions.every(c => c.conditions) ? '모든 묶음이 맞을 때' : '모두 맞을 때'],['any',draft.conditions.every(c => c.conditions) ? '묶음 하나라도 맞을 때' : '하나라도 맞을 때']].map(([value,label]) => <button type="button" aria-pressed={draft.match === value} onClick={() => setDraft({...draft,match:value})}>{label}</button>)}</span></h2>
+            <div class="rule-condition-items">{draft.conditions.map((condition,index) => {
+              if (!condition.conditions) return conditionRow(condition,index);
+              const number = draft.conditions.slice(0,index+1).filter(c => c.conditions).length;
+              return <div key={index}>
+                {index > 0 && <div class="rule-group-join" aria-hidden="true"><span>{draft.match === 'all' ? '그리고' : '또는'}</span></div>}
+                <fieldset class="rule-condition-group" data-group={index} aria-label={`묶음 ${number}`}>
+                  <legend class="rule-group-head"><b>묶음 {number}</b><span class="seg" role="group" aria-label={`묶음 ${number} 조건 결합`}>{[['all','모두 맞을 때'],['any','하나라도 맞을 때']].map(([value,label]) => <button type="button" aria-pressed={condition.match === value} onClick={() => updateCondition(index,{match:value})}>{label}</button>)}</span><button type="button" class="ib" aria-label={`묶음 ${number} 빼기`} disabled={draft.conditions.length === 1} onClick={() => removeCondition(index)}><Icon name="x" size="s"/></button></legend>
+                  {condition.conditions.map((child,childIndex) => conditionRow(child,index,childIndex,number))}
+                  <button class="addc" type="button" disabled={leaves.length >= 20 || condition.conditions.length >= 10} onClick={() => addCondition(index)}><Icon name="plus" size="s"/>이 묶음에 조건 추가</button>
+                </fieldset>
+              </div>;
+            })}</div>
+            <div class="rule-group-foot"><button class="addc" type="button" data-add-condition disabled={draft.conditions.length >= 10 || leaves.length >= 20} onClick={() => addCondition()}><Icon name="plus" size="s"/>조건 추가</button><button class="addc" type="button" disabled={draft.conditions.length >= 10 || leaves.length > 18} onClick={() => changeConditions([...draft.conditions,{match:draft.match === 'all' ? 'any' : 'all',conditions:[{field:'subject',op:'has',value:''},{field:'subject',op:'has',value:''}]}], `[data-group="${draft.conditions.length}"] button`)}><Icon name="plus" size="s"/>묶음 추가</button>{draft.conditions.some(c => c.conditions) && <span class={`rule-condition-count${leaves.length === 20 ? ' full' : ''}`}>조건 {leaves.length}/20</span>}</div>
+            {draft.conditions.some(c => c.conditions) && <p class="rule-note">묶음은 한 단계까지만 만들 수 있어요(묶음 안에 묶음은 없어요). 바깥 조건은 10개, 묶음 안 조건은 2~10개, 전체 조건은 20개까지예요.</p>}
+            {leaves.some(c => c.op === 'matches') && <p class="rule-note" id="rule-pattern-note">패턴은 전체 값과 비교해요. *는 글자 0개 이상이며 20개까지 쓸 수 있어요. ?는 사용할 수 없어요. 글자 그대로는 \*, \?, \\로 입력하세요. 보낸 사람·받는 사람 패턴은 주소만 봅니다.</p>}
             <p class="rule-note">보낸 사람·받는 사람의 포함·포함 안 됨은 이름과 주소를 함께 봅니다. 정확히·시작은 주소만 봅니다. 받는 사람은 To·Cc를 모두 봅니다. 제목은 제목 전체를 비교하며, 영문 대소문자는 구분하지 않아요.</p>
-            {rule.conditions.some(c => c.field === 'attachment') && <p class="rule-note">첨부파일 있음은 메일의 최상위 Content-Type이 multipart/mixed인 경우예요.</p>}
+            {leaves.some(c => c.field === 'attachment') && <p class="rule-note">첨부파일 있음은 메일의 최상위 Content-Type이 multipart/mixed인 경우예요.</p>}
           </div>
           <div class="step"><h2><i aria-hidden="true">2</i>어떻게 할까요</h2><div class="acts-list">
             <div class={`act${Object.hasOwn(rule.actions,'move') ? ' on' : ''}`}><input id="rule-move" type="checkbox" checked={Object.hasOwn(rule.actions,'move')} disabled={Boolean(rule.actions.trash)} onChange={e => toggleAction('move',e.currentTarget.checked)}/><div><label for="rule-move">폴더로 옮기기</label><small>메일은 폴더 한 곳에만 들어갑니다. 받은편지함에서 빠져 이 폴더로 갑니다</small><div class="ex"><select class="dd" aria-label="옮길 폴더" disabled={!Object.hasOwn(rule.actions,'move')} value={rule.actions.move ?? ''} onChange={e => setDraft({...draft,actions:{...draft.actions,move:e.currentTarget.value}})}><option value="">폴더를 고르세요</option>{!choices.length && <option disabled>옮길 개인 폴더가 없어요</option>}{rule.actions.move && !choices.some(f => f.path === rule.actions.move) && <option value={rule.actions.move}>폴더 없음: {rule.actions.move}</option>}{choices.map(f => <option value={f.path}>{f.name}</option>)}</select></div></div></div>

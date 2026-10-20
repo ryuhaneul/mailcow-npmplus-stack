@@ -128,6 +128,17 @@
 .sig-dialog.d-dialog .delete-users li:last-child{border:0}
 .sig-dialog.d-dialog .delete-users small{display:block;font-size:12px;color:var(--ink-3);margin-top:3px}
 .sig-dialog.d-dialog .dialog-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+/* Composer uses the same picker and replacement dialog as Signature D. */
+.composer .compose-signature-bar{display:flex;align-items:center;gap:12px;position:relative;font-size:12px;color:var(--ink-3);padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:19px;flex-wrap:wrap}
+.composer .signature-picker{display:flex;align-items:center;gap:7px;max-width:100%;font-size:13px;font-weight:550;color:var(--ink-2);border:1px solid var(--line-2);border-radius:5px;padding:5px 9px;overflow-wrap:anywhere;text-align:left}
+.composer .signature-picker .i{flex:none}
+.composer .signature-picker:hover{background:var(--hover)}
+.composer .compose-signature-bar>small{font-size:11px;color:var(--warn)}
+.composer .signature-menu{position:absolute;left:37px;top:auto;bottom:calc(100% + 6px);z-index:10;width:220px;max-width:calc(100% - 37px);max-height:320px;overflow:auto;padding:5px;background:var(--surface);border:1px solid var(--line-2);border-radius:8px;box-shadow:var(--float)}
+.composer .signature-menu>button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:9px;text-align:left;padding:9px 12px;border-radius:5px;font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+.composer .signature-menu>button .i{flex:none}
+.composer .signature-menu>button:hover,.composer .signature-menu>button[aria-checked=true]{background:var(--sunken)}
+.composer .signature-picker:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:1050px){
   .signature-settings .sig-modebar .hint{display:none}
 }
@@ -137,6 +148,9 @@
   .signature-settings .sig-library{grid-row:2}
 }
 @media(max-width:700px){
+  .composer .compose-signature-bar{gap:9px}
+  .composer .signature-picker{font-size:12px}
+  .composer .signature-menu{left:33px;max-width:calc(100% - 33px);width:205px}
   .signature-settings .signature-list{padding:14px 12px;margin-bottom:14px}
   .signature-settings .signature-items>button{min-width:139px;max-width:185px;padding:9px 10px;font-size:12px}
   .signature-settings .signature-actions{flex-direction:column;align-items:flex-start;gap:9px;margin-bottom:14px}

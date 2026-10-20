@@ -39,7 +39,8 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   installClientIp(app);
   await installAuth(app, { ...auth, config });
   await installDirectory(app, { config });
-  await app.register(composeRoutes, { config, service: createComposeService({ config, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot }) });
+  const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
+  await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot }) });
   const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
@@ -49,7 +50,6 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await app.register(storageRoutes, { service: folderService });
   await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap }) });
   await app.register(eventRoutes, { listService });
-  const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
   const normalizeHtml = createSignatureNormalizer({ config, images });
   const signatures = createSignaturesService({ imap: app.imap, normalizeHtml, getIdentities: async session => {
     const { identities } = await app.directory.identities(session);

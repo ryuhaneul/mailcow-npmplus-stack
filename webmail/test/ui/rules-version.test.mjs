@@ -20,6 +20,8 @@ await test('newer filter versions hide unsupported summaries and all write contr
   t.after(() => browser.close());
   const captures = process.env.V2G_CAPTURE_DIR || '/tmp/webmail-v2g-captures';
   await mkdir(captures, { recursive: true });
+  for (const [activeName, label, message] of [['webmail-rules', 'active', '필터는 서버에서 계속 동작해요.'], [null, 'inactive', '필터가 꺼져 있어요'], ['legacy', 'other', '필터가 다른 프로그램에서 바뀌었어요']]) {
+  fake.state.rules = rulesFixture('newer_version', { doc, rev: doc.rev, prevAvailable: false, activeName, activeScript: activeName });
   for (const width of [1280, 768, 375]) {
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     const page = await context.newPage();
@@ -27,7 +29,8 @@ await test('newer filter versions hide unsupported summaries and all write contr
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/#filters`);
     await expect(page.locator('.rules-banner')).toHaveAttribute('data-state', 'newer_version');
-    await expect(page.locator('.rules-banner')).toContainText('새 버전 웹메일에서 만든 필터예요. 지금은 볼 수만 있어요.');
+    await expect(page.locator('.rules-banner')).toHaveText(`새 버전 웹메일에서 만든 필터예요. 지금은 볼 수만 있어요. ${message}`);
+    if (activeName !== 'webmail-rules') await expect(page.locator('.rules-banner')).not.toContainText('계속 동작');
     await expect(page.locator('.filters-view')).toContainText('이 버전에서는 규칙 조건을 표시할 수 없어요.');
     await expect(page.locator('.rules-banner button')).toHaveCount(0);
     await expect(page.locator('.filters-view a[href="#rule"]')).toHaveCount(0);
@@ -35,9 +38,10 @@ await test('newer filter versions hide unsupported summaries and all write contr
     await expect(page.locator('.filters-view')).not.toContainText('Synthetic meeting');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.evaluate(() => document.fonts.ready);
-    await page.screenshot({ path: `${captures}/newer-version-${width}.png` });
+    await page.screenshot({ path: `${captures}/newer-version-${label}-${width}.png` });
     assert.deepEqual(errors, []);
     await context.close();
+  }
   }
   assert.equal(fake.state.requests.some(request => request.path.startsWith('/api/rules') && request.method !== 'GET'), false);
   fake.state.rules = rulesFixture('ok');

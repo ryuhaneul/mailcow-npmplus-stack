@@ -56,7 +56,7 @@ class FakeImap extends EventEmitter {
   async messageDelete(uid, options) { this.calls.push({ action: 'delete', path: this.mailbox.path, uid, options }); return true; }
   async messageFlagsAdd(uid, flags, options) { this.calls.push({ action: 'flags', path: this.mailbox.path, uid, flags, options }); return true; }
 }
-async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables } = {}) {
+async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, images } = {}) {
   let time = Date.UTC(2026, 0, 1), logs = ''; const calls = [], clients = [], attempts = [];
   const actualConfig = { ...config, ...smtp?.options, ...overrides }, tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w09-'));
   const stream = new Writable({ write(chunk, _encoding, callback) { logs += chunk.toString(); callback(); } });
@@ -64,7 +64,7 @@ async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables }
   await installAuth(app, { config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
   const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [directoryTables ? directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || [] : sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
   const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); } };
-  const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot });
+  const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot, ...(images ? { images } : {}) });
   await app.register(composeRoutes, { config: actualConfig, service });
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   async function login() {
@@ -281,4 +281,29 @@ test('composeId is validated and may follow the multipart file', async t => {
   const response = await f.app.inject({ method: 'POST', url: '/api/attachments', headers: { ...f.headers, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload });
   assert.equal(response.statusCode, 201, response.body);
   assert.equal((await readdir(f.dir)).length, 1);
+});
+
+for (const [method, endpoint] of [['POST', '/api/send'], ['PUT', '/api/drafts']]) test(`signature manifest HTTP contract: ${endpoint} rejects malformed/missing and includes inline MIME`, async t => {
+  const assetId = 'A'.repeat(32), token = `cid:wm-compose-v1.${'I'.repeat(32)}.${assetId}@signature.invalid`;
+  const bytes = Buffer.from('47494638396101000100000000', 'hex');
+  let stored = { images: { [assetId]: { name: 'synthetic.gif', contentType: 'image/gif', base64: bytes.toString('base64') } } };
+  const f = await fixture(t, { images: { async read() { return stored; } } });
+  const signature = { html: `<p><img src="${token}"></p>`, signatureImages: [{ token, assetId }] };
+  failure(await request(f, method, endpoint, body({ ...signature, signatureImages: null })), 422, 'SIGNATURE_INVALID');
+  failure(await request(f, method, endpoint, body({ ...signature, signatureImages: [{ token, assetId: 'B'.repeat(32) }] })), 422, 'SIGNATURE_INVALID');
+  stored = { images: {} };
+  failure(await request(f, method, endpoint, body(signature)), 422, 'SIGNATURE_IMAGE_NOT_FOUND');
+  assert.equal(f.attempts.length, 0); assert.equal(f.calls.filter(call => call.action === 'append').length, 0);
+  stored = { images: { [assetId]: { name: 'synthetic.gif', contentType: 'image/gif', base64: bytes.toString('base64') } } };
+  const over = (await upload(f, Buffer.alloc(1024 * 1024 - bytes.length + 1))).json();
+  failure(await request(f, method, endpoint, body({ ...signature, attachmentIds: [over.id] })), 413, 'ATTACH_TOO_LARGE');
+  assert.equal(f.attempts.length, 0); assert.equal(f.calls.filter(call => call.action === 'append').length, 0);
+  assert.equal((await request(f, 'DELETE', `/api/attachments/${over.id}`)).statusCode, 204);
+  const result = await request(f, method, endpoint, body(signature));
+  assert.equal(result.statusCode, 200, result.body);
+  const raw = f.calls.find(call => call.action === 'append').raw.toString().replace(/\r\n[ \t]+/g, ' ');
+  assert.match(raw, /Content-Type: multipart\/related;/);
+  assert.match(raw, /Content-ID: <wm-inline-v1\.[A-Za-z0-9_-]{32}\.1@signature\.invalid>/);
+  assert.match(raw, /Content-Disposition: inline;/);
+  assert.ok(raw.includes(bytes.toString('base64')));
 });

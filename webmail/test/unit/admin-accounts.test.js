@@ -33,6 +33,7 @@ async function fixture(t) {
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});
     if (path === '/api/v1/get/filters/all') return structuredClone(filters.length ? filters : {});
+    if (path === '/api/v1/get/alias-domain/all') return [];
     if (path === '/api/v1/get/domain/all') return structuredClone(domains);
     if (path === '/api/v1/get/alias/all') return structuredClone(aliases);
     if (path === '/api/v1/get/syncjobs/all/no_log') return structuredClone(jobs);

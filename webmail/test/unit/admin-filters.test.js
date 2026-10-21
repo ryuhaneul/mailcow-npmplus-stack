@@ -15,6 +15,7 @@ import { SCRIPT_NAME } from '../../server/sieve/model.js';
 import { AppError } from '../../server/errors.js';
 import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
 
+const guard = 'if header :contains "X-Spam-Flag" "YES" { stop; }';
 const owner = 'owner@example.com', ctx = { session: {}, actor: 'admin', ip: '198.51.100.42', addr: owner };
 const original = '# original-synthetic-sieve-marker\r\nrequire ["copy"];\r\nredirect :copy "keep@example.com";\r\n';
 async function fixture(t) {
@@ -66,14 +67,29 @@ for (const source of ['redirect "keep@example.com";\n', 'if header :contains "Su
   const f = await fixture(t); await assert.rejects(edit(f, (await item(f)).etag, source), { statusCode: 422, code: 'MOVE_CONFIRM' }); assert.equal(writes(f).length, 0);
   assert.equal((await edit(f, (await item(f)).etag, source, { confirmMove: true })).script, source);
 });
-for (const target of ['outside@example.net', 'person@off.example.com', 'person@bad.example.com']) test(`admin filters: rejects external/inactive redirect ${target}`, async t => {
-  const f = await fixture(t); await assert.rejects(edit(f, (await item(f)).etag, `redirect :copy "${target}";`), { statusCode: 422, code: 'EXTERNAL_REDIRECT' }); assert.equal(writes(f).length, 0);
+for (const target of ['outside@example.net', 'person@off.example.com', 'person@bad.example.com']) test(`admin filters: allows external/inactive redirect ${target}`, async t => {
+  const f = await fixture(t); assert.equal((await edit(f, (await item(f)).etag, `${guard}\nredirect :copy "${target}";`)).script, `${guard}\nredirect :copy "${target}";`); assert.equal(writes(f).length, 1);
+});
+
+for (const source of ['redirect :copy "outside@example.net";', `redirect :copy "outside@example.net"; ${guard}`, `if true { ${guard} } redirect :copy "outside@example.net";`]) test(`admin filters: external spam guard rejects missing, late or nested guard ${source}`, async t => {
+  const f = await fixture(t);
+  await assert.rejects(edit(f, (await item(f)).etag, source), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  await assert.rejects(create(f, { preset: 'custom', script: source }), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  assert.equal(writes(f).length, 0);
+});
+test('admin filters: undo rechecks guard policy after a domain becomes external and audits failure', async t => {
+  const f = await fixture(t), result = await edit(f, (await item(f)).etag);
+  f.domains[0].active = '0';
+  await assert.rejects(revert(f, result.auditId), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  assert.equal(writes(f).length, 1);
+  const record = (await f.history.list()).items.find(row => row.revertOf === result.auditId);
+  assert.equal(record.result, 'failed'); assert.equal(record.code, 'EXTERNAL_SPAM_GUARD');
 });
 test('admin filters: active alias domain is internal and apparent redirect in comments/strings is ignored', async t => {
   const f = await fixture(t), source = '# redirect "outside@example.net";\n/* redirect "outside@example.net"; */\nif header :contains "Subject" "redirect outside@example.net" { redirect :copy "person@alias.example.com"; }';
   assert.equal((await edit(f, (await item(f)).etag, source)).script, source);
 });
-for (const source of ['redirect "${target}";', 'set "value" "${unknown}"; keep;', 'redirect :list "office";', 'redirect text:\nkeep@example.com\n.\n;', 'redirect :unknown "keep@example.com";', 'redirect "unterminated']) test(`admin filters: unsafe inspection rejected ${source}`, async t => {
+for (const source of ['redirect "${target}";', 'set "target" "outside@example.net"; redirect "${target}";', 'redirect :list "office";', 'redirect text:\nkeep@example.com\n.\n;', 'redirect :unknown "keep@example.com";', 'redirect "unterminated']) test(`admin filters: unsafe inspection rejected ${source}`, async t => {
   const f = await fixture(t); await assert.rejects(edit(f, (await item(f)).etag, source, { confirmMove: true }), { statusCode: 422, code: 'FILTER_UNINSPECTABLE' }); assert.equal(writes(f).length, 0);
 });
 test('admin filters: missing/stale filter and unchanged edits', async t => {
@@ -86,25 +102,26 @@ for (const failure of ['changed', 'missing-backup']) test(`admin filters: undo $
   if (failure === 'changed') f.filters[0].script_data += '# external change\n'; else await fs.rm(join(f.dir, 'filter-backups', `${result.auditId}.before.sieve`));
   await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: failure === 'changed' ? 'CHANGED_ELSEWHERE' : 'NOT_REVERTIBLE' }); assert.equal(writes(f).length, 1);
 });
-for (const source of ['redirect :copy "outside@example.net";', 'redirect "${unknown}";']) test(`admin filters: cleaning unsafe Before disables reversal ${source}`, async t => {
+for (const source of ['redirect "${unknown}";', 'set "target" "outside@example.net"; redirect "${target}";', 'redirect :copy "outside@example.net";']) test(`admin filters: cleaning unsafe Before disables reversal ${source}`, async t => {
   const f = await fixture(t); f.filters[0].script_data = source; const result = await edit(f, (await item(f)).etag), record = await f.history.detail(result.auditId);
-  assert.equal(record.revertible, false); assert.ok(record.detail.reason.includes('이전 원문')); await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: 'NOT_REVERTIBLE' });
+  assert.equal(record.revertible, false); assert.ok(record.detail.reason.includes('이전 원문')); if (source.startsWith('redirect :copy')) assert.match(record.detail.reason, /스팸 제외 없는 외부 전달/); await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: 'NOT_REVERTIBLE' });
 });
-test('admin filters: undo rechecks current domain policy and move rollback uses confirmation', async t => {
-  const f = await fixture(t); f.filters[0].script_data = 'redirect "keep@example.com";\r\n'; const moving = f.filters[0].script_data;
+test('admin filters: external redirect can be reversed and move rollback uses confirmation', async t => {
+  const f = await fixture(t); f.filters[0].script_data = `${guard}\r\nredirect "outside@example.net";\r\n`; const moving = f.filters[0].script_data;
   const result = await edit(f, (await item(f)).etag); await revert(f, result.auditId); assert.equal(f.filters[0].script_data, moving);
-  const next = await edit(f, (await item(f)).etag); f.domains[0].active = '0'; await assert.rejects(revert(f, next.auditId), { statusCode: 422, code: 'EXTERNAL_REDIRECT' });
+  const next = await edit(f, (await item(f)).etag); f.domains[0].active = '0'; await revert(f, next.auditId); assert.equal(f.filters[0].script_data, moving);
 });
 test('admin filters: discard/custom create, active duplicate guard and non-revertible creation', async t => {
-  const f = await fixture(t), result = await create(f); assert.equal(result.script, 'discard;\n'); assert.equal(result.type, 'postfilter'); assert.equal((await f.history.detail(result.auditId)).revertible, false);
+  const f = await fixture(t), result = await create(f); assert.equal(result.script, 'discard;\n'); assert.equal(result.type, 'postfilter'); assert.equal((await f.history.detail(result.auditId)).revertible, false); assert.match((await f.history.detail(result.auditId)).summary, /관리자 필터를 만들었어요/);
   await assert.rejects(create(f), { statusCode: 409, code: 'FILTER_EXISTS' });
   f.filters.find(row => row.id === result.id).active = '0'; const custom = await create(f, { preset: 'custom', script: 'keep;\n' }); assert.equal(custom.script, 'keep;\n');
   assert.equal(writes(f).at(-1).body.active, '1'); assert.equal(writes(f).at(-1).body.script_desc, '관리자 필터');
 });
-test('admin filters: custom creation applies the same copy/move and external policy', async t => {
+test('admin filters: custom creation allows external redirects and keeps move confirmation', async t => {
   const f = await fixture(t); await assert.rejects(create(f, { preset: 'custom', script: 'redirect "keep@example.com";' }), { code: 'MOVE_CONFIRM' });
-  await assert.rejects(create(f, { preset: 'custom', script: 'redirect :copy "outside@example.net";' }), { code: 'EXTERNAL_REDIRECT' });
-  assert.equal((await create(f, { preset: 'custom', script: 'redirect "keep@example.com";', confirmMove: true })).type, 'postfilter');
+  const external = await create(f, { preset: 'custom', script: `${guard}\nredirect :copy "outside@example.net";` }); assert.equal(external.script, `${guard}\nredirect :copy "outside@example.net";`);
+  f.filters.find(row => row.id === external.id).active = '0';
+  assert.equal((await create(f, { preset: 'custom', script: `${guard}\nredirect "outside@example.net";`, confirmMove: true })).type, 'postfilter');
 });
 test('admin filters: post-write mismatch is 502; backup/intent failure prevents mutation', async t => {
   const f = await fixture(t); f.options.ignoreWrites = true; await assert.rejects(edit(f, (await item(f)).etag), { statusCode: 502, code: 'WRITE_VERIFY_FAILED' });
@@ -118,11 +135,11 @@ for (const [index, source] of [
   'redirect :copy ["keep@example.com", "outside@example.net"];',
 ].entries()) test(`filter checks: finds external user redirect case ${index + 1}`, async t => {
   const f = await fixture(t); f.scripts.set(owner, source); const result = await f.service.checks({});
-  assert.deepEqual(result.external, [{ address: owner, targets: ['outside@example.net'] }]); assert.equal(result.checked, 1); assert.equal(result.uninspectable.length, 0); assert.equal(result.failed.length, 0);
+  assert.deepEqual(result.external, [{ address: owner, targets: ['outside@example.net'], filters: [{ source: 'user', type: 'active-user', targets: ['outside@example.net'], needsSpamGuard: true }] }]); assert.equal(result.checked, 1); assert.equal(result.uninspectable.length, 0); assert.equal(result.failed.length, 0);
 });
 test('filter checks: non-webmail name, uninspectable script, and exact Dovecot order are separate read-only results', async t => {
   const f = await fixture(t); f.names.set(owner, [{ name: 'rainloop.user', active: true }, { name: SCRIPT_NAME, active: false }]); f.scripts.set(owner, 'redirect "${unknown}";');
-  const result = await f.service.checks({}); assert.deepEqual(result.nonWebmail, [{ address: owner, activeName: 'rainloop.user' }]); assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE' }]);
+  const result = await f.service.checks({}); assert.deepEqual(result.nonWebmail, [{ address: owner, activeName: 'rainloop.user' }]); assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'user', type: 'active-user' }]);
   assert.deepEqual(result.globalOrder.map(row => row.type), ['global-prefilter', 'admin-prefilter', 'active-user', 'admin-postfilter', 'global-postfilter']); assert.equal(result.globalOrder[0].script, f.global.prefilter); assert.equal(result.globalOrder[4].script, f.global.postfilter);
   assert.equal(writes(f).length, 0); assert.equal((await f.audit.read()).rows.length, 0);
 });
@@ -150,7 +167,8 @@ test('user filters: script/name only, empty script state supported, no download/
   assert.equal((await app.inject({ url: `/api/admin/user-filters/${owner}/download`, headers })).statusCode, 404);
   assert.equal((await app.inject({ method: 'PUT', url: `/api/admin/user-filters/${owner}`, headers, payload: { script: 'discard;' } })).statusCode, 404);
   const listed = await app.inject({ url: `/api/admin/filters/${owner}`, headers }); assert.equal(listed.statusCode, 200, listed.body);
-  const updated = await app.inject({ method: 'PUT', url: `/api/admin/filters/${owner}/1`, headers, payload: { etag: listed.json().items[0].etag, script: 'discard;\n' } }); assert.equal(updated.statusCode, 200, updated.body);
+  const refused = await app.inject({ method: 'PUT', url: `/api/admin/filters/${owner}/1`, headers, payload: { etag: listed.json().items[0].etag, script: 'redirect :copy "outside@example.net";' } }); assert.equal(refused.statusCode, 422); assert.equal(refused.json().error.code, 'EXTERNAL_SPAM_GUARD');
+  const updated = await app.inject({ method: 'PUT', url: `/api/admin/filters/${owner}/1`, headers, payload: { etag: listed.json().items[0].etag, script: `${guard}\nredirect :copy "outside@example.net";\n` } }); assert.equal(updated.statusCode, 200, updated.body);
   const checked = await app.inject({ url: '/api/admin/checks/filters', headers }); assert.equal(checked.statusCode, 200, checked.body); assert.equal(checked.headers['cache-control'], 'no-store');
   assert.ok(!logLines.join('').includes('synthetic-user-script-marker')); assert.ok(!logLines.join('').includes('original-synthetic-sieve-marker'));
   f.scripts.delete(owner); f.names.delete(owner); assert.deepEqual(await f.service.user({}, owner), { address: owner, script: null, activeName: null });
@@ -178,4 +196,69 @@ test('dockerapi sieve list: actual plaintext protocol, exact allowlisted body an
   const count = calls.length; for (const task of ['sieve_print', 'sieve', 'restart', '__proto__']) await assert.rejects(client.call(task, owner), { statusCode: 422, code: 'DOCKERAPI_TASK_NOT_ALLOWED' }); assert.equal(calls.length, count);
   options.text = 'require ["copy"]; # synthetic-raw-script-marker'; await assert.rejects(client.listSieve(owner), error => error.code === 'DOCKERAPI_REJECTED' && !error.message.includes('synthetic-raw-script-marker'));
   options.type = 'application/json'; options.text = JSON.stringify({ name: SCRIPT_NAME, script: 'synthetic-raw-script-marker' }); await assert.rejects(client.listSieve(owner), { code: 'DOCKERAPI_REJECTED' });
+});
+
+test('filter checks: active admin pre/post filters join external mailbox results and missing spam guard list', async t => {
+  const f = await fixture(t);
+  f.filters[0].script_data = 'redirect :copy "pre@example.net";';
+  f.filters.push({ ...f.filters[0], id: '2', filter_type: 'postfilter', script_data: `${guard}\nredirect :copy "post@example.net";` });
+  f.filters.push({ ...f.filters[0], id: '3', active: '0', script_data: 'redirect :copy "inactive@example.net";' });
+  f.scripts.set(owner, 'redirect :copy "user@example.net";');
+  const result = await f.service.checks({});
+  assert.equal(result.checked, 1); assert.equal(result.external.length, 1);
+  assert.deepEqual(result.external[0], { address: owner, targets: ['post@example.net', 'pre@example.net', 'user@example.net'], filters: [
+    { source: 'admin', type: 'prefilter', id: '1', targets: ['pre@example.net'], needsSpamGuard: true },
+    { source: 'admin', type: 'postfilter', id: '2', targets: ['post@example.net'], needsSpamGuard: false },
+    { source: 'user', type: 'active-user', targets: ['user@example.net'], needsSpamGuard: true },
+  ] });
+  assert.deepEqual(result.spamGuardMissing, [
+    { address: owner, source: 'admin', type: 'prefilter', id: '1', targets: ['pre@example.net'] },
+    { address: owner, source: 'user', type: 'active-user', targets: ['user@example.net'] },
+  ]);
+  assert.equal(writes(f).length, 0);
+});
+test('filter checks: admin forwarding is checked when there is no active user script', async t => {
+  const f = await fixture(t); f.scripts.delete(owner); f.names.delete(owner);
+  f.filters[0].script_data = 'redirect :copy "outside@example.net";';
+  const result = await f.service.checks({}); assert.equal(result.external[0].filters[0].source, 'admin'); assert.equal(result.spamGuardMissing.length, 1);
+});
+test('filter checks: admin parse failure does not hide valid user forwarding', async t => {
+  const f = await fixture(t); f.filters[0].script_data = 'redirect "${unknown}";';
+  f.scripts.set(owner, 'redirect :copy "outside@example.net";');
+  const result = await f.service.checks({});
+  assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'admin', type: 'prefilter', id: '1' }]);
+  assert.equal(result.external[0].filters[0].source, 'user');
+});
+
+const variableLiterals = [
+  'require ["variables", "fileinto", "copy"]; fileinto "Archive/${folder}"; redirect :copy "keep@example.com";',
+  'require ["variables", "copy"]; if header :contains "Subject" "${subject}" { keep; } redirect :copy "keep@example.com";',
+  'require ["variables", "copy"]; set "unused" "${other}"; redirect :copy "keep@example.com";',
+];
+for (const [index, source] of variableLiterals.entries()) test(`fixed redirect inspection, checks, save and exact reversal permit unrelated variable strings ${index + 1}`, async t => {
+  assert.deepEqual(inspectRedirects(source), [{ target: 'keep@example.com', copy: true }]);
+  const f = await fixture(t); f.scripts.set(owner, source);
+  const checked = await f.service.checks({}); assert.deepEqual(checked.uninspectable, []); assert.deepEqual(checked.external, []);
+  const saved = await edit(f, (await item(f)).etag, source); assert.equal(saved.script, source);
+  const changed = await edit(f, saved.etag, 'discard;\n');
+  assert.equal((await f.history.detail(changed.auditId)).canRevert, true);
+  await revert(f, changed.auditId); assert.equal(f.filters[0].script_data, source);
+});
+test('variable redirect targets remain uninspectable directly and in checks, including a set variable', async t => {
+  for (const source of ['redirect "${target}";', 'set "target" "outside@example.net"; redirect "${target}";']) {
+    assert.throws(() => inspectRedirects(source), { statusCode: 422, code: 'FILTER_UNINSPECTABLE' });
+    const f = await fixture(t); f.scripts.set(owner, source);
+    const checked = await f.service.checks({});
+    assert.deepEqual(checked.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'user', type: 'active-user' }]);
+  }
+});
+test('checks retain a fixed external target when other strings contain variables', async t => {
+  const f = await fixture(t); f.scripts.set(owner, 'fileinto "Archive/${folder}"; if header :contains "Subject" "${subject}" { keep; } redirect :copy "outside@example.net";');
+  const checked = await f.service.checks({}); assert.deepEqual(checked.uninspectable, []);
+  assert.deepEqual(checked.external[0].targets, ['outside@example.net']);
+});
+test('unused variable strings without redirect are inspectable and can be saved', async t => {
+  const f = await fixture(t), source = 'set "value" "${unknown}"; keep;';
+  assert.deepEqual(inspectRedirects(source), []);
+  assert.equal((await edit(f, (await item(f)).etag, source)).script, source);
 });

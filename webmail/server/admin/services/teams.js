@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, chmod, open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { externalRedirectPreview, internalDomainSet } from '../filter-script.js';
 import { AppError } from '../../errors.js';
 import { analyze, addMember, removeMember, renameMember, addressPattern, Refused } from '../sieve-team.js';
 import { etag, assertUnchanged } from '../lock.js';
@@ -70,6 +71,13 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const freshRows = await filters(session);
     const entries = prefilters(freshRows, team);
     if (entries.length !== 1 || String(entries[0].id) !== String(original.id) || entries[0].script_data !== original.script_data) throw conflict();
+    const domainRows = await Promise.all(['domain/all', 'alias-domain/all'].map(async path => {
+      const value = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object' && !Object.keys(value).length) return [];
+      throw new AppError(502, 'MAILCOW_REJECTED', '도메인 정보를 읽을 수 없어요.');
+    }));
+    if (externalRedirectPreview(next, [...internalDomainSet(...domainRows)]).needsSpamGuard) throw new AppError(422, 'EXTERNAL_SPAM_GUARD', '이 메일함 관리자 필터에 스팸 제외 줄을 먼저 넣어 주세요.');
     const current = entries[0];
     const attr = { script_data: next };
     for (const key of ['script_desc', 'active', 'filter_type']) if (current[key] !== undefined && current[key] !== null) attr[key] = String(current[key]);

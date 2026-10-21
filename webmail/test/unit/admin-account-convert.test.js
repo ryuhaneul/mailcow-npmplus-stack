@@ -37,6 +37,7 @@ async function fixture(t, direction = 'mailbox-to-alias') {
     calls.push({ method, path, body: structuredClone(body) }); options.onCall?.({ method, path, body });
     if (method === 'POST' && options.failPath === path) throw options.failure ?? new AppError(422, 'MAILCOW_REJECTED', syncSecret);
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
+    if (path === '/api/v1/get/alias-domain/all') return [];
     if (path === '/api/v1/get/domain/all') return [{ domain_name: 'example.com', active: 1 }];
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});

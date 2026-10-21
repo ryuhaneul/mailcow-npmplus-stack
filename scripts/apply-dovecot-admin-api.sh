@@ -27,6 +27,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 export WEBMAIL_ADMIN_DOVEADM_KEY="${WEBMAIL_ADMIN_DOVEADM_KEY:-}"
+export MAIL_FTS_NIGHTLY_ENABLE="${MAIL_FTS_NIGHTLY_ENABLE:-false}"
 log() { echo "[apply-dovecot-admin-api] $*"; }
 die() { echo "[apply-dovecot-admin-api] ERROR: $*" >&2; exit 1; }
 CONF_DIR="$MAILCOW_DIR/data/conf/dovecot"
@@ -65,6 +66,9 @@ key = os.environ.get('WEBMAIL_ADMIN_DOVEADM_KEY', '')
 # A single unquoted Dovecot value: reject config/comment/line injection.
 if mode != 'revert' and not re.fullmatch(r'[A-Za-z0-9_+/=.-]+', key):
     sys.exit('WEBMAIL_ADMIN_DOVEADM_KEY must be a nonempty safe token')
+enabled = os.environ.get('MAIL_FTS_NIGHTLY_ENABLE', 'false')
+if mode != 'revert' and enabled not in ('true', 'false'):
+    sys.exit('MAIL_FTS_NIGHTLY_ENABLE must be true or false')
 begin = b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
 end = b'# END mailstack-admin doveadm\n'
 separator = b'# mailstack-admin doveadm: added EOF newline\n'
@@ -78,6 +82,10 @@ tail = (
     b'remote ::/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
     b'remote 8000::/1 {\n  doveadm_allowed_commands = search,expunge,quota get,quota recalc,mailbox list,acl get\n}\n'
     b'service doveadm {\n  inet_listener http {\n    port = 12346\n  }\n}\n'
+)
+nightly_tail = tail.replace(
+    b',acl get\n',
+    b',acl get,index,mailbox status,user,fts-flatcurve stats,mailbox metadata get\n',
 )
 lines = data.splitlines(keepends=True)
 clean = []
@@ -103,7 +111,7 @@ while i < len(lines):
         if added_newline:
             content = content[len(separator):]
         # Accept both previous global allowlists for upgrade and byte-exact revert.
-        allowed_tails = (tail, legacy_tail, legacy_tail.replace(b',acl get\n', b'\n'))
+        allowed_tails = (tail, nightly_tail, legacy_tail, legacy_tail.replace(b',acl get\n', b'\n'))
         if not any(re.fullmatch(rb'doveadm_api_key = [A-Za-z0-9_+/=.-]+\n' + re.escape(allowed_tail), content) for allowed_tail in allowed_tails):
             sys.exit('managed API block differs; refusing to remove unknown content')
         owned_separator = added_newline
@@ -122,7 +130,7 @@ if mode != 'revert':
     # Keep an existing block in its original position, including its EOF separator.
     needs_newline = owned_separator if managed else bool(data) and not data.endswith(b'\n')
     block = begin + (separator if needs_newline else b'')
-    block += b'doveadm_api_key = ' + key.encode('ascii') + b'\n' + tail + end
+    block += b'doveadm_api_key = ' + key.encode('ascii') + b'\n' + (nightly_tail if enabled == 'true' else tail) + end
     if managed:
         prefix = b''.join(clean[:insert_at])
         suffix = b''.join(clean[insert_at:])

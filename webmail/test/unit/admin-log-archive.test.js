@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -188,12 +188,12 @@ for (const mutate of [data => { data.status.generations = null; }, data => { dat
   const f = fixture(); mutate(f.data); await assert.rejects(f.service.archiveStatus(), { statusCode: 503 });
 });
 
-async function appFixture(t, { state = 'ready', enabled = true } = {}) {
-  const remote = await upstream(t, (request, response) => {
+async function appFixture(t, { state = 'ready', enabled = true, upstreamHandler } = {}) {
+  const remote = await upstream(t, upstreamHandler ?? ((request, response) => {
     const url = new URL(request.url, 'http://synthetic');
     response.writeHead(remote.options.status, { 'content-type': 'application/json' });
     response.end(JSON.stringify(remote.options.status !== 200 ? { error: { message: key } } : url.pathname === '/v1/status' ? statusResult() : url.pathname === '/v1/coverage' ? { sources: [coverage('postfix')] } : remote.options.body));
-  });
+  }));
   const directory = await mkdtemp(join(tmpdir(), 'admin-log-archive-')); t.after(() => rm(directory, { recursive: true, force: true }));
   let clock = Date.UTC(2026, 9, 21), logs = '';
   const calls = [], options = {};
@@ -267,4 +267,47 @@ test('archive HTTP: disabled feature preserves recent logs; 410 restart and 429 
   f.remote.options.status = 429;
   const busy = await f.app.inject({ url: f.urls[0], headers: f.headers });
   assert.equal(busy.statusCode, 429); assert.equal(busy.headers['retry-after'], '1');
+});
+
+for (const endpoint of ['search', 'status']) for (const bodyStarted of [false, true]) test(`archive HTTP: browser disconnect cancels ${endpoint} upstream within 250ms (body=${bodyStarted})`, { timeout: 5000 }, async t => {
+  const expected = endpoint === 'search' ? 1 : 2, arrived = Promise.withResolvers(), closed = Promise.withResolvers();
+  let requests = 0, closures = 0;
+  const f = await appFixture(t, { upstreamHandler: (_request, response) => {
+    response.once('close', () => { if (++closures === expected) closed.resolve(); });
+    if (bodyStarted) { response.writeHead(200, { 'content-type': 'application/json' }); response.write('{'); }
+    if (++requests === expected) arrived.resolve();
+  } });
+  const address = await f.app.listen({ port: 0, host: '127.0.0.1' });
+  const browser = httpRequest(address + f.urls[endpoint === 'search' ? 0 : 1], { headers: f.headers });
+  browser.on('error', () => {});
+  t.after(() => browser.destroy());
+  browser.end();
+  await arrived.promise;
+  const started = performance.now();
+  const timer = setTimeout(() => closed.reject(new Error('upstream remained open for 250ms after browser disconnect')), 250);
+  browser.destroy();
+  try { await closed.promise; }
+  finally { clearTimeout(timer); }
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 250, `upstream closed after ${elapsed}ms`);
+  assert.equal(requests, expected);
+  t.diagnostic(`upstream ${endpoint}: ${closures} connection(s) closed in ${elapsed.toFixed(1)}ms`);
+});
+
+test('archive HTTP: completed incoming GET keeps upstream alive until its normal response', async t => {
+  const f = await appFixture(t);
+  const address = await f.app.listen({ port: 0, host: '127.0.0.1' });
+  for (const url of f.urls) {
+    const result = await new Promise((resolve, reject) => {
+      const browser = httpRequest(address + url, { headers: f.headers }, response => {
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.once('error', reject);
+        response.once('end', () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks)) }));
+      });
+      browser.once('error', reject); browser.end();
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.enabled, true);
+  }
 });

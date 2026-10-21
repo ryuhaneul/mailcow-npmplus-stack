@@ -81,9 +81,9 @@ export function createLogsService({ mailcow, config, logArchive }) {
     }
     return bounded(result);
   }
-  async function archive(query = {}) {
+  async function archive(query = {}, options = {}) {
     if (!logArchive?.enabled) return { enabled: false, lines: [], cursor: null, partialReason: null, incomplete: false, coverage: null };
-    const upstreamQuery = archiveQuery(query), data = await logArchive.search(upstreamQuery);
+    const upstreamQuery = archiveQuery(query), data = await logArchive.search(upstreamQuery, options);
     if (!object(data) || !Array.isArray(data.lines) || data.lines.length > Number(upstreamQuery.limit) || !(data.nextCursor === null || typeof data.nextCursor === 'string' && data.nextCursor.length > 0 && data.nextCursor.length <= 4096) || ![null, 'limit', 'response_bytes', 'scan_bytes', 'timeout'].includes(data.partialReason) || typeof data.incomplete !== 'boolean') throw archiveUnavailable();
     const lines = data.lines.map(row => {
       if (!object(row) || !nullableTime(row.time) || typeof row.message !== 'string' || typeof row.program !== 'string' || typeof row.priority !== 'string') throw archiveUnavailable();
@@ -93,9 +93,9 @@ export function createLogsService({ mailcow, config, logArchive }) {
     }).filter(line => searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(upstreamQuery.q.toLowerCase())).map(trimValues);
     return archiveBounded({ enabled: true, lines, cursor: data.nextCursor, partialReason: data.partialReason, incomplete: data.incomplete, coverage: archiveCoverage(data.coverage, upstreamQuery.source) });
   }
-  async function archiveStatus() {
+  async function archiveStatus(options = {}) {
     if (!logArchive?.enabled) return { enabled: false, sources: [] };
-    const [status, coverage] = await Promise.all([logArchive.status(), logArchive.coverage()]);
+    const [status, coverage] = await Promise.all([logArchive.status(options), logArchive.coverage(options)]);
     if (!object(status) || !Array.isArray(status.generations) || !Array.isArray(status.issues) || !(status.collectionLagSeconds === null || Number.isFinite(status.collectionLagSeconds) && status.collectionLagSeconds >= 0) || !object(coverage) || !Array.isArray(coverage.sources)) throw archiveUnavailable();
     for (const generation of status.generations) if (!object(generation) || !Object.hasOwn(archiveSources, generation.source) || !Number.isSafeInteger(generation.pendingBytes) || generation.pendingBytes < 0) throw archiveUnavailable();
     for (const issue of status.issues) if (!object(issue) || !Object.hasOwn(archiveSources, issue.source) || typeof issue.reason !== 'string') throw archiveUnavailable();

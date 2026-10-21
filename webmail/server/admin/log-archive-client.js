@@ -8,7 +8,7 @@ export const archiveUnavailable = () => new AppError(503, 'LOG_ARCHIVE_UNAVAILAB
 
 export function createLogArchiveClient({ config, logger, timeoutMs = LOG_ARCHIVE_TIMEOUT_MS, maxResponseBytes = LOG_ARCHIVE_MAX_BYTES }) {
   const enabled = Boolean(config.logArchiveUrl && config.logArchiveKey);
-  async function request(path, query) {
+  async function request(path, query, { signal } = {}) {
     if (!enabled) throw archiveUnavailable();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -18,7 +18,7 @@ export function createLogArchiveClient({ config, logger, timeoutMs = LOG_ARCHIVE
       if (query) url.search = new URLSearchParams(query).toString();
       const transport = url.protocol === 'https:' ? https : http;
       const response = await new Promise((resolve, reject) => {
-        const req = transport.request(url, { method: 'GET', signal: controller.signal, headers: { 'X-Log-Archive-Key': config.logArchiveKey, accept: 'application/json' } }, response => {
+        const req = transport.request(url, { method: 'GET', signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal, headers: { 'X-Log-Archive-Key': config.logArchiveKey, accept: 'application/json' } }, response => {
           const chunks = []; let size = 0;
           response.on('data', chunk => {
             size += chunk.length;
@@ -47,8 +47,8 @@ export function createLogArchiveClient({ config, logger, timeoutMs = LOG_ARCHIVE
   }
   return {
     enabled,
-    search: query => request('/v1/search', query),
-    status: () => request('/v1/status'),
-    coverage: () => request('/v1/coverage'),
+    search: (query, options) => request('/v1/search', query, options),
+    status: options => request('/v1/status', undefined, options),
+    coverage: options => request('/v1/coverage', undefined, options),
   };
 }

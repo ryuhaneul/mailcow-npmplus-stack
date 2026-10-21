@@ -1,0 +1,11 @@
+{
+  "name": "mailstack-log-archiver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "start": "node main.js",
+    "test": "node --test test/*.test.js"
+  }
+}

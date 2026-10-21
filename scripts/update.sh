@@ -70,6 +70,36 @@ command -v git >/dev/null 2>&1 || die "git not found"
 command -v docker >/dev/null 2>&1 || die "docker not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin not available"
 
+# Refresh this checkout before loading any environment or shared libraries.
+git_pull_if_repo() {
+    local dir="$1" label="$2"
+    if [ ! -d "$dir" ]; then
+        warn "$label: directory missing ($dir) — skipping"
+        return 0
+    fi
+    if [ ! -d "$dir/.git" ]; then
+        log "$label: not a git repo — skipping"
+        return 0
+    fi
+    log "$label: git pull (branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown))"
+    if git -C "$dir" pull --ff-only 2>&1 | tee -a "$LOGFILE" | tail -3; then
+        :
+    else
+        warn "$label: git pull failed (non-fatal) — continuing with current checkout"
+    fi
+}
+
+if [ "${MAILSTACK_UPDATE_REEXEC:-false}" != true ]; then
+    SELF_HEAD_BEFORE=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)
+    git_pull_if_repo "$PROJECT_DIR" "mailcow-npmplus-stack (self)"
+    SELF_HEAD_AFTER=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)
+    if [ "$SELF_HEAD_BEFORE" != "$SELF_HEAD_AFTER" ]; then
+        log "Stack checkout changed; restarting update with the refreshed script"
+        export MAILSTACK_UPDATE_REEXEC=true
+        exec bash "$SCRIPT_DIR/update.sh" "$@"
+    fi
+fi
+
 # Read feature selection before pulling or starting optional stacks.
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || die ".env not found"
@@ -92,6 +122,10 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
+# Both app deployment and Toolkit source synchronization require rsync.
+if [ "$WEBMAIL_ENABLE" = true ] || [ "$TOOLKIT_ENABLE" = true ]; then
+    command -v rsync >/dev/null 2>&1 || die "rsync not found; install it with 'dnf install -y rsync', 'apt-get update && apt-get install -y rsync', or 'yum install -y rsync', then rerun update; stopped before deployment changes"
+fi
 waf_options || die "Invalid WAF options; update stopped before changes"
 waf_resolve_bouncer_key "$NPMPLUS_DIR" "$([ "$WAF_ENABLE" = false ] && echo true || echo false)" || die "Bouncer key selection failed; update stopped before changes"
 WAF_BOUNCER_KEY_RESOLVED=${CROWDSEC_BOUNCER_KEY:-}
@@ -115,25 +149,6 @@ fi
 # ============================================================
 header "Phase 1: git pull component repos"
 
-git_pull_if_repo() {
-    local dir="$1" label="$2"
-    if [ ! -d "$dir" ]; then
-        warn "$label: directory missing ($dir) — skipping"
-        return 0
-    fi
-    if [ ! -d "$dir/.git" ]; then
-        log "$label: not a git repo — skipping"
-        return 0
-    fi
-    log "$label: git pull (branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown))"
-    if git -C "$dir" pull --ff-only 2>&1 | tee -a "$LOGFILE" | tail -3; then
-        :
-    else
-        warn "$label: git pull failed (non-fatal) — continuing with current checkout"
-    fi
-}
-
-git_pull_if_repo "$PROJECT_DIR" "mailcow-npmplus-stack (self)"
 if [ "$TOOLKIT_ENABLE" = true ]; then git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"; fi
 # mailcow-dockerized is managed by its own update.sh; pulling here races with Phase 3.
 # npmplus / snappymail dirs are typically not git repos (compose files copied from stack).

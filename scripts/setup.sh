@@ -308,7 +308,7 @@ install_pkg openssl
 install_pkg git
 install_pkg python3
 waf_options || die "Invalid WAF options"
-[ "$WEBMAIL_ENABLE" != true ] || install_pkg rsync
+if [ "$WEBMAIL_ENABLE" = true ] || [ "$TOOLKIT_ENABLE" = true ]; then install_pkg rsync; fi
 
 # ============================================================
 # Phase 1: Docker Engine

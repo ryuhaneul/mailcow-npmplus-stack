@@ -1,5 +1,6 @@
 import { useAdminData } from '../hooks/useAdminData.js';
 import StatusCards from '../components/StatusCards.jsx';
+import FtsStatus from '../components/FtsStatus.jsx';
 import Loading from '../components/Loading.jsx';
 import LoadError from '../components/LoadError.jsx';
 import Empty from '../components/Empty.jsx';
@@ -15,8 +16,9 @@ export function administratorRow(item) {
 export function autoexpungeMessage(days) { return typeof days === 'number' ? `스팸·휴지통에서 ${days}일 지난 메일을 자동으로 지웁니다` : '꺼져 있습니다'; }
 export default function Overview() {
   const status = useAdminData('/api/admin/status'), queue = useAdminData('/api/admin/queue'), compat = useAdminData('/api/admin/compat-usage'), data = status.data;
+  const fts = useAdminData('/api/admin/fts-status');
   const admins = useAdminData('/api/admin/admins'), autoexpunge = useAdminData('/api/admin/autoexpunge');
-  const reload = () => { status.reload(); queue.reload(); compat.reload(); admins.reload(); autoexpunge.reload(); };
+  const reload = () => { status.reload(); queue.reload(); compat.reload(); admins.reload(); autoexpunge.reload(); fts.reload(); };
   return <div data-admin-page="overview"><div class="page-head"><div><h1>운영 현황</h1><p>마지막 확인 {kst(Date.now())}</p></div><div class="actions"><button class="btn" type="button" onClick={reload}><AdminIcon name="sync"/>새로고침</button></div></div>
     <div class="content"><StatusCards resource={status}/><div class="grid2"><section class="card"><h2>인증서</h2><Result resource={status}>
       {data?.certificates.map(cert => <div class="certificate" key={cert.port}><h3>{cert.port} 포트</h3>{cert.error ? <LoadError error={{ code: cert.error }} title="인증서를 불러오지 못했습니다" retry={status.reload}/> : <><p>{cert.daysRemaining}일 · {kst(cert.expiresAt)} 만료</p><p>{cert.valid ? '검증 성공' : `검증 실패 · ${cert.reason}`}</p></>}</div>)}
@@ -24,6 +26,7 @@ export default function Overview() {
       <Result value={data?.version} resource={status} title="판 정보를 불러오지 못했습니다"><div class="mini-row"><span>mailcow</span><span>{data?.version.version}</span></div></Result>
       <Result value={data?.containers} resource={status} title="컨테이너를 불러오지 못했습니다"><div class="mini-row"><span>컨테이너 이상</span><span>{data?.containers.abnormalCount}개</span></div>{data?.containers.items?.map(item => <div class="mini-row" key={item.container}><span>{item.container}</span><span>{item.state}</span></div>)}</Result>
     </Result></section></div>
+    <FtsStatus resource={fts}/>
     <section class="overview-section"><div class="section-title"><h2>메일 큐</h2><div class="actions"><span class="chip">보기 전용</span><a class="btn ghost" href="#logs">전체 큐 보기</a></div></div>{queue.data?.items.length > 20 && <p class="hint">전체 {queue.data.items.length}건 중 20건</p>}<Result resource={queue}>
       {!queue.data?.items.length ? <Empty>대기 중인 메일이 없습니다.</Empty> : <Table headings={['상태', '보낸 주소', '받는 주소', '대기 시간', '최근 응답']}>{queue.data.items.slice(0, 20).map(item => <tr key={item.id}><td>{({ active: '대기', deferred: '지연', hold: '보류' })[item.state]}</td><td>{item.sender}</td><td>{item.recipients.join(', ')}</td><td>{duration(item.waitingSeconds)}</td><td>{item.reason}</td></tr>)}</Table>}
     </Result></section>

@@ -2,22 +2,62 @@ import { timingSafeEqual } from 'node:crypto';
 import { AppError } from '../errors.js';
 import { MailcowAuthLost } from './mailcow-client.js';
 import { cookieName, cookieOptions } from './session.js';
+import { createApiKeyRateLimiter } from './api-key-ratelimit.js';
 
 const changing = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const authRoot = '/api/admin/auth/';
-export function installAdminGuard(app, { config, sessions, client }) {
+const keyHeader = 'x-mailadmin-api-key';
+const tokenPattern = /^mak_v1_[A-Za-z0-9_-]{43}$/;
+const keyMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const keyReasons = new Set(['INVALID_TOKEN', 'UNKNOWN_KEY', 'REVOKED', 'EXPIRED', 'IP_DENIED', 'HUMAN_ONLY', 'PERMISSION_DENIED']);
+const forbidden = reason => Object.assign(new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.'), { reason });
+const humanOnly = path => path === '/api/admin/auth' || path.startsWith(authRoot) || path === '/api/admin/api-keys' || path.startsWith('/api/admin/api-keys/');
+export function installAdminGuard(app, { config, sessions, client, apiKeys, apiKeyRateLimiter = createApiKeyRateLimiter() }) {
   app.decorateRequest('session', null);
   app.decorateRequest('adminError', null);
+  app.decorateRequest('adminPrincipal', null);
+  app.decorateRequest('adminKeyMode', false);
   const clear = reply => reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
   const managed = request => request.routeOptions.url?.startsWith('/api/admin/');
   app.addHook('onRequest', async request => {
-    if (!managed(request) || !changing.has(request.method)) return;
-    if (request.headers.origin !== `https://${config.adminHostname}`) throw new AppError(403, 'BAD_ORIGIN', '허용된 관리 주소에서 다시 시도해 주세요.');
+    if (!managed(request)) return;
+    request.adminKeyMode = Object.hasOwn(request.headers, keyHeader);
+    if (!changing.has(request.method)) return;
+    if (!request.adminKeyMode && request.headers.origin !== `https://${config.adminHostname}`) throw new AppError(403, 'BAD_ORIGIN', '허용된 관리 주소에서 다시 시도해 주세요.');
     if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new AppError(415, 'JSON_REQUIRED', 'JSON 형식으로 요청해 주세요.');
   });
   app.addHook('preHandler', async (request, reply) => {
     if (!managed(request)) return;
     const path = request.routeOptions.url;
+    if (request.adminKeyMode) {
+      const release = apiKeyRateLimiter.reserveIp(request.ip);
+      let authenticated = false;
+      try {
+        if (humanOnly(path)) throw forbidden('HUMAN_ONLY');
+        const token = request.headers[keyHeader];
+        const duplicates = request.raw.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === keyHeader).length;
+        if (duplicates > 1 || typeof token !== 'string' || !tokenPattern.test(token)) throw forbidden('INVALID_TOKEN');
+        if (!config.mailcowApiKey || !apiKeys) throw new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
+        const result = await apiKeys.authenticate(token, request.ip);
+        if (!result.ok) throw forbidden(result.reason);
+        authenticated = true;
+        release();
+        const item = result.item;
+        request.adminPrincipal = { type: 'apiKey', id: item.id, name: item.name, permission: item.permission };
+        if (!keyMethods.has(request.method) || (item.permission === 'read' && request.method !== 'GET')) throw forbidden('PERMISSION_DENIED');
+        apiKeyRateLimiter.reserveKey(item.id);
+        await apiKeys.recordUse(item.id, request.ip);
+        const context = client.createApiContext({ permission: item.permission });
+        request.session = { id: `apikey:${item.id}`, username: `API 키: ${item.name}`, state: 'ready', mailcow: context };
+        if (!changing.has(request.method) && request.routeOptions.config.adminMailcowApi === true) return;
+        const status = await client.call(context, 'GET', '/api/v1/get/status/version');
+        if (!status || typeof status.version !== 'string' || !status.version) throw new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
+        return;
+      } catch (error) {
+        if (!authenticated && error.code !== 'API_KEY_FORBIDDEN') release();
+        throw error;
+      }
+    }
     if (request.method === 'POST' && path === `${authRoot}login`) return;
     try { request.session = await sessions.get(request.cookies[cookieName]); }
     catch (error) { clear(reply); throw error; }
@@ -45,8 +85,9 @@ export function installAdminGuard(app, { config, sessions, client }) {
   });
   app.addHook('onError', async (request, reply, error) => {
     request.adminError = error;
-    if (managed(request)) request.log.warn({ code: error instanceof AppError ? error.code : 'ADMIN_REQUEST_FAILED', username: request.session?.username ?? (typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : undefined), ip: request.ip }, '관리 요청을 처리하지 못했습니다.');
-    if (error instanceof MailcowAuthLost && request.session) {
+    if (managed(request) && request.adminKeyMode) request.log.warn({ code: error instanceof AppError ? error.code : 'ADMIN_REQUEST_FAILED', reason: keyReasons.has(error.reason) ? error.reason : undefined, requestId: request.id, method: request.method, route: request.routeOptions.url, ip: request.ip, keyId: request.adminPrincipal?.id }, 'API 키 요청을 처리하지 못했습니다.');
+    else if (managed(request)) request.log.warn({ code: error instanceof AppError ? error.code : 'ADMIN_REQUEST_FAILED', username: request.session?.username ?? (typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : undefined), ip: request.ip }, '관리 요청을 처리하지 못했습니다.');
+    if (error instanceof MailcowAuthLost && request.session && !request.adminKeyMode) {
       clear(reply);
       await sessions.destroy(request.session);
     }

@@ -422,3 +422,20 @@ test('admin auth: fifth successful reservation releases the block without erasin
   assert.equal((await login(f)).statusCode, 200);
   assert.equal((await login(f)).statusCode, 200);
 });
+
+test('admin auth: malformed API header cannot fall back to a ready human cookie', async t => {
+  const f = await fixture(t); const headers = credentials(await login(f));
+  const before = count(f, 'call');
+  const response = await write(f, '/api/admin/test-write', { ...headers, 'x-mailadmin-api-key': 'synthetic-invalid-key' });
+  failure(response, 403, 'API_KEY_FORBIDDEN');
+  assert.equal(response.headers['set-cookie'], undefined); assert.equal(count(f, 'call'), before); assert.equal(f.handled, 0); assert.equal(count(f, 'logout'), 0);
+  assert.equal((await f.app.inject({ url: '/api/admin/auth/session', headers })).statusCode, 200);
+});
+test('admin auth: API header cannot access human login, session, TOTP or logout', async t => {
+  const f = await fixture(t); const headers = { ...credentials(await login(f)), 'x-mailadmin-api-key': `mak_v1_${'A'.repeat(43)}` };
+  for (const path of ['login', 'session', 'totp', 'logout']) {
+    const response = path === 'session' ? await f.app.inject({ url: `/api/admin/auth/${path}`, headers }) : await write(f, `/api/admin/auth/${path}`, headers);
+    failure(response, 403, 'API_KEY_FORBIDDEN'); assert.equal(response.headers['set-cookie'], undefined);
+  }
+  assert.equal(count(f, 'login'), 1); assert.equal(count(f, 'totp'), 0); assert.equal(count(f, 'logout'), 0);
+});

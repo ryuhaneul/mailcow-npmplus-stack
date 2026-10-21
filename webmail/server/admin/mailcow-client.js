@@ -5,6 +5,7 @@ import { CookieJar, JSDOM, VirtualConsole } from 'jsdom';
 import { mailTlsOptions } from '../mail/imap-pool.js';
 import { AppError } from '../errors.js';
 
+const apiUnavailable = () => new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
 const unavailable = () => new AppError(503, 'MAILCOW_UNAVAILABLE', 'mailcow에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
 export class MailcowAuthLost extends AppError {
   constructor() {
@@ -31,10 +32,20 @@ function authFailure(data) {
 export function createMailcowClient({ config, logger }) {
   const base = new URL(config.mailcowUiUrl);
   const resources = new WeakMap();
+  let apiAgent;
+  function createApiContext({ permission }) {
+    if (!['read', 'full'].includes(permission)) throw new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.');
+    if (!config.mailcowApiKey || base.protocol !== 'https:') throw apiUnavailable();
+    apiAgent ??= new https.Agent({ ...mailTlsOptions({ ...config, mailTlsServername: config.mailcowUiServername }), keepAlive: false });
+    const context = Object.freeze({});
+    resources.set(context, { apiKey: true, permission, agent: apiAgent, closed: false });
+    return context;
+  }
   async function request(session, method, path, { form, body, signal } = {}) {
     const resource = resources.get(session);
     if (!resource || resource.closed) throw new MailcowAuthLost();
     const url = new URL(path, base);
+    const failed = resource.apiKey ? apiUnavailable : unavailable;
     const payload = form ? Buffer.from(new URLSearchParams(form).toString()) : body === undefined ? null : Buffer.from(JSON.stringify(body));
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -48,17 +59,17 @@ export function createMailcowClient({ config, logger }) {
           agent: resource.agent, method, signal: controller.signal,
           headers: {
             host: config.mailcowUiServername, 'user-agent': 'mailstack-webmail-admin',
-            'x-forwarded-for': resource.ip, cookie: session.jar.getCookieStringSync(url.href),
+            ...(resource.apiKey ? { 'x-api-key': config.mailcowApiKey } : { 'x-forwarded-for': resource.ip, cookie: session.jar.getCookieStringSync(url.href) }),
             ...(form || body !== undefined ? { 'content-type': form ? 'application/x-www-form-urlencoded' : 'application/json' } : {}),
             ...(payload ? { 'content-length': payload.length } : {}),
           },
         }, response => {
           const chunks = []; let size = 0;
-          try { for (const cookie of response.headers['set-cookie'] || []) session.jar.setCookieSync(cookie, url.href); }
-          catch { response.destroy(); reject(unavailable()); return; }
+          try { if (!resource.apiKey) for (const cookie of response.headers['set-cookie'] || []) session.jar.setCookieSync(cookie, url.href); }
+          catch { response.destroy(); reject(failed()); return; }
           response.on('data', chunk => {
             size += chunk.length;
-            if (size > 2 * 1024 * 1024) { response.destroy(); reject(unavailable()); }
+            if (size > 2 * 1024 * 1024) { response.destroy(); reject(failed()); }
             else chunks.push(chunk);
           });
           response.once('error', reject);
@@ -69,7 +80,7 @@ export function createMailcowClient({ config, logger }) {
       });
     } catch (error) {
       if (error instanceof AppError) throw error;
-      throw unavailable();
+      throw failed();
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
@@ -79,7 +90,7 @@ export function createMailcowClient({ config, logger }) {
 
   async function logout(session) {
     const resource = resources.get(session);
-    if (!resource || resource.closed) return;
+    if (!resource || resource.closed || resource.apiKey) return;
     if (resource.logout) return resource.logout;
     resource.logout = (async () => {
       try {
@@ -102,16 +113,24 @@ export function createMailcowClient({ config, logger }) {
   async function call(session, method, path, body, signal) {
     if (!((method === 'GET' && /^\/api\/v1\/get\/[^?#]+$/.test(path)) ||
       (method === 'POST' && /^\/api\/v1\/(?:add|edit|delete)\/[^?#]+$/.test(path)))) throw new AppError(422, 'INVALID_INPUT', 'API 요청을 확인해 주세요.');
+    const url = new URL(path, base);
+    if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash) throw new AppError(422, 'INVALID_INPUT', 'API 요청을 확인해 주세요.');
+    const resource = resources.get(session);
+    const apiKey = resource?.apiKey === true;
+    if (apiKey && resource.permission === 'read' && method !== 'GET') throw new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.');
+    const lost = apiKey ? apiUnavailable : () => new MailcowAuthLost();
     const response = await request(session, method, path, { body, signal });
-    if ([constants.HTTP_STATUS_UNAUTHORIZED, constants.HTTP_STATUS_FORBIDDEN].includes(response.status)) throw new MailcowAuthLost();
+    if ([constants.HTTP_STATUS_UNAUTHORIZED, constants.HTTP_STATUS_FORBIDDEN].includes(response.status)) throw lost();
     let data;
-    try { data = JSON.parse(response.body); } catch { throw new MailcowAuthLost(); }
-    if (authFailure(data)) throw new MailcowAuthLost();
+    try { data = JSON.parse(response.body); } catch { throw lost(); }
+    if (authFailure(data)) throw lost();
     if (response.status !== 200) throw new AppError(502, 'MAILCOW_REJECTED', 'mailcow가 요청을 거절했어요.');
-    session.mailcowSeenAt = Date.now();
+    if (!apiKey) session.mailcowSeenAt = Date.now();
     if (method === 'POST') {
       let current;
-      if (Array.isArray(data)) {
+      if (apiKey && Array.isArray(data)) {
+        current = data;
+      } else if (Array.isArray(data)) {
         const previous = session.lastReturn;
         const startsWithPrevious = data.length >= previous.length && previous.every((row, index) => isDeepStrictEqual(row, data[index]));
         current = startsWithPrevious ? data.slice(previous.length) : data;
@@ -124,7 +143,7 @@ export function createMailcowClient({ config, logger }) {
       const rejected = current.find(row => row?.type === 'error' || row?.type === 'danger');
       if (rejected) {
         const raw = Array.isArray(rejected.msg) ? rejected.msg[0] : rejected.msg;
-        const key = typeof raw === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(raw) ? raw : null;
+        const key = typeof raw === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(raw) && !(apiKey && raw.includes(config.mailcowApiKey)) ? raw : null;
         const error = new AppError(422, 'MAILCOW_REJECTED', key ? `mailcow가 요청을 거절했어요(${key}).` : 'mailcow가 요청을 거절했어요.');
         error.mailcowMessageKey = key;
         throw error;
@@ -201,5 +220,5 @@ export function createMailcowClient({ config, logger }) {
       throw error;
     }
   }
-  return { login, totp, call, logout };
+  return { login, totp, call, logout, createApiContext };
 }

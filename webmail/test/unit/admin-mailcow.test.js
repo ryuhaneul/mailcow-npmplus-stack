@@ -92,6 +92,16 @@ async function fakeMailcow(t, mode = 'plain') {
       if (mode === 'totp-bad-redirect') return redirect('https://outside.example.com/admin/dashboard');
       return redirect('/admin/dashboard');
     }
+    if (mode === 'api-key' && req.url.startsWith('/api/v1/')) {
+      assert.equal(req.headers['x-api-key'], config.mailcowApiKey);
+      assert.equal(req.headers.cookie, undefined); assert.equal(req.headers['x-forwarded-for'], undefined);
+      if (options.apiHang) return;
+      if (options.apiLarge) return res.end('x'.repeat(2 * 1024 * 1024 + 1));
+      if (options.apiStatus) res.statusCode = options.apiStatus;
+      res.setHeader('set-cookie', 'ignored=synthetic-cookie; Path=/');
+      if (options.apiRaw !== undefined) return res.end(options.apiRaw);
+      return json(options.apiData ?? { items: ['synthetic'] });
+    }
     if (req.url === '/api/v1/get/status/version') {
       if (mode === 'version-empty') return res.end();
       if (mode === 'not-admin' || mode === 'totp-not-admin') return json({ type: 'error', msg: 'access denied' });
@@ -111,7 +121,7 @@ async function fakeMailcow(t, mode = 'plain') {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
-  const config = { mailcowUiUrl: `https://127.0.0.1:${server.address().port}`, mailcowUiServername: 'mailcow.example.com', mailTlsMode: 'pin', mailTlsPinFile: join(tempRoot, 'cert.pem') };
+  const config = { mailcowApiKey: 'synthetic-upstream-key', mailcowUiUrl: `https://127.0.0.1:${server.address().port}`, mailcowUiServername: 'mailcow.example.com', mailTlsMode: 'pin', mailTlsPinFile: join(tempRoot, 'cert.pem') };
   const client = createMailcowClient({ config, logger });
   const login = async (username = '  ADMIN  ', ip = '203.0.113.7') => {
     const password = Buffer.from(passwordText);
@@ -367,4 +377,105 @@ for (const type of ['error', 'danger']) test(`admin client: array ${type} reject
   fake.options.apiData = [rejected, { type: 'success', msg: 'mailbox_modified' }];
   await fake.client.call(session, 'POST', '/api/v1/edit/mailbox', {});
   await fake.client.logout(session);
+});
+
+test('admin API client: internal context sends only the server key and never owns cookies or logout', async t => {
+  const fake = await fakeMailcow(t, 'api-key');
+  const context = fake.client.createApiContext({ permission: 'full' });
+  assert.deepEqual(context, {}); assert.ok(Object.isFrozen(context));
+  assert.deepEqual(await fake.client.call(context, 'GET', '/api/v1/get/mailbox/all'), { items: ['synthetic'] });
+  fake.options.apiData = { type: 'success', msg: 'mailbox_modified' };
+  const body = { items: ['synthetic@example.test'], attr: { active: '1' } };
+  await fake.client.call(context, 'POST', '/api/v1/edit/mailbox', body);
+  assert.deepEqual(JSON.parse(fake.calls.at(-1).raw), body);
+  for (const call of fake.calls) {
+    assert.equal(call.headers['x-api-key'], 'synthetic-upstream-key');
+    assert.equal(call.headers.host, 'mailcow.example.com');
+    for (const name of ['cookie', 'x-forwarded-for', 'x-mailadmin-api-key', 'x-mailadmin-csrf', 'authorization']) assert.equal(call.headers[name], undefined);
+    assert.ok(!call.raw.includes('synthetic-upstream-key'));
+  }
+  await fake.client.logout(context); await fake.client.logout(context);
+  assert.equal(fake.calls.length, 2); assert.deepEqual(context, {});
+  await assert.rejects(fake.client.call({}, 'GET', '/api/v1/get/mailbox/all'), MailcowAuthLost);
+  assert.equal(fake.calls.length, 2);
+});
+test('admin API client: missing configuration and invalid permission never call upstream', async t => {
+  const fake = await fakeMailcow(t, 'api-key');
+  const client = createMailcowClient({ config: { ...fake.config, mailcowApiKey: '' }, logger });
+  assert.throws(() => client.createApiContext({ permission: 'full' }), { statusCode: 503, code: 'MAILCOW_API_UNAVAILABLE' });
+  assert.throws(() => fake.client.createApiContext({ permission: 'invalid' }), { statusCode: 403 });
+  assert.equal(fake.calls.length, 0);
+});
+test('admin API client: read context blocks writes even if a read route calls them', async t => {
+  const fake = await fakeMailcow(t, 'api-key'); const context = fake.client.createApiContext({ permission: 'read' });
+  await fake.client.call(context, 'GET', '/api/v1/get/mailbox/all');
+  await assert.rejects(fake.client.call(context, 'POST', '/api/v1/edit/mailbox', {}), { statusCode: 403, code: 'API_KEY_FORBIDDEN' });
+  assert.equal(fake.calls.length, 1);
+});
+for (const [method, path] of [
+  ['GET', 'https://outside.example.test/api/v1/get/mailbox/all'], ['GET', '//outside.example.test/api/v1/get/mailbox/all'],
+  ['GET', '/admin/'], ['POST', '/'], ['DELETE', '/api/v1/delete/mailbox'],
+  ['GET', '/api/v1/get/mailbox/all?key=synthetic'], ['GET', '/api/v1/get/mailbox/all#fragment'],
+  ['GET', '/api/v1/get/../../admin/'], ['GET', '/api/v1/get/%2e%2e/%2e%2e/admin/'],
+  ['GET', '/api/v1/get/..\\..\\admin/'],
+]) test(`admin API client: refuses ${method} ${path}`, async t => {
+  const fake = await fakeMailcow(t, 'api-key'); const context = fake.client.createApiContext({ permission: 'full' });
+  await assert.rejects(fake.client.call(context, method, path), { statusCode: 422, code: 'INVALID_INPUT' });
+  assert.equal(fake.calls.length, 0);
+});
+for (const [name, options] of [
+  ['empty', { apiRaw: '' }], ['HTML', { apiRaw: '<html>login</html>' }],
+  ['unauthorized', { apiStatus: 401 }], ['forbidden', { apiStatus: 403 }],
+  ['authentication failed', { apiData: { type: 'error', msg: 'authentication_failed' } }],
+  ['access denied', { apiData: [{ type: 'error', msg: ['access_denied'] }] }],
+  ['large', { apiLarge: true }],
+]) test(`admin API client: ${name} is 503 without human auth loss`, async t => {
+  const fake = await fakeMailcow(t, 'api-key'); const context = fake.client.createApiContext({ permission: 'full' });
+  Object.assign(fake.options, options);
+  await assert.rejects(fake.client.call(context, 'GET', '/api/v1/get/mailbox/all'), error => !(error instanceof MailcowAuthLost) && error.statusCode === 503 && error.code === 'MAILCOW_API_UNAVAILABLE');
+  assert.deepEqual(context, {}); await fake.client.logout(context); assert.equal(fake.calls.length, 1);
+});
+test('admin API client: identical POST responses are independently checked sequentially and concurrently', async t => {
+  const fake = await fakeMailcow(t, 'api-key'); const context = fake.client.createApiContext({ permission: 'full' });
+  for (const apiData of [
+    [{ type: 'success', msg: 'mailbox_modified' }], { type: 'success', msg: 'mailbox_modified' },
+    [{ type: 'danger', msg: ['mailbox_invalid'] }], { type: 'error', msg: ['mailbox_invalid'] },
+  ]) {
+    fake.options.apiData = apiData;
+    const call = () => fake.client.call(context, 'POST', '/api/v1/edit/mailbox', {});
+    const check = async () => {
+      if ((Array.isArray(apiData) ? apiData[0] : apiData).type === 'success') assert.deepEqual(await call(), apiData);
+      else await assert.rejects(call(), { statusCode: 422, code: 'MAILCOW_REJECTED', mailcowMessageKey: 'mailbox_invalid' });
+    };
+    await check(); await check(); await Promise.all([check(), check()]);
+  }
+  assert.equal(fake.calls.length, 16); assert.deepEqual(context, {});
+});
+test('admin API client: redirect, invalid POST shapes and echoed key never escape response boundaries', async t => {
+  const fake = await fakeMailcow(t, 'api-key'); const context = fake.client.createApiContext({ permission: 'full' });
+  fake.options.apiStatus = 302;
+  await assert.rejects(fake.client.call(context, 'GET', '/api/v1/get/mailbox/all'), { statusCode: 502 });
+  fake.options.apiStatus = 200;
+  for (const data of [{}, { type: 'unknown' }]) {
+    fake.options.apiData = data;
+    await assert.rejects(fake.client.call(context, 'POST', '/api/v1/edit/mailbox', {}), { statusCode: 502 });
+  }
+  fake.config.mailcowApiKey = 'synthetic_secret_key';
+  fake.options.apiData = { type: 'error', msg: fake.config.mailcowApiKey };
+  await assert.rejects(fake.client.call(context, 'POST', '/api/v1/edit/mailbox', {}), error => error.statusCode === 422 && error.mailcowMessageKey === null && !error.message.includes(fake.config.mailcowApiKey));
+  assert.equal(fake.calls.length, 4);
+});
+test('admin API client: TLS hostname failure and abort return API unavailable without web login', async t => {
+  const fake = await fakeMailcow(t, 'api-key');
+  const wrong = createMailcowClient({ config: { ...fake.config, mailcowUiServername: 'wrong.example.test' }, logger });
+  await assert.rejects(wrong.call(wrong.createApiContext({ permission: 'full' }), 'GET', '/api/v1/get/mailbox/all'), { statusCode: 503, code: 'MAILCOW_API_UNAVAILABLE' });
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(fake.client.call(fake.client.createApiContext({ permission: 'full' }), 'GET', '/api/v1/get/mailbox/all', undefined, controller.signal), { statusCode: 503, code: 'MAILCOW_API_UNAVAILABLE' });
+  assert.equal(fake.calls.length, 0);
+});
+test('admin API client: API deadline aborts a hanging response within fifteen seconds', async t => {
+  const fake = await fakeMailcow(t, 'api-key'); fake.options.apiHang = true;
+  const start = Date.now();
+  await assert.rejects(fake.client.call(fake.client.createApiContext({ permission: 'full' }), 'GET', '/api/v1/get/mailbox/all'), { statusCode: 503, code: 'MAILCOW_API_UNAVAILABLE' });
+  assert.ok(Date.now() - start >= 14_500 && Date.now() - start < 17_000); assert.equal(fake.calls.length, 1);
 });

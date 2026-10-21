@@ -261,6 +261,57 @@ test('fully drained historical rotation removal leaves a tombstone without false
   assert.equal(checkpoints.filter((item) => item.closed).length, 1);
 });
 
+for (const restart of [false, true]) {
+  test(`stopped container observed twice then replaced retires without gaps (restart=${restart})`, async (t) => {
+    const f = await fixture(t);
+    const file = await container(f);
+    const old = json('stopped-final'); const next = json('replacement');
+    await fs.writeFile(file, old);
+    await f.collector.collect();
+    await f.collector.collect();
+    if (restart) await f.restart();
+    await fs.rm(path.dirname(file), { recursive: true });
+    await fs.writeFile(await container(f, id('b')), next);
+    const result = await f.collector.collect();
+    assert.equal(result.status.gaps.length, 0);
+    assert.equal(result.status.backfillComplete, true);
+    const checkpoints = Object.values((await f.store.snapshot()).checkpoint.generations);
+    assert.equal(checkpoints.find((item) => item.instance === id('a')).closed, true);
+    assert.equal(checkpoints.find((item) => item.instance === id('a')).offset, old.length);
+    await f.restart();
+    await f.collector.collect();
+    assert.equal((await f.collector.status()).gaps.length, 0);
+    assert.deepEqual(lines(await output(f)), lines(Buffer.concat([old, next])));
+  });
+
+  for (const scenario of ['one observation', 'last observation grew', 'unread stable suffix', 'grew after last observation']) {
+    if (restart && scenario === 'grew after last observation') continue;
+    test(`active container removal retains one gap: ${scenario} (restart=${restart})`, async (t) => {
+      const f = await fixture(t, scenario === 'unread stable suffix' ? { maxBatchBytes: 1 } : {});
+      const file = await container(f);
+      const first = json('first'); const second = json('second');
+      await fs.writeFile(file, scenario === 'unread stable suffix' ? Buffer.concat([first, second, second, second]) : first);
+      await f.collector.collect();
+      if (scenario !== 'one observation') await f.collector.collect();
+      if (scenario === 'last observation grew') {
+        await fs.appendFile(file, second);
+        await f.collector.collect();
+      }
+      if (scenario === 'grew after last observation') await fs.appendFile(file, second);
+      if (restart) await f.restart();
+      await fs.rm(path.dirname(file), { recursive: true });
+      await fs.writeFile(await container(f, id('b')), json('replacement'));
+      for (let poll = 0; poll < 5; poll++) await f.collector.collect();
+      const gaps = (await f.collector.status()).gaps;
+      assert.equal(gaps.length, 1);
+      assert.equal(gaps[0].reason, 'source-disappeared');
+      assert.equal(gaps[0].unknownLines, true);
+      const checkpoints = Object.values((await f.store.snapshot()).checkpoint.generations);
+      assert.equal(checkpoints.find((item) => item.instance === id('a')).closed, true);
+    });
+  }
+}
+
 test('hostconfig driver detection uses only allowlisted container metadata', async (t) => {
   const f = await fixture(t);
   const file = await container(f);

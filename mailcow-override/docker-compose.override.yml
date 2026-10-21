@@ -1,17 +1,41 @@
 services:
   # NPM certificate volume sharing
   nginx-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     volumes:
       - npmplus-data:/npm-data:ro
   dovecot-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     volumes:
       - npmplus-data:/npm-data:ro
   postfix-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     volumes:
       - npmplus-data:/npm-data:ro
 
   # Mailcow Toolkit (built from /home/mailcow-toolkit)
   toolkit-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     build: /home/mailcow-toolkit
     container_name: toolkit-mailcow
     restart: always
@@ -27,8 +51,126 @@ services:
 
   # Disable acme-mailcow (NPM handles certificates)
   acme-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     restart: "no"
     entrypoint: ["sleep", "infinity"]
+
+  clamd-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  dockerapi-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  memcached-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  mysql-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  netfilter-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  ofelia-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  olefy-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  php-fpm-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  postfix-tlspol-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  redis-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  rspamd-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  sogo-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  unbound-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
+
+  watchdog-mailcow:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
 
 volumes:
   npmplus-data:

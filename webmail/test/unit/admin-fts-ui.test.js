@@ -17,6 +17,23 @@ test('FTS overview uses KST scheduling, honest missing values and distinct run s
     assert.equal(nextFtsStart({ ...base, enabled: false }), null);
     assert.equal(nextFtsStart({ ...base, window: { ...base.window, start: '04:15' } }, Date.parse('2026-10-20T18:00:00Z')), '2026-10-20T19:15:00.000Z');
   });
+  await t.test('overnight next openings and running cutoff use the opening KST date', () => {
+    const overnight = { ...base, window: { ...base.window, start: '22:00', end: '06:00' } };
+    for (const [now, next] of [
+      ['2026-10-20T12:59:59Z', '2026-10-20T13:00:00.000Z'],
+      ['2026-10-20T13:00:00Z', '2026-10-21T13:00:00.000Z'],
+      ['2026-10-20T14:59:59Z', '2026-10-21T13:00:00.000Z'],
+      ['2026-10-20T15:00:00Z', '2026-10-21T13:00:00.000Z'],
+      ['2026-10-20T21:00:00Z', '2026-10-21T13:00:00.000Z'],
+      ['2026-10-21T00:00:00Z', '2026-10-21T13:00:00.000Z'],
+      ['2026-12-31T15:00:00Z', '2027-01-01T13:00:00.000Z'],
+    ]) assert.equal(nextFtsStart(overnight, Date.parse(now)), next);
+    const running = { ...overnight, lastRun: { status: 'running', day: '2026-10-20' } };
+    for (const now of ['2026-10-20T14:59:59Z', '2026-10-20T15:00:00Z', '2026-10-20T20:59:59Z']) {
+      assert.equal(ftsResult(running, Date.parse(now)), '실행 중');
+    }
+    assert.equal(ftsResult(running, Date.parse('2026-10-20T21:00:00Z')), '종료 시각 초과·마무리 중');
+  });
   await t.test('all outcomes preserve manual recovery, corruption and soft cutoff semantics', () => {
     assert.equal(ftsResult(base), '미실행');
     for (const [status, expected] of [['done', '완료'], ['cutoff', '시간 창 종료'], ['failed', '일부 실패'], ['unknown', '종료 확인 필요']]) assert.equal(ftsResult({ ...base, lastRun: { status } }), expected);

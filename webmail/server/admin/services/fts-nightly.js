@@ -10,7 +10,7 @@ const unfinished = row => ['pending', 'running', 'failed', 'unknown', 'unmeasure
 // never cancels an in-flight remote index when the start deadline passes.
 export function createFtsNightly({ state: store, measure, doveadm, audit, history, logger, now = Date.now }) {
   history?.register('fts.nightly', { label: '검색 색인을 정리했어요' });
-  async function runOnce({ deadline, signal } = {}) {
+  async function runOnce({ day, deadline, signal } = {}) {
     const cutoff = () => now() >= deadline || signal?.aborted === true;
     if (!Number.isFinite(deadline)) throw new AppError(422, 'FTS_DEADLINE_INVALID', '색인 종료 시각을 확인해 주세요.');
     let state = null, keepLock = false, sentIndex = false;
@@ -144,7 +144,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
     try {
       const previous = await store.read();
       if (previous.damaged) throw new AppError(409, 'FTS_STATE_CORRUPT', '색인 상태를 확인해 주세요.');
-      state = await store.startRun(new Date(now() + 9 * 3_600_000).toISOString().slice(0, 10));
+      state = await store.startRun(day ?? new Date(now() + 9 * 3_600_000).toISOString().slice(0, 10));
       await audit.run({ actor: 'scheduler', ip: '', action: 'fts.nightly', target: state.day,
         kind: 'irreversible', revertible: false, before: { runId: state.runId }, after: {} }, async () => {
         await execute(previous.state);

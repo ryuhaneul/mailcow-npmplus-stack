@@ -77,7 +77,7 @@ export function loadAdminConfig(env = process.env) {
   for (const [key, time] of [['FTS_NIGHTLY_START', ftsStart], ['FTS_NIGHTLY_END', ftsEnd]]) {
     if (typeof time !== 'string' || time.length !== 5 || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) invalid(key);
   }
-  if (ftsStart >= ftsEnd) invalid('FTS_NIGHTLY_END');
+  if (ftsStart === ftsEnd) invalid('FTS_NIGHTLY_END');
   const ftsNightly = Object.freeze({ enabled: ftsEnabled === 'true', start: ftsStart, end: ftsEnd, stateDir: '/data/fts-nightly' });
   const trustedSenderFile = choice('TRUSTED_SENDER_FILE', ['', '/run/trusted/trusted_senders.map']);
   const relayRaw = choice('RELAY_FILES', ['', '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc']);

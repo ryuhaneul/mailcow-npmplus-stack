@@ -1195,7 +1195,7 @@ MAIL_FTS_NIGHTLY_START=03:00
 MAIL_FTS_NIGHTLY_END=06:00
 ```
 
-시각은 서버 시간대와 무관하게 `Asia/Seoul`(KST)의 `HH:MM`입니다. 시작은 끝보다 빨라야 하며(`START < END`), 자정을 넘는 창은 지원하지 않습니다. 끄려면 `MAIL_FTS_NIGHTLY_ENABLE=false`로 바꿉니다. 설정 후 스택 저장소 루트에서 기존 update를 실행합니다. mailcow 자체를 갱신하지 않는 경우는 다음과 같습니다.
+시각은 서버 시간대와 무관하게 `Asia/Seoul`(KST)의 `HH:MM`입니다. 시작과 끝은 달라야 합니다(`START != END`). 시작이 끝보다 늦으면 자정을 넘는 창입니다(예: `22:00`~다음 날 `06:00`). 실행 일자는 창이 시작된 KST 날짜로 저장하므로 자정 전후에 재시작해도 같은 창에서 두 번 실행하지 않습니다. 종료 시각부터는 새 폴더를 시작하지 않고 진행 중인 폴더의 완료를 기다립니다. 끄려면 `MAIL_FTS_NIGHTLY_ENABLE=false`로 바꿉니다. 설정 후 스택 저장소 루트에서 기존 update를 실행합니다. mailcow 자체를 갱신하지 않는 경우는 다음과 같습니다.
 
 ```bash
 sudo ./scripts/update.sh -y --skip-mailcow-update

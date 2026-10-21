@@ -43,7 +43,7 @@ export function createApiKeyRateLimiter({ now = Date.now, maxEntries = 10_000 } 
       record.blockedUntil = record.failures.length >= 5 ? record.failures.at(-1).at + 5 * minute : 0;
     };
   }
-  // Only authenticated, authorized persistent ids may reach this map.
+  // Only authenticated persistent ids may reach this map, including denied permissions.
   function reserveKey(id) {
     const at = now();
     let record = keys.get(id);

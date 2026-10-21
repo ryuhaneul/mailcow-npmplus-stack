@@ -9,7 +9,8 @@ const authRoot = '/api/admin/auth/';
 const keyHeader = 'x-mailadmin-api-key';
 const tokenPattern = /^mak_v1_[A-Za-z0-9_-]{43}$/;
 const keyMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
-const keyReasons = new Set(['INVALID_TOKEN', 'UNKNOWN_KEY', 'REVOKED', 'EXPIRED', 'IP_DENIED', 'HUMAN_ONLY', 'PERMISSION_DENIED']);
+const authenticationFailures = new Set(['INVALID_TOKEN', 'UNKNOWN_KEY', 'REVOKED', 'EXPIRED', 'IP_DENIED']);
+const keyReasons = new Set([...authenticationFailures, 'HUMAN_ONLY', 'PERMISSION_DENIED']);
 const forbidden = reason => Object.assign(new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.'), { reason });
 const humanOnly = path => path === '/api/admin/auth' || path.startsWith(authRoot) || path === '/api/admin/api-keys' || path.startsWith('/api/admin/api-keys/');
 export function installAdminGuard(app, { config, sessions, client, apiKeys, apiKeyRateLimiter = createApiKeyRateLimiter() }) {
@@ -33,19 +34,19 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
       const release = apiKeyRateLimiter.reserveIp(request.ip);
       let authenticated = false;
       try {
-        if (humanOnly(path)) throw forbidden('HUMAN_ONLY');
         const token = request.headers[keyHeader];
         const duplicates = request.raw.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === keyHeader).length;
         if (duplicates > 1 || typeof token !== 'string' || !tokenPattern.test(token)) throw forbidden('INVALID_TOKEN');
-        if (!config.mailcowApiKey || !apiKeys) throw new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
+        if (!config.mailcowApiKey || !apiKeys) throw humanOnly(path) ? forbidden('HUMAN_ONLY') : new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
         const result = await apiKeys.authenticate(token, request.ip);
         if (!result.ok) throw forbidden(result.reason);
         authenticated = true;
         release();
         const item = result.item;
         request.adminPrincipal = { type: 'apiKey', id: item.id, name: item.name, permission: item.permission };
-        if (!keyMethods.has(request.method) || (item.permission === 'read' && request.method !== 'GET')) throw forbidden('PERMISSION_DENIED');
         apiKeyRateLimiter.reserveKey(item.id);
+        if (humanOnly(path)) throw forbidden('HUMAN_ONLY');
+        if (!keyMethods.has(request.method) || (item.permission === 'read' && request.method !== 'GET')) throw forbidden('PERMISSION_DENIED');
         await apiKeys.recordUse(item.id, request.ip);
         const context = client.createApiContext({ permission: item.permission });
         request.session = { id: `apikey:${item.id}`, username: `API 키: ${item.name}`, state: 'ready', mailcow: context };
@@ -54,7 +55,7 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
         if (!status || typeof status.version !== 'string' || !status.version) throw new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
         return;
       } catch (error) {
-        if (!authenticated && error.code !== 'API_KEY_FORBIDDEN') release();
+        if (!authenticated && !(error.code === 'API_KEY_FORBIDDEN' && authenticationFailures.has(error.reason))) release();
         throw error;
       }
     }

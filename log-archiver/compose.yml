@@ -1,0 +1,55 @@
+name: log-archiver
+services:
+  log-archiver:
+    build:
+      context: ..
+      dockerfile: log-archiver/Dockerfile
+    image: mailstack-log-archiver:local
+    # The store abstract-socket lock is namespace-local. Fixed name also prevents
+    # a second Compose project from mounting the same archive concurrently.
+    container_name: log-archiver
+    restart: always
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    env_file: ./.env
+    environment:
+      LOG_ARCHIVE_ROOT: /archive
+      LOG_ARCHIVE_DOCKER_ROOT: /docker-containers
+      LOG_ARCHIVE_NPMPLUS_ROOT: /npmplus-data
+      LOG_ARCHIVE_PORT: "8080"
+    volumes:
+      - type: bind
+        source: ${LOG_ARCHIVE_DOCKER_CONTAINERS:?Docker containers directory required}
+        target: /docker-containers
+        read_only: true
+        bind:
+          create_host_path: false
+      - npmplus-data:/npmplus-data:ro
+      - log-archive-data:/archive
+    networks: [log-archive-internal]
+    cpus: 0.5
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.status===204?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+volumes:
+  npmplus-data:
+    external: true
+    name: ${LOG_ARCHIVE_NPMPLUS_VOLUME:?NPMplus data volume required}
+  log-archive-data:
+    name: log-archive-data
+networks:
+  log-archive-internal:
+    name: log-archive-internal
+    internal: true

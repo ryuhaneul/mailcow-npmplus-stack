@@ -68,8 +68,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
     return new Set([...primary, ...aliases.filter(row => String(row.active) === '1' && primary.has(normalize(row.target_domain))).map(row => normalize(row.alias_domain))]);
   }
   async function validate(session, source, confirmMove) {
-    const redirects = inspectRedirects(source), internal = await internalDomains(session);
-    if (redirects.some(row => !internal.has(row.target.split('@')[1]))) throw new AppError(422, 'EXTERNAL_REDIRECT', '전달 대상은 활성 사내 도메인만 쓸 수 있어요.');
+    const redirects = inspectRedirects(source);
     if (redirects.some(row => !row.copy) && confirmMove !== true) throw new AppError(422, 'MOVE_CONFIRM', '원본을 옮기는 전달이 있어요. 원본 보존 여부를 확인해 주세요.');
   }
   const dto = row => ({ id: String(row.id), type: row.filter_type, active: String(row.active) === '1', description: row.script_desc, script: row.script_data, etag: etag(state(row)) });
@@ -89,10 +88,10 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
       const after = state({ ...row, script_data: data.script }); if (isDeepStrictEqual(before, after)) return { ...dto(row), unchanged: true };
       let revertible = true;
       try { await validate(session, row.script_data, true); } catch (error) {
-        if (!(error instanceof AppError) || !['EXTERNAL_REDIRECT', 'FILTER_UNINSPECTABLE'].includes(error.code)) throw error;
+        if (!(error instanceof AppError) || error.code !== 'FILTER_UNINSPECTABLE') throw error;
         revertible = false;
       }
-      const detail = revertible ? {} : { reason: '이전 원문에 회사 밖 전달 또는 해석 불가 문법이 있어 이 도구로 되돌릴 수 없음' };
+      const detail = revertible ? {} : { reason: '이전 원문에 해석 불가 문법이 있어 이 도구로 되돌릴 수 없음' };
       return audit.run({ actor, ip, action: 'filter.edit', target: addr, kind: 'config', revertible, before, after, ...hashes(row.script_data, data.script) }, async intent => {
         const saved = await apply(session, addr, id, before, after, data.script); return { ...dto(saved), auditId: intent.id, detail };
       }, { prepare: ({ id }) => backups.write(id, row.script_data, data.script) });

@@ -22,16 +22,16 @@ test('spam exclusion must be standalone and ahead of every external redirect', (
 const bounce = 'if envelope :is "from" "" { stop; }';
 test('forwarding safety insertion merges require and inserts exactly the missing guards', () => {
   for (const [script, expected] of [
-    [redirect, `require ["envelope"];\n${guard}\n${bounce}\n${redirect}`],
+    [redirect, `require ["envelope", "copy"];\n${guard}\n${bounce}\n${redirect}`],
     [`require ["copy"];\n${redirect}`, `require ["copy", "envelope"];\n${guard}\n${bounce}\n${redirect}`],
     [`require "copy";\n${redirect}`, `require ["copy", "envelope"];\n${guard}\n${bounce}\n${redirect}`],
     [`require ["copy", "envelope"];\n${redirect}`, `require ["copy", "envelope"];\n${guard}\n${bounce}\n${redirect}`],
     [`require "copy";\nrequire "envelope";\n${redirect}`, `require "copy";\nrequire "envelope";\n${guard}\n${bounce}\n${redirect}`],
     [`# header\r\nrequire ["copy"];\r\nrequire "fileinto";\r\n${redirect}`, `# header\r\nrequire ["copy", "envelope"];\r\nrequire "fileinto";\r\n${guard}\r\n${bounce}\r\n${redirect}`],
     [`require /* a */ [\n "copy"\n]; ${redirect}`, `require /* a */ [\n "copy", "envelope"\n];\n${guard}\n${bounce}\n ${redirect}`],
-    [`# require "envelope";\n${redirect}`, `require ["envelope"];\n${guard}\n${bounce}\n# require "envelope";\n${redirect}`],
-    [`${guard}\n${redirect}`, `require ["envelope"];\n${bounce}\n${guard}\n${redirect}`],
-    [`require "envelope";\n${bounce}\n${redirect}`, `require "envelope";\n${guard}\n${bounce}\n${redirect}`],
+    [`# require "envelope";\n${redirect}`, `require ["envelope", "copy"];\n${guard}\n${bounce}\n# require "envelope";\n${redirect}`],
+    [`${guard}\n${redirect}`, `require ["envelope", "copy"];\n${bounce}\n${guard}\n${redirect}`],
+    [`require "envelope";\n${bounce}\n${redirect}`, `require ["envelope", "copy"];\n${guard}\n${bounce}\n${redirect}`],
   ]) {
     assert.equal(insertForwardingSafety(script, []), expected, script);
     assert.equal(externalRedirectPreview(expected, []).needsSpamGuard, false);
@@ -50,4 +50,18 @@ test('bounce advice is independent of mandatory spam policy and ignores late, ne
   const both = `require "envelope";\n${guard}\n${bounce}\n${redirect}`;
   assert.equal(insertForwardingSafety(both, []), both);
   assert.equal(needsBounceGuard('redirect :copy "inside@example.com";', ['example.com']), false);
+});
+
+test('copy capability is merged only for an actual copy tag and is never duplicated', () => {
+  const tail = `${guard}\n${bounce}\n`;
+  for (const [source, expected] of [
+    [`require ["envelope"];\n${redirect}`, `require ["envelope", "copy"];\n${tail}${redirect}`],
+    [`require /* declaration */ ["envelope"];\r\n${redirect}`, `require /* declaration */ ["envelope", "copy"];\r\n${guard}\r\n${bounce}\r\n${redirect}`],
+    [`require "envelope";\nrequire "copy";\n${redirect}`, `require "envelope";\nrequire "copy";\n${tail}${redirect}`],
+    [`# redirect :copy "ignored@example.net";\nredirect "outside@example.net";`, `require ["envelope"];\n${tail}# redirect :copy "ignored@example.net";\nredirect "outside@example.net";`],
+    [`if header :contains "Subject" ":copy" { keep; }\nredirect "outside@example.net";`, `require ["envelope"];\n${tail}if header :contains "Subject" ":copy" { keep; }\nredirect "outside@example.net";`],
+  ]) {
+    assert.equal(insertForwardingSafety(source, []), expected, source);
+    assert.equal(insertForwardingSafety(expected, []), expected);
+  }
 });

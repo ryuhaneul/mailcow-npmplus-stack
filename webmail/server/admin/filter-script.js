@@ -49,26 +49,29 @@ export function insertForwardingSafety(script, internalDomains) {
   if (needsBounceGuard(script, internalDomains)) lines.push(bounceGuard);
   if (!lines.length) return script;
   const newline = script.includes('\r\n') ? '\r\n' : '\n';
-  let words = scriptTokens(script), index = 0, firstRequire = null, hasEnvelope = false;
+  let words = scriptTokens(script), index = 0, firstRequire = null;
+  const required = new Set(['envelope']);
+  if (words.some(word => word.value.toLowerCase() === ':copy')) required.add('copy');
   while (words[index]?.value.toLowerCase() === 'require') {
     const start = index++;
     while (words[index] && words[index].value !== ';') {
-      if (words[index].value.toLowerCase() === '"envelope"') hasEnvelope = true;
+      required.delete(words[index].value.slice(1, -1).toLowerCase());
       index++;
     }
     if (!words[index]) break;
     firstRequire ??= words.slice(start + 1, index);
     index++;
   }
-  if (!hasEnvelope) {
-    if (!firstRequire) script = `require ["envelope"];${newline}${script}`;
+  if (required.size) {
+    const missing = [...required].map(value => `"${value}"`).join(', ');
+    if (!firstRequire) script = `require [${missing}];${newline}${script}`;
     else if (firstRequire[0]?.value === '[') {
       const last = firstRequire.filter(word => word.value.startsWith('"')).at(-1);
       const at = last?.end ?? firstRequire[0].end;
-      script = `${script.slice(0, at)}${last ? ', ' : ''}"envelope"${script.slice(at)}`;
+      script = `${script.slice(0, at)}${last ? ', ' : ''}${missing}${script.slice(at)}`;
     } else {
       const capability = firstRequire[0];
-      script = `${script.slice(0, capability.start)}[${capability.value}, "envelope"]${script.slice(capability.end)}`;
+      script = `${script.slice(0, capability.start)}[${capability.value}, ${missing}]${script.slice(capability.end)}`;
     }
   }
   words = scriptTokens(script); index = 0; let end = 0;

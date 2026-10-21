@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { openStore } from '../store.js';
+import { openCollector } from '../collector.js';
 import { createSearch, validateQuery, projectLine, MAX_RESPONSE_BYTES } from '../search.js';
 import { createArchiveServer } from '../api.js';
 
@@ -181,7 +182,15 @@ test('coverage includes all eight policies and collection gaps, with empty vs in
   await store.commit({ records: [row('kept')] });
   const wrapped = {
     root: store.root, file: store.file.bind(store), readIndex: store.readIndex.bind(store),
-    async snapshot() { const state = await store.snapshot(); state.checkpoint.gaps = [{ source: 'postfix', from: base.start, to: base.end, reason: 'copytruncate' }]; return state; },
+    async snapshot() {
+      const state = await store.snapshot();
+      state.checkpoint.generations = {
+        old: { source: 'postfix', closed: true, gaps: [{ source: 'postfix', generation: 'old', start: base.start, end: base.end, reason: 'copytruncate', fromOffset: 100, toOffset: null, unknownLines: true }] },
+        current: { source: 'postfix', gaps: [{ source: 'postfix', generation: 'current', start: null, end: null, reason: 'source-read-error', fromOffset: 0, toOffset: null, unknownLines: true }] },
+        other: { source: 'dovecot', gaps: [{ source: 'dovecot', generation: 'other', start: base.start, end: base.end, reason: 'source-disappeared', fromOffset: 100, toOffset: null, unknownLines: true }] },
+      };
+      return state;
+    },
   };
   const engine = createSearch({ store: wrapped });
   const coverage = await engine.coverage();
@@ -190,9 +199,46 @@ test('coverage includes all eight policies and collection gaps, with empty vs in
   assert.equal(coverage.sources.find(item => item.source === 'nginx').retentionDays, 1);
   const response = await engine.search(params({ q: 'absent' }));
   assert.equal(response.returned, 0); assert.equal(response.complete, true); assert.equal(response.incomplete, true);
-  assert.equal(response.coverage.gaps[0].reason, 'copytruncate');
+  assert.deepEqual(response.coverage.gaps, [
+    { source: 'postfix', from: '2026-10-21T08:00:00.000Z', to: '2026-10-21T09:00:00.000Z', reason: 'copytruncate' },
+    { source: 'postfix', from: null, to: null, reason: 'source-read-error' },
+  ]);
+  assert.deepEqual(coverage.sources.find(item => item.source === 'postfix').gaps, response.coverage.gaps);
+  assert.equal(coverage.sources.find(item => item.source === 'dovecot').gaps.length, 1);
   const empty = await engine.search(params({ source: 'dovecot' }));
   assert.equal(empty.coverage.oldest, null); assert.equal(empty.incomplete, true);
+});
+
+test('collector checkpoint gaps survive access truncation and appear in coverage and search by source', async t => {
+  const store = await fixture(t);
+  const npmplusRoot = path.join(store.root, 'synthetic-npmplus');
+  const file = path.join(npmplusRoot, 'nginx/logs/access.log');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const access = minute => `2001:db8::1 - - [21/Oct/2026:08:${minute}:00 +0000] "GET /synthetic HTTP/1.1" 200 1\n`;
+  await fs.writeFile(file, access('00'));
+  let now = new Date('2026-10-21T08:10:00Z');
+  const collector = await openCollector({ store, npmplusRoot, requiredSources: ['npmplus'], now: () => now });
+  t.after(() => collector.close());
+  await collector.collect();
+  await fs.writeFile(file, access('59'));
+  now = new Date('2026-10-21T08:20:00Z');
+  await collector.collect();
+  const { checkpoint } = await store.snapshot();
+  const collected = Object.values(checkpoint.generations).flatMap(item => item.gaps ?? []);
+  assert.equal(collected.length, 1);
+  assert.equal(collected[0].reason, 'source-truncated-or-rewritten');
+  const expected = [{ source: 'npmplus', from: collected[0].start, to: collected[0].end, reason: collected[0].reason }];
+  const engine = createSearch({ store });
+  const coverage = await engine.coverage();
+  assert.deepEqual(coverage.sources.find(item => item.source === 'npmplus').gaps, expected);
+  assert.ok(coverage.sources.filter(item => item.source !== 'npmplus').every(item => item.gaps.length === 0));
+  const response = await engine.search(params({ source: 'npmplus', start: '2026-10-21T08:05:00Z', end: '2026-10-21T08:25:00Z', q: 'absent' }));
+  assert.deepEqual(response.coverage.gaps, expected);
+  assert.ok(response.coverage.oldest < response.requestedRange.start);
+  assert.ok(response.coverage.newest > response.requestedRange.end);
+  assert.equal(response.returned, 0);
+  assert.equal(response.complete, true);
+  assert.equal(response.incomplete, true);
 });
 
 test('corrupt gzip, read failure and cancellation return errors without paths or content', async t => {

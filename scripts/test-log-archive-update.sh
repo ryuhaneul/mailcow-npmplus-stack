@@ -22,6 +22,9 @@ end=s.index('# ============================================================', st
 start=s.index('header "Phase 3:')
 end=s.index('# ============================================================',start)
 (dest/'phase3.sh').write_text(s[start:end])
+start=s.index('# Install logging limits before')
+end=s.index('# ============================================================',start)
+(dest/'logging-policy.sh').write_text(s[start:end])
 # These direct paths must use the same transaction wrapper as edge deployment.
 assert 'edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d webmail-admin' in s
 assert 'edge_archive_apply "$dir" false edge_npmplus_up up -d' in s
@@ -51,6 +54,35 @@ reset_case() {
     rm -f "$TMP/"*-fail "$TMP/"signal-* "$TMP/deleted-ids" "$TMP/legacy" "$TMP/unknown-preview" "$TMP/no-change" "$TMP/new-create"
     : > "$TMP/calls"
     LOG_ARCHIVE_ENABLE=true
+    SKIP_MAILCOW_UPDATE=false
+    cat > "$TMP/mailcow/docker-compose.yml" <<'MAILCOW'
+services:
+  postfix-mailcow:
+    image: synthetic
+  dovecot-mailcow:
+    image: synthetic
+  rspamd-mailcow:
+    image: synthetic
+  php-fpm-mailcow:
+    image: synthetic
+  nginx-mailcow:
+    image: synthetic
+MAILCOW
+    cat > "$TMP/mailcow/docker-compose.override.yml" <<'OVERRIDE'
+services:
+  postfix-mailcow:
+    environment:
+      OPERATOR_SETTING: keep
+OVERRIDE
+    cat > "$TMP/npm/docker-compose.yml" <<'NPM'
+services:
+  npmplus:
+    image: operator.invalid/npmplus:custom
+    environment:
+      LOGROTATE: "true"
+  crowdsec:
+    image: operator.invalid/crowdsec:custom
+NPM
     LOG_ARCHIVE_REQUIRED_SOURCES=postfix,dovecot,rspamd,php-fpm,nginx,npmplus,webmail,webmail-admin
     WEBMAIL_ENABLE=true WEBMAIL_ADMIN_ENABLE=true SNAPPYMAIL_ENABLE=false
     WEBMAIL_MAIL_TLS_MODE=verify EDGE_WEBMAIL_PIN_CHANGED=false
@@ -64,6 +96,19 @@ docker() {
     local service arg
     if [ "$1" = compose ]; then
         case " $* " in
+            *' config --services '*|*' config --format json '*)
+                python3 - "$PWD" "$*" <<'RENDER'
+import json,pathlib,sys,yaml
+root=pathlib.Path(sys.argv[1]); services={}
+for name in ('docker-compose.yml','docker-compose.override.yml'):
+ p=root/name
+ if p.exists():
+  for key,value in yaml.safe_load(p.read_text()).get('services',{}).items():
+   services.setdefault(key,{}).update(value)
+if '--services' in sys.argv[2]: print('\n'.join(services))
+else: print(json.dumps({'services':services}))
+RENDER
+                ;;
             *' --dry-run '*)
                 [ ! -f "$TMP/preview-fail" ] || return 1
                 if [ -f "$TMP/unknown-preview" ]; then echo 'unexpected preview format'; return 0; fi
@@ -82,6 +127,7 @@ docker() {
                             echo " ✔ DRY-RUN MODE - Container webmail $action"
                             echo " ✔ DRY-RUN MODE - Container webmail-admin $action"
                         fi ;;
+                    "$TMP/mailcow") echo " ✔ DRY-RUN MODE - Container id-${*: -1} $action" ;;
                     *) fail 'unexpected preview project' ;;
                 esac ;;
             *' ps -a -q '*)
@@ -92,7 +138,9 @@ docker() {
                 esac ;;
             *' ps -a --format '*)
                 [ ! -f "$TMP/new-create" ] || return 0
-                if [ "$PWD" = "$TMP/npm" ]; then echo 'npmplus|npmplus'
+                if [ "$PWD" = "$TMP/mailcow" ]; then
+                    for service in postfix-mailcow dovecot-mailcow rspamd-mailcow php-fpm-mailcow nginx-mailcow; do echo "id-$service|$service"; done
+                elif [ "$PWD" = "$TMP/npm" ]; then echo 'npmplus|npmplus'
                 else printf 'webmail|webmail\nwebmail-admin|webmail-admin\nmailrelay-webmail|mailrelay-webmail\n'; fi ;;
             *' ps --status running --services '*)
                 if [ "$PWD" = "$TMP/mailcow" ]; then printf 'postfix-mailcow\ndovecot-mailcow\n'
@@ -167,7 +215,7 @@ cp "$TMP/logs/access.log" "$TMP/logs/nginx/logs/access.log"
 run_upstream() (
     trap - EXIT
     ENV_FILE="$TMP/stack.env" PROJECT_DIR="$ROOT" SCRIPT_DIR="$TMP/scripts"
-    MAILCOW_DIR="$TMP/mailcow" LOGFILE="$TMP/update.log" SKIP_MAILCOW_UPDATE=false
+    MAILCOW_DIR="$TMP/mailcow" NPMPLUS_DIR="$TMP/npm" LOGFILE="$TMP/update.log"
     header() { :; }
     log() { :; }
     warn() { :; }
@@ -175,6 +223,7 @@ run_upstream() (
     confirm() { return 0; }
     webmail_mailcow_value() { echo 172.22.1; }
     source "$TMP/prepare.sh"
+    source "$TMP/logging-policy.sh"
     source "$TMP/phase3.sh"
 )
 assert_order() {
@@ -319,6 +368,65 @@ run_upstream
 ! grep -Eq '^prepare$|^backfill$|^docker stop ' "$TMP/calls" || fail upstream-disabled
 assert_order upstream health
 pass 'feature OFF upstream keeps existing update and health path'
+# Reproduce first upgrade from pre-archive runtime compose files, including
+# the no-upstream path used to roll out logging limits alone.
+reset_case
+SKIP_MAILCOW_UPDATE=true
+run_upstream
+! grep -qx upstream "$TMP/calls" || fail skipped-upstream
+assert_order 'docker compose config --format json' 'docker compose --dry-run up -d --no-deps --no-build --wait --wait-timeout 180 postfix-mailcow' 'docker stop id-postfix-mailcow' status replace
+! grep -q '^docker stop id-rspamd-mailcow$' "$TMP/calls" || fail logging-stopped-source
+! grep -q '^docker compose .*up -d .*rspamd-mailcow$' "$TMP/calls" || fail logging-started-stopped
+python3 - "$TMP" <<'POLICY'
+import pathlib,sys,yaml
+root=pathlib.Path(sys.argv[1]); policy={'driver':'json-file','options':{'max-size':'20m','max-file':'5','compress':'false'}}
+m=yaml.safe_load((root/'mailcow/docker-compose.override.yml').read_text())
+assert len(m['services'])==5 and all(v['logging']==policy for v in m['services'].values())
+assert m['services']['postfix-mailcow']['environment']=={'OPERATOR_SETTING':'keep'}
+n=yaml.safe_load((root/'npm/docker-compose.yml').read_text())
+assert all(v['logging']==policy for v in n['services'].values())
+assert n['services']['npmplus']['environment']['LOGROTATE']=='true'
+assert n['services']['npmplus']['image']=='operator.invalid/npmplus:custom'
+POLICY
+pass 'skip-mailcow-update installs missing mailcow/NPMplus limits and drains only current running mailcow services'
+reset_case
+SKIP_MAILCOW_UPDATE=true
+LOG_ARCHIVE_ENABLE=false
+run_upstream
+! grep -Eq '^prepare$|^backfill$|^docker stop ' "$TMP/calls" || fail logging-off-drain
+grep -q '^replace$' "$TMP/calls" || fail logging-off-apply
+log_archive_check_logging "$TMP/mailcow"
+log_archive_check_logging "$TMP/npm"
+pass 'feature OFF still installs and applies bounded logging without starting archiver or stopped mailcow sources'
+reset_case
+SKIP_MAILCOW_UPDATE=true
+touch "$TMP/no-change"
+run_upstream
+! grep -q '^docker stop ' "$TMP/calls" || fail logging-unchanged-stop
+pass 'unchanged logging application uses dry-run and avoids drain'
+reset_case
+SKIP_MAILCOW_UPDATE=true
+touch "$TMP/drain-fail"
+if run_upstream; then fail logging-drain-failure; fi
+no_replace
+grep -q '^docker start id-postfix-mailcow$' "$TMP/calls" || fail logging-drain-restore
+pass 'first logging rollout drain failure restores old running ID and prevents replacement'
+reset_case
+SKIP_MAILCOW_UPDATE=true
+touch "$TMP/preview-fail"
+if run_upstream; then fail logging-preview-failure; fi
+no_replace
+pass 'first logging rollout rejects failed preview before container changes'
+reset_case
+cat >> "$TMP/mailcow/docker-compose.override.yml" <<'CUSTOM_LOGGING'
+    logging:
+      driver: local
+CUSTOM_LOGGING
+before=$(sha256sum "$TMP/mailcow/docker-compose.override.yml")
+if run_upstream; then fail conflicting-logging; fi
+no_replace
+[ "$(sha256sum "$TMP/mailcow/docker-compose.override.yml")" = "$before" ] || fail operator-logging-overwrite
+pass 'conflicting existing logging stops update before upstream or replacement without overwrite'
 # Exercise real preparation with rsync spy: generated environments and the
 # independent archiver directory must survive --delete synchronization.
 reset_case

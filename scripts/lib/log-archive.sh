@@ -9,12 +9,110 @@
 # log_archive_release: forget saved IDs after successful replacement.
 # Callers MUST trap failure/INT/TERM and call restore, then release after success.
 # Multiple stop_and_drain calls may accumulate one transaction's running set.
-# OFF is a no-op. No helper prints keys, source paths or raw API responses.
+# Logging policy helpers always run, including when the feature is OFF.
+# Other helpers: OFF is a no-op. No helper prints keys, source paths or raw API responses.
 if [ "${LOG_ARCHIVE_LIB_LOADED:-false}" = true ]; then return 0; fi
 LOG_ARCHIVE_LIB_LOADED=true
 declare -a LOG_ARCHIVE_RUNNING_IDS=()
 
 log_archive_error() { echo "[log-archive] ERROR: $*" >&2; return 1; }
+
+# log_archive_check_logging <compose directory>: validate every rendered service.
+# Rendered configuration stays in the pipe; errors disclose service names only.
+log_archive_check_logging() {
+    (cd "$1" && docker compose config --format json) | python3 -c '
+import json,sys
+try:
+ services=json.load(sys.stdin)["services"]
+ assert services
+ policy={"driver":"json-file","options":{"max-size":"20m","max-file":"5","compress":"false"}}
+ for name,service in services.items():
+  if service.get("logging") is None and sys.argv[1]=="missing":
+   print(name)
+   continue
+  if service.get("logging")!=policy:
+   sys.exit("[log-archive] ERROR: Docker logging policy missing or conflicting for "+name)
+except (ValueError,KeyError,AssertionError,TypeError):
+ sys.exit("[log-archive] ERROR: cannot validate Docker logging policy")
+' "${2:-required}"
+}
+
+# log_archive_ensure_logging <compose directory> <managed template> <target file>
+# Add only missing policy blocks for known rendered services. Existing custom
+# logging fails closed; unrelated override/runtime settings retain their bytes.
+log_archive_ensure_logging() {
+    local dir="$1" template="$2" target="$3" services missing
+    missing=$(log_archive_check_logging "$dir" missing) || return 1
+    services=$(cd "$dir" && docker compose config --services) || return 1
+    [ -n "$services" ] || return 1
+    python3 - "$template" "$target" "$services" "$missing" <<'LOGGING'
+import os,pathlib,re,shutil,sys,tempfile
+policy='    logging:\n      driver: json-file\n      options:\n        max-size: "20m"\n        max-file: "5"\n        compress: "false"\n'
+
+def section(text):
+    matches=list(re.finditer(r'^services:[ \t]*(?:#[^\n]*)?\n',text,re.M))
+    if len(matches)!=1: raise ValueError()
+    start=matches[0].end()
+    end=re.search(r'^[^ \t#\r\n]',text[start:],re.M)
+    end=start+end.start() if end else len(text)
+    blocks={}
+    headers=0
+    for line in text[start:end].splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        indent=len(line)-len(line.lstrip(' '))
+        if indent<=2:
+            if not re.fullmatch(r'  [\w.-]+:[ \t]*(?:#[^\n]*)?',line): raise ValueError()
+            headers+=1
+    entries=list(re.finditer(r'^  ([\w.-]+):[ \t]*(?:#[^\n]*)?\n',text[start:end],re.M))
+    if len(entries)!=headers: raise ValueError()
+    for i,entry in enumerate(entries):
+        a=start+entry.start(); b=start+entries[i+1].start() if i+1<len(entries) else end
+        if entry[1] in blocks: raise ValueError()
+        blocks[entry[1]]=(a,b,text[a:b])
+    return start,end,blocks
+
+try:
+    template,target=map(pathlib.Path,sys.argv[1:3])
+    known=section(template.read_bytes().decode('utf-8'))[2]
+    original=target.read_bytes().decode('utf-8') if target.exists() else 'services:\n'
+    start,end,blocks=section(original)
+    edits=[]; additions=''
+    missing=set(sys.argv[4].splitlines())
+    for name in sys.argv[3].splitlines():
+        if name not in known:
+            sys.exit('[log-archive] ERROR: Docker logging policy missing for '+name)
+        if name not in missing: continue
+        block=blocks.get(name)
+        if block:
+            fields=[line for line in block[2].splitlines()[1:] if line.strip() and not line.lstrip().startswith('#')]
+            if fields and len(fields[0])-len(fields[0].lstrip(' '))!=4: raise ValueError()
+            # Do not override any explicit operator policy. Rendered validation
+            # below checks equivalence, including YAML anchors and option types.
+            if re.search(r'^    logging[ \t]*:',block[2],re.M): continue
+            insert=block[0]+block[2].index('\n')+1
+            edits.append((insert,policy))
+        else:
+            additions+='  '+name+':\n'+policy
+    if additions: edits.append((end,('' if original[:end].endswith('\n') else '\n')+additions))
+    result=original
+    for offset,content in sorted(edits,reverse=True): result=result[:offset]+content+result[offset:]
+    if edits:
+        if target.exists():
+            fd,backup=tempfile.mkstemp(prefix=target.name+'.logging.bak-',dir=target.parent)
+            os.close(fd); shutil.copy2(target,backup)
+        fd,tmp=tempfile.mkstemp(prefix=target.name+'.logging-',dir=target.parent)
+        try:
+            with os.fdopen(fd,'w') as stream: stream.write(result)
+            if target.exists(): shutil.copymode(target,tmp)
+            os.replace(tmp,target)
+        finally:
+            if os.path.exists(tmp): os.unlink(tmp)
+except (OSError,UnicodeError,ValueError):
+    sys.exit('[log-archive] ERROR: cannot prepare Docker logging policy')
+LOGGING
+    [ "$?" -eq 0 ] || return 1
+    log_archive_check_logging "$dir"
+}
 
 log_archive_validate_sources() {
     local source seen=,

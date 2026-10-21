@@ -239,6 +239,15 @@ compose_pull() {
 compose_pull "$NPMPLUS_DIR" "npmplus"
 [ "$SNAPPYMAIL_ENABLE" != true ] || compose_pull "$SNAPPYMAIL_DIR" "snappymail"
 
+# Install logging limits before the upstream updater can recreate containers.
+# Runtime compose/override settings outside logging stay operator-managed.
+log_archive_ensure_logging "$MAILCOW_DIR" "$PROJECT_DIR/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml" \
+    || die "Mailcow service logging policy is incomplete"
+if [ -f "$NPMPLUS_DIR/docker-compose.yml" ]; then
+    log_archive_ensure_logging "$NPMPLUS_DIR" "$PROJECT_DIR/npmplus/docker-compose.yml" "$NPMPLUS_DIR/docker-compose.yml" \
+        || die "NPMplus service logging policy is incomplete"
+fi
+
 # ============================================================
 # Phase 3: Mailcow official update
 # ============================================================
@@ -308,6 +317,18 @@ else
     trap - EXIT INT TERM HUP
     log "Mailcow update: done"
 fi
+
+# Apply to the current running set even when the upstream update was skipped.
+# Recheck after upstream changes so a new unprotected service fails closed.
+log_archive_check_logging "$MAILCOW_DIR" || die "Mailcow service logging policy is incomplete after update"
+MAILCOW_LOGGING_RUNNING=$(cd "$MAILCOW_DIR" && docker compose ps --status running --services) \
+    || die "Could not record running Mailcow services for logging application"
+while IFS= read -r service; do
+    [ -n "$service" ] || continue
+    edge_archive_apply "$MAILCOW_DIR" false edge_compose_up up -d --no-deps --no-build --wait --wait-timeout 180 "$service" \
+        || die "Mailcow logging application failed for $service"
+done <<< "$MAILCOW_LOGGING_RUNNING"
+log "Stopped Mailcow services are preserved; logging limits apply when they are next recreated (compose up)."
 
 # ============================================================
 # Phase 4: Re-apply Toolkit UI patches + APP_LINKS

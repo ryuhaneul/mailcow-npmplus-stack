@@ -102,6 +102,14 @@ export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 source "$SCRIPT_DIR/lib/admin-access.sh"
 admin_access preflight >/dev/null || die "Invalid ADMIN_ACCESS_LIST; update stopped before changes"
 
+# Existing installations must be fully backfilled before any replacement path,
+# including the upstream updater (which owns its own container recreation).
+WEBMAIL_STACK_ENV="$ENV_FILE"
+log_archive_prepare "$PROJECT_DIR" || die "Log archive preparation/backfill failed; update stopped before container changes"
+if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
+    log "Docker logging limits may recreate containers on first application; archive backfill and drain precede replacement."
+fi
+
 # ============================================================
 # Phase 1: git pull for component repos
 # ============================================================
@@ -256,21 +264,48 @@ else
     log "Running Mailcow official update..."
     MAILCOW_NAT_NETWORK=$(webmail_mailcow_value IPV4_NETWORK)
     MAILCOW_NAT_NETWORK="${MAILCOW_NAT_NETWORK:-172.22.1}.0/24"
-    trap 'mailcow_nat_watch_stop' EXIT
+    MAILCOW_ARCHIVE_REPLACING=false
+    mailcow_update_cleanup() {
+        local status=$?
+        local -a running=()
+        trap - EXIT INT TERM HUP
+        mailcow_nat_watch_stop
+        if [ "$status" -ne 0 ] && [ "$LOG_ARCHIVE_ENABLE" = true ]; then
+            log_archive_restore || warn "Could not start every original container ID; checking current services"
+            if [ "$MAILCOW_ARCHIVE_REPLACING" = true ]; then
+                mapfile -t running < <(printf '%s\n' "$MAILCOW_RUNNING_BEFORE" | sed '/^$/d')
+                if [ "${#running[@]}" -gt 0 ]; then
+                    (cd "$MAILCOW_DIR" && docker compose up -d --no-deps --no-recreate --wait --wait-timeout 30 "${running[@]}") \
+                        || warn "Mailcow running-set recovery failed; inspect current container health"
+                fi
+                (mailcow_after_update "$MAILCOW_DIR" "$MAILCOW_RUNNING_BEFORE") \
+                    || warn "Mailcow health recovery incomplete; update stopped"
+            fi
+        fi
+        exit "$status"
+    }
+    trap 'mailcow_update_cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap 'exit 129' HUP
+    log_archive_stop_and_drain "$MAILCOW_DIR" postfix-mailcow dovecot-mailcow rspamd-mailcow php-fpm-mailcow nginx-mailcow \
+        || die "Mailcow archive drain failed; upstream update not started"
     # -f: force yes, skip interactive prompts inside mailcow update.sh.
     mailcow_nat_watch_start "$MAILCOW_NAT_NETWORK"
+    MAILCOW_ARCHIVE_REPLACING=true
     if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
         :
     else
         MAILCOW_UPDATE_RC=$?
     fi
     mailcow_nat_watch_stop
-    trap - EXIT INT TERM HUP
+    if [ "$LOG_ARCHIVE_ENABLE" = true ] && [ "$MAILCOW_UPDATE_RC" -ne 0 ]; then
+        die "Mailcow official update failed — recovering current services; see $LOGFILE"
+    fi
     mailcow_after_update "$MAILCOW_DIR" "$MAILCOW_RUNNING_BEFORE"
     [ "$MAILCOW_UPDATE_RC" -eq 0 ] || die "Mailcow official update failed — see $LOGFILE"
+    log_archive_release
+    trap - EXIT INT TERM HUP
     log "Mailcow update: done"
 fi
 
@@ -440,7 +475,7 @@ edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects a
 
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
-    (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+    edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d webmail-admin || die "Webmail admin startup failed"
     WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
 elif docker inspect webmail-admin >/dev/null 2>&1; then
     warn "Webmail admin disabled; existing container preserved — 끄려면 docs/guide.md 관리 화면 끄기(계획 7-6) 절차를 따르세요"
@@ -458,9 +493,11 @@ compose_up() {
         return 0
     fi
     log "$label: docker compose up -d"
-    (cd "$dir" && {
-        if [ "$label" = npmplus ]; then _waf_npmplus_compose up -d; else docker compose up -d; fi
-    } 2>&1 | tee -a "$LOGFILE" | tail -5) \
+    if [ "$label" = npmplus ]; then
+        edge_archive_apply "$dir" false edge_npmplus_up up -d
+    else
+        edge_archive_apply "$dir" false edge_compose_up up -d
+    fi 2>&1 | tee -a "$LOGFILE" | tail -5 \
         || die "$label: docker compose up -d failed after app migration; review NPMplus state"
 }
 

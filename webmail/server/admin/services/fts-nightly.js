@@ -9,7 +9,8 @@ const unfinished = row => ['pending', 'running', 'failed', 'unknown', 'unmeasure
 // never cancels an in-flight remote index when the start deadline passes.
 export function createFtsNightly({ state: store, measure, doveadm, audit, history, logger, now = Date.now }) {
   history?.register('fts.nightly', { label: '검색 색인을 정리했어요' });
-  async function runOnce({ deadline } = {}) {
+  async function runOnce({ deadline, signal } = {}) {
+    const cutoff = () => now() >= deadline || signal?.aborted === true;
     if (!Number.isFinite(deadline)) throw new AppError(422, 'FTS_DEADLINE_INVALID', '색인 종료 시각을 확인해 주세요.');
     const token = await store.acquire();
     if (!token) return { status: 'busy', state: null, warnings: [] };
@@ -42,7 +43,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       for (const row of previous?.folders ?? []) {
         if (!unfinished(row) || remeasured.has(key(row))) continue;
         remeasured.add(key(row));
-        if (now() >= deadline) break;
+        if (cutoff()) break;
         // Revalidate yesterday's identity before using it as a priority hint.
         try {
           const fresh = await measure.measureFolder(row.user, row.mailbox);
@@ -66,7 +67,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       const queue = rows.filter(eligible).sort((a, b) => Number(priority.has(key(b))) - Number(priority.has(key(a))) ||
         b.unindexed - a.unindexed || key(a).localeCompare(key(b)));
       for (const row of queue) {
-        if (now() >= deadline) break;
+        if (cutoff()) break;
         const record = state.folders.find(item => key(item) === key(row));
         try {
           const before = await measure.measureFolder(row.user, row.mailbox);
@@ -76,13 +77,13 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
           } else if (!eligible(before)) {
             record.result = before.status === 'ok' ? 'done' : before.status;
           } else {
-            if (now() >= deadline) break;
+            if (cutoff()) break;
             record.startedAt = timestamp(); record.result = 'running';
             state.current = { user: row.user, mailbox: row.mailbox, guid: row.guid };
             await save();
             // Save/read may themselves consume the remaining start window.
             await assertUnblocked();
-            if (now() >= deadline) {
+            if (cutoff()) {
               state.current = null; record.result = 'pending'; record.startedAt = null;
               break;
             }
@@ -123,7 +124,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       }
       state.current = null;
       const failed = state.folders.some(row => ['failed', 'unmeasured'].includes(row.result));
-      state.status = now() >= deadline ? 'cutoff' : failed || warnings.length ? 'failed' : 'done';
+      state.status = cutoff() ? 'cutoff' : failed || warnings.length ? 'failed' : 'done';
       state.finishedAt = timestamp();
       await save();
     }

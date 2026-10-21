@@ -313,3 +313,39 @@ test('fts nightly: initial snapshot save failure releases the lock before any re
   assert.ok(result.warnings.some(row => row.stage === 'state'));
   assert.ok(await f.state.acquire()); await f.state.release();
 });
+
+test('fts nightly: aborted before run starts no folders and releases lock as cutoff', async t => {
+  const f = await fixture(t); const controller = new AbortController(); controller.abort();
+  const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
+  assert.equal(result.status, 'cutoff'); assert.equal(f.indexed.size, 0);
+  assert.equal((await f.state.read()).state.status, 'cutoff');
+  assert.ok(await f.state.acquire()); await f.state.release();
+});
+
+test('fts nightly: shutdown during remote index lets it finish and starts zero next folders', async t => {
+  const f = await fixture(t, [row('first', 20), row('next')]); const controller = new AbortController();
+  const index = f.deps.doveadm.indexMailbox;
+  f.deps.doveadm.indexMailbox = async (...args) => {
+    controller.abort(); await index(...args); // no signal is forwarded to the remote operation
+  };
+  const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
+  assert.equal(result.status, 'cutoff'); assert.deepEqual([...f.indexed], ['first']);
+  assert.equal(result.state.folders[0].result, 'done'); assert.equal(result.state.folders[1].result, 'pending');
+  assert.ok(await f.state.acquire()); await f.state.release();
+});
+
+test('fts nightly: shutdown while saving current blocks index at the final start check', async t => {
+  const f = await fixture(t); const controller = new AbortController(); const save = f.state.save;
+  f.state.save = async (...args) => { const saved = await save(...args); if (saved.current) controller.abort(); return saved; };
+  const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
+  assert.equal(result.status, 'cutoff'); assert.equal(f.indexed.size, 0);
+  assert.equal(result.state.current, null); assert.equal(result.state.folders[0].result, 'pending');
+});
+
+test('fts nightly: shutdown does not release remote unknown lock', async t => {
+  const f = await fixture(t, [row('first', 20), row('next')]); const controller = new AbortController();
+  f.deps.doveadm.indexMailbox = async () => { controller.abort(); throw fault('DOVEADM_INDEX_UNKNOWN'); };
+  const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
+  assert.equal(result.status, 'unknown'); assert.equal(await f.state.acquire(), null);
+  assert.equal(result.state.indexBlocked, true); assert.equal(f.indexed.size, 0);
+});

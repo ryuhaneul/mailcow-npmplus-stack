@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { openStore } from '../store.js';
 import { openCollector } from '../collector.js';
-import { createSources, discoverSources, parseRecord, SOURCE_NAMES } from '../sources.js';
+import { createSources, discoverSources, parseRecord, SOURCE_NAMES, MAX_LINE_BYTES } from '../sources.js';
 
 const stamp = '2026-10-21T08:00:00.123456789Z';
 const json = (text, time = stamp) => Buffer.from(`${JSON.stringify({ log: `${text}\n`, stream: 'stdout', time })}\n`);
@@ -336,4 +338,124 @@ test('concurrent polls serialize against the committed checkpoint', async (t) =>
   const results = await Promise.all([f.collector.collect(), f.collector.collect(), f.collector.collect()]);
   assert.equal(results.reduce((sum, item) => sum + item.collected, 0), 2);
   assert.deepEqual(await output(f), expected);
+});
+
+
+test('1 MiB physical line boundary preserves raw Docker/access bytes and rejects the next byte', async (t) => {
+  const f = await fixture(t, { requiredSources: ['postfix', 'npmplus'] });
+  const dockerFile = await container(f);
+  for (const [file, makeLine, source, kind] of [[dockerFile, json, 'postfix', 'docker'], [f.accessFile, access, 'npmplus', 'access']]) {
+    const allowed = makeLine('x'.repeat(MAX_LINE_BYTES - makeLine('').length));
+    const oversized = makeLine('x'.repeat(MAX_LINE_BYTES + 1 - makeLine('').length));
+    const after = makeLine('after-boundary');
+    assert.equal(allowed.length, MAX_LINE_BYTES);
+    assert.equal(oversized.length, MAX_LINE_BYTES + 1);
+    assert.equal(parseRecord(allowed, kind).valid, true);
+    assert.equal(parseRecord(oversized, kind).valid, false);
+    await fs.writeFile(file, Buffer.concat([allowed, oversized, after]));
+    const result = await f.collector.collect();
+    assert.deepEqual(await output(f, source), Buffer.concat([allowed, after]));
+    const generation = result.status.generations.find((item) => item.source === source);
+    assert.equal(generation.offset, allowed.length + oversized.length + after.length);
+    const gaps = result.status.gaps.filter((item) => item.source === source);
+    assert.equal(gaps.length, 1);
+    assert.deepEqual(gaps[0], { source, generation: generation.generation, reason: 'line-too-long', start: result.status.observedAt,
+      end: result.status.observedAt, fromOffset: allowed.length, toOffset: allowed.length + oversized.length, unknownLines: true });
+  }
+});
+
+test('unfinished oversized line advances offsets and extends one gap across batches and restart', async (t) => {
+  const f = await fixture(t, { maxBatchBytes: 128 * 1024 });
+  const file = await container(f);
+  const first = json('before-unfinished');
+  const last = json('after-unfinished');
+  const oversizedBytes = 2 * MAX_LINE_BYTES + 37;
+  await fs.writeFile(file, Buffer.concat([first, Buffer.alloc(oversizedBytes, 120)]));
+  let result;
+  for (let poll = 0; poll < 20; poll++) {
+    result = await f.collector.collect();
+    if (result.status.generations[0].offset === first.length + oversizedBytes) break;
+  }
+  assert.equal(result.status.generations[0].offset, first.length + oversizedBytes);
+  assert.equal(result.status.gaps.length, 1);
+  assert.equal(result.status.gaps[0].fromOffset, first.length);
+  assert.equal(result.status.gaps[0].toOffset, first.length + oversizedBytes);
+  assert.deepEqual(await output(f), first);
+  await f.restart();
+  await f.collector.collect();
+  await fs.appendFile(file, Buffer.concat([Buffer.from('tail\r\n'), last]));
+  result = await f.collector.collect();
+  assert.equal(result.status.generations[0].offset, (await fs.stat(file)).size);
+  assert.equal(result.status.gaps.length, 1);
+  assert.equal(result.status.gaps[0].toOffset, first.length + oversizedBytes + 6);
+  assert.equal(result.status.gaps[0].reason, 'line-too-long');
+  assert.deepEqual(await output(f), Buffer.concat([first, last]));
+  await f.restart();
+  await f.collector.collect();
+  assert.equal((await f.collector.status()).gaps.length, 1);
+  assert.deepEqual(await output(f), Buffer.concat([first, last]));
+});
+
+test('64 MiB physical line stays below 256 MiB peak RSS with one gap and exact surrounding lines/offset', async (t) => {
+  // Isolate RSS from other tests, especially the existing 100,000-line fixture.
+  if (process.env.LAG3_LARGE_LINE_CHILD !== '1') {
+    const env = { ...process.env, LAG3_LARGE_LINE_CHILD: '1' };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^64 MiB physical line', fileURLToPath(import.meta.url)], {
+      env, encoding: 'utf8', timeout: 30000,
+    });
+    assert.ifError(child.error);
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    const measurement = child.stdout.match(/peak RSS \d+(?:\.\d+)? MiB;[^\n]+/);
+    assert.ok(measurement, child.stdout + child.stderr);
+    t.diagnostic(measurement[0]);
+    return;
+  }
+  const f = await fixture(t);
+  const file = await container(f);
+  const before = json('before-64-MiB');
+  const after = json('after-64-MiB');
+  const physicalBytes = 64 * 1024 * 1024;
+  const prefix = Buffer.from('{"log":"');
+  const suffix = Buffer.from(`","stream":"stdout","time":"${stamp}"}\n`);
+  const chunk = Buffer.alloc(64 * 1024, 120);
+  const handle = await fs.open(file, 'w');
+  try {
+    await handle.write(before);
+    await handle.write(prefix);
+    let remaining = physicalBytes - prefix.length - suffix.length;
+    while (remaining > 0) {
+      const size = Math.min(remaining, chunk.length);
+      await handle.write(chunk.subarray(0, size));
+      remaining -= size;
+    }
+    await handle.write(suffix);
+    await handle.write(after);
+  } finally { await handle.close(); }
+  let result;
+  let collected = 0;
+  for (let poll = 0; poll < 20; poll++) {
+    result = await f.collector.collect();
+    collected += result.collected;
+    if (result.status.backfillComplete) break;
+  }
+  const totalBytes = before.length + physicalBytes + after.length;
+  assert.equal(collected, 2);
+  assert.equal(result.status.backfillComplete, true);
+  assert.equal(result.status.generations[0].offset, totalBytes);
+  assert.equal((await fs.stat(file)).size, totalBytes);
+  assert.deepEqual(await output(f), Buffer.concat([before, after]));
+  assert.equal(result.status.gaps.length, 1);
+  const gap = result.status.gaps[0];
+  assert.equal(gap.reason, 'line-too-long');
+  assert.equal(gap.fromOffset, before.length);
+  assert.equal(gap.toOffset, before.length + physicalBytes);
+  assert.equal(gap.unknownLines, true);
+  await f.restart();
+  assert.equal((await f.collector.collect()).collected, 0);
+  assert.deepEqual(await output(f), Buffer.concat([before, after]));
+  assert.equal((await f.collector.status()).gaps.length, 1);
+  const peakRssKiB = process.resourceUsage().maxRSS;
+  t.diagnostic(`peak RSS ${(peakRssKiB / 1024).toFixed(1)} MiB; discarded ${physicalBytes} bytes; offset ${totalBytes}; gaps 1`);
+  assert.ok(peakRssKiB < 256 * 1024, `peak RSS ${peakRssKiB} KiB exceeds 256 MiB`);
 });

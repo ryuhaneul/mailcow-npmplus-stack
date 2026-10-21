@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { createSources, discoverSources, parseRecord, utcTime, SOURCE_NAMES } from './sources.js';
+import { createSources, discoverSources, parseRecord, utcTime, SOURCE_NAMES, MAX_LINE_BYTES } from './sources.js';
 import { DEFAULT_RETENTION } from './store.js';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -39,6 +39,9 @@ async function fingerprint(handle, offset) {
  * After a failed commit close/reopen both store and collector before retrying.
  * Persisted gaps live at checkpoint.generations[generation].gaps, each:
  * {source,generation,reason,start,end,fromOffset,toOffset,unknownLines:true}.
+ * Lines exceeding MAX_LINE_BYTES (including LF) are discarded through the next
+ * LF with a line-too-long gap. lineTooLongFromOffset persists an unfinished
+ * discard across batches/restarts; offsets include the discarded bytes.
  * Fully consumed historical files retire without a gap; an unseen suffix
  * appended after the last observation and removed before the next poll is
  * inherently unobservable. requiredSources must match enabled deployment inputs.
@@ -238,7 +241,8 @@ class Collector {
     checkpoint.partialBytes = 0;
     const limit = checkpoint.observedSize;
     let position = start;
-    let pending = Buffer.alloc(0);
+    let pending = [];
+    let pendingBytes = 0;
     let prefix = await bytesAt(file.handle, 0, Math.min(start, 256));
     let tail = await bytesAt(file.handle, Math.max(0, start - 256), Math.min(start, 256));
     if (start && (hash(prefix.subarray(0, checkpoint.prefixBytes)) !== checkpoint.prefixHash || hash(tail) !== checkpoint.tailHash)) {
@@ -250,29 +254,50 @@ class Collector {
         throw Object.assign(new Error('Source changed while reading'), { code: 'SOURCE_CHANGED_DURING_READ' });
       }
     };
+    const consume = (bytes) => {
+      if (prefix.length < 256) prefix = Buffer.concat([prefix, bytes.subarray(0, 256 - prefix.length)]);
+      tail = bytes.length >= 256 ? bytes.subarray(bytes.length - 256) : Buffer.concat([tail, bytes]).subarray(-256);
+      checkpoint.offset += bytes.length;
+    };
     while (position < limit) {
       const chunk = await bytesAt(file.handle, position, Math.min(64 * 1024, limit - position));
       if (!chunk.length) break;
       position += chunk.length;
-      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
       let begin = 0;
-      let end;
-      while ((end = pending.indexOf(10, begin)) !== -1) {
-        const raw = Buffer.from(pending.subarray(begin, end + 1));
-        const nextOffset = checkpoint.offset + raw.length;
-        const parsed = parseRecord(raw, file.kind);
-        if (!parsed.valid) this.gap(checkpoint, generation, 'unparseable-record-time', stamp, checkpoint.offset, nextOffset);
-        const cutoff = Date.parse(stamp) - this.retention[file.source] * 86400000;
-        if (parsed.eventTime === null || Date.parse(parsed.eventTime) >= cutoff) records.push({ source: file.source, raw, eventTime: parsed.eventTime, observedAt: stamp });
-        if (prefix.length < 256) prefix = Buffer.concat([prefix, raw.subarray(0, 256 - prefix.length)]);
-        tail = raw.length >= 256 ? raw.subarray(raw.length - 256) : Buffer.concat([tail, raw]).subarray(-256);
-        checkpoint.offset = nextOffset;
-        begin = end + 1;
+      while (begin < chunk.length) {
+        const end = chunk.indexOf(10, begin);
+        const next = end === -1 ? chunk.length : end + 1;
+        const piece = chunk.subarray(begin, next);
+        if (checkpoint.lineTooLongFromOffset !== undefined || pendingBytes + piece.length > MAX_LINE_BYTES) {
+          checkpoint.lineTooLongFromOffset ??= checkpoint.offset;
+          for (const bytes of pending) consume(bytes);
+          pending = [];
+          pendingBytes = 0;
+          consume(piece);
+          const fromOffset = checkpoint.lineTooLongFromOffset;
+          const gap = checkpoint.gaps.find((item) => item.reason === 'line-too-long' && item.fromOffset === fromOffset);
+          if (gap) { gap.end = stamp; gap.toOffset = checkpoint.offset; }
+          else this.gap(checkpoint, generation, 'line-too-long', stamp, fromOffset, checkpoint.offset);
+          if (end !== -1) delete checkpoint.lineTooLongFromOffset;
+        } else if (end === -1) {
+          pending.push(piece);
+          pendingBytes += piece.length;
+        } else {
+          const raw = Buffer.concat([...pending, piece], pendingBytes + piece.length);
+          const nextOffset = checkpoint.offset + raw.length;
+          const parsed = parseRecord(raw, file.kind);
+          if (!parsed.valid) this.gap(checkpoint, generation, 'unparseable-record-time', stamp, checkpoint.offset, nextOffset);
+          const cutoff = Date.parse(stamp) - this.retention[file.source] * 86400000;
+          if (parsed.eventTime === null || Date.parse(parsed.eventTime) >= cutoff) records.push({ source: file.source, raw, eventTime: parsed.eventTime, observedAt: stamp });
+          consume(raw);
+          pending = [];
+          pendingBytes = 0;
+        }
+        begin = next;
         if (checkpoint.offset - start >= budget) { await verify(); return checkpoint.offset - start; }
       }
-      pending = pending.subarray(begin);
     }
-    checkpoint.partialBytes = pending.length;
+    checkpoint.partialBytes = pendingBytes;
     await verify();
     return checkpoint.offset - start;
   }

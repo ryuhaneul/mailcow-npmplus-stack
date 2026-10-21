@@ -1,6 +1,9 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
+// Complete physical line size, including its LF terminator.
+export const MAX_LINE_BYTES = 1024 * 1024;
+
 export const SOURCE_NAMES = Object.freeze(['postfix', 'dovecot', 'webmail', 'webmail-admin', 'npmplus', 'rspamd', 'php-fpm', 'nginx']);
 
 /** Exact deployment identities; overrides must come from the installation manifest. */
@@ -78,6 +81,7 @@ export function utcTime(value) {
 
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export function parseRecord(raw, kind) {
+  if (raw.length > MAX_LINE_BYTES) return { eventTime: null, valid: false };
   if (kind === 'docker') {
     try {
       const record = JSON.parse(raw.toString('utf8'));

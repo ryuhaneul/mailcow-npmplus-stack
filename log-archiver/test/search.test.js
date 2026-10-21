@@ -151,6 +151,37 @@ test('NPM access timestamp, URL and structured fields project only allowed value
   assert.deepEqual(structured.fields, { path: '/path', status: '200' });
 });
 
+test('path query removal preserves prefixes, paths and token boundaries', () => {
+  const cases = [
+    ['/a/b?x=1&next=/c?y=2', '/a/b'],
+    ['prefix/a?x /b?y', 'prefix/a /b'],
+    ['prefix?keep/a?drop', 'prefix?keep/a'],
+    ['plain?keep plain /no-query', 'plain?keep plain /no-query'],
+    ['/? /?x //a///b?x', '/ / //a///b'],
+    ['한글/경로?값=합성', '한글/경로'],
+    ['GET https://example.test/a?x=1 /b?y', 'GET https://example.test/a /b'],
+  ];
+  for (const boundary of [' ', '\t', '\r', '\n', '\u00a0', '"', "'", '<', '>']) {
+    cases.push([`prefix/a?drop${boundary}/b?drop`, `prefix/a${boundary}/b`]);
+    cases.push([`/a${boundary}?keep`, `/a${boundary}?keep`]);
+  }
+  for (const [raw, expected] of cases) {
+    assert.equal(projectLine(raw, { source: 'npmplus' }, 'id').message, expected, JSON.stringify(raw));
+  }
+});
+
+test('64KiB slash-heavy paths with and without queries project within 50ms', t => {
+  const path = '/a'.repeat(32 * 1024);
+  for (const suffix of ['?x', '']) {
+    const started = performance.now();
+    const line = projectLine(path + suffix, { source: 'npmplus' }, 'id');
+    const elapsed = performance.now() - started;
+    assert.equal(line.message, path);
+    assert.ok(elapsed < 50, `64KiB path ${suffix ? 'with' : 'without'} query took ${elapsed.toFixed(2)}ms`);
+    t.diagnostic(`64KiB ${suffix ? 'with' : 'without'} query: ${elapsed.toFixed(2)}ms`);
+  }
+});
+
 test('2MiB response boundary returns the unreturned line on the next page without loss', async t => {
   const store = await fixture(t, { memberBytes: 1024 * 1024 });
   await store.commit({ records: Array.from({ length: 220 }, (_, i) => row(`${i} ${'가'.repeat(3990)}`)) });

@@ -213,7 +213,9 @@ export function createFtsState({ dir = '/data/fts-nightly', now = Date.now, fs =
         try { await fs.stat(join(dir, damagedBackup)); exists = true; }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
         if (exists) throw fail('FTS_DAMAGED_BACKUP_EXISTS', '같은 시각의 상태 보존 파일이 있어요.');
-        await fs.rename(statePath, join(dir, damagedBackup));
+        await fs.copyFile(statePath, join(dir, damagedBackup));
+        const backup = await fs.open(join(dir, damagedBackup), 'r');
+        try { await backup.sync(); } finally { await backup.close(); }
         await syncDir(dir);
       }
       const record = { by: evidence.by, at: evidence.at, reason: evidence.reason, remoteStopped: true,

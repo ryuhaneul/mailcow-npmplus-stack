@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createFtsState } from '../../server/admin/fts-state.js';
+import { createFtsNightly } from '../../server/admin/services/fts-nightly.js';
 
 const current = { user: 'person@example.test', mailbox: '받은 편지함', guid: 'abc123' };
 const evidence = { by: 'operator', at: '2026-10-21T01:00:00Z', reason: 'host verified idle', remoteStopped: true,
@@ -338,4 +339,33 @@ test('fts recovery CLI: damaged reset is explicit, preserves bytes, and sanitize
     assert.ok(!result.stderr.includes('synthetic-private'));
   }
   const help = await cli(['--help']); assert.equal(help.code, 0); assert.match(help.stdout, /시험용/);
+});
+
+
+test('fts state: reset temp-file EIO without a lock preserves damaged state and blocks the next nightly run', async t => {
+  const injectedFs = { ...fs, async open(path, ...args) {
+    const handle = await fs.open(path, ...args);
+    if (!path.endsWith('.tmp')) return handle;
+    return { writeFile: (...values) => handle.writeFile(...values), close: () => handle.close(),
+      async sync() { throw Object.assign(new Error('synthetic fsync failure'), { code: 'EIO' }); } };
+  } };
+  const f = await fixture(t, { fs: injectedFs }), bytes = '{synthetic-damaged';
+  await fs.writeFile(join(f.dir, 'state.json'), bytes, { mode: 0o600 });
+  assert.equal((await f.store.inspectLock()).locked, false);
+  await assert.rejects(f.store.manualUnlock({ ...evidence, resetDamagedState: true }), { code: 'EIO' });
+  assert.equal(await fs.readFile(join(f.dir, 'state.json'), 'utf8'), bytes);
+  const backups = (await fs.readdir(f.dir)).filter(name => name.startsWith('state.json.damaged-'));
+  assert.equal(backups.length, 1); assert.equal(await fs.readFile(join(f.dir, backups[0]), 'utf8'), bytes);
+  const restarted = createFtsState({ dir: f.dir });
+  assert.deepEqual(await restarted.read(), { state: null, damaged: true, code: 'FTS_STATE_CORRUPT' });
+  let measurements = 0, indexCalls = 0;
+  const measured = { ...current, messages: 1, indexed: 0, unindexed: 1, status: 'ok', reason: null };
+  const runner = createFtsNightly({ state: restarted, now: () => Date.parse('2026-10-20T18:00:00Z'),
+    measure: { async measureAll() { measurements++; return { folders: [measured] }; },
+      async measureFolder() { measurements++; return measured; } },
+    doveadm: { async indexMailbox() { indexCalls++; } }, audit: { async run(_meta, execute) { return execute(); } } });
+  const result = await runner.runOnce({ deadline: Date.parse('2026-10-20T21:00:00Z') });
+  assert.equal(result.status, 'failed'); assert.equal(result.warnings[0].code, 'FTS_STATE_CORRUPT');
+  assert.equal(measurements, 0); assert.equal(indexCalls, 0);
+  assert.equal((await restarted.read()).damaged, true); assert.equal((await restarted.inspectLock()).locked, false);
 });

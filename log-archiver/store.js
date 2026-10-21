@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip, createGunzip } from 'node:zlib';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const DEFAULT_RETENTION = Object.freeze({
   postfix: 90, dovecot: 90, rspamd: 7, 'php-fpm': 1, nginx: 1,
@@ -301,6 +302,137 @@ export class ArchiveStore {
     });
   }
 
+  // Compression runs outside the publication queue: collection may append while
+  // this bounded snapshot is read. Only an unchanged hour may be replaced.
+  compact({ now = new Date() } = {}) {
+    if (this.compacting) return this.compacting;
+    const work = (async () => {
+      const instant = new Date(now).getTime();
+      if (!Number.isFinite(instant)) throw new TypeError('Invalid compaction time');
+      const entries = await this.run(() => clone(this.catalog.hours.filter(item => !item.compacted && Date.parse(item.hour) + 3600000 <= instant)));
+      const compacted = [];
+      // Capture the batch once: stale hours wait for the next expiry loop rather
+      // than being retried indefinitely while late events keep arriving.
+      for (const entry of entries) compacted.push(...(await this.compactHour(entry)).compacted);
+      return { compacted };
+    })();
+    this.compacting = work.finally(() => { this.compacting = null; });
+    return this.compacting;
+  }
+
+  async compactHour(candidate) {
+    const selected = await this.run(async () => {
+      const entry = this.catalog.hours.find(item => key(item) === key(candidate) && item.fileId === candidate.fileId && !item.compacted);
+      return entry ? { before: clone(entry), index: await this.loadIndex(entry) } : null;
+    });
+    if (!selected) return { compacted: [] };
+    const { before, index } = selected;
+    const temp = `state/staging/${randomUUID()}.gz`;
+    const backup = `state/staging/${randomUUID()}.backup`;
+    let pendingPublished = false;
+    try {
+      const after = { ...before, fileId: randomUUID(), compressedBytes: 0, compacted: true };
+      const afterIndex = { version: 1, members: [] };
+      const output = await fs.open(this.file(temp), 'wx', 0o600);
+      try {
+        let group = [];
+        let bytes = 0;
+        const flush = async () => {
+          if (!group.length) return;
+          const started = performance.now();
+          const start = after.compressedBytes;
+          let decodedBytes = 0;
+          let lineCount = 0;
+          let minTime = null;
+          let maxTime = null;
+          let unknownTimeCount = 0;
+          for (const member of group) {
+            minTime = earlier(minTime, member.minTime);
+            maxTime = later(maxTime, member.maxTime);
+            unknownTimeCount += member.unknownTimeCount;
+          }
+          await pipeline(
+            createReadStream(this.file(before.file), { start: group[0].start, end: group.at(-1).end - 1 }),
+            createGunzip(),
+            async function* (chunks) {
+              for await (const chunk of chunks) {
+                decodedBytes += chunk.length;
+                for (const byte of chunk) if (byte === 10) lineCount++;
+                yield chunk;
+              }
+            },
+            createGzip({ level: 6 }),
+            async chunks => {
+              for await (const chunk of chunks) {
+                await writeAll(output, chunk, after.compressedBytes);
+                after.compressedBytes += chunk.length;
+                await this.fault('compactPartial');
+              }
+            },
+          );
+          if (decodedBytes !== bytes || lineCount !== group.reduce((sum, member) => sum + member.lineCount, 0)) throw recoveryError();
+          afterIndex.members.push({ start, end: after.compressedBytes, lineCount, uncompressedBytes: bytes, minTime, maxTime, unknownTimeCount });
+          // Keep at most half of the compression duty cycle, yielding between
+          // members without holding up the collection/publication queue.
+          await delay(Math.ceil(performance.now() - started));
+          group = [];
+          bytes = 0;
+        };
+        for (const member of index.members) {
+          if (bytes + member.uncompressedBytes > this.memberBytes) await flush();
+          group.push(member);
+          bytes += member.uncompressedBytes;
+          if (bytes >= this.memberBytes) await flush();
+        }
+        await flush();
+        await output.sync();
+        await this.fault('compactAfterStageSync');
+      } finally { await output.close(); }
+      return await this.run(async () => {
+        const current = this.catalog.hours.find(item => key(item) === key(before));
+        if (!current || current.fileId !== before.fileId || current.compressedBytes !== before.compressedBytes) return { compacted: [] };
+        try {
+          // Retain the old inode until the checkpoint commit marker is durable.
+          await fs.link(this.file(before.file), this.file(backup));
+          await syncDir(this.file('state/staging'));
+          const transactionId = randomUUID();
+          const afterCheckpoint = { ...clone(this.checkpoint), transactionId };
+          const afterCatalog = clone(this.catalog);
+          afterCatalog.transactionId = transactionId;
+          afterCatalog.hours = afterCatalog.hours.map(item => key(item) === key(before) ? after : item);
+          const change = { before, beforeIndex: index, after, afterIndex, backup, stages: [temp, backup] };
+          const pending = { version: 1, type: 'compact', previousTransactionId: this.checkpoint.transactionId, transactionId, beforeCheckpoint: this.checkpoint, afterCheckpoint, beforeCatalog: this.catalog, afterCatalog, changes: [change] };
+          await this.fault('compactBeforePending');
+          // If publication itself fails, recovery owns all staging files too.
+          pendingPublished = true;
+          await atomicJson(this.file('state/pending.json'), pending);
+          await this.fault('compactAfterPending');
+          await fs.rename(this.file(temp), this.file(after.file));
+          await syncDir(path.dirname(this.file(after.file)));
+          await syncDir(this.file('state/staging'));
+          await this.fault('compactAfterReplace');
+          await atomicJson(this.file(after.indexFile), afterIndex);
+          await this.fault('compactAfterIndex');
+          await atomicJson(this.file('state/catalog.json'), afterCatalog);
+          await this.fault('compactAfterCatalog');
+          await this.fault('compactBeforeCheckpoint');
+          await atomicJson(this.file('state/checkpoint.json'), afterCheckpoint);
+          this.catalog = afterCatalog;
+          this.checkpoint = afterCheckpoint;
+          await this.fault('compactAfterCheckpoint');
+          await this.finishPending(pending);
+          return { compacted: [clone(after)] };
+        } catch (error) { this.failed = true; throw error; }
+      });
+    } finally {
+      // Once pending may exist, only recovery may discard the old inode.
+      if (!pendingPublished) {
+        await fs.rm(this.file(temp), { force: true });
+        await fs.rm(this.file(backup), { force: true });
+      }
+    }
+  }
+
   async finishPending(pending) {
     await this.fault('beforePendingRemove');
     await fs.unlink(this.file('state/pending.json'));
@@ -312,7 +444,7 @@ export class ArchiveStore {
   }
 
   async verifyMembers(change) {
-    const startIndex = change.beforeIndex?.members.length ?? 0;
+    const startIndex = change.backup ? 0 : change.beforeIndex?.members.length ?? 0;
     for (const member of change.afterIndex.members.slice(startIndex)) {
       let bytes = 0;
       let lines = 0;
@@ -326,7 +458,7 @@ export class ArchiveStore {
   }
 
   async recover(pending) {
-    if (pending.version !== 1 || !['write', 'delete'].includes(pending.type)) throw recoveryError();
+    if (pending.version !== 1 || !['write', 'delete', 'compact'].includes(pending.type)) throw recoveryError();
     if (pending.type === 'delete') {
       if (this.checkpoint.transactionId !== pending.transactionId) throw recoveryError();
       // Catalog removal is the deletion commit marker; checkpoints remain unchanged.
@@ -347,7 +479,14 @@ export class ArchiveStore {
     } else if (this.checkpoint.transactionId === pending.previousTransactionId) {
       if (JSON.stringify(this.checkpoint) !== JSON.stringify(pending.beforeCheckpoint)) throw recoveryError();
       for (const change of pending.changes) {
-        if (change.before) {
+        if (pending.type === 'compact') {
+          // Keep backup intact so another crash during rollback is replayable.
+          const restore = `state/staging/${randomUUID()}.restore`;
+          await fs.link(this.file(change.backup), this.file(restore));
+          await fs.rename(this.file(restore), this.file(change.before.file));
+          await syncDir(path.dirname(this.file(change.before.file)));
+          await atomicJson(this.file(change.before.indexFile), change.beforeIndex);
+        } else if (change.before) {
           const handle = await fs.open(this.file(change.before.file), 'r+');
           try {
             if ((await handle.stat()).size < change.before.compressedBytes) throw recoveryError();
@@ -412,6 +551,7 @@ export class ArchiveStore {
   }
 
   async close() {
+    await this.compacting?.catch(() => {});
     await this.queue;
     this.closed = true;
     await this.releaseLock();

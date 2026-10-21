@@ -30,11 +30,10 @@ export function createFtsMeasure({ doveadm, now = Date.now, folderList = user =>
       guid = status.guid.toLowerCase();
       const stats = await doveadm.ftsStats(user, mailbox);
       if (!Array.isArray(stats)) return unknown('measurement-failed', guid);
-      if (!stats.length) return unknown('missing-stats', guid);
-      if (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid) return unknown('guid-mismatch', guid);
-      const messages = status.messages, indexed = stats[0].messages;
+      if (stats.length && (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid)) return unknown('guid-mismatch', guid);
+      const messages = status.messages, indexed = stats[0]?.messages ?? (stats.length ? undefined : 0);
       if (!validCount(messages) || !validCount(indexed) || indexed > messages) return unknown('invalid-count', guid);
-      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, shards: stats[0].shards ?? null,
+      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, shards: stats.length ? stats[0].shards ?? null : 0,
         measuredAt: new Date(now()).toISOString(), status: 'ok', reason: null };
     } catch { return unknown('measurement-failed', guid); }
   }
@@ -84,4 +83,13 @@ export function summarizeFtsFolders(folders) {
   const top = folders.filter(folder => folder.status === 'ok' && folder.unindexed > 0)
     .sort((a, b) => b.unindexed - a.unindexed || a.user.localeCompare(b.user) || a.mailbox.localeCompare(b.mailbox)).slice(0, 20);
   return { totals, top };
+}
+
+
+export function latestFtsMeasurement(record) {
+  if (record.result === 'unknown' && record.error === 'manual-unlock' && !record.after) {
+    return { user: record.user, mailbox: record.mailbox, guid: record.guid, messages: null, indexed: null,
+      unindexed: null, shards: null, measuredAt: null, status: 'unmeasured', reason: 'manual-unlock' };
+  }
+  return record.after ?? record.before;
 }

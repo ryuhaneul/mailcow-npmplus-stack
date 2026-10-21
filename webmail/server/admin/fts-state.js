@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { AppError } from '../errors.js';
 import { createResourceLock } from './lock.js';
+import { latestFtsMeasurement, summarizeFtsFolders } from './services/fts-measure.js';
 
 const MAX_BYTES = 4 * 1024 * 1024;
 const statuses = ['running', 'done', 'cutoff', 'failed', 'unknown'];
@@ -38,7 +39,8 @@ const emptyState = () => ({ v: 1, runId: null, day: null, status: null, startedA
 // lock, including an incomplete owner record, is never reclaimed automatically.
 // acquire(): token or null (busy); read(): {state, damaged, code?}.
 // startRun()/save()/markRemoteUnknown() return the saved state and require this
-// instance's ownership. Callers must check indexBlocked before every index.
+// instance's ownership, except restart recording. Callers must preserve unknown
+// locks and check indexBlocked before every index; release checks ownership only.
 // Disable scheduling and verify remote completion before manualUnlock().
 export function createFtsState({ dir = '/data/fts-nightly', now = Date.now, fs = nativeFs } = {}) {
   const lockDir = join(dir, 'lock');
@@ -133,9 +135,6 @@ export function createFtsState({ dir = '/data/fts-nightly', now = Date.now, fs =
   async function release(token = owned) {
     return serial.run('state', async () => {
       await assertOwner(token);
-      const state = await load();
-      if (state.indexBlocked || state.remoteUnknown || state.current)
-        throw fail('FTS_REMOTE_UNKNOWN', '원격 작업 종료 확인 전에는 잠금을 해제할 수 없어요.');
       await removeLock(token);
     });
   }
@@ -192,29 +191,67 @@ export function createFtsState({ dir = '/data/fts-nightly', now = Date.now, fs =
       return state;
     });
   }
+  async function inspectLock() {
+    try { await fs.stat(lockDir); return { locked: true }; }
+    catch (error) { if (error.code === 'ENOENT') return { locked: false }; throw error; }
+  }
   async function manualUnlock(evidence) {
     return serial.run('state', async () => {
       if (!evidenceValid(evidence)) throw fail('FTS_UNLOCK_EVIDENCE', '원격 작업 종료 확인과 해제 증거가 필요해요.');
-      const names = await fs.readdir(lockDir);
-      const state = await load();
-      const records = names.filter(name => /^[a-f0-9-]{36}\.json$/.test(name));
-      if (names.length !== records.length || records.length > 1) throw fail('FTS_LOCK_CORRUPT', '잠금 파일을 확인해 주세요.');
+      const result = await read();
+      if (result.damaged && evidence.resetDamagedState !== true)
+        throw fail('FTS_STATE_CORRUPT', '색인 상태 파일이 손상됐어요. 복구가 필요해요.');
+      let names;
+      try { names = await fs.readdir(lockDir); }
+      catch (error) { if (error.code === 'ENOENT') names = null; else throw error; }
+      const records = (names ?? []).filter(name => /^[a-f0-9-]{36}\.json$/.test(name));
+      if (names && (names.length !== records.length || records.length > 1)) throw fail('FTS_LOCK_CORRUPT', '잠금 파일을 확인해 주세요.');
+      const state = result.state ?? emptyState();
+      const damagedBackup = result.damaged ? `state.json.damaged-${timestamp().replaceAll(':', '-')}` : null;
+      if (damagedBackup) {
+        let exists = false;
+        try { await fs.stat(join(dir, damagedBackup)); exists = true; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (exists) throw fail('FTS_DAMAGED_BACKUP_EXISTS', '같은 시각의 상태 보존 파일이 있어요.');
+        await fs.rename(statePath, join(dir, damagedBackup));
+        await syncDir(dir);
+      }
       const record = { by: evidence.by, at: evidence.at, reason: evidence.reason, remoteStopped: true,
         ...(evidence.remeasured !== undefined ? { remeasured: evidence.remeasured } : {}),
         ...(evidence.note !== undefined ? { note: evidence.note } : {}),
+        ...(damagedBackup ? { resetDamagedState: true, damagedBackup } : {}),
         recordedAt: timestamp(), previousRunId: state.runId, previousRemoteUnknown: state.remoteUnknown,
         lockToken: records[0]?.slice(0, -5) ?? null };
       state.unlockHistory.push(record);
+      for (const folder of state.folders) {
+        if (folder.result !== 'running') continue;
+        folder.result = 'unknown'; folder.error = 'manual-unlock'; folder.finishedAt = timestamp();
+        const measured = evidence.remeasured;
+        const count = value => Number.isSafeInteger(value) && value >= 0;
+        const valid = measured?.user === folder.user && measured?.mailbox === folder.mailbox &&
+          count(measured.messages) && count(measured.indexed) && measured.indexed <= measured.messages &&
+          Number.isFinite(Date.parse(measured.at));
+        folder.after = valid ? { user: folder.user, mailbox: folder.mailbox, guid: folder.guid,
+          messages: measured.messages, indexed: measured.indexed, unindexed: measured.messages - measured.indexed,
+          shards: count(measured.shards) ? measured.shards : null, measuredAt: measured.at, status: 'ok', reason: null } : null;
+      }
+      if (state.snapshot) {
+        const folders = state.folders.map(latestFtsMeasurement);
+        const times = folders.map(row => row.measuredAt).filter(value => Number.isFinite(Date.parse(value))).sort();
+        state.snapshot = { ...state.snapshot, folders, ...summarizeFtsFolders(folders),
+          measuredAt: times.at(-1) ?? state.snapshot.measuredAt };
+      }
       state.remoteUnknown = null;
       state.indexBlocked = false;
       state.current = null;
       if (state.status === 'running' || state.status === 'unknown') { state.status = 'failed'; state.finishedAt = timestamp(); }
       // Evidence must be durable before unlocking. A failure preserves the lock.
+      await init();
       await write(state);
       if (record.lockToken) await removeLock(record.lockToken);
-      else { await fs.rmdir(lockDir); await syncDir(dir); owned = null; }
+      else if (names) { await fs.rmdir(lockDir); await syncDir(dir); owned = null; }
       return state;
     });
   }
-  return { acquire, release, startRun, save, read, markRemoteUnknown, manualUnlock };
+  return { acquire, release, startRun, save, read, markRemoteUnknown, manualUnlock, inspectLock };
 }

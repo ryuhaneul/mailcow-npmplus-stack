@@ -94,6 +94,25 @@ await test('FTS overview synthetic responses, independent errors and responsive 
       await expect(card.getByText('일부 실패', { exact: true })).toBeVisible(); assert.deepEqual(requests, ['GET', 'GET']); assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
+  for (const remeasured of [false, true]) for (const width of [1280, 768, 375]) await t.test(`manual recovery remeasured=${remeasured} ${width}`, async () => {
+    const recovered = { user: 'operator-test@example.test', mailbox: 'Imported', messages: remeasured ? 20001 : null,
+      indexed: remeasured ? 20001 : null, unindexed: remeasured ? 0 : null, status: remeasured ? 'ok' : 'unmeasured',
+      result: 'unknown', error: 'manual-unlock', measuredAt: remeasured ? measuredAt : null };
+    const data = { ...complete, lastRun: { ...complete.lastRun, status: 'failed' }, folders: [recovered],
+      snapshot: { measuredAt, totals: { messages: remeasured ? 20001 : 0, indexed: remeasured ? 20001 : 0,
+        unindexed: 0, unmeasured: remeasured ? 0 : 1, excluded: 0 }, top20: [] } };
+    const { page, card, context, errors } = await open(data, width);
+    try {
+      await expect(card).not.toContainText('현재 폴더'); await expect(card).not.toContainText('20,000통');
+      await expect(card.getByText('일부 실패', { exact: true })).toBeVisible();
+      if (remeasured) await expect(card).toContainText('0통');
+      else { await expect(card).not.toContainText('0통'); await expect(card).toContainText('측정 실패 1개'); }
+      await card.locator('summary').click(); await expect(card).toContainText('수동 복구 · 실행 결과 미확인');
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await page.screenshot({ path: `${captures}/manual-${remeasured ? 'remeasured' : 'unmeasured'}-${width}.png`, fullPage: true });
+      assert.deepEqual(errors, []); diagnostics.push({ name: `manual-${remeasured}`, width, errors });
+    } finally { await context.close(); }
+  });
   for (const [status, expected] of [['running', '종료 시각 초과·마무리 중'], ['cutoff', '시간 창 종료']]) await t.test(status, async () => {
     const { card, context, errors } = await open({ ...complete, lastRun: { ...complete.lastRun, status, finishedAt: status === 'running' ? null : complete.lastRun.finishedAt } });
     try { await expect(card.getByText(expected, { exact: true })).toBeVisible(); assert.deepEqual(errors, []); } finally { await context.close(); }

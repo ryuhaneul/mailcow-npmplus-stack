@@ -1,3 +1,5 @@
+import { latestFtsMeasurement } from '../services/fts-measure.js';
+
 // Project stored results explicitly: state also contains private recovery evidence.
 const pick = (value, keys) => Object.fromEntries(keys.map(key => [key, value?.[key] ?? null]));
 const measurement = value => pick(value, ['user', 'mailbox', 'guid', 'messages', 'indexed', 'unindexed', 'shards', 'status', 'reason', 'measuredAt']);
@@ -23,7 +25,7 @@ export default async function ftsRoutes(app, { state, config }) {
         top20: (snapshot.top ?? []).slice(0, 20).map(measurement),
       } : null,
       folders: (stored?.folders ?? []).map(folder => ({
-        ...measurement(folder.after ?? folder.before),
+        ...measurement(latestFtsMeasurement(folder)),
         ...pick(folder, ['user', 'mailbox', 'result', 'error', 'startedAt', 'finishedAt']),
       })),
       damaged,

@@ -60,7 +60,7 @@ for (const [label, messages, indexed] of [
 });
 
 for (const [method, result, reason] of [
-  ['mailboxStatus', [], 'missing-status'], ['ftsStats', [], 'missing-stats'],
+  ['mailboxStatus', [], 'missing-status'],
   ['mailboxStatus', [{ mailbox, guid, messages: 30 }, { mailbox, guid, messages: 30 }], 'guid-mismatch'],
   ['ftsStats', [{ mailbox, guid, messages: 10 }, { mailbox, guid, messages: 10 }], 'guid-mismatch'],
   ['ftsStats', [{ mailbox, guid: otherGuid, messages: 10 }], 'guid-mismatch'],
@@ -256,3 +256,19 @@ test('FTS full measurement stops before the next folder and preserves only obser
   const empty = await service.measureAll({ shouldStop: () => true });
   assert.equal(empty.incomplete, true); assert.deepEqual(empty.folders, []); assert.deepEqual(calls, []);
 });
+
+
+for (const messages of [0, 47, 20000]) test(`FTS no stats database and ${messages} messages is a measured zero index`, async () => {
+  const { service } = fixture({ mailboxStatus: () => [{ mailbox, guid, messages }], ftsStats: () => [] });
+  const result = await service.measureAll();
+  assert.deepEqual(result.folders[0], { user, mailbox, guid, messages, indexed: 0, unindexed: messages,
+    shards: 0, measuredAt: new Date(at).toISOString(), status: 'ok', reason: null });
+  assert.equal(result.totals.unmeasured, 0); assert.equal(result.top.length, messages ? 1 : 0);
+});
+
+for (const status of [[], [{ mailbox, guid: 'invalid', messages: 4 }], [{ mailbox, guid, messages: -1 }]]) {
+  test(`FTS empty stats cannot override invalid mailbox status ${JSON.stringify(status)}`, async () => {
+    const { service } = fixture({ mailboxStatus: () => status, ftsStats: () => [] });
+    assert.equal((await service.measureFolder(user, mailbox)).status, 'unmeasured');
+  });
+}

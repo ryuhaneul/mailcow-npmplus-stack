@@ -174,3 +174,21 @@ test('FTS app onReady persists restart warning before API reads even with schedu
   assert.equal(body.remoteUnknown.user, null); assert.equal(body.remoteUnknown.mailbox, null);
   assert.deepEqual(await readdir(join(dir, 'lock')), lockFiles); assert.equal(remoteCalls, 0);
 });
+
+for (const remeasured of [false, true]) test(`FTS API manual recovery uses fresh or unknown counts, remeasured=${remeasured}`, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'fts-api-recover-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const state = createFtsState({ dir }); await state.acquire(); const run = await state.startRun();
+  const before = row(4), current = { user: before.user, mailbox: before.mailbox, guid: before.guid };
+  await state.save({ ...run, current, folders: [{ ...current, before, after: null, result: 'running', error: null }],
+    snapshot: { measuredAt: instant, folders: [before], totals: { messages: 10, indexed: 6, unindexed: 4, unmeasured: 0, excluded: 0 }, top: [before] } });
+  await state.markRemoteUnknown(current);
+  const restored = await state.manualUnlock({ by: 'operator', at: instant, reason: 'synthetic verified idle', remoteStopped: true,
+    ...(remeasured ? { remeasured: { user: before.user, mailbox: before.mailbox, messages: 10, indexed: 10, at: instant } } : {}) });
+  const f = await fixture(t, { state: restored, damaged: false });
+  const response = await f.app.inject({ url: '/api/admin/fts-status', headers: f.headers }); assert.equal(response.statusCode, 200);
+  const body = response.json(); assert.equal(body.lastRun.status, 'failed'); assert.equal(body.indexBlocked, false); assert.equal(body.remoteUnknown, null);
+  assert.equal(body.folders[0].result, 'unknown'); assert.equal(body.folders[0].error, 'manual-unlock');
+  assert.equal(body.folders[0].unindexed, remeasured ? 0 : null); assert.equal(body.folders[0].status, remeasured ? 'ok' : 'unmeasured');
+  assert.equal(body.snapshot.totals.unmeasured, remeasured ? 0 : 1); assert.equal(body.snapshot.totals.unindexed, 0);
+  assert.deepEqual(body.snapshot.top20, []);
+});

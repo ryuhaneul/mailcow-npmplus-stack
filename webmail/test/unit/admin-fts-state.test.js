@@ -92,7 +92,7 @@ test('fts state: reads are local, private files and atomic save preserve all pro
   assert.equal((await fs.stat(join(f.dir, 'state.json'))).mode & 0o777, 0o600);
   assert.equal((await fs.stat(join(f.dir, 'lock', `${token}.json`))).mode & 0o777, 0o600);
   assert.equal((await fs.readdir(f.dir)).filter(name => name.endsWith('.tmp')).length, 0);
-  await assert.rejects(f.store.release(), { code: 'FTS_REMOTE_UNKNOWN' });
+  await f.store.release();
 });
 
 test('fts state: only owner can mutate or release, including an obsolete token after recovery', async t => {
@@ -118,7 +118,7 @@ test('fts state: remote unknown blocks index flag and subsequent runs until dura
   assert.equal((await restarted.read()).state.indexBlocked, true);
   await assert.rejects(f.store.save({ ...unknown, remoteUnknown: null, indexBlocked: false }), { code: 'FTS_REMOTE_UNKNOWN' });
   await assert.rejects(f.store.startRun('2026-10-22'), { code: 'FTS_REMOTE_UNKNOWN' });
-  await assert.rejects(f.store.release(), { code: 'FTS_REMOTE_UNKNOWN' });
+  assert.equal((await f.store.inspectLock()).locked, true);
   for (const value of [undefined, {}, { ...evidence, remoteStopped: false }, { ...evidence, by: '' }, { ...evidence, at: 'invalid' }])
     await assert.rejects(restarted.manualUnlock(value), { code: 'FTS_UNLOCK_EVIDENCE' });
   const restored = await restarted.manualUnlock(evidence);
@@ -226,4 +226,116 @@ test('fts state: restart preserves existing remote unknown evidence verbatim', a
   const unknown = await f.store.markRemoteUnknown(current);
   const restarted = createFtsState({ dir: f.dir });
   assert.deepEqual(await restarted.markRemoteUnknown({ reason: 'restart' }), unknown);
+});
+
+async function runningFixture(t, options = {}) {
+  const f = await fixture(t, options); await f.store.acquire(); const run = await f.store.startRun();
+  const before = { ...current, messages: 20001, indexed: 1, unindexed: 20000, shards: 1,
+    status: 'ok', reason: null, measuredAt: run.startedAt };
+  await f.store.save({ ...run, current, folders: [{ ...current, before, after: null, result: 'running', error: null }],
+    snapshot: { measuredAt: run.startedAt, folders: [before], totals: { messages: 20001, indexed: 1, unindexed: 20000, unmeasured: 0, excluded: 0 }, top: [before] } });
+  await f.store.markRemoteUnknown(current); // interrupted index with a durable running row
+  return f;
+}
+
+for (const locked of [true, false]) test(`fts state: explicit damaged reset preserves original bytes and records evidence, lock=${locked}`, async t => {
+  const f = await fixture(t); if (locked) await f.store.acquire();
+  const bytes = '{synthetic-damaged-state'; await fs.writeFile(join(f.dir, 'state.json'), bytes, { mode: 0o600 });
+  await assert.rejects(f.store.manualUnlock(evidence), { code: 'FTS_STATE_CORRUPT' });
+  await assert.rejects(f.store.manualUnlock({ ...evidence, resetDamagedState: true, remoteStopped: false }), { code: 'FTS_UNLOCK_EVIDENCE' });
+  assert.equal(await fs.readFile(join(f.dir, 'state.json'), 'utf8'), bytes);
+  const restored = await f.store.manualUnlock({ ...evidence, resetDamagedState: true });
+  assert.equal(restored.runId, null); assert.deepEqual(restored.runIds, {}); assert.deepEqual(restored.folders, []);
+  const saved = restored.unlockHistory[0]; assert.equal(saved.resetDamagedState, true);
+  assert.ok(saved.damagedBackup.startsWith('state.json.damaged-'));
+  assert.equal(await fs.readFile(join(f.dir, saved.damagedBackup), 'utf8'), bytes);
+  assert.equal((await f.store.read()).damaged, false); assert.equal((await f.store.inspectLock()).locked, false);
+  assert.equal((await fs.stat(join(f.dir, 'state.json'))).mode & 0o777, 0o600);
+});
+
+test('fts state: release checks its owner even when state is damaged and never changes evidence', async t => {
+  const f = await fixture(t); const token = await f.store.acquire();
+  await fs.writeFile(join(f.dir, 'state.json'), '{');
+  const other = createFtsState({ dir: f.dir });
+  await assert.rejects(other.release(token), { code: 'FTS_LOCK_OWNER' });
+  await f.store.release(token); assert.equal((await f.store.inspectLock()).locked, false);
+  assert.equal(await fs.readFile(join(f.dir, 'state.json'), 'utf8'), '{');
+});
+
+test('fts state: damaged recovery write failure keeps the lock and the preserved source file', async t => {
+  const controls = {}, f = await fixture(t, { fs: faultFs(controls) }); await f.store.acquire();
+  await fs.writeFile(join(f.dir, 'state.json'), '{synthetic'); controls['file-sync'] = true;
+  await assert.rejects(f.store.manualUnlock({ ...evidence, resetDamagedState: true }), /file-sync/);
+  assert.equal((await f.store.inspectLock()).locked, true);
+  const backups = (await fs.readdir(f.dir)).filter(name => name.startsWith('state.json.damaged-'));
+  assert.equal(backups.length, 1); assert.equal(await fs.readFile(join(f.dir, backups[0]), 'utf8'), '{synthetic');
+});
+
+const remeasured = { user: current.user, mailbox: current.mailbox, messages: 20001, indexed: 20001,
+  at: '2026-10-21T04:29:39Z', by: 'synthetic status + stats' };
+for (const measured of [undefined, {}, { ...remeasured, mailbox: 'other' }, { ...remeasured, indexed: 20002 },
+  { ...remeasured, messages: -1 }, { ...remeasured, indexed: 0.5 }, { ...remeasured, messages: Number.MAX_SAFE_INTEGER + 1 },
+  { ...remeasured, at: 'invalid' }]) {
+  test(`fts state: manual recovery without valid matching remeasurement excludes stale backlog ${JSON.stringify(measured)}`, async t => {
+    const f = await runningFixture(t);
+    const restored = await f.store.manualUnlock({ ...evidence, remeasured: measured });
+    assert.equal(restored.current, null); assert.equal(restored.status, 'failed');
+    assert.equal(restored.folders[0].result, 'unknown'); assert.equal(restored.folders[0].error, 'manual-unlock');
+    assert.equal(restored.folders[0].after, null); assert.equal(restored.snapshot.totals.unmeasured, 1);
+    assert.equal(restored.snapshot.totals.unindexed, 0); assert.deepEqual(restored.snapshot.top, []);
+    assert.equal(restored.snapshot.folders[0].status, 'unmeasured'); assert.equal(restored.snapshot.folders[0].messages, null);
+  });
+}
+
+for (const indexed of [20001, 10001]) test(`fts state: matching VM-shaped remeasurement updates totals/top with indexed=${indexed} but retains unknown run outcome`, async t => {
+  const f = await runningFixture(t);
+  const restored = await f.store.manualUnlock({ ...evidence, remeasured: { ...remeasured, indexed } });
+  assert.equal(restored.folders[0].result, 'unknown'); assert.equal(restored.folders[0].error, 'manual-unlock');
+  assert.equal(restored.folders[0].after.guid, current.guid); assert.equal(restored.folders[0].after.measuredAt, remeasured.at);
+  assert.equal(restored.folders[0].after.unindexed, 20001 - indexed);
+  assert.equal(restored.snapshot.totals.unmeasured, 0); assert.equal(restored.snapshot.totals.unindexed, 20001 - indexed);
+  assert.equal(restored.snapshot.top.length, indexed === 20001 ? 0 : 1);
+  assert.equal(restored.snapshot.measuredAt, remeasured.at); assert.equal(restored.status, 'failed');
+});
+
+function cli(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [new URL('../../bin/fts-unlock.js', import.meta.url).pathname, ...args]);
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject); child.on('close', code => resolve({ code, stdout, stderr }));
+  });
+}
+
+test('fts recovery CLI: preview never mutates, flags are required, confirmed recovery hides private tokens', async t => {
+  const f = await runningFixture(t), bytes = await fs.readFile(join(f.dir, 'state.json'), 'utf8');
+  const [tokenFile] = await fs.readdir(join(f.dir, 'lock'));
+  const args = ['--state-dir', f.dir, '--by', 'operator', '--reason', 'synthetic remote idle', '--remote-stopped'];
+  const preview = await cli(args); assert.equal(preview.code, 2); assert.match(preview.stderr, /CLI_CONFIRM_REQUIRED/);
+  assert.equal(JSON.parse(preview.stdout).locked, true); assert.equal(JSON.parse(preview.stdout).current.mailbox, current.mailbox);
+  assert.equal(await fs.readFile(join(f.dir, 'state.json'), 'utf8'), bytes);
+  for (const missing of ['--by', '--reason', '--remote-stopped']) {
+    const values = args.filter((value, index) => value !== missing && args[index - 1] !== missing);
+    const result = await cli([...values, '--yes']); assert.equal(result.code, 2); assert.match(result.stderr, /CLI_EVIDENCE_REQUIRED/);
+    assert.equal((await f.store.inspectLock()).locked, true);
+  }
+  const result = await cli([...args, '--yes']); assert.equal(result.code, 0, result.stderr);
+  const [before, after] = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(before.locked, true); assert.equal(after.ok, true); assert.equal(after.locked, false); assert.equal(after.status, 'failed');
+  for (const value of [f.dir, tokenFile, tokenFile.slice(0, -5), 'unlockHistory":[' ]) assert.ok(!result.stdout.includes(value));
+  assert.equal((await f.store.read()).state.snapshot.totals.unmeasured, 1);
+});
+
+test('fts recovery CLI: damaged reset is explicit, preserves bytes, and sanitizes malformed inputs and IO errors', async t => {
+  const f = await fixture(t); await fs.writeFile(join(f.dir, 'state.json'), '{synthetic-private');
+  const args = ['--state-dir', f.dir, '--by', 'operator', '--reason', 'synthetic damaged state', '--remote-stopped', '--yes'];
+  assert.equal((await cli(args)).code, 2);
+  const result = await cli([...args, '--reset-damaged']); assert.equal(result.code, 0, result.stderr);
+  const backup = (await f.store.read()).state.unlockHistory[0].damagedBackup;
+  assert.equal(await fs.readFile(join(f.dir, backup), 'utf8'), '{synthetic-private');
+  for (const bad of [['--unknown'], ['--by'], ['--yes', '--yes'], ['--state-dir', join(f.dir, 'state.json')]]) {
+    const result = await cli(bad); assert.equal(result.code, 2); assert.ok(!result.stderr.includes(f.dir));
+    assert.ok(!result.stderr.includes('synthetic-private'));
+  }
+  const help = await cli(['--help']); assert.equal(help.code, 0); assert.match(help.stdout, /시험용/);
 });

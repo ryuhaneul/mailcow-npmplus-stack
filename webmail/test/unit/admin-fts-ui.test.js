@@ -68,4 +68,16 @@ test('FTS overview uses KST scheduling, honest missing values and distinct run s
     assert.match(blocked, /종료 확인 필요 — 수동 복구/); assert.match(blocked, /앱 재시작 뒤 남은 잠금/);
   });
 
+  await t.test('finished runs never show a stale running row as current; manual recovery reason remains visible', () => {
+    const folder = { user: 'person@example.test', mailbox: 'Imported', status: 'unmeasured',
+      result: 'running', messages: null, indexed: null, unindexed: null };
+    const data = { ...base, lastRun: { status: 'failed' }, folders: [folder], snapshot: {
+      measuredAt: '2026-10-21T18:00:00Z', totals: { unindexed: 0, unmeasured: 1, excluded: 0 }, top20: [],
+    } };
+    assert.doesNotMatch(render(data), /현재 폴더/);
+    assert.match(render({ ...data, lastRun: { status: 'running' } }), /현재 폴더/);
+    const recovered = render({ ...data, folders: [{ ...folder, result: 'unknown', error: 'manual-unlock' }] });
+    assert.doesNotMatch(recovered, /현재 폴더|0 통/); assert.match(recovered, /수동 복구 · 실행 결과 미확인/);
+  });
+
 });

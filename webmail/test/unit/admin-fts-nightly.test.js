@@ -411,3 +411,35 @@ for (const stop of ['deadline', 'signal']) test(`fts nightly: real full measurem
   assert.equal((await f.state.read()).state.status, 'cutoff');
   assert.ok(await f.state.acquire()); await f.state.release();
 });
+
+test('fts nightly: damaged state fails before any lock acquisition or remote work', async t => {
+  const f = await fixture(t); await fs.mkdir(join(f.dir, 'state'));
+  const bytes = '{synthetic-corrupt'; await fs.writeFile(join(f.dir, 'state', 'state.json'), bytes);
+  f.deps.state = { ...f.state, async acquire() { assert.fail('must not acquire a lock for damaged state'); } };
+  const result = await f.run(); assert.equal(result.status, 'failed'); assert.equal(result.state, null);
+  assert.equal(result.warnings[0].code, 'FTS_STATE_CORRUPT'); assert.deepEqual(f.events, []);
+  assert.equal((await f.state.inspectLock()).locked, false);
+  assert.equal(await fs.readFile(join(f.dir, 'state', 'state.json'), 'utf8'), bytes);
+});
+
+test('fts nightly: damage appearing after preflight releases only its own lock', async t => {
+  const f = await fixture(t), acquire = f.state.acquire;
+  f.state.acquire = async () => { const token = await acquire(); await fs.writeFile(join(f.dir, 'state', 'state.json'), '{'); return token; };
+  const result = await f.run(); assert.equal(result.status, 'failed'); assert.deepEqual(f.events, []);
+  assert.equal((await f.state.inspectLock()).locked, false); assert.equal((await f.state.read()).damaged, true);
+});
+
+test('fts nightly: uninitialized flatcurve databases are indexed, empty folders are skipped without failures', async t => {
+  const f = await fixture(t), indexes = [];
+  f.deps.measure = createFtsMeasure({ now: f.deps.now, doveadm: {
+    async listUsers() { return ['user@example.test']; },
+    async call() { return ['Archive', 'Imported'].map(mailbox => ({ mailbox })); },
+    async specialUse() { return [{ value: '' }]; },
+    async mailboxStatus(user, mailbox) { return [{ mailbox, guid: (mailbox === 'Archive' ? 'a' : 'b').repeat(32), messages: mailbox === 'Archive' ? 0 : 20000 }]; },
+    async ftsStats(user, mailbox) { return indexes.includes(mailbox) ? [{ mailbox, guid: 'b'.repeat(32), messages: 20000, shards: 5 }] : []; },
+  } });
+  f.deps.doveadm.indexMailbox = async (user, mailbox) => { indexes.push(mailbox); };
+  const result = await f.run(); assert.equal(result.status, 'done'); assert.deepEqual(indexes, ['Imported']);
+  assert.equal(result.state.snapshot.totals.unmeasured, 0); assert.equal(result.state.snapshot.totals.unindexed, 0);
+  assert.equal(result.state.folders[0].before.indexed, 0); assert.equal(result.state.folders[1].after.shards, 5);
+});

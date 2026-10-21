@@ -10,6 +10,7 @@ const reasons = {
   trash: '휴지통 제외', junk: '스팸 폴더 제외', 'measurement-failed': '측정 실패', 'missing-status': '폴더 상태 없음',
   'missing-stats': '색인 통계 없음', 'guid-mismatch': '폴더 식별 정보 불일치', 'invalid-count': '측정 수치 확인 필요',
   FTS_FOLDER_CHANGED: '폴더 변경 확인 필요', FTS_MEASURE_FAILED: '색인 후 측정 실패',
+  'manual-unlock': '수동 복구 · 실행 결과 미확인',
   DOVEADM_UNAVAILABLE: '서버 연결 불가', DOVEADM_INDEX_UNKNOWN: '종료 확인 필요',
 };
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('ko-KR') : '미측정';
@@ -46,7 +47,7 @@ export default function FtsStatus({ resource, now = Date.now() }) {
   const blocked = data && (data.indexBlocked || data.remoteUnknown || data.lastRun?.status === 'unknown');
   const stale = snapshot?.measuredAt && now - Date.parse(snapshot.measuredAt) > dayMs;
   const issues = data?.folders.filter(row => ['failed', 'unknown', 'unmeasured', 'excluded'].includes(row.result) || ['unmeasured', 'excluded'].includes(row.status)) ?? [];
-  const running = data?.folders.find(row => row.result === 'running');
+  const running = data?.lastRun?.status === 'running' && data.folders.find(row => row.result === 'running');
   const targetCount = snapshot && Number.isSafeInteger(totals.excluded) ? data.folders.length - totals.excluded : null;
   const remaining = !snapshot?.incomplete && totals && (totals.unmeasured === 0 || targetCount > totals.unmeasured) ? totals.unindexed : null;
   return <section class="overview-section card fts-status" aria-labelledby="fts-title" data-fts-status>

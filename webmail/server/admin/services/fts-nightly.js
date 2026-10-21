@@ -1,4 +1,4 @@
-import { summarizeFtsFolders } from './fts-measure.js';
+import { latestFtsMeasurement, summarizeFtsFolders } from './fts-measure.js';
 import { AppError } from '../../errors.js';
 
 const key = row => JSON.stringify([row.user, row.mailbox, row.guid]);
@@ -13,8 +13,6 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
   async function runOnce({ deadline, signal } = {}) {
     const cutoff = () => now() >= deadline || signal?.aborted === true;
     if (!Number.isFinite(deadline)) throw new AppError(422, 'FTS_DEADLINE_INVALID', '색인 종료 시각을 확인해 주세요.');
-    const token = await store.acquire();
-    if (!token) return { status: 'busy', state: null, warnings: [] };
     let state = null, keepLock = false, sentIndex = false;
     const warnings = [];
     const timestamp = () => new Date(now()).toISOString();
@@ -22,9 +20,17 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       warnings.push({ code, stage });
       logger?.warn({ code, stage }, '검색 색인 실행 기록을 확인해 주세요.');
     }
+    try {
+      if ((await store.read()).damaged) throw new AppError(409, 'FTS_STATE_CORRUPT', '색인 상태를 확인해 주세요.');
+    } catch (error) {
+      warn(codeOf(error), 'run');
+      return { status: 'failed', state: null, warnings };
+    }
+    const token = await store.acquire();
+    if (!token) return { status: 'busy', state: null, warnings: [] };
     async function save() {
       if (state.snapshot) {
-        const folders = state.folders.map(row => row.after ?? row.before);
+        const folders = state.folders.map(latestFtsMeasurement);
         const times = folders.map(row => row.measuredAt).filter(value => Number.isFinite(Date.parse(value))).sort();
         state.snapshot = { ...state.snapshot, measuredAt: times.at(-1) ?? state.snapshot.measuredAt,
           folders, ...summarizeFtsFolders(folders) };
@@ -151,6 +157,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
         } };
       });
     } catch (error) {
+      if (error.code === 'FTS_REMOTE_UNKNOWN') keepLock = true;
       warn(codeOf(error), error.code?.startsWith('AUDIT_') ? 'audit' : 'run');
       if (state) {
         if (keepLock && !state.indexBlocked) {

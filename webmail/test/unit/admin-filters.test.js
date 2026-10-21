@@ -135,11 +135,11 @@ for (const [index, source] of [
   'redirect :copy ["keep@example.com", "outside@example.net"];',
 ].entries()) test(`filter checks: finds external user redirect case ${index + 1}`, async t => {
   const f = await fixture(t); f.scripts.set(owner, source); const result = await f.service.checks({});
-  assert.deepEqual(result.external, [{ address: owner, targets: ['outside@example.net'] }]); assert.equal(result.checked, 1); assert.equal(result.uninspectable.length, 0); assert.equal(result.failed.length, 0);
+  assert.deepEqual(result.external, [{ address: owner, targets: ['outside@example.net'], filters: [{ source: 'user', type: 'active-user', targets: ['outside@example.net'], needsSpamGuard: true }] }]); assert.equal(result.checked, 1); assert.equal(result.uninspectable.length, 0); assert.equal(result.failed.length, 0);
 });
 test('filter checks: non-webmail name, uninspectable script, and exact Dovecot order are separate read-only results', async t => {
   const f = await fixture(t); f.names.set(owner, [{ name: 'rainloop.user', active: true }, { name: SCRIPT_NAME, active: false }]); f.scripts.set(owner, 'redirect "${unknown}";');
-  const result = await f.service.checks({}); assert.deepEqual(result.nonWebmail, [{ address: owner, activeName: 'rainloop.user' }]); assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE' }]);
+  const result = await f.service.checks({}); assert.deepEqual(result.nonWebmail, [{ address: owner, activeName: 'rainloop.user' }]); assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'user', type: 'active-user' }]);
   assert.deepEqual(result.globalOrder.map(row => row.type), ['global-prefilter', 'admin-prefilter', 'active-user', 'admin-postfilter', 'global-postfilter']); assert.equal(result.globalOrder[0].script, f.global.prefilter); assert.equal(result.globalOrder[4].script, f.global.postfilter);
   assert.equal(writes(f).length, 0); assert.equal((await f.audit.read()).rows.length, 0);
 });
@@ -196,4 +196,36 @@ test('dockerapi sieve list: actual plaintext protocol, exact allowlisted body an
   const count = calls.length; for (const task of ['sieve_print', 'sieve', 'restart', '__proto__']) await assert.rejects(client.call(task, owner), { statusCode: 422, code: 'DOCKERAPI_TASK_NOT_ALLOWED' }); assert.equal(calls.length, count);
   options.text = 'require ["copy"]; # synthetic-raw-script-marker'; await assert.rejects(client.listSieve(owner), error => error.code === 'DOCKERAPI_REJECTED' && !error.message.includes('synthetic-raw-script-marker'));
   options.type = 'application/json'; options.text = JSON.stringify({ name: SCRIPT_NAME, script: 'synthetic-raw-script-marker' }); await assert.rejects(client.listSieve(owner), { code: 'DOCKERAPI_REJECTED' });
+});
+
+test('filter checks: active admin pre/post filters join external mailbox results and missing spam guard list', async t => {
+  const f = await fixture(t);
+  f.filters[0].script_data = 'redirect :copy "pre@example.net";';
+  f.filters.push({ ...f.filters[0], id: '2', filter_type: 'postfilter', script_data: `${guard}\nredirect :copy "post@example.net";` });
+  f.filters.push({ ...f.filters[0], id: '3', active: '0', script_data: 'redirect :copy "inactive@example.net";' });
+  f.scripts.set(owner, 'redirect :copy "user@example.net";');
+  const result = await f.service.checks({});
+  assert.equal(result.checked, 1); assert.equal(result.external.length, 1);
+  assert.deepEqual(result.external[0], { address: owner, targets: ['post@example.net', 'pre@example.net', 'user@example.net'], filters: [
+    { source: 'admin', type: 'prefilter', id: '1', targets: ['pre@example.net'], needsSpamGuard: true },
+    { source: 'admin', type: 'postfilter', id: '2', targets: ['post@example.net'], needsSpamGuard: false },
+    { source: 'user', type: 'active-user', targets: ['user@example.net'], needsSpamGuard: true },
+  ] });
+  assert.deepEqual(result.spamGuardMissing, [
+    { address: owner, source: 'admin', type: 'prefilter', id: '1', targets: ['pre@example.net'] },
+    { address: owner, source: 'user', type: 'active-user', targets: ['user@example.net'] },
+  ]);
+  assert.equal(writes(f).length, 0);
+});
+test('filter checks: admin forwarding is checked when there is no active user script', async t => {
+  const f = await fixture(t); f.scripts.delete(owner); f.names.delete(owner);
+  f.filters[0].script_data = 'redirect :copy "outside@example.net";';
+  const result = await f.service.checks({}); assert.equal(result.external[0].filters[0].source, 'admin'); assert.equal(result.spamGuardMissing.length, 1);
+});
+test('filter checks: admin parse failure does not hide valid user forwarding', async t => {
+  const f = await fixture(t); f.filters[0].script_data = 'redirect "${unknown}";';
+  f.scripts.set(owner, 'redirect :copy "outside@example.net";');
+  const result = await f.service.checks({});
+  assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'admin', type: 'prefilter', id: '1' }]);
+  assert.equal(result.external[0].filters[0].source, 'user');
 });

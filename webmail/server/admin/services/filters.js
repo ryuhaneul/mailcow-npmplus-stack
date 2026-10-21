@@ -6,7 +6,7 @@ import { etag, assertUnchanged } from '../lock.js';
 import { createFilterBackups } from './teams.js';
 import { addressPattern } from '../sieve-team.js';
 import { tokens } from '../../sieve/import-syntax.js';
-import { externalRedirectPreview, externalSpamGuardMessage } from '../filter-script.js';
+import { externalRedirectPreview, externalSpamGuardMessage, internalDomainSet } from '../filter-script.js';
 import { SCRIPT_NAME } from '../../sieve/model.js';
 
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -65,8 +65,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
   }
   async function internalDomains(session) {
     const [domains, aliases] = await Promise.all([rows(session, 'domain/all'), rows(session, 'alias-domain/all')]);
-    const primary = new Set(domains.filter(row => String(row.active) === '1').map(row => normalize(row.domain_name ?? row.domain)));
-    return new Set([...primary, ...aliases.filter(row => String(row.active) === '1' && primary.has(normalize(row.target_domain))).map(row => normalize(row.alias_domain))]);
+    return internalDomainSet(domains, aliases);
   }
   async function validate(session, source, confirmMove) {
     const redirects = inspectRedirects(source);
@@ -133,7 +132,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
     if (!global || typeof global !== 'object' || Array.isArray(global) || ['prefilter', 'postfilter'].some(key => global[key] !== undefined && typeof global[key] !== 'string')) throw rejected();
     if (boxes.some(row => typeof row?.username !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(normalize(row.username)))) throw rejected();
     const addresses = [...new Set(boxes.map(row => normalize(row.username)))].sort();
-    const result = { checked: 0, total: addresses.length, failed: [], external: [], nonWebmail: [], uninspectable: [],
+    const result = { checked: 0, total: addresses.length, failed: [], external: [], nonWebmail: [], uninspectable: [], spamGuardMissing: [],
       globalOrder: [
         { order: 1, type: 'global-prefilter', script: global.prefilter ?? '' },
         { order: 2, type: 'admin-prefilter' },
@@ -142,29 +141,43 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
         { order: 5, type: 'global-postfilter', script: global.postfilter ?? '' },
       ] };
     let next = 0, fatal;
+    function inspect(source, address, metadata) {
+      try {
+        const external = inspectRedirects(source).filter(row => !internal.has(row.target.split('@')[1]));
+        if (!external.length) return;
+        const targets = [...new Set(external.map(row => row.target))].sort();
+        const needsSpamGuard = externalRedirectPreview(source, [...internal]).needsSpamGuard;
+        const filter = { ...metadata, targets, needsSpamGuard };
+        let entry = result.external.find(row => row.address === address);
+        if (!entry) { entry = { address, targets: [], filters: [] }; result.external.push(entry); }
+        entry.targets = [...new Set([...entry.targets, ...targets])].sort(); entry.filters.push(filter);
+        if (needsSpamGuard) result.spamGuardMissing.push({ address, ...metadata, targets });
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'FILTER_UNINSPECTABLE') throw error;
+        result.uninspectable.push({ address, code: 'FILTER_UNINSPECTABLE', ...metadata });
+      }
+    }
+    function failed(address, error, metadata = {}) {
+      if (error instanceof MailcowAuthLost) fatal = error;
+      else result.failed.push({ address, code: error instanceof AppError ? error.code : 'INTERNAL_ERROR', ...metadata });
+    }
     async function worker() {
       while (!fatal && next < addresses.length) {
         const addr = addresses[next++];
         try {
+          for (const row of await filterRows(session, addr)) if (String(row.active) === '1') inspect(row.script_data, addr, { source: 'admin', type: row.filter_type, id: String(row.id) });
+        } catch (error) { failed(addr, error, { source: 'admin' }); }
+        if (fatal) continue;
+        try {
           const current = await userState(session, addr); result.checked++;
           if (current.activeName && current.activeName !== SCRIPT_NAME) result.nonWebmail.push({ address: addr, activeName: current.activeName });
-          if (current.script === null) continue;
-          try {
-            const external = inspectRedirects(current.script).filter(row => !internal.has(row.target.split('@')[1]));
-            if (external.length) result.external.push({ address: addr, targets: [...new Set(external.map(row => row.target))].sort() });
-          } catch (error) {
-            if (!(error instanceof AppError) || error.code !== 'FILTER_UNINSPECTABLE') throw error;
-            result.uninspectable.push({ address: addr, code: 'FILTER_UNINSPECTABLE' });
-          }
-        } catch (error) {
-          if (error instanceof MailcowAuthLost) fatal = error;
-          else result.failed.push({ address: addr, code: error instanceof AppError ? error.code : 'INTERNAL_ERROR' });
-        }
+          if (current.script !== null) inspect(current.script, addr, { source: 'user', type: 'active-user' });
+        } catch (error) { failed(addr, error); }
       }
     }
     await Promise.all(Array.from({ length: Math.min(4, addresses.length) }, worker));
     if (fatal) throw fatal;
-    for (const key of ['failed', 'external', 'nonWebmail', 'uninspectable']) result[key].sort((a, b) => a.address.localeCompare(b.address));
+    for (const key of ['failed', 'external', 'nonWebmail', 'uninspectable', 'spamGuardMissing']) result[key].sort((a, b) => a.address.localeCompare(b.address));
     return result;
   }
   history.register('filter.edit', {

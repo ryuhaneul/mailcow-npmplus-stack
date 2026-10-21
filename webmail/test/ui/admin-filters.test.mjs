@@ -88,4 +88,36 @@ test('administrator filter external forwarding preview', async t => {
       assert.deepEqual(writes, [{ etag: 'filter-1', script: expected }]); assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
+  for (const width of [1280, 768, 390, 375]) await t.test(`checks distinguish administrator and user filters and missing spam guard ${width}`, async () => {
+    const { page, context, errors } = await open(width);
+    try {
+      const data = { total: 1, checked: 1, failed: [], nonWebmail: [], uninspectable: [], globalOrder: [],
+        external: [{ address: 'person@example.com', targets: ['outside@example.net'], filters: [
+          { source: 'admin', type: 'prefilter', id: '1', targets: ['outside@example.net'], needsSpamGuard: true },
+          { source: 'admin', type: 'postfilter', id: '2', targets: ['outside@example.net'], needsSpamGuard: false },
+          { source: 'user', type: 'active-user', targets: ['outside@example.net'], needsSpamGuard: true },
+        ] }], spamGuardMissing: [
+          { address: 'person@example.com', source: 'admin', type: 'prefilter', id: '1', targets: ['outside@example.net'] },
+          { address: 'person@example.com', source: 'user', type: 'active-user', targets: ['outside@example.net'] },
+        ] };
+      await page.route('**/api/admin/checks/filters', route => route.fulfill({ json: data }));
+      await page.goto(page.url().split('#')[0] + '#filters/person%40example.com/checks');
+      const external = page.locator('.detail-section').filter({ has: page.getByRole('heading', { name: '외부 전달 · 1개', exact: true }) });
+      await expect(external).toContainText('관리자 필터 · prefilter · #1');
+      await expect(external).toContainText('관리자 필터 · postfilter · #2');
+      await expect(external).toContainText('사용자 필터 · active-user');
+      await expect(external.getByRole('link', { name: '관리자 필터 · prefilter · #1' })).toHaveAttribute('href', '#filters/person%40example.com/admin');
+      const missing = page.locator('.detail-section').filter({ has: page.getByRole('heading', { name: '스팸 제외 없음 · 2개', exact: true }) });
+      await expect(missing.locator('.mini-row')).toHaveCount(2);
+      await expect(page.locator('.account-detail')).not.toContainText('outside@example.net');
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: `${captures}/filter-checks-${width}.png`, fullPage: true });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      data.external = []; data.spamGuardMissing = [];
+      await page.getByRole('button', { name: '다시 점검', exact: true }).click();
+      const empty = page.locator('.detail-section').filter({ has: page.getByRole('heading', { name: '스팸 제외 없음 · 0개', exact: true }) });
+      await expect(empty.getByText('없음', { exact: true })).toBeVisible(); assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
 });

@@ -42,3 +42,9 @@ export function insertSpamGuard(script) {
 }
 
 export const externalSpamGuardMessage = '외부로 전달하는 필터는 맨 앞에 스팸 메일 전달 제외 줄이 있어야 저장할 수 있어요.';
+
+export function internalDomainSet(domains, aliases) {
+  const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const primary = new Set(domains.filter(row => String(row.active) === '1').map(row => normalize(row.domain_name ?? row.domain)));
+  return new Set([...primary, ...aliases.filter(row => String(row.active) === '1' && primary.has(normalize(row.target_domain))).map(row => normalize(row.alias_domain))]);
+}

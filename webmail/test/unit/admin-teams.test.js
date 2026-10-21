@@ -18,6 +18,8 @@ async function fixture(t, source = script) {
   const calls = []; const options = {}; let reads = 0;
   const mailcow = { async call(_session, method, path, body) {
     calls.push({ method, path, body });
+    if (path === '/api/v1/get/domain/all') return options.domains ?? [{ domain_name: 'example.com', active: '1' }];
+    if (path === '/api/v1/get/alias-domain/all') return [];
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/mailbox/all') return structuredClone(Object.hasOwn(options, 'mailboxes') ? options.mailboxes : boxes);
     if (path === '/api/v1/get/filters/all') { reads++; options.onRead?.(reads, rows); return structuredClone(Object.hasOwn(options, 'filters') ? options.filters : rows.length ? rows : {}); }
@@ -227,4 +229,32 @@ test('teams: empty mailbox object is an empty list and malformed lists still ret
     f.options.mailboxes = []; f.options.filters = value;
     await assert.rejects(f.service.list({}), { statusCode: 502, code: 'MAILCOW_REJECTED' });
   }
+});
+
+const externalScript = 'require ["copy"];\nredirect :copy "first@example.com";\nredirect :copy "outside@example.net";\n';
+test('teams: member addition cannot preserve an unguarded external redirect; zero writes', async t => {
+  const f = await fixture(t, externalScript);
+  await assert.rejects(change(f, (await item(f)).etag), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  assert.equal(writes(f).length, 0); assert.equal(f.rows[0].script_data, externalScript);
+});
+test('teams: removing external redirect is allowed, but undo refuses its unguarded restoration and audits failure', async t => {
+  const f = await fixture(t, externalScript);
+  const removed = await change(f, (await item(f)).etag, false, 'outside@example.net');
+  assert.equal(writes(f).length, 1); assert.ok(!f.rows[0].script_data.includes('outside@example.net'));
+  await assert.rejects(f.history.revert(removed.auditId, { confirm: true, session: {}, actor: 'admin', ip: '203.0.113.7' }), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  assert.equal(writes(f).length, 1);
+  const failed = (await f.history.list()).items.find(row => row.revertOf === removed.auditId);
+  assert.equal(failed.result, 'failed'); assert.equal(failed.code, 'EXTERNAL_SPAM_GUARD');
+});
+test('teams: deleting an internal member while unguarded external forwarding remains is refused', async t => {
+  const f = await fixture(t, externalScript.replace('redirect :copy "first@example.com";', 'redirect :copy "first@example.com";\nredirect :copy "second@example.com";'));
+  await assert.rejects(change(f, (await item(f)).etag, false, first), { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD' });
+  assert.equal(writes(f).length, 0);
+});
+test('teams: guarded external forwarding permits internal membership changes and reversal', async t => {
+  const f = await fixture(t, externalScript.replace('require ["copy"];', 'require ["copy"];\nif header :contains "X-Spam-Flag" "YES" { stop; }'));
+  const changed = await change(f, (await item(f)).etag);
+  assert.equal(writes(f).length, 1);
+  await f.history.revert(changed.auditId, { confirm: true, session: {}, actor: 'admin', ip: '203.0.113.7' });
+  assert.equal(writes(f).length, 2);
 });

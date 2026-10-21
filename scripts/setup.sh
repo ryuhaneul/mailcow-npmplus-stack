@@ -231,6 +231,7 @@ setup_mailcow_up() {
     local services service ids changed
     (cd "$MAILCOW_DIR" && docker compose pull --policy missing --ignore-buildable && docker compose build) || return 1
     services=$(cd "$MAILCOW_DIR" && docker compose config --services) || return 1
+    services=$(printf '%s\n' "$services" | log_archive_order_mailcow_services) || return 1
     for service in $services; do
         ids=$(cd "$MAILCOW_DIR" && docker compose ps -a -q "$service") || return 1
         if [ -z "$ids" ]; then

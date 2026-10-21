@@ -46,6 +46,8 @@ export function loadAdminConfig(env = process.env) {
   if (mailcowUiUrl.protocol !== 'https:' || !mailcowUiUrl.hostname || mailcowUiUrl.username || mailcowUiUrl.password ||
     mailcowUiUrl.search || mailcowUiUrl.hash || mailcowUiUrl.pathname !== '/') invalid('MAILCOW_UI_URL');
   const mailcowUiServername = host('MAILCOW_UI_SERVERNAME');
+  const mailcowApiKey = env.MAILCOW_API_KEY ?? '';
+  if (typeof mailcowApiKey !== 'string' || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(mailcowApiKey) || mailcowApiKey !== mailcowApiKey.trim()) invalid('MAILCOW_API_KEY');
   const imapHost = host('IMAP_HOST'), smtpHost = host('SMTP_HOST'), mailTlsServername = host('MAIL_TLS_SERVERNAME');
   const mailTlsMode = choice('MAIL_TLS_MODE', ['verify', 'pin']);
   const mailTlsPinFile = value('MAIL_TLS_PIN_FILE', true);
@@ -93,7 +95,7 @@ export function loadAdminConfig(env = process.env) {
   if (typeof rspamdMapDir !== 'string' || !isAbsolute(rspamdMapDir) || rspamdMapDir.includes('\0')) invalid('ADMIN_RSPAMD_MAP_DIR');
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    adminHostname, sessionIdleMin, sessionMaxHours, mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, apiKeyDir: '/data/api-keys', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly,

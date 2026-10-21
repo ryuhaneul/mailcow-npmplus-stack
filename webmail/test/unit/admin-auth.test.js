@@ -164,7 +164,7 @@ test('admin auth: totp cookie returns CSRF and fixed five-minute expiry, blocks 
   failure(await write(f, '/api/admin/auth/totp', noCsrf, { code: '123456' }), 403, 'CSRF');
   assert.equal(count(f, 'totp'), 0); assert.equal(count(f, 'call'), 0);
   const done = await write(f, '/api/admin/auth/totp', headers, { code: '123456' });
-  assert.equal(done.statusCode, 200, done.body); assert.deepEqual(done.json().features, { cleanup: false, relay: false, trusted: false }); assert.equal(done.json().step, 'done'); assert.equal(count(f, 'totp'), 1);
+  assert.equal(done.statusCode, 200, done.body); assert.deepEqual(done.json().features, { apiKeys: false, cleanup: false, relay: false, trusted: false }); assert.equal(done.json().step, 'done'); assert.equal(count(f, 'totp'), 1);
   assert.equal((await f.app.inject({ url: '/api/admin/test-local', headers })).statusCode, 200);
 });
 
@@ -306,10 +306,10 @@ test('admin auth: oversized JSON is rejected without sending credentials upstrea
 });
 
 for (const [doveadmUrl, doveadmKey, relayFiles, expected] of [
-  ['', '', [], { cleanup: false, relay: false, trusted: false }],
-  ['http://dovecot:12346', 'synthetic-feature-key', [], { cleanup: true, relay: false, trusted: false }],
-  ['http://dovecot:12346', '', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { cleanup: false, relay: true, trusted: false }],
-  ['http://dovecot:12346', 'synthetic-feature-key', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { cleanup: true, relay: true, trusted: false }],
+  ['', '', [], { apiKeys: false, cleanup: false, relay: false, trusted: false }],
+  ['http://dovecot:12346', 'synthetic-feature-key', [], { apiKeys: false, cleanup: true, relay: false, trusted: false }],
+  ['http://dovecot:12346', '', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { apiKeys: false, cleanup: false, relay: true, trusted: false }],
+  ['http://dovecot:12346', 'synthetic-feature-key', ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc'], { apiKeys: false, cleanup: true, relay: true, trusted: false }],
 ]) test(`admin feature flags cleanup=${expected.cleanup} relay=${expected.relay} expose booleans only`, async t => {
   const f = await fixture(t, { overrides: { doveadmUrl, doveadmKey, relayFiles } });
   const response = await login(f); assert.deepEqual(response.json().features, expected);

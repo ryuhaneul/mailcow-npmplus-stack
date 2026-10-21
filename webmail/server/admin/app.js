@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { loadAdminConfig } from './config.js';
 import { installAdminAuth } from './routes/auth.js';
+import { createApiKeyStore } from './api-keys.js';
+import { createApiKeysService } from './services/api-keys.js';
+import apiKeysRoutes from './routes/api-keys.js';
 import { createAudit } from './audit.js';
 import { createResourceLock } from './lock.js';
 import { createHistoryService } from './services/history.js';
@@ -71,7 +74,8 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
       paths: [...new Set([...base.redact.paths, ...(logger?.redact?.paths ?? []),
         'req.headers.cookie', 'req.headers["x-mailadmin-csrf"]', 'req.body',
-        '*.password', '*.code', '*.dataBase64', '*.script'])] } };
+        'req.headers["x-mailadmin-api-key"]', 'mailcowApiKey', 'MAILCOW_API_KEY', '*.mailcowApiKey', '*.MAILCOW_API_KEY',
+        '*.token', '*.digest', '*.password', '*.code', '*.dataBase64', '*.script'])] } };
   }
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
@@ -85,13 +89,17 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
     if (pathname === '/api' || pathname.startsWith('/api/')) reply.header('cache-control', 'no-store');
     return payload;
   });
-  await installAdminAuth(app, { ...auth, config });
+  const apiKeys = createApiKeyStore({ directory: config.apiKeyDir, now: auth.now });
+  app.decorate('apiKeys', apiKeys);
+  await installAdminAuth(app, { ...auth, config, apiKeys });
   const audit = createAudit({ ...auditOptions, dir: config.auditDir, logger: app.log });
   const adminLock = createResourceLock();
   const history = createHistoryService({ audit, lock: adminLock });
   app.decorate('audit', audit);
   app.decorate('adminLock', adminLock);
   app.decorate('adminHistory', history);
+  const apiKeysService = createApiKeysService({ store: apiKeys, config, audit, lock: adminLock });
+  await app.register(apiKeysRoutes, { service: apiKeysService });
   await app.register(historyRoutes, { service: history });
   dockerapi ??= createDockerApi({ config });
   app.decorate('dockerapi', dockerapi);

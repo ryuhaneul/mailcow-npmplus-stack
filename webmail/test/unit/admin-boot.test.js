@@ -265,3 +265,15 @@ test('admin FTS lifecycle: ready starts runner and close returns while a remote 
   assert.equal(released, true);
   assert.equal((await app.ftsState.read()).state.deadline, '2026-10-20T21:00:00.000Z');
 });
+
+test('admin config: optional single mailcow API credential and fixed private store directory', () => {
+  const disabled = loadAdminConfig(env);
+  assert.equal(disabled.mailcowApiKey, '');
+  assert.equal(disabled.apiKeyDir, '/data/api-keys');
+  const enabled = loadAdminConfig({ ...env, MAILCOW_API_KEY: 'synthetic-upstream-key' });
+  assert.equal(enabled.mailcowApiKey, 'synthetic-upstream-key');
+  assert.equal(loadAdminConfig({ ...env, MAILCOW_API_KEY: '' }).mailcowApiKey, '');
+  for (const value of [false, ' ', ' synthetic', 'synthetic ', 'synthetic\nvalue', 'synthetic\rvalue', 'synthetic\0value', 'synthetic\tvalue']) {
+    assert.throws(() => loadAdminConfig({ ...env, MAILCOW_API_KEY: value }), { message: '환경변수 MAILCOW_API_KEY 형식이 올바르지 않습니다.' });
+  }
+});

@@ -4,17 +4,21 @@ import { createMailcowClient } from '../mailcow-client.js';
 import { createAdminSessionStore, cookieName, cookieOptions } from '../session.js';
 import { createAdminRateLimiter } from '../ratelimit.js';
 import { installAdminGuard } from '../guard.js';
+import { createApiKeyRateLimiter } from '../api-key-ratelimit.js';
 
-export async function installAdminAuth(app, { config, client = createMailcowClient({ config, logger: app.log }), now = Date.now } = {}) {
+export async function installAdminAuth(app, { config, client = createMailcowClient({ config, logger: app.log }), now = Date.now, apiKeys } = {}) {
   await app.register(cookie);
   const sessions = createAdminSessionStore({ config, client, logger: app.log, now });
   const rateLimiter = createAdminRateLimiter({ now });
   app.decorate('mailcow', client);
   app.decorate('adminSessions', sessions);
   app.decorate('adminRateLimiter', rateLimiter);
-  installAdminGuard(app, { config, sessions, client });
+  const apiKeyRateLimiter = createApiKeyRateLimiter({ now });
+  app.decorate('adminApiKeyRateLimiter', apiKeyRateLimiter);
+  installAdminGuard(app, { config, sessions, client, apiKeys, apiKeyRateLimiter });
   const timer = setInterval(() => {
     rateLimiter.sweep();
+    apiKeyRateLimiter.sweep();
     sessions.sweep().catch(() => app.log.error({ code: 'SESSION_SWEEP_FAILED' }, '관리 만료 세션 정리에 실패했습니다.'));
   }, 60_000);
   timer.unref();
@@ -23,7 +27,7 @@ export async function installAdminAuth(app, { config, client = createMailcowClie
 }
 
 async function authRoutes(app, { config, client, sessions, rateLimiter }) {
-  const publicSession = session => ({ step: session.state === 'totp' ? 'totp' : 'done', user: { username: session.username }, csrf: session.csrf, features: { trusted: Boolean(config.trustedSenderFile), cleanup: Boolean(config.doveadmUrl && config.doveadmKey), relay: Boolean(config.relayFiles?.length) }, expiresAt: sessions.expiresAt(session) });
+  const publicSession = session => ({ step: session.state === 'totp' ? 'totp' : 'done', user: { username: session.username }, csrf: session.csrf, features: { apiKeys: Boolean(config.mailcowApiKey), trusted: Boolean(config.trustedSenderFile), cleanup: Boolean(config.doveadmUrl && config.doveadmKey), relay: Boolean(config.relayFiles?.length) }, expiresAt: sessions.expiresAt(session) });
   const clear = reply => reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
   app.post('/api/admin/auth/login', async (request, reply) => {
     const body = request.body;

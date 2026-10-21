@@ -269,6 +269,14 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
             }
             if (decodedBytes !== member.uncompressedBytes || !stopped && (memberBytes !== member.uncompressedBytes || lineNumber !== member.lineCount || lineBytes !== 0)) throw corrupt();
           } catch (error) {
+            if (!controller.signal.aborted) {
+              // A replacement can land between readIndex and opening the gzip.
+              // Old offsets against the new inode must expire the snapshot,
+              // while corruption of the same file retains its original error.
+              const current = await wait(store.snapshot());
+              const actual = current.catalog.hours.find(item => item.source === entry.source && item.hour === entry.hour);
+              if (!actual || actual.fileId !== entry.fileId) throw expired();
+            }
             if (timedOut && !signal?.aborted && error.name === 'AbortError') {
               if (lines.length > initialLines) rollbackMember();
               reason = 'timeout'; break outer;

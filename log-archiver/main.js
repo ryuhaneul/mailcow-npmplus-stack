@@ -80,6 +80,7 @@ async function main() {
           await collector.collect();
           if (!shutdown.signal.aborted && performance.now() >= expireAt) {
             await store.expire({ now: new Date() });
+            store.compact({ now: new Date() }).catch(() => report('archive-compaction-failed'));
             expireAt = performance.now() + config.expireMs;
           }
           await pause(Math.max(0, config.collectMs - (performance.now() - started)));

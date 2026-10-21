@@ -465,3 +465,262 @@ test('rejects nonphysical lines, aliases, offset regression and unsafe source na
   }
   assert.equal((await store.snapshot()).checkpoint.generations.g.offset, 100);
 });
+
+const compactNow = '2026-10-21T10:00:00Z';
+const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function archivedBytes(store, entry) {
+  return gunzipSync(await fs.readFile(store.file(entry.file)));
+}
+
+test('closed-hour compaction preserves raw hash/order/multiplicity, aggregates metadata and improves small-member compression', async (t) => {
+  const { store, root } = await fixture(t, { memberBytes: 4096 });
+  const records = Array.from({ length: 90 }, (_, index) => row(`synthetic queue-id=${index % 3} 동일 줄 a@example.test status=sent\r`));
+  records.splice(5, 0, { ...row('binary'), raw: Buffer.from([255, 0, 13, 10]) });
+  records.splice(10, 0, row(''));
+  records.push(row('last original timestamp', '2026-10-21T08:59:59.999999999Z'));
+  for (const [index, record] of records.entries()) {
+    await store.commit({ records: [record], checkpoints: { g: { offset: index + 1, fingerprint: 'synthetic' } } });
+  }
+  // Include unknown-time lines in the same hour without parsing raw contents.
+  const unknown = { ...row('unknown original', null), observedAt: '2026-10-21T08:30:00Z' };
+  await store.commit({ records: [unknown] });
+  const before = await store.snapshot();
+  const old = before.catalog.hours[0];
+  const original = Buffer.concat([...records, unknown].map(record => record.raw));
+  assert.equal(digest(await archivedBytes(store, old)), digest(original));
+  const { compacted } = await store.compact({ now: compactNow });
+  assert.equal(compacted.length, 1);
+  const entry = compacted[0];
+  assert.notEqual(entry.fileId, old.fileId);
+  assert.equal(entry.file, old.file);
+  assert.equal(entry.compacted, true);
+  assert.ok(entry.compressedBytes < old.compressedBytes * 0.3, `${entry.compressedBytes}/${old.compressedBytes}`);
+  assert.equal(digest(await archivedBytes(store, entry)), digest(original));
+  assert.deepEqual(await archivedBytes(store, entry), original);
+  for (const field of ['lineCount', 'minTime', 'maxTime', 'unknownTimeCount']) assert.equal(entry[field], old[field]);
+  const index = await store.readIndex(entry);
+  assert.ok(index.members.length > 1);
+  assert.ok(index.members.every(member => member.uncompressedBytes <= 4096));
+  assert.equal(index.members.reduce((sum, member) => sum + member.lineCount, 0), old.lineCount);
+  assert.equal(index.members.reduce((sum, member) => sum + member.unknownTimeCount, 0), 1);
+  const after = await store.snapshot();
+  assert.deepEqual(after.checkpoint.generations, before.checkpoint.generations);
+  assert.notEqual(after.transactionId, before.transactionId);
+  await assert.rejects(store.readIndex(old), { code: 'ARCHIVE_SNAPSHOT_EXPIRED' });
+  assert.deepEqual(await store.compact({ now: compactNow }), { compacted: [] });
+  assert.equal((await fs.stat(store.file(entry.file))).mode & 0o777, 0o600);
+  assert.deepEqual(await fs.readdir(path.join(root, 'state/staging')), []);
+  await store.close();
+  const reopened = await openStore({ root });
+  try {
+    assert.deepEqual(await archivedBytes(reopened, entry), original);
+    assert.deepEqual(await reopened.compact({ now: compactNow }), { compacted: [] });
+  } finally { await reopened.close(); }
+});
+
+test('compaction drains closed hours serially, skips current/future hours and keeps oversized members intact', async (t) => {
+  const { store } = await fixture(t, { memberBytes: 16 });
+  const records = [row('x'.repeat(200)), row('small'), row('other source', stamp, 'dovecot'), row('current', compactNow), row('future', '2026-10-21T11:00:00Z')];
+  await store.commit({ records });
+  const before = await store.snapshot();
+  const { compacted } = await store.compact({ now: compactNow });
+  assert.equal(compacted.length, 2);
+  for (const entry of compacted) {
+    assert.equal(entry.hour, '2026-10-21T08:00:00.000Z');
+    const index = await store.readIndex(entry);
+    for (const member of index.members) assert.ok(member.uncompressedBytes <= 16 || member.lineCount === 1);
+  }
+  assert.deepEqual(await store.compact({ now: compactNow }), { compacted: [] });
+  const after = await store.snapshot();
+  for (const old of before.catalog.hours.filter(entry => entry.hour >= compactNow)) {
+    assert.deepEqual(after.catalog.hours.find(entry => entry.fileId === old.fileId), old);
+  }
+  assert.deepEqual(await contents(store), records.map(record => record.raw.toString().slice(0, -1)).sort());
+});
+
+for (const mutation of ['append', 'expire', 'recreate']) {
+  test(`compaction outside publication queue discards stale output after concurrent ${mutation}`, async (t) => {
+    const { store, root } = await fixture(t);
+    await store.commit({ records: [row('baseline')], checkpoints: { g: { offset: 9 } } });
+    const before = (await store.snapshot()).catalog.hours[0];
+    let release, arrived;
+    const blocked = new Promise(resolve => { arrived = resolve; });
+    const barrier = new Promise(resolve => { release = resolve; });
+    store.fault = async point => {
+      if (point === 'compactAfterStageSync') { arrived(); await barrier; }
+    };
+    const compacting = store.compact({ now: compactNow });
+    assert.equal(store.compact({ now: compactNow }), compacting, 'only one compression operation');
+    await blocked;
+    if (mutation === 'append') await store.commit({ records: [row('late')], checkpoints: { g: { offset: 14 } } });
+    else {
+      await store.expire({ now: '2027-10-21T00:00:00Z' });
+      if (mutation === 'recreate') await store.commit({ records: [row('replacement')] });
+    }
+    release();
+    assert.deepEqual(await compacting, { compacted: [] });
+    assert.deepEqual(await contents(store), mutation === 'append' ? ['baseline', 'late'] : mutation === 'recreate' ? ['replacement'] : []);
+    assert.deepEqual(await fs.readdir(path.join(root, 'state/staging')), []);
+    if (mutation === 'append') {
+      const entry = (await store.snapshot()).catalog.hours[0];
+      assert.equal(entry.fileId, before.fileId);
+      assert.equal(entry.compacted, undefined);
+      store.fault = async () => {};
+      assert.equal((await store.compact({ now: compactNow })).compacted.length, 1);
+    }
+  });
+}
+
+const crashCompactor = `
+  const {openStore}=await import(process.env.STORE_MODULE);
+  const store=await openStore({root:process.env.ARCHIVE_ROOT, fault:async point=>{
+    if(point===process.env.CRASH_POINT)process.kill(process.pid,'SIGKILL');
+  }});
+  await store.compact({now:'${compactNow}'});
+  await store.close();
+`;
+for (const point of ['compactPartial', 'compactAfterStageSync', 'compactBeforePending', 'compactAfterPending', 'compactAfterReplace', 'compactAfterIndex', 'compactAfterCatalog', 'compactBeforeCheckpoint', 'compactAfterCheckpoint', 'beforePendingRemove', 'afterPendingRemove']) {
+  test(`SIGKILL at ${point}: compaction recovers exact original bytes and input positions`, async (t) => {
+    const { store, root } = await fixture(t);
+    const records = [row('same original\r'), row('same original\r'), row('last original')];
+    for (const record of records) await store.commit({ records: [record], checkpoints: { g: { offset: 99, fingerprint: 'unchanged' } } });
+    const original = Buffer.concat(records.map(record => record.raw));
+    const before = await store.snapshot();
+    await store.close();
+    const result = await child(crashCompactor, { ARCHIVE_ROOT: root, CRASH_POINT: point });
+    assert.equal(result.signal, 'SIGKILL', result.output);
+    const committed = ['compactAfterCheckpoint', 'beforePendingRemove', 'afterPendingRemove'].includes(point);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const recovered = await openStore({ root });
+      try {
+        const snap = await recovered.snapshot();
+        const entry = snap.catalog.hours[0];
+        assert.equal(digest(await archivedBytes(recovered, entry)), digest(original));
+        assert.equal(entry.lineCount, records.length);
+        assert.deepEqual(snap.checkpoint.generations, before.checkpoint.generations);
+        if (attempt === 0) assert.equal(entry.compacted === true, committed);
+        await recovered.compact({ now: compactNow });
+        assert.deepEqual(await archivedBytes(recovered, (await recovered.snapshot()).catalog.hours[0]), original);
+        assert.deepEqual(await fs.readdir(path.join(root, 'state/staging')), []);
+      } finally { await recovered.close(); }
+    }
+  });
+}
+
+// Kill around the real filesystem operations too, including JSON temporary
+// writes/renames and crashes while a previous compaction is being rolled back.
+const crashCompactionWrites = `
+  import { syncBuiltinESMExports } from 'node:module';
+  import fs from 'node:fs/promises';
+  const {openStore}=await import(process.env.STORE_MODULE);
+  let store;
+  if (!process.env.RECOVER_ONLY) store=await openStore({root:process.env.ARCHIVE_ROOT});
+  const steps=[];
+  const step=label=>{
+    steps.push(label);
+    if(steps.length===Number(process.env.CRASH_STEP))process.kill(process.pid,'SIGKILL');
+  };
+  for(const method of ['link','rename','unlink','rm']){
+    const original=fs[method];
+    fs[method]=async(...args)=>{
+      step('before:'+method);
+      const result=await original(...args);
+      step('after:'+method);
+      return result;
+    };
+  }
+  const originalOpen=fs.open;
+  fs.open=async(...args)=>{
+    if(args[1]==='wx')step('before:open');
+    const handle=await originalOpen(...args);
+    if(args[1]==='wx')step('after:open');
+    for(const method of ['write','writeFile','sync']){
+      const original=handle[method].bind(handle);
+      handle[method]=async(...values)=>{
+        step('before:'+method);
+        const result=await original(...values);
+        step('after:'+method);
+        return result;
+      };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  if(process.env.RECOVER_ONLY)store=await openStore({root:process.env.ARCHIVE_ROOT});
+  else await store.compact({now:'${compactNow}'});
+  await store.close();
+  console.log(JSON.stringify(steps));
+`;
+
+test('SIGKILL before/after every compaction filesystem mutation and rollback mutation loses/duplicates zero bytes', async (t) => {
+  const { store, root, dir } = await fixture(t);
+  const records = [row('identical\r'), row('identical\r'), row('original last')];
+  for (const record of records) await store.commit({ records: [record], checkpoints: { g: { offset: 42, fingerprint: 'original' } } });
+  const before = await store.snapshot();
+  const original = Buffer.concat(records.map(record => record.raw));
+  await store.close();
+  const seed = path.join(dir, 'seed');
+  await fs.cp(root, seed, { recursive: true });
+  const pendingSeed = path.join(dir, 'pending-seed');
+  await fs.cp(seed, pendingSeed, { recursive: true });
+  const interrupted = await child(crashCompactor, { ARCHIVE_ROOT: pendingSeed, CRASH_POINT: 'compactAfterReplace' });
+  assert.equal(interrupted.signal, 'SIGKILL', interrupted.output);
+  for (const recoverOnly of [false, true]) {
+    const fixtureRoot = recoverOnly ? pendingSeed : seed;
+    const baselineRoot = path.join(dir, recoverOnly ? 'rollback-baseline' : 'compact-baseline');
+    await fs.cp(fixtureRoot, baselineRoot, { recursive: true });
+    const env = { ARCHIVE_ROOT: baselineRoot, ...(recoverOnly ? { RECOVER_ONLY: '1' } : {}) };
+    const baseline = await child(crashCompactionWrites, env);
+    assert.equal(baseline.code, 0, baseline.output);
+    const steps = JSON.parse(baseline.output);
+    assert.ok(steps.includes('after:rename'));
+    assert.ok(steps.includes('after:link'));
+    for (let index = 0; index < steps.length; index++) {
+      await t.test(`${recoverOnly ? 'rollback' : 'compact'} ${index + 1} ${steps[index]}`, async () => {
+        const target = path.join(dir, `${recoverOnly ? 'rollback' : 'compact'}-${index}`);
+        await fs.cp(fixtureRoot, target, { recursive: true });
+        const result = await child(crashCompactionWrites, { ...env, ARCHIVE_ROOT: target, CRASH_STEP: String(index + 1) });
+        assert.equal(result.signal, 'SIGKILL', result.output);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const recovered = await openStore({ root: target });
+          try {
+            const snapshot = await recovered.snapshot();
+            assert.deepEqual(snapshot.checkpoint.generations, before.checkpoint.generations);
+            assert.deepEqual(await archivedBytes(recovered, snapshot.catalog.hours[0]), original);
+            assert.equal(snapshot.catalog.hours[0].lineCount, records.length);
+          } finally { await recovered.close(); }
+        }
+      });
+    }
+  }
+});
+
+test('compaction rejects damaged original members without publishing a replacement', async (t) => {
+  const { store } = await fixture(t);
+  const { catalog } = await store.commit({ records: [row('original')] });
+  const entry = catalog.hours[0];
+  const file = store.file(entry.file);
+  const bytes = await fs.readFile(file);
+  bytes[bytes.length - 8] ^= 255;
+  await fs.writeFile(file, bytes);
+  await assert.rejects(store.compact({ now: compactNow }));
+  assert.deepEqual((await store.snapshot()).catalog, catalog);
+  assert.deepEqual(await fs.readFile(file), bytes);
+  assert.deepEqual(await fs.readdir(store.file('state/staging')), []);
+});
+
+test('compaction committed member corruption fails recovery instead of silently accepting data', async (t) => {
+  const { store, root } = await fixture(t);
+  await store.commit({ records: [row('original')], checkpoints: { g: { offset: 42 } } });
+  store.fault = async point => { if (point === 'compactAfterCheckpoint') throw new Error('synthetic interruption'); };
+  await assert.rejects(store.compact({ now: compactNow }));
+  await store.close();
+  const entry = (await readCatalog(root)).hours[0];
+  const file = path.join(root, entry.file);
+  const bytes = await fs.readFile(file);
+  bytes[bytes.length - 8] ^= 255;
+  await fs.writeFile(file, bytes);
+  await assert.rejects(openStore({ root }), { code: 'ARCHIVE_RECOVERY_FAILED' });
+  assert.ok(await fs.stat(path.join(root, 'state/pending.json')));
+});

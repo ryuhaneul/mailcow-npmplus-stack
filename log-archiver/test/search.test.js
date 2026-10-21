@@ -446,3 +446,40 @@ test('scan budget discards only the unverified member and resumes without duplic
   const timed = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') + (tick++ >= 4 ? 10000 : 0), timeoutMs: 10000 });
   await assert.rejects(timed.search(params({ limit: '1' })), { code: 'LOG_SCAN_CANNOT_ADVANCE' });
 });
+
+test('compaction between index lookup and gzip open returns snapshot-expired 410 through the API', async t => {
+  const store = await fixture(t, { memberBytes: 4096 });
+  const records = Array.from({ length: 20 }, (_, index) => row(`synthetic original-${index}`));
+  for (const record of records) await store.commit({ records: [record] });
+  const originalReadIndex = store.readIndex.bind(store);
+  let replaced = false;
+  store.readIndex = async entry => {
+    const index = await originalReadIndex(entry);
+    if (!replaced) {
+      replaced = true;
+      const result = await store.compact({ now: '2026-10-21T10:00:00Z' });
+      assert.equal(result.compacted.length, 1);
+    }
+    return index;
+  };
+  const { get } = await serverFixture(t, store);
+  const route = `/v1/search?${new URLSearchParams(params())}`;
+  const expired = await get(route);
+  assert.equal(expired.status, 410);
+  assert.equal((await expired.json()).error.code, 'ARCHIVE_SNAPSHOT_EXPIRED');
+  const fresh = await get(route);
+  assert.equal(fresh.status, 200);
+  const body = await fresh.json();
+  assert.deepEqual(body.lines.map(line => line.message), records.map((_, index) => `synthetic original-${index}`));
+});
+
+test('compaction invalidates a previous pagination cursor and a fresh search keeps every original line', async t => {
+  const store = await fixture(t, { memberBytes: 4096 });
+  for (const message of ['same', 'same', 'last']) await store.commit({ records: [row(message)] });
+  const engine = createSearch({ store });
+  const first = await engine.search(params({ limit: '1' }));
+  assert.ok(first.nextCursor);
+  await store.compact({ now: '2026-10-21T10:00:00Z' });
+  await assert.rejects(engine.search(params({ limit: '1', cursor: first.nextCursor })), { status: 410, code: 'ARCHIVE_SNAPSHOT_EXPIRED' });
+  assert.deepEqual((await pages(engine, params({ limit: '1' }))).rows.map(line => line.message), ['same', 'same', 'last']);
+});

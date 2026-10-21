@@ -41,7 +41,6 @@ import securityRoutes from './routes/security.js';
 import { createStatusService } from './services/status.js';
 import statusRoutes from './routes/status.js';
 import ftsRoutes from './routes/fts.js';
-import { createFtsState } from './fts-state.js';
 import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
 import { createLogoService } from './services/logo.js';
@@ -152,7 +151,6 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const status = createStatusService({ mailcow: app.mailcow, config, tlsExpiry });
   app.decorate('status', status);
   await app.register(statusRoutes, { service: status });
-  const ftsState = createFtsState({ dir: config.ftsNightly?.stateDir ?? '/data/fts-nightly' });
   await app.register(ftsRoutes, { state: ftsState, config });
   const logs = createLogsService({ mailcow: app.mailcow, config });
   app.decorate('logs', logs);

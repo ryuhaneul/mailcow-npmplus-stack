@@ -42,7 +42,7 @@ sys.exit(subprocess.call([{real_cat!r}] + sys.argv[1:]))
     key = 'synthetic-doveadm-key-example.com'
     envfile = root / '.env'
     envfile.write_text(f'MAILCOW_DIR={conf.parents[3]}\nWEBMAIL_ADMIN_DOVEADM_KEY={key}\n')
-    env = dict(os.environ, FIXTURE_ROOT=str(root), PATH=str(root / 'bin') + ':' + os.environ['PATH'])
+    env = dict(os.environ, MAIL_FTS_NIGHTLY_ENABLE='false', FIXTURE_ROOT=str(root), PATH=str(root / 'bin') + ':' + os.environ['PATH'])
     outputs = []
 
     def metadata():
@@ -186,6 +186,47 @@ sys.exit(subprocess.call([{real_stat!r}] + args))
         run('--revert')
         assert conf.read_bytes() == original
 
+    # Upgrade every supported managed block, then shrink only the five nightly commands.
+    nightly_commands = b'index,mailbox status,user,fts-flatcurve stats,mailbox metadata get'
+    nightly_applied = applied.replace(allowlist + b'\n', allowlist + b',' + nightly_commands + b'\n')
+    global_blocks = [original + b'\n' + begin + separator + b'doveadm_api_key = ' + key.encode()
+                     + b'\ndoveadm_allowed_commands = ' + commands + b'\n' + listener + end
+                     for commands in (allowlist.replace(b',acl get', b''), allowlist)]
+    for previous in [applied, *global_blocks]:
+        conf.write_bytes(previous)
+        protected = metadata()
+        calls_before = (root / 'calls').read_bytes()
+        run('--check', ok=False, MAIL_FTS_NIGHTLY_ENABLE='true')
+        assert conf.read_bytes() == previous and metadata() == protected
+        assert (root / 'calls').read_bytes() == calls_before
+        run(MAIL_FTS_NIGHTLY_ENABLE='true')
+        assert conf.read_bytes() == nightly_applied
+        assert nightly_applied.count(allowlist + b',' + nightly_commands + b'\n') == 4
+        # /1 remote scopes remain byte-exact; no global allowlist restricts replicator.
+        assert not any(line.startswith(b'doveadm_allowed_commands') for line in nightly_applied.splitlines())
+        protected = metadata()
+        calls_before = (root / 'calls').read_bytes()
+        run('--check', MAIL_FTS_NIGHTLY_ENABLE='true')
+        run(MAIL_FTS_NIGHTLY_ENABLE='true')
+        assert metadata() == protected and (root / 'calls').read_bytes() == calls_before
+        run('--check', ok=False)
+        assert conf.read_bytes() == nightly_applied and metadata() == protected
+        # Failure during shrink restores the entire expanded key/remote block.
+        run(ok=False, FAIL_RELOAD='1', RESTORE_WITH_KEY='1')
+        assert conf.read_bytes() == nightly_applied
+        run()
+        assert conf.read_bytes() == applied, 'disable must restore only the six-command IP block'
+        run('--check')
+        run('--revert')
+        assert conf.read_bytes() == original
+    conf.write_bytes(nightly_applied)
+    run('--revert', MAIL_FTS_NIGHTLY_ENABLE='true')
+    assert conf.read_bytes() == original
+    calls_before = (root / 'calls').read_bytes()
+    run(ok=False, MAIL_FTS_NIGHTLY_ENABLE='yes')
+    run('--check', ok=False, MAIL_FTS_NIGHTLY_ENABLE='yes')
+    assert conf.read_bytes() == original and (root / 'calls').read_bytes() == calls_before
+
     # Reload failure and EXIT trap restore both legacy key blocks securely.
     rollback_modes = []
     for commands in (allowlist.replace(b',acl get', b''), allowlist):
@@ -273,4 +314,47 @@ sys.exit(subprocess.call([{real_stat!r}] + args))
     run(ok=False)
     assert conf.read_bytes() == b'# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)\n'
     assert all(key.encode() not in output for output in outputs)
-print('PASS: byte-exact IP-only block/key/listener/allowlist; 644 apply to 600; equal-block permission repair; check permissions; no-op metadata; revert keeps 600; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload/EXIT rollback preserves legacy key block bytes and 600; keyless rollback preserves original permissions; malformed marker rejection; output secret occurrences=0')
+    # Stack configuration defaults, validation, reread, admin env and script forwarding.
+    repo = fixture.parents[2]
+    (conf.parents[3] / 'mailcow.conf').write_text('DBNAME=mailcow\nIPV4_NETWORK=192.0.2\nMAILCOW_HOSTNAME=mail.example.com\n')
+    envfile.write_text(f'DOMAIN=example.com\nMAILCOW_DIR={conf.parents[3]}\n')
+    conf.write_bytes(original)
+    code = '''source "$1/scripts/lib/webmail-env.sh"
+MAIL_FTS_NIGHTLY_ENABLE=true
+MAIL_FTS_NIGHTLY_START=22:00
+MAIL_FTS_NIGHTLY_END=23:00
+webmail_load_config "$2/.env" "$2/mailcow"
+[ "$MAIL_FTS_NIGHTLY_ENABLE/$MAIL_FTS_NIGHTLY_START/$MAIL_FTS_NIGHTLY_END" = false/03:00/06:00 ]
+WEBMAIL_ADMIN_ENABLE=true
+webmail_generate_admin_env "$2/generated"
+grep -q '^FTS_NIGHTLY_ENABLE="false"$' "$2/generated/webmail-admin.env"
+grep -q '^FTS_NIGHTLY_START="03:00"$' "$2/generated/webmail-admin.env"
+grep -q '^FTS_NIGHTLY_END="06:00"$' "$2/generated/webmail-admin.env"
+MAIL_FTS_NIGHTLY_ENABLE=true
+MAIL_FTS_NIGHTLY_START=01:23
+MAIL_FTS_NIGHTLY_END=04:56
+webmail_generate_admin_env "$2/generated"
+grep -q '^FTS_NIGHTLY_ENABLE="true"$' "$2/generated/webmail-admin.env"
+grep -q '^FTS_NIGHTLY_START="01:23"$' "$2/generated/webmail-admin.env"
+grep -q '^FTS_NIGHTLY_END="04:56"$' "$2/generated/webmail-admin.env"
+[ "$(stat -c %a "$2/generated/webmail-admin.env")" = 600 ]
+WEBMAIL_ENABLE=true
+WEBMAIL_ADMIN_DOVEADM_ENABLE=true
+webmail_options
+for field in MAIL_FTS_NIGHTLY_START MAIL_FTS_NIGHTLY_END; do
+    for invalid in 3:00 24:00 12:60 03:00:00 garbage; do
+        if ( printf -v "$field" %s "$invalid"; webmail_options ); then exit 1; fi
+    done
+done
+if ( MAIL_FTS_NIGHTLY_ENABLE=yes; webmail_options ); then exit 1; fi
+WEBMAIL_ADMIN_DOVEADM_KEY=synthetic-doveadm-key-example.com
+webmail_reconcile_admin_api "$2/scripts"
+MAIL_FTS_NIGHTLY_ENABLE=false
+webmail_reconcile_admin_api "$2/scripts"
+'''
+    result = subprocess.run(['bash', '-euc', code, 'fixture', str(repo), str(root)], env=env, capture_output=True)
+    outputs.append(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stderr.decode()
+    assert conf.read_bytes() == applied, 'reconcile must pass the flag to the child script and shrink correctly'
+    assert all(key.encode() not in output for output in outputs)
+print('PASS: nightly 5-command upgrade/check/shrink/revert and rollback; env defaults/validation/reread/admin generation/forwarding; byte-exact IP-only block/key/listener/allowlist; 644 apply to 600; equal-block permission repair; check permissions; no-op metadata; revert keeps 600; global 5/6-command upgrade/check/revert; unknown-block rejection; byte-exact revert; outside preservation; missing/unsafe key rejection; reload/EXIT rollback preserves legacy key block bytes and 600; keyless rollback preserves original permissions; malformed marker rejection; output secret occurrences=0')

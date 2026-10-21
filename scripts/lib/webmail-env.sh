@@ -20,6 +20,9 @@ webmail_options() {
     WEBMAIL_ADMIN_DOVEADM_ENABLE="${WEBMAIL_ADMIN_DOVEADM_ENABLE:-false}"
     WEBMAIL_ADMIN_RELAY_ENABLE="${WEBMAIL_ADMIN_RELAY_ENABLE:-false}"
     WEBMAIL_ADMIN_DOVEADM_KEY="${WEBMAIL_ADMIN_DOVEADM_KEY:-}"
+    MAIL_FTS_NIGHTLY_ENABLE="${MAIL_FTS_NIGHTLY_ENABLE:-false}"
+    MAIL_FTS_NIGHTLY_START="${MAIL_FTS_NIGHTLY_START:-03:00}"
+    MAIL_FTS_NIGHTLY_END="${MAIL_FTS_NIGHTLY_END:-06:00}"
     WEBMAIL_ADMIN_ENABLE="${WEBMAIL_ADMIN_ENABLE:-false}"
     WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
     WEBMAIL_ADMIN_HOSTNAME=${WEBMAIL_ADMIN_HOSTNAME,,}
@@ -32,10 +35,13 @@ webmail_options() {
     MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
     WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
     [[ "$WEBMAIL_ATTACH_MAX_MB" =~ ^[0-9]+$ ]] || { webmail_error "invalid attachment size"; return 1; }
-    local flag host joined="" label
+    local flag host joined="" label time
     local -a hosts labels
-    for flag in "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
+    for flag in "$MAIL_FTS_NIGHTLY_ENABLE" "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
+    done
+    for time in "$MAIL_FTS_NIGHTLY_START" "$MAIL_FTS_NIGHTLY_END"; do
+        [[ "$time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { webmail_error "nightly FTS times must be HH:MM (Asia/Seoul)"; return 1; }
     done
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
     IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
@@ -107,6 +113,9 @@ webmail_load_config() {
     WEBMAIL_ADMIN_HOSTNAME=
     WEBMAIL_ADMIN_SESSION_IDLE_MIN=
     WEBMAIL_ADMIN_SESSION_MAX_HOURS=
+    MAIL_FTS_NIGHTLY_ENABLE=false
+    MAIL_FTS_NIGHTLY_START=
+    MAIL_FTS_NIGHTLY_END=
     MAIL_AUTOEXPUNGE_ENABLE=
     MAIL_SHARE_WHOLE_MAILBOX=false
     MAIL_TRUSTED_SENDER_ENABLE=false
@@ -273,6 +282,7 @@ webmail_reconcile_admin_api() {
         done
     fi
     if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
+        MAIL_FTS_NIGHTLY_ENABLE="${MAIL_FTS_NIGHTLY_ENABLE:-false}" \
         WEBMAIL_ADMIN_DOVEADM_KEY="$WEBMAIL_ADMIN_DOVEADM_KEY" MAILCOW_DIR="$MAILCOW_DIR" \
             bash "$scripts/apply-dovecot-admin-api.sh" apply -y || return 1
     elif grep -qFx '# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
@@ -376,6 +386,9 @@ webmail_generate_admin_env() (
     if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then pin_file=/run/mail-tls-pin.pem; fi
     {
         webmail_env_line ADMIN_MODE true &&
+        webmail_env_line FTS_NIGHTLY_ENABLE "${MAIL_FTS_NIGHTLY_ENABLE:-false}" &&
+        webmail_env_line FTS_NIGHTLY_START "${MAIL_FTS_NIGHTLY_START:-03:00}" &&
+        webmail_env_line FTS_NIGHTLY_END "${MAIL_FTS_NIGHTLY_END:-06:00}" &&
         webmail_env_line SHARE_WHOLE_MAILBOX "${MAIL_SHARE_WHOLE_MAILBOX:-false}" &&
         webmail_env_line ADMIN_HOSTNAME "$WEBMAIL_ADMIN_HOSTNAME" &&
         webmail_env_line ADMIN_SESSION_IDLE_MIN "$((10#$WEBMAIL_ADMIN_SESSION_IDLE_MIN))" &&

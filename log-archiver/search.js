@@ -7,6 +7,7 @@ import { DEFAULT_RETENTION } from './store.js';
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
 const sources = Object.keys(DEFAULT_RETENTION);
+const searchSources = ['postfix', 'dovecot', 'rspamd', 'webmail', 'webmail-admin', 'npmplus'];
 const allowedFields = ['method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code'];
 const rfc3339 = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/;
 const timeKey = value => value.replace(/(?:\.(\d+))?Z$/, (_, fraction = '') => `.${fraction.padEnd(9, '0')}Z`);
@@ -46,7 +47,7 @@ export function validateQuery(input) {
   }
   const source = query.source, start = utc(query.start), end = utc(query.end);
   const limit = Number(query.limit ?? '200'), q = query.q ?? '';
-  if (!sources.includes(source) || timeKey(start) >= timeKey(end) || Date.parse(end) - Date.parse(start) > DEFAULT_RETENTION[source] * 86400000 || !/^[1-9]\d*$/.test(query.limit ?? '200') || !Number.isSafeInteger(limit) || limit > 1000 || Array.from(q).length > 200 || query.cursor !== undefined && (!query.cursor || query.cursor.length > 4096)) throw invalid();
+  if (!searchSources.includes(source) || timeKey(start) >= timeKey(end) || Date.parse(end) - Date.parse(start) > DEFAULT_RETENTION[source] * 86400000 || !/^[1-9]\d*$/.test(query.limit ?? '200') || !Number.isSafeInteger(limit) || limit > 1000 || Array.from(q).length > 200 || query.cursor !== undefined && (!query.cursor || query.cursor.length > 4096)) throw invalid();
   return { source, start, end, q, limit, ...(query.cursor === undefined ? {} : { cursor: query.cursor }) };
 }
 
@@ -107,9 +108,8 @@ function coverageOf(snapshot, retention, source) {
     const oldest = hours.reduce((value, entry) => !value || timeKey(entry.minTime) < timeKey(value) ? entry.minTime : value, null);
     const newest = hours.reduce((value, entry) => !value || timeKey(entry.maxTime) > timeKey(value) ? entry.maxTime : value, null);
     const generations = Object.values(snapshot.checkpoint.generations ?? {}).filter(item => item.source === name);
-    const observed = generations.map(item => item.observedAt).filter(value => typeof value === 'string' && Number.isFinite(Date.parse(value))).sort();
     const gaps = generations.flatMap(item => item.gaps ?? []).filter(gap => gap.source === name).map(gap => ({ source: name, from: projectedTime(gap.start), to: projectedTime(gap.end), reason: cleanText(gap.reason) }));
-    return { source: name, retentionDays: retention[name], oldest, newest, gaps, unknownTimeCount: hours.reduce((sum, entry) => sum + entry.unknownTimeCount, 0), backfill: generations.length ? (generations.every(item => item.backfillComplete === true) ? 'complete' : 'unknown') : 'unknown', collectionLagSeconds: observed.length ? Math.max(0, (Date.now() - Date.parse(observed.at(-1))) / 1000) : null };
+    return { source: name, retentionDays: retention[name], oldest, newest, gaps, unknownTimeCount: hours.reduce((sum, entry) => sum + entry.unknownTimeCount, 0) };
   });
 }
 
@@ -147,6 +147,7 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
     if (active >= 2) throw archiveError(429, 'LOG_QUERY_BUSY', '다른 로그 검색이 진행 중이에요. 잠시 후 다시 시도해 주세요.');
     active++;
     const controller = new AbortController(), started = now();
+    const cutoff = timeKey(new Date(started - retention[query.source] * 86400000).toISOString());
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     const abort = () => controller.abort();
@@ -179,7 +180,7 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
       initialPosition = position ? { ...position } : null;
       const covered = snapshot.coverage;
       const incomplete = !covered.oldest || timeKey(query.start) < timeKey(covered.oldest) || timeKey(query.end) > timeKey(covered.newest) || covered.gaps.some(gap => !gap.from || !gap.to || timeKey(gap.from) < timeKey(query.end) && timeKey(gap.to) > timeKey(query.start));
-      const result = () => ({ source: query.source, requestedRange: { start: query.start, end: query.end }, coverage: covered, lines, returned: lines.length, nextCursor: position ? encode(snapshot, position) : null, complete: position === null, incomplete, partialReason: position ? reason : null, scannedBytes, collectionLagSeconds: covered.collectionLagSeconds });
+      const result = () => ({ source: query.source, requestedRange: { start: query.start, end: query.end }, coverage: covered, lines, returned: lines.length, nextCursor: position ? encode(snapshot, position) : null, complete: position === null, incomplete, partialReason: position ? reason : null, scannedBytes });
       if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) throw archiveError(503, 'LOG_RESPONSE_TOO_LARGE', '보관 범위 정보가 너무 커요.');
       const hours = snapshot.state.catalog.hours;
       const startHour = position ? hours.findIndex(entry => entry.source === position.source && entry.hour === position.hour) : hours.length;
@@ -201,14 +202,34 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
           inputStream.pipe(gzip);
           const abortRead = () => { inputStream.destroy(); gzip.destroy(Object.assign(new Error('Aborted'), { name: 'AbortError' })); };
           controller.signal.addEventListener('abort', abortRead, { once: true });
-          let lineNumber = 0, lineBytes = 0, parts = [], memberBytes = 0;
+          let lineNumber = 0, lineBytes = 0, parts = [], memberBytes = 0, decodedBytes = 0, stopped = false;
+          const initialLines = lines.length;
+          const corrupt = () => archiveError(502, 'ARCHIVE_CORRUPT', '보관 로그가 손상되었어요.');
+          const rollbackMember = () => {
+            lines.splice(initialLines);
+            position = { source: entry.source, hour: entry.hour, memberStart: member.start, line: resume.line, byte: resume.byte };
+          };
+          const drainBytes = length => {
+            // Default members are at most 1MiB, below the 256MiB scan budget.
+            // Publish rows only after their member passes CRC/ISIZE and length.
+            if (now() - started >= timeoutMs || controller.signal.aborted) { reason = 'timeout'; return false; }
+            if (scannedBytes + length > maxScanBytes) { scannedBytes = maxScanBytes; reason = 'scan_bytes'; return false; }
+            scannedBytes += length;
+            return true;
+          };
           try {
             for await (const chunk of gzip) {
+              decodedBytes += chunk.length;
+              if (stopped) {
+                if (!drainBytes(chunk.length)) { rollbackMember(); break outer; }
+                continue;
+              }
               let offset = 0;
               while (offset < chunk.length) {
                 if (signal?.aborted) throw archiveError(499, 'LOG_QUERY_CANCELLED', '로그 검색을 취소했어요.');
                 if (controller.signal.aborted || now() - started >= timeoutMs || scannedBytes >= maxScanBytes) {
                   reason = scannedBytes >= maxScanBytes ? 'scan_bytes' : 'timeout';
+                  if (lines.length > initialLines) rollbackMember();
                   break outer;
                 }
                 const newline = chunk.indexOf(10, offset);
@@ -228,27 +249,37 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
                     const before = { source: entry.source, hour: entry.hour, memberStart: member.start, line: lineNumber, byte: 0 };
                     const id = `${entry.source}/${entry.hour}/${member.start}/${lineNumber}`;
                     const line = projectLine(lineBytes > MAX_LINE_BYTES ? '' : Buffer.concat(parts).toString('utf8'), entry, id, lineBytes > MAX_LINE_BYTES);
-                    const matchesTime = !line.time || timeKey(line.time) >= timeKey(query.start) && timeKey(line.time) < timeKey(query.end);
+                    const matchesTime = !line.time || timeKey(line.time) >= cutoff && timeKey(line.time) >= timeKey(query.start) && timeKey(line.time) < timeKey(query.end);
                     if (matchesTime && searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(query.q.toLowerCase())) {
                       const display = { ...line, message: cut(line.message), program: cut(line.program), priority: cut(line.priority), ...(line.fields ? { fields: Object.fromEntries(Object.entries(line.fields).map(([key, value]) => [key, cut(value)])) } : {}) };
                       lines.push(display);
-                      if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) { lines.pop(); position = before; reason = 'response_bytes'; break outer; }
+                      if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) {
+                        lines.pop(); position = before; reason = 'response_bytes';
+                        if (lines.length === initialLines) break outer;
+                        stopped = true; break;
+                      }
                     }
                   }
                   lineNumber++; lineBytes = 0; parts = [];
                   if (lineNumber >= resume.line) position = lineNumber === member.lineCount ? nextMember() : { source: entry.source, hour: entry.hour, memberStart: member.start, line: lineNumber, byte: 0 };
-                  if (lines.length >= query.limit && lineNumber < member.lineCount) { reason = 'limit'; break outer; }
+                  if (lines.length >= query.limit && lineNumber < member.lineCount) { reason = 'limit'; stopped = true; break; }
                 }
               }
+              if (stopped && !drainBytes(chunk.length - offset)) { rollbackMember(); break outer; }
             }
-            if (memberBytes !== member.uncompressedBytes || lineNumber !== member.lineCount || lineBytes !== 0) throw archiveError(502, 'LOG_ARCHIVE_READ_FAILED', '보관 로그를 읽을 수 없어요.');
+            if (decodedBytes !== member.uncompressedBytes || !stopped && (memberBytes !== member.uncompressedBytes || lineNumber !== member.lineCount || lineBytes !== 0)) throw corrupt();
           } catch (error) {
-            if (timedOut && !signal?.aborted && error.name === 'AbortError') { reason = 'timeout'; break outer; }
+            if (timedOut && !signal?.aborted && error.name === 'AbortError') {
+              if (lines.length > initialLines) rollbackMember();
+              reason = 'timeout'; break outer;
+            }
+            if (['Z_DATA_ERROR', 'Z_BUF_ERROR'].includes(error.code)) throw corrupt();
             throw error;
           } finally {
             controller.signal.removeEventListener('abort', abortRead);
             inputStream.destroy(); gzip.destroy();
           }
+          if (stopped) break outer;
           position = nextMember();
           if (lines.length >= query.limit) { reason = 'limit'; break outer; }
         }

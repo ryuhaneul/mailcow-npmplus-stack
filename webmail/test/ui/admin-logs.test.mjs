@@ -50,7 +50,7 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
         assert.equal(requests.length, 0);
       } else {
         await archiveReady(page);
-        await expect(page.locator('#archive-source option')).toHaveCount(8);
+        assert.deepEqual(await page.locator('#archive-source option').evaluateAll(options => options.map(option => option.value)), ['postfix', 'dovecot', 'rspamd', 'webmail', 'webmail-admin', 'npmplus']);
         await expect(page.getByLabel('시작 날짜·시각 · KST (UTC+09:00)', { exact: true })).toBeVisible();
         await expect(page.locator('tbody')).toContainText('17:30');
         await expect(page.locator('tbody')).toContainText('sender@example.test');
@@ -156,7 +156,9 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     try {
       await archiveReady(page); await page.locator('#archive-from').fill('2026-10-19T12:00'); await periodSearch(page); await archiveReady(page);
       await expect(page.getByText('수집 전 구간을 포함하거나', { exact: false })).toBeVisible();
-      await page.locator('#archive-source').selectOption('php-fpm'); await periodSearch(page); await archiveReady(page);
+      await page.locator('#archive-source').selectOption('rspamd');
+      await page.locator('#archive-from').fill('2026-10-13T12:00'); await page.locator('#archive-to').fill('2026-10-13T13:00');
+      await periodSearch(page); await archiveReady(page);
       await expect(page.getByText('보관 만료 구간을 포함합니다.', { exact: false })).toBeVisible();
     } finally { await context.close(); }
     const empty = await open({ response: { ...complete, lines: [] } });

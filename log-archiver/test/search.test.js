@@ -48,7 +48,7 @@ test('query allowlist, duplicates, UTC/KST boundaries, literal text and nanoseco
   assert.equal(validateQuery(params({ start: '2026-10-21T17:00:00+09:00', end: '2026-10-21T18:00:00+09:00' })).start, '2026-10-21T08:00:00.000Z');
   assert.equal(validateQuery(params({ start: '2026-10-21T17:00:00.123456789+09:00' })).start, stamp);
   assert.equal(validateQuery(params({ limit: '1', q: '[a+b].*' })).limit, 1);
-  for (const change of [{ source: 'ui' }, { source: '../../x' }, { start: '2026-10-21T08:00:00' }, { end: base.start }, { start: '2026-02-30T08:00:00Z' }, { start: '2026-10-21T25:00:00Z' }, { q: '가'.repeat(201) }, { limit: '0' }, { limit: '1001' }, { limit: '1.5' }, { limit: ['1', '2'] }, { extra: 'x' }, { end: '2027-10-21T09:00:00Z' }]) assert.throws(() => validateQuery(params(change)), { status: 422 });
+  for (const change of [{ source: 'php-fpm' }, { source: 'nginx' }, { source: 'ui' }, { source: '../../x' }, { start: '2026-10-21T08:00:00' }, { end: base.start }, { start: '2026-02-30T08:00:00Z' }, { start: '2026-10-21T25:00:00Z' }, { q: '가'.repeat(201) }, { limit: '0' }, { limit: '1001' }, { limit: '1.5' }, { limit: ['1', '2'] }, { extra: 'x' }, { end: '2027-10-21T09:00:00Z' }]) assert.throws(() => validateQuery(params(change)), { status: 422 });
   assert.throws(() => validateQuery(new URLSearchParams('source=postfix&source=postfix&start=2026-10-21T08:00:00Z&end=2026-10-21T09:00:00Z')), { status: 422 });
 });
 
@@ -195,6 +195,10 @@ test('coverage includes all eight policies and collection gaps, with empty vs in
   const engine = createSearch({ store: wrapped });
   const coverage = await engine.coverage();
   assert.equal(coverage.sources.length, 8);
+  for (const item of coverage.sources) {
+    assert.equal(Object.hasOwn(item, 'backfill'), false);
+    assert.equal(Object.hasOwn(item, 'collectionLagSeconds'), false);
+  }
   assert.equal(coverage.sources.find(item => item.source === 'rspamd').retentionDays, 7);
   assert.equal(coverage.sources.find(item => item.source === 'nginx').retentionDays, 1);
   const response = await engine.search(params({ q: 'absent' }));
@@ -267,6 +271,7 @@ test('HTTP read API authenticates shared header, rejects duplicates/input, bound
   const route = `/v1/search?${new URLSearchParams(base)}`;
   const response = await get(route); assert.equal(response.status, 200); assert.equal((await response.json()).lines[0].message, 'smoke');
   assert.equal((await get(`${route}&source=postfix`)).status, 422);
+  for (const source of ['php-fpm', 'nginx']) assert.equal((await get(`/v1/search?${new URLSearchParams({ ...base, source })}`)).status, 422);
   assert.equal((await get('/v1/coverage')).status, 200);
   assert.equal((await get('/v1/status')).status, 200);
   assert.equal((await get('/v1/search', { method: 'POST' })).status, 405);
@@ -374,4 +379,70 @@ test('malformed/nested structured text and quoted credential fields never reveal
     assert.ok(!JSON.stringify(result).includes(q), q);
     assert.equal((await engine.search(params({ q }))).returned, 0, q);
   }
+});
+
+
+test('each page excludes rows before the current source retention cutoff inside a retained hour', async t => {
+  const store = await fixture(t, { memberBytes: 1024 * 1024 });
+  for (const source of ['postfix', 'dovecot', 'rspamd', 'webmail', 'webmail-admin', 'npmplus']) {
+    const day = source === 'rspamd' ? '2026-10-14' : '2026-07-23';
+    await store.commit({ records: [
+      row('expired-0929', `${day}T09:29:00Z`, source),
+      row('cutoff-0930', `${day}T09:30:00Z`, source),
+      row('expires-before-next-page', `${day}T09:30:30Z`, source),
+      row('next-cutoff', `${day}T09:31:00Z`, source),
+    ] });
+    let clock = Date.parse('2026-10-21T09:30:00Z');
+    const engine = createSearch({ store, now: () => clock });
+    const query = params({ source, start: `${day}T09:00:00Z`, end: `${day}T10:00:00Z`, limit: '1' });
+    const first = await engine.search(query);
+    assert.deepEqual(first.lines.map(line => line.message), ['cutoff-0930'], source);
+    clock += 60000;
+    const next = await engine.search({ ...query, cursor: first.nextCursor });
+    assert.deepEqual(next.lines.map(line => line.message), ['next-cutoff'], source);
+    assert.equal(next.complete, true);
+  }
+});
+
+test('early limit, response and scan boundaries never publish rows from an unverified member', async t => {
+  const store = await fixture(t, { memberBytes: 1024 * 1024 });
+  await store.commit({ records: Array.from({ length: 400 }, (_, index) => row(`${index} ${'x'.repeat(1000)}`)) });
+  const { catalog } = await store.snapshot();
+  const file = store.file(catalog.hours[0].file), original = await fs.readFile(file);
+  for (const trailer of [8, 4]) {
+    const corrupt = Buffer.from(original); corrupt[corrupt.length - trailer] ^= 255;
+    await fs.writeFile(file, corrupt);
+    for (const [options, query] of [[{}, { limit: '1' }], [{ maxResponseBytes: 4096 }, {}]]) {
+      await assert.rejects(createSearch({ store, ...options }).search(params(query)), { status: 502, code: 'ARCHIVE_CORRUPT' });
+    }
+  }
+  await fs.writeFile(file, original);
+  const limited = await createSearch({ store }).search(params({ limit: '1' }));
+  assert.equal(limited.returned, 1);
+  assert.equal(limited.partialReason, 'limit');
+  assert.ok(limited.scannedBytes > 400000, 'verification drains the returned row member');
+  const smallResponse = await createSearch({ store, maxResponseBytes: 4096 }).search(params());
+  assert.equal(smallResponse.partialReason, 'response_bytes');
+  assert.ok(smallResponse.scannedBytes > 400000);
+  await assert.rejects(createSearch({ store, maxScanBytes: 16384 }).search(params({ limit: '1' })), { code: 'LOG_SCAN_CANNOT_ADVANCE' });
+});
+
+
+test('scan budget discards only the unverified member and resumes without duplicates or lost rows', async t => {
+  const store = await fixture(t, { memberBytes: 64 * 1024 });
+  await store.commit({ records: Array.from({ length: 400 }, (_, index) => row(`${index} ${'x'.repeat(1000)}`)) });
+  const { catalog } = await store.snapshot(), index = await store.readIndex(catalog.hours[0]);
+  const engine = createSearch({ store, maxScanBytes: 100000 });
+  const first = await engine.search(params({ limit: '1000' }));
+  assert.equal(first.partialReason, 'scan_bytes');
+  assert.equal(first.returned, index.members[0].lineCount);
+  assert.equal(position(first.nextCursor).memberStart, index.members[1].start);
+  assert.equal(position(first.nextCursor).line, 0);
+  const result = await pages(engine, params({ limit: '1000' }));
+  assert.equal(result.rows.length, 400);
+  assert.equal(new Set(result.rows.map(line => line.id)).size, 400);
+  assert.ok(result.responses.every(response => response.scannedBytes <= 100000));
+  let tick = 0;
+  const timed = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') + (tick++ >= 4 ? 10000 : 0), timeoutMs: 10000 });
+  await assert.rejects(timed.search(params({ limit: '1' })), { code: 'LOG_SCAN_CANNOT_ADVANCE' });
 });

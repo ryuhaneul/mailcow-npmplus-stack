@@ -206,3 +206,60 @@ test('admin config: trusted sender file only accepts the agreed enabled and disa
   assert.equal(loadAdminConfig({ ...env, TRUSTED_SENDER_FILE: '/run/trusted/trusted_senders.map' }).trustedSenderFile, '/run/trusted/trusted_senders.map');
   for (const value of ['/run/trusted/other.map', ' ', false]) assert.throws(() => loadAdminConfig({ ...env, TRUSTED_SENDER_FILE: value }), /TRUSTED_SENDER_FILE/);
 });
+
+test('admin config: FTS nightly defaults and explicit same-day KST window', () => {
+  assert.deepEqual(loadAdminConfig(env).ftsNightly, { enabled: false, start: '03:00', end: '06:00', stateDir: '/data/fts-nightly' });
+  const result = loadAdminConfig({ ...env, FTS_NIGHTLY_ENABLE: 'true', FTS_NIGHTLY_START: '00:00', FTS_NIGHTLY_END: '23:59' });
+  assert.deepEqual(result.ftsNightly, { enabled: true, start: '00:00', end: '23:59', stateDir: '/data/fts-nightly' });
+  assert.ok(Object.isFrozen(result.ftsNightly));
+});
+
+test('admin config: invalid FTS env fails in the existing config error format even when disabled', () => {
+  for (const [key, values] of [
+    ['FTS_NIGHTLY_ENABLE', ['', 'TRUE', '1', 'yes', true]],
+    ['FTS_NIGHTLY_START', ['', '3:00', '24:00', '03:60', ' 03:00', '03:00\n', false]],
+    ['FTS_NIGHTLY_END', ['', '6:00', '24:00', '06:60', '06:00 ', 600]],
+  ]) for (const value of values) {
+    assert.throws(() => loadAdminConfig({ ...env, [key]: value }), { message: `환경변수 ${key} 형식이 올바르지 않습니다.` });
+  }
+  for (const [start, end] of [['03:00', '03:00'], ['23:00', '02:00']]) {
+    assert.throws(() => loadAdminConfig({ ...env, FTS_NIGHTLY_START: start, FTS_NIGHTLY_END: end }), /FTS_NIGHTLY_END/);
+  }
+});
+
+test('admin FTS lifecycle: shared read-only state is available while disabled and health remains ready', async t => {
+  const app = await fixture(t);
+  assert.equal(typeof app.ftsState.read, 'function');
+  assert.deepEqual((await app.inject('/healthz')).json(), { ok: true });
+});
+
+test('admin FTS lifecycle: ready starts runner and close returns while a remote read remains in flight', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-20T18:30:00Z') });
+  const dir = await mkdtemp(join(tmpdir(), 'admin-fts-lifecycle-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let entered, finish;
+  const inFlight = new Promise(resolve => { entered = resolve; });
+  const remote = new Promise(resolve => { finish = resolve; });
+  t.after(() => finish([]));
+  let measurements = 0;
+  const app = await fixture(t, {
+    config: { ...loadAdminConfig(env), auditDir: join(dir, 'audit'),
+      ftsNightly: { enabled: true, start: '03:00', end: '06:00', stateDir: join(dir, 'state') } },
+    doveadm: { async listUsers() { measurements++; entered(); return remote; } },
+  });
+  await app.ready(); await inFlight;
+  assert.equal(measurements, 1);
+  await app.close(); // must not wait for the pending remote operation
+  finish([]);
+  let released = false;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const result = await app.ftsState.read();
+    if (result.state?.status === 'cutoff') {
+      const token = await app.ftsState.acquire();
+      if (token) { await app.ftsState.release(token); released = true; break; }
+    }
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(released, true);
+  assert.equal((await app.ftsState.read()).state.deadline, '2026-10-20T21:00:00.000Z');
+});

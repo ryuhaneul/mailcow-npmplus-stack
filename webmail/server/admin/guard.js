@@ -23,6 +23,7 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
   app.addHook('onRequest', async request => {
     if (!managed(request)) return;
     request.adminKeyMode = Object.hasOwn(request.headers, keyHeader);
+    if (request.adminKeyMode && humanOnly(request.routeOptions.url)) throw forbidden('HUMAN_ONLY');
     if (!changing.has(request.method)) return;
     if (!request.adminKeyMode && request.headers.origin !== `https://${config.adminHostname}`) throw new AppError(403, 'BAD_ORIGIN', '허용된 관리 주소에서 다시 시도해 주세요.');
     if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new AppError(415, 'JSON_REQUIRED', 'JSON 형식으로 요청해 주세요.');
@@ -37,7 +38,7 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
         const token = request.headers[keyHeader];
         const duplicates = request.raw.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === keyHeader).length;
         if (duplicates > 1 || typeof token !== 'string' || !tokenPattern.test(token)) throw forbidden('INVALID_TOKEN');
-        if (!config.mailcowApiKey || !apiKeys) throw humanOnly(path) ? forbidden('HUMAN_ONLY') : new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
+        if (!config.mailcowApiKey || !apiKeys) throw new AppError(503, 'MAILCOW_API_UNAVAILABLE', 'mailcow API 연결 설정을 확인해 주세요.');
         const result = await apiKeys.authenticate(token, request.ip);
         if (!result.ok) throw forbidden(result.reason);
         authenticated = true;
@@ -45,7 +46,6 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
         const item = result.item;
         request.adminPrincipal = { type: 'apiKey', id: item.id, name: item.name, permission: item.permission };
         apiKeyRateLimiter.reserveKey(item.id);
-        if (humanOnly(path)) throw forbidden('HUMAN_ONLY');
         if (!keyMethods.has(request.method) || (item.permission === 'read' && request.method !== 'GET')) throw forbidden('PERMISSION_DENIED');
         await apiKeys.recordUse(item.id, request.ip);
         const context = client.createApiContext({ permission: item.permission });

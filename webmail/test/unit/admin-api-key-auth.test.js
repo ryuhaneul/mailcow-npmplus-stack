@@ -94,7 +94,7 @@ for (const raw of ['', 'bad', `mak_v1_${'A'.repeat(44)}`, 'A'.repeat(1000), [tok
 for (const path of ['/api/admin/auth/login', '/api/admin/auth/session', '/api/admin/auth/totp', '/api/admin/auth/logout', '/api/admin/api-keys', '/api/admin/api-keys/synthetic', '/api/admin/%61uth/session']) test(`API guard: human-only ${path} rejects keys even with a cookie`, async t => {
   const f = await fixture(t);
   failure(await f.inject({ url: path, headers: { ...header, cookie: 'mailadmin_sid=synthetic-cookie' } }));
-  assert.equal(count(f, 'authenticate'), 1); assert.equal(count(f, 'session'), 0); assert.equal(count(f, 'handled'), 0);
+  assert.equal(count(f, 'authenticate'), 0); assert.equal(count(f, 'session'), 0); assert.equal(count(f, 'handled'), 0);
 });
 test('API guard: human-only POST cannot use valid Origin and CSRF to fall back', async t => {
   const f = await fixture(t);
@@ -135,7 +135,7 @@ test('API guard: header outside registered admin routes has no authentication ef
   assert.equal((await f.inject({ url: '/healthz' })).statusCode, 200);
   failure(await f.inject({ url: '/api/admin/api-keys/' }));
   for (const url of ['/api/admin/missing', '/api/admin/auth/session/', '/api/admin/resource/item/']) assert.equal((await f.inject({ url })).statusCode, 404, url);
-  assert.equal(count(f, 'authenticate'), 1); assert.equal(count(f, 'recordUse'), 0);
+  assert.equal(count(f, 'authenticate'), 0); assert.equal(count(f, 'recordUse'), 0);
 });
 test('API guard: key is accepted only in the custom header', async t => {
   const f = await fixture(t, { state: 'totp' });
@@ -222,10 +222,9 @@ for (const denied of ['read POST', 'human-only']) test(`API guard: ten ${denied}
   assert.equal((await f.inject({ headers: { 'x-mailadmin-api-key': fullToken } })).statusCode, 200);
   assert.equal(count(f, 'handled'), 1); assert.equal(count(f, 'recordUse'), 1);
 });
-for (const denied of ['read POST', 'human-only']) test(`API guard: ${denied} denials consume the authenticated key budget`, async t => {
+test('API guard: read POST denials consume the authenticated key budget', async t => {
   const f = await fixture(t, { permission: 'read' });
-  for (let i = 0; i < 120; i++) failure(await f.inject(denied === 'read POST'
-    ? { method: 'POST', payload: {} } : { url: '/api/admin/api-keys' }));
+  for (let i = 0; i < 120; i++) failure(await f.inject({ method: 'POST', payload: {} }));
   const response = await f.inject(); failure(response, 429, 'RATE_LIMITED');
   assert.equal(response.headers['retry-after'], '60');
   assert.equal(count(f, 'handled'), 0); assert.equal(count(f, 'recordUse'), 0);
@@ -238,4 +237,24 @@ for (const reason of ['INVALID_TOKEN', 'UNKNOWN_KEY', 'REVOKED', 'EXPIRED', 'IP_
   f.options.authenticate = undefined;
   const response = await f.inject(); failure(response, 429, 'RATE_LIMITED');
   assert.equal(response.headers['retry-after'], '300'); assert.equal(count(f, 'handled'), 0);
+});
+
+test('API guard: human-only paths reject before an EACCES store or either limiter is touched', async t => {
+  let storeCalls = 0, ipReservations = 0, keyReservations = 0;
+  const store = createApiKeyStore({ fs: { async mkdir() { storeCalls++; throw Object.assign(new Error('synthetic denied'), { code: 'EACCES' }); } } });
+  await assert.rejects(store.authenticate(token, ip), { statusCode: 503, code: 'API_KEY_STORE_UNAVAILABLE' });
+  storeCalls = 0;
+  const f = await fixture(t, { store });
+  const reserveIp = f.limiter.reserveIp, reserveKey = f.limiter.reserveKey;
+  f.limiter.reserveIp = (...args) => { ipReservations++; return reserveIp(...args); };
+  f.limiter.reserveKey = (...args) => { keyReservations++; return reserveKey(...args); };
+  for (const url of ['/api/admin/auth/session', '/api/admin/api-keys', '/api/admin/api-keys/synthetic']) failure(await f.inject({ url }));
+  assert.equal(storeCalls, 0); assert.equal(ipReservations, 0); assert.equal(keyReservations, 0);
+  assert.equal(count(f, 'recordUse'), 0); assert.equal(count(f, 'handled'), 0);
+});
+test('API guard: human-only denials leave the key budget available', async t => {
+  const f = await fixture(t);
+  for (let i = 0; i < 120; i++) failure(await f.inject({ url: '/api/admin/auth/session' }));
+  assert.equal(count(f, 'authenticate'), 0);
+  assert.equal((await f.inject()).statusCode, 200);
 });

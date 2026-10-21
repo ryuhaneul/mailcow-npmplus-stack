@@ -178,6 +178,40 @@ c=open(sys.argv[1]).read().splitlines()
 assert c.index('compose pull --policy missing --ignore-buildable') < c.index('compose build') < c.index('backfill') < c.index('stop:postfix-mailcow') < c.index('drain:postfix-mailcow') < c.index('compose up -d --no-deps --no-build --wait --wait-timeout 180 postfix-mailcow') < c.index('release')
 PY
 pass 'changed source builds then drains then replaces then releases in parent shell'
+# Both existing-service replacement paths share the same service ordering API.
+for selection in full partial; do
+ if [ "$selection" = full ]; then
+  SERVICES=$'z-future-mailcow\nrspamd-mailcow\nredis-mailcow\npostfix-mailcow\nphp-fpm-mailcow\nnginx-mailcow\nmysql-mailcow\nmemcached-mailcow\ndovecot-mailcow\nunbound-mailcow\na-future-mailcow'
+  expected='mysql-mailcow redis-mailcow memcached-mailcow unbound-mailcow php-fpm-mailcow nginx-mailcow dovecot-mailcow postfix-mailcow rspamd-mailcow a-future-mailcow z-future-mailcow'
+ else
+  SERVICES=$'z-future-mailcow\npostfix-mailcow\nnginx-mailcow\ndovecot-mailcow\nredis-mailcow\na-future-mailcow'
+  expected='redis-mailcow nginx-mailcow dovecot-mailcow postfix-mailcow a-future-mailcow z-future-mailcow'
+ fi
+ EXISTING=$SERVICES
+ : > "$TMP/calls"
+ setup_mailcow_up
+ python3 - "$TMP/calls" "$expected" <<'ORDER_CHECK'
+import sys
+calls=open(sys.argv[1]).read().splitlines()
+prefix='compose up -d --no-deps --no-build --wait --wait-timeout 180 '
+actual=[line.removeprefix(prefix) for line in calls if line.startswith(prefix)]
+assert actual==sys.argv[2].split(),actual
+previous=-1
+for name in actual:
+ preview=calls.index('compose --ansi never --dry-run up -d --no-deps --no-build '+name)
+ replace=calls.index(prefix+name)
+ release=calls.index('release',replace)
+ assert previous<preview<replace<release
+ if name in {'dovecot-mailcow','postfix-mailcow','rspamd-mailcow','php-fpm-mailcow','nginx-mailcow'}:
+  assert preview<calls.index('stop:'+name)<calls.index('drain:'+name)<replace
+ previous=release
+ORDER_CHECK
+ pass "$selection setup set uses dependency order, unknown names last, and serial drain/replace/health"
+done
+SERVICES=postfix-mailcow
+EXISTING=postfix-mailcow
+[ -z "$(printf '\n' | log_archive_order_mailcow_services)" ] || fail empty-order
+pass 'empty service set stays empty'
 PLAN='Container synthetic-postfix Running'
 : > "$TMP/calls"
 setup_mailcow_up

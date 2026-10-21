@@ -17,6 +17,20 @@ declare -a LOG_ARCHIVE_RUNNING_IDS=()
 
 log_archive_error() { echo "[log-archive] ERROR: $*" >&2; return 1; }
 
+# log_archive_order_mailcow_services: newline-separated services on stdin/stdout.
+# Keep authentication dependencies first and dovecot immediately before postfix;
+# unlisted services follow in name order. Only supplied services are emitted.
+log_archive_order_mailcow_services() {
+    python3 -c '
+import sys
+priority="mysql-mailcow redis-mailcow memcached-mailcow unbound-mailcow php-fpm-mailcow nginx-mailcow dovecot-mailcow postfix-mailcow rspamd-mailcow".split()
+rank={name:i for i,name in enumerate(priority)}
+services=[line.strip() for line in sys.stdin if line.strip()]
+for name in sorted(services,key=lambda name:(rank.get(name,len(rank)),name)):
+ print(name)
+'
+}
+
 # log_archive_check_logging <compose directory>: validate every rendered service.
 # Rendered configuration stays in the pipe; errors disclose service names only.
 log_archive_check_logging() {

@@ -323,6 +323,8 @@ fi
 log_archive_check_logging "$MAILCOW_DIR" || die "Mailcow service logging policy is incomplete after update"
 MAILCOW_LOGGING_RUNNING=$(cd "$MAILCOW_DIR" && docker compose ps --status running --services) \
     || die "Could not record running Mailcow services for logging application"
+MAILCOW_LOGGING_RUNNING=$(printf '%s\n' "$MAILCOW_LOGGING_RUNNING" | log_archive_order_mailcow_services) \
+    || die "Could not order Mailcow services for logging application"
 while IFS= read -r service; do
     [ -n "$service" ] || continue
     edge_archive_apply "$MAILCOW_DIR" false edge_compose_up up -d --no-deps --no-build --wait --wait-timeout 180 "$service" \

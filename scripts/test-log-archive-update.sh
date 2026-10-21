@@ -51,7 +51,7 @@ services=(webmail webmail-admin npmplus postfix-mailcow dovecot-mailcow rspamd-m
 for service in "${services[@]}"; do printf 'synthetic\n' > "$TMP/logs/id-$service-json.log"; done
 printf 'synthetic access\n' > "$TMP/logs/access.log"
 reset_case() {
-    rm -f "$TMP/"*-fail "$TMP/"signal-* "$TMP/deleted-ids" "$TMP/legacy" "$TMP/unknown-preview" "$TMP/no-change" "$TMP/new-create"
+    rm -f "$TMP/"*-fail "$TMP/"signal-* "$TMP/deleted-ids" "$TMP/legacy" "$TMP/unknown-preview" "$TMP/no-change" "$TMP/new-create" "$TMP/mailcow-running"
     : > "$TMP/calls"
     LOG_ARCHIVE_ENABLE=true
     SKIP_MAILCOW_UPDATE=false
@@ -139,11 +139,16 @@ RENDER
             *' ps -a --format '*)
                 [ ! -f "$TMP/new-create" ] || return 0
                 if [ "$PWD" = "$TMP/mailcow" ]; then
-                    for service in postfix-mailcow dovecot-mailcow rspamd-mailcow php-fpm-mailcow nginx-mailcow; do echo "id-$service|$service"; done
+                    if [ -f "$TMP/mailcow-running" ]; then
+                        while IFS= read -r service; do echo "id-$service|$service"; done < "$TMP/mailcow-running"
+                    else
+                        for service in postfix-mailcow dovecot-mailcow rspamd-mailcow php-fpm-mailcow nginx-mailcow; do echo "id-$service|$service"; done
+                    fi
                 elif [ "$PWD" = "$TMP/npm" ]; then echo 'npmplus|npmplus'
                 else printf 'webmail|webmail\nwebmail-admin|webmail-admin\nmailrelay-webmail|mailrelay-webmail\n'; fi ;;
             *' ps --status running --services '*)
-                if [ "$PWD" = "$TMP/mailcow" ]; then printf 'postfix-mailcow\ndovecot-mailcow\n'
+                if [ "$PWD" = "$TMP/mailcow" ]; then
+                    if [ -f "$TMP/mailcow-running" ]; then cat "$TMP/mailcow-running"; else printf 'postfix-mailcow\ndovecot-mailcow\n'; fi
                 elif [ "$PWD" = "$TMP/npm" ]; then echo npmplus
                 else echo webmail; fi ;;
             *' build '*) echo build >> "$TMP/calls" ;;
@@ -389,6 +394,44 @@ assert n['services']['npmplus']['environment']['LOGROTATE']=='true'
 assert n['services']['npmplus']['image']=='operator.invalid/npmplus:custom'
 POLICY
 pass 'skip-mailcow-update installs missing mailcow/NPMplus limits and drains only current running mailcow services'
+# Exercise the real logging replacement loop with an alphabetic full inventory
+# and a partial running set; no absent service may be added by ordering.
+for selection in full partial; do
+    reset_case
+    SKIP_MAILCOW_UPDATE=true
+    python3 - "$TMP" "$ROOT" "$selection" <<'ORDER_FIXTURE'
+import pathlib,sys,yaml
+root,repo=map(pathlib.Path,sys.argv[1:3])
+services=sorted(yaml.safe_load((repo/'mailcow-override/docker-compose.override.yml').read_text())['services'])
+if sys.argv[3]=='partial': services=['sogo-mailcow','rspamd-mailcow','postfix-mailcow','mysql-mailcow','dovecot-mailcow','acme-mailcow']
+(root/'mailcow-running').write_text('\n'.join(services)+'\n')
+(root/'mailcow/docker-compose.yml').write_text(yaml.safe_dump({'services':{name:{'image':'synthetic'} for name in services}}))
+for name in services:
+ (root/('state-'+name)).write_text('true\n')
+ (root/'logs'/('id-'+name+'-json.log')).write_text('synthetic\n')
+ORDER_FIXTURE
+    run_upstream
+    python3 - "$TMP/calls" "$selection" <<'ORDER_CHECK'
+import sys
+calls=open(sys.argv[1]).read().splitlines()
+expected='mysql redis memcached unbound php-fpm nginx dovecot postfix rspamd acme clamd dockerapi netfilter ofelia olefy postfix-tlspol sogo toolkit watchdog'.split()
+if sys.argv[2]=='partial': expected='mysql dovecot postfix rspamd acme sogo'.split()
+expected=[name+'-mailcow' for name in expected]
+prefix='docker compose up -d --no-deps --no-build --wait --wait-timeout 180 '
+actual=[line.removeprefix(prefix) for line in calls if line.startswith(prefix)]
+assert actual==expected,(actual,expected)
+previous=-1
+for name in expected:
+ preview=calls.index('docker compose --dry-run up -d --no-deps --no-build --wait --wait-timeout 180 '+name)
+ replace=calls.index(prefix+name)
+ assert previous<preview<replace
+ if name in {'dovecot-mailcow','postfix-mailcow','rspamd-mailcow','php-fpm-mailcow','nginx-mailcow'}:
+  stop=calls.index('docker stop id-'+name)
+  assert preview<stop<next(i for i in range(stop+1,replace) if calls[i]=='status')<replace
+ previous=replace
+ORDER_CHECK
+    pass "$selection running set replaces in dependency order with per-service preview, drain and health wait"
+done
 reset_case
 SKIP_MAILCOW_UPDATE=true
 LOG_ARCHIVE_ENABLE=false
@@ -409,7 +452,7 @@ SKIP_MAILCOW_UPDATE=true
 touch "$TMP/drain-fail"
 if run_upstream; then fail logging-drain-failure; fi
 no_replace
-grep -q '^docker start id-postfix-mailcow$' "$TMP/calls" || fail logging-drain-restore
+grep -q '^docker start id-dovecot-mailcow$' "$TMP/calls" || fail logging-drain-restore
 pass 'first logging rollout drain failure restores old running ID and prevents replacement'
 reset_case
 SKIP_MAILCOW_UPDATE=true

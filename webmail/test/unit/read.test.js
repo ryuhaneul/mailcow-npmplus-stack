@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { JSDOM } from 'jsdom';
 import { downloadMessage } from 'imapflow/lib/download.js';
 import { createReadService, decodeIso2022Kr, decodeCharset, attachmentHeaders } from '../../server/mail/read.js';
-import { sanitizeHtml } from '../../server/mail/sanitize.js';
+import { sanitizeHtml, sanitizeComposeHtml } from '../../server/mail/sanitize.js';
 import { encodeRef, decodeRef, assertUidValidity } from '../../server/mail/ref.js';
 import { createApp } from '../../server/app.js';
 
@@ -69,6 +69,25 @@ test('sanitize: external count, protocol-relative blocking, opt-in, CID and safe
 test('sanitize: preserves safe style rules and declarations', () => {
   const { html } = sanitizeHtml('<style>p { color: red; } @import "https://example.com/x";</style><p style="color:blue;background:url(https://example.com/x)">안녕</p>');
   assert.ok(html.includes('color: red')); assert.ok(html.includes('color: blue')); assert.ok(!html.includes('url('));
+});
+
+for (const [name, css] of [
+  ['lowercase escape', String.raw`p{font-family:"a\3c/style\3e\3cimg src=https://evil.example/t.png\3e"}`],
+  ['uppercase escape', String.raw`p{font-family:"a\3C/style\3E\3Cimg src=https://evil.example/t.png\3E"}`],
+  ['six-digit escape', String.raw`p{font-family:"a\00003c/style\00003e\00003cimg src=https://evil.example/t.png\00003e"}`],
+  ['uppercase closing tag', String.raw`p{font-family:"a\3c/STYLE\3e\3cimg src=https://evil.example/t.png\3e"}`],
+  ['comments', String.raw`/* before */p{/* declaration */font-family:"a\3c/style\3e\3cimg src=https://evil.example/t.png\3e"}/* after */`],
+]) for (const sanitize of [sanitizeHtml, sanitizeComposeHtml]) test(`${sanitize.name}: style serialization contains ${name} within CSS`, () => {
+  const result = sanitize(`<div><style>${css}</style><p>x</p></div>`);
+  const html = typeof result === 'string' ? result : result.html;
+  const doc = new JSDOM(html).window.document, style = doc.querySelector('style');
+  assert.equal(doc.querySelectorAll('style').length, 1);
+  assert.equal(doc.querySelectorAll('img').length, 0);
+  assert.equal((html.match(/<\/style/gi) || []).length, 1);
+  assert.ok(!style.textContent.includes('<'));
+  assert.match(style.textContent, /\\3c /);
+  assert.match(style.sheet.cssRules[0].style.getPropertyValue('font-family'), /<\/style><img src=https:\/\/evil\.example\/t\.png>/i);
+  assert.equal(doc.querySelector('p').textContent, 'x');
 });
 
 class ReadImap extends EventEmitter {

@@ -22,7 +22,8 @@ function cleanStyle(text) {
     for (let i = rules.length - 1; i >= 0; i--) {
       if (!safeCss(rules[i].cssText)) style.sheet.deleteRule(i);
     }
-    return Array.from(style.sheet.cssRules, rule => rule.cssText).join('\n');
+    // CSSOM may decode escapes into HTML tag boundaries during serialization.
+    return Array.from(style.sheet.cssRules, rule => rule.cssText).join('\n').replace(/</g, '\\3c ');
   } catch { return ''; } finally { style.remove(); }
 }
 export function sanitizeHtml(html, { ref, cidParts = new Map(), images = false } = {}) {

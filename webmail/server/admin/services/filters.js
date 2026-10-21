@@ -180,6 +180,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
     for (const key of ['failed', 'external', 'nonWebmail', 'uninspectable', 'spamGuardMissing']) result[key].sort((a, b) => a.address.localeCompare(b.address));
     return result;
   }
+  history.register('filter.create', { label: '관리자 필터를 만들었어요' });
   history.register('filter.edit', {
     label: '관리자 필터를 바꿨어요',
     read: async ({ session, target, record }) => state((await filterRows(session, target)).find(row => String(row.id) === String(record.before.id))),

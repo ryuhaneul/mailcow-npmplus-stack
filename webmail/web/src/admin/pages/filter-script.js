@@ -1,1 +1,1 @@
-export { hasMoveRedirect, externalRedirectPreview, insertSpamGuard, externalSpamGuardMessage } from '../../../../server/admin/filter-script.js';
+export { hasMoveRedirect, externalRedirectPreview, insertForwardingSafety, needsBounceGuard, externalSpamGuardMessage } from '../../../../server/admin/filter-script.js';

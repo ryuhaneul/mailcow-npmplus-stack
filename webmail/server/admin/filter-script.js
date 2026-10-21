@@ -30,15 +30,54 @@ export function externalRedirectPreview(script, internalDomains) {
   }
   return { external: [...targets].sort(), needsSpamGuard: targets.size > 0 && guard >= firstRedirect };
 }
-export function insertSpamGuard(script) {
-  const words = scriptTokens(script); let index = 0, end = 0;
+const bounceGuard = 'if envelope :is "from" "" { stop; }';
+export function needsBounceGuard(script, internalDomains) {
+  if (!externalRedirectPreview(script, internalDomains).external.length) return false;
+  const words = scriptTokens(script), guardWords = scriptTokens(bounceGuard).map(word => word.value.toLowerCase());
+  let depth = 0;
+  for (let i = 0; i < words.length; i++) {
+    if (depth === 0 && guardWords.every((word, offset) => words[i + offset]?.value.toLowerCase() === word)
+      && !externalRedirectPreview(script.slice(0, words[i].start), internalDomains).external.length) return false;
+    if (words[i].value === '{') depth++;
+    if (words[i].value === '}') depth--;
+  }
+  return true;
+}
+export function insertForwardingSafety(script, internalDomains) {
+  const lines = [];
+  if (externalRedirectPreview(script, internalDomains).needsSpamGuard) lines.push(spamGuard);
+  if (needsBounceGuard(script, internalDomains)) lines.push(bounceGuard);
+  if (!lines.length) return script;
+  const newline = script.includes('\r\n') ? '\r\n' : '\n';
+  let words = scriptTokens(script), index = 0, firstRequire = null, hasEnvelope = false;
+  while (words[index]?.value.toLowerCase() === 'require') {
+    const start = index++;
+    while (words[index] && words[index].value !== ';') {
+      if (words[index].value.toLowerCase() === '"envelope"') hasEnvelope = true;
+      index++;
+    }
+    if (!words[index]) break;
+    firstRequire ??= words.slice(start + 1, index);
+    index++;
+  }
+  if (!hasEnvelope) {
+    if (!firstRequire) script = `require ["envelope"];${newline}${script}`;
+    else if (firstRequire[0]?.value === '[') {
+      const last = firstRequire.filter(word => word.value.startsWith('"')).at(-1);
+      const at = last?.end ?? firstRequire[0].end;
+      script = `${script.slice(0, at)}${last ? ', ' : ''}"envelope"${script.slice(at)}`;
+    } else {
+      const capability = firstRequire[0];
+      script = `${script.slice(0, capability.start)}[${capability.value}, "envelope"]${script.slice(capability.end)}`;
+    }
+  }
+  words = scriptTokens(script); index = 0; let end = 0;
   while (words[index]?.value.toLowerCase() === 'require') {
     while (words[index] && words[index].value !== ';') index++;
     if (!words[index]) break;
     end = words[index++].end;
   }
-  const newline = script.includes('\r\n') ? '\r\n' : '\n';
-  return end ? `${script.slice(0, end)}${newline}${spamGuard}${newline}${script.slice(end).replace(/^\r?\n/, '')}` : `${spamGuard}${newline}${script}`;
+  return `${script.slice(0, end)}${newline}${lines.join(newline)}${newline}${script.slice(end).replace(/^\r?\n/, '')}`;
 }
 
 export const externalSpamGuardMessage = '외부로 전달하는 필터는 맨 앞에 스팸 메일 전달 제외 줄이 있어야 저장할 수 있어요.';

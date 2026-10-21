@@ -112,7 +112,7 @@ test('admin filters: external redirect can be reversed and move rollback uses co
   const next = await edit(f, (await item(f)).etag); f.domains[0].active = '0'; await revert(f, next.auditId); assert.equal(f.filters[0].script_data, moving);
 });
 test('admin filters: discard/custom create, active duplicate guard and non-revertible creation', async t => {
-  const f = await fixture(t), result = await create(f); assert.equal(result.script, 'discard;\n'); assert.equal(result.type, 'postfilter'); assert.equal((await f.history.detail(result.auditId)).revertible, false);
+  const f = await fixture(t), result = await create(f); assert.equal(result.script, 'discard;\n'); assert.equal(result.type, 'postfilter'); assert.equal((await f.history.detail(result.auditId)).revertible, false); assert.match((await f.history.detail(result.auditId)).summary, /관리자 필터를 만들었어요/);
   await assert.rejects(create(f), { statusCode: 409, code: 'FILTER_EXISTS' });
   f.filters.find(row => row.id === result.id).active = '0'; const custom = await create(f, { preset: 'custom', script: 'keep;\n' }); assert.equal(custom.script, 'keep;\n');
   assert.equal(writes(f).at(-1).body.active, '1'); assert.equal(writes(f).at(-1).body.script_desc, '관리자 필터');

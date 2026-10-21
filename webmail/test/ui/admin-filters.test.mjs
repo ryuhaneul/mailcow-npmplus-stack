@@ -8,6 +8,7 @@ import { createFakeAdminApi } from '../../web/dev/fake-admin-api.js';
 
 const captures = process.env.EXTFWD_CAPTURE_DIR || '/tmp/extfwd-captures';
 const guard = 'if header :contains "X-Spam-Flag" "YES" { stop; }';
+const bounce = 'if envelope :is "from" "" { stop; }';
 const redirect = 'require ["copy"];\nredirect :copy "outside@example.net";\n';
 const warning = '외부로 전달하는 필터는 맨 앞에 스팸 메일 전달 제외 줄이 있어야 저장할 수 있어요.';
 test('administrator filter external forwarding preview', async t => {
@@ -41,10 +42,36 @@ test('administrator filter external forwarding preview', async t => {
     ['guard before redirect', `require ["copy"];\n${guard}\nredirect :copy "outside@example.net";`, true, false],
     ['guard after redirect', `${redirect}${guard}`, true, true],
     ['guard nested in other condition', `if false { ${guard} }\n${redirect}`, true, true],
+    ['both safety guards', `require ["copy", "envelope"];\n${guard}\n${bounce}\nredirect :copy "outside@example.net";`, true, false],
+    ['bounce guard only', `require ["copy", "envelope"];\n${bounce}\nredirect :copy "outside@example.net";`, true, true],
   ]) await t.test(name, async () => {
     const { page, context, errors } = await open();
-    try { const dialog = await preview(page, script); await expect(dialog.getByText('외부로 전달: outside@example.net', { exact: true })).toHaveCount(external ? 1 : 0); await expect(dialog.getByText(warning, { exact: false })).toHaveCount(warn ? 1 : 0); await expect(dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' })).toHaveCount(warn ? 1 : 0); if (warn) await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); else await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled(); assert.deepEqual(errors, []); }
+    try { const dialog = await preview(page, script); await expect(dialog.getByText('외부로 전달: outside@example.net', { exact: true })).toHaveCount(external ? 1 : 0); await expect(dialog.getByText(warning, { exact: false })).toHaveCount(warn ? 1 : 0); await expect(dialog.getByRole('button', { name: '전달 안전 줄 넣기' })).toHaveCount(external && name !== 'both safety guards' ? 1 : 0); if (warn) await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); else await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled(); assert.deepEqual(errors, []); }
     finally { await context.close(); }
+  });
+  await t.test('bounce exclusion is recommended and optional; insertion adds only the missing guard', async () => {
+    const { page, context, writes } = await open();
+    try {
+      const script = `require ["copy"];\n${guard}\nredirect :copy "outside@example.net";`;
+      const dialog = await preview(page, script);
+      await expect(dialog).toContainText('반송 안내가 외부로 다시 전달될 수 있어요.');
+      await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
+      await dialog.getByRole('button', { name: '전달 안전 줄 넣기' }).click();
+      const expected = `require ["copy", "envelope"];\n${bounce}\n${guard}\nredirect :copy "outside@example.net";`;
+      await expect(page.getByLabel('Sieve 스크립트', { exact: true })).toHaveValue(expected);
+      await expect(dialog.getByRole('button', { name: '전달 안전 줄 넣기' })).toHaveCount(0);
+      await dialog.getByRole('button', { name: '저장', exact: true }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0); assert.equal(writes[0].script, expected);
+    } finally { await context.close(); }
+  });
+  await t.test('spam-only guard still saves without optional bounce exclusion', async () => {
+    const { page, context, writes } = await open();
+    try {
+      const script = `${guard}\nredirect :copy "outside@example.net";`;
+      const dialog = await preview(page, script);
+      await dialog.getByRole('button', { name: '저장', exact: true }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0); assert.equal(writes[0].script, script);
+    } finally { await context.close(); }
   });
   await t.test('missing guard blocks administrator save without insertion', async () => {
     const { page, context, writes } = await open();
@@ -64,7 +91,7 @@ test('administrator filter external forwarding preview', async t => {
       await dialog.getByRole('button', { name: '저장', exact: true }).click();
       await expect(dialog.locator('[data-error-code=EXTERNAL_SPAM_GUARD]')).toHaveText(warning);
       await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
-      await dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' }).click();
+      await dialog.getByRole('button', { name: '전달 안전 줄 넣기' }).click();
       await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
     } finally { await context.close(); }
   });
@@ -75,11 +102,11 @@ test('administrator filter external forwarding preview', async t => {
       await page.evaluate(() => document.fonts.ready);
       await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
       await page.screenshot({ path: `${captures}/external-warning-${width}.png`, fullPage: true });
-      await dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' }).click();
-      await expect(dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' })).toHaveCount(0);
+      await dialog.getByRole('button', { name: '전달 안전 줄 넣기' }).click();
+      await expect(dialog.getByRole('button', { name: '전달 안전 줄 넣기' })).toHaveCount(0);
       await expect(dialog.getByText(warning, { exact: false })).toHaveCount(0);
       await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
-      const expected = `require ["copy"];\n${guard}\nredirect :copy "outside@example.net";\n`;
+      const expected = `require ["copy", "envelope"];\n${guard}\n${bounce}\nredirect :copy "outside@example.net";\n`;
       await expect(page.getByLabel('Sieve 스크립트', { exact: true })).toHaveValue(expected);
       await page.screenshot({ path: `${captures}/external-guard-${width}.png`, fullPage: true });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

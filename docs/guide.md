@@ -1133,6 +1133,8 @@ sudo bash scripts/verify.sh
 
 관리 env의 `DOVEADM_URL`은 `http://dovecot:12346`이며 `dovecot`은 mailcow 내부망의 서비스 별칭입니다. 클라이언트가 `/doveadm/v1`을 붙입니다. 허용 명령은 `search,expunge,quota get,quota recalc,mailbox list,acl get`입니다. `extra.conf` 관리 블록은 키와 HTTP 리스너를 두고, 허용 목록은 `remote 0.0.0.0/1`·`remote 128.0.0.0/1`·`remote ::/1`·`remote 8000::/1` 네 블록 안에 각각 설정합니다. IP로 들어오는 doveadm 연결에만 허용 목록을 적용해 mailcow replicator의 unix 소켓 연결은 그대로 둡니다. 기존 전역 허용 목록 블록은 적용 시 키를 유지한 새 형식으로 갱신하고 reload하며, `--check`는 새 형식만 통과합니다. 포트12346은 호스트에 게시하지 않습니다. `DOVEADM_KEY`는 관리 env에만 넣고 공개 웹메일에는 전달하지 않습니다.
 
+야간 검색 색인을 켜면 아래 [야간 검색 색인](#13-야간-검색-색인)에 적힌 다섯 명령만 추가로 허용합니다.
+
 릴레이는 `/home/mailcow-dockerized/data/conf/postfix/extra.cf`와 `data/conf/rspamd/local.d/options.inc`가 모두 있을 때만 연결합니다. 특히 mailcow 기본 상태에서 `options.inc`가 없으면 빈 파일을 만들지 않고 두 마운트와 `RELAY_FILES`를 비운 뒤 경고합니다. 기능은 `RELAY_DISABLED`로 꺼지고 verify의 파일 검사는 실패로 표시됩니다. 설정을 검토해 두 파일을 준비하거나 선택값을 false로 되돌립니다.
 
 릴레이를 켜면 Postfix 설정 디렉터리를 `/run/relay/postfix`, Rspamd `local.d` 디렉터리를 `/run/relay/rspamd`에 `rw,z`로 연결합니다. 관리 env의 `RELAY_FILES`는 `/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc`입니다. 관리 서버가 쓰는 대상은 두 파일뿐이지만 컨테이너에는 두 설정 디렉터리 전체의 쓰기 권한이 노출됩니다. 이 범위 때문에 릴레이 기능은 기본 꺼짐(`WEBMAIL_ADMIN_RELAY_ENABLE=false`)이며 승인된 관리 작업에만 사용합니다. mailcow Postfix 시작 스크립트는 `sed -i`로 `extra.cf` inode를 바꿉니다. 디렉터리를 연결하면 서비스 재시작 뒤 다음 파일 열기에서도 새 inode를 찾아 읽고 쓸 수 있습니다. mailcow는 Postfix 디렉터리에 `rw,z`, Rspamd `local.d` 디렉터리에 `rw,Z`를 사용하므로 단순히 모든 경로의 라벨을 같은 방식으로 바꿔도 안전하다고 가정할 수 없습니다. 시험 VM은 도커 SELinux가 꺼져 있어 충돌을 검증하지 못했습니다. **운영 서버 반영 전 도커 SELinux 설정과 AVC(`ausearch -m avc --input-logs`) 확인 필수**입니다. 거부가 있으면 적용을 중단하고 mount/컨테이너 라벨을 확인합니다. 운영 반영 전 node UID로 두 파일에 쓸 수 있는지, Postfix 재시작으로 inode가 바뀐 뒤에도 관리 쪽에서 새 내용을 읽고 쓰는지, Rspamd 재시작 뒤에도 같은지 확인합니다. 두 파일에 그룹 64250 쓰기 권한을 붙이며, mailcow update가 파일을 새로 쓰면 권한이 빠질 수 있어 우리 스택 update가 매번 다시 맞춥니다(그 사이 저장은 '쓰기 권한 없음'으로 실패하며 파일은 바뀌지 않습니다). Rspamd는 시작할 때 `local.d`의 소유자·그룹을 다시 바꾸므로, 두 파일에 그룹 64250의 POSIX ACL(`g:64250:rw`)도 붙여 재시작 뒤 그룹 쓰기 권한을 유지합니다.
@@ -1176,3 +1178,106 @@ seed는 `data/conf/rspamd/override.d/mailstack-trusted/trusted_senders.map`이 *
 ```bash
 sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-trusted-sender.sh --revert -y
 ```
+
+## 13. 야간 검색 색인
+
+자동 색인이 건너뛴 메일 폴더를 매일 KST 시간 창 안에서 한 번에 하나씩 색인합니다. 기본 창은 **03:00~06:00**이며, 06:00 이후에는 새 폴더를 시작하지 않고 진행 중인 폴더는 마무리합니다. 완료 시각을 06:00으로 강제하지 않습니다. 창 안에서 관리 앱이 늦게 기동하면 그날 미실행분을 시작하고, 창 밖이면 다음 날까지 기다립니다.
+
+휴지통·스팸함은 폴더 이름이 아닌 special-use(`\Trash`·`\Junk`) 설정으로 제외합니다. 공유(`Shared/`)·가상(`WebmailVirtual/`) 폴더와 이름에 `*` 또는 `%`가 들어간 폴더도 제외합니다. 제외된 폴더의 미색인 메일은 이 작업으로 처리되지 않습니다.
+
+### 켜기·끄기와 적용
+
+관리 화면과 doveadm 관리를 먼저 켭니다(`WEBMAIL_ADMIN_ENABLE=true`, `WEBMAIL_ADMIN_DOVEADM_ENABLE=true`). 스택 저장소의 `.env`에서 다음 값을 설정합니다. 켜기 기본값은 `false`이며 setup·update가 선택값을 자동으로 바꾸지 않습니다.
+
+```dotenv
+MAIL_FTS_NIGHTLY_ENABLE=true
+MAIL_FTS_NIGHTLY_START=03:00
+MAIL_FTS_NIGHTLY_END=06:00
+```
+
+시각은 서버 시간대와 무관하게 `Asia/Seoul`(KST)의 `HH:MM`입니다. 시작은 끝보다 빨라야 하며(`START < END`), 자정을 넘는 창은 지원하지 않습니다. 끄려면 `MAIL_FTS_NIGHTLY_ENABLE=false`로 바꿉니다. 설정 후 스택 저장소 루트에서 기존 update를 실행합니다. mailcow 자체를 갱신하지 않는 경우는 다음과 같습니다.
+
+```bash
+sudo ./scripts/update.sh -y --skip-mailcow-update
+sudo bash scripts/apply-dovecot-admin-api.sh --check
+```
+
+update가 관리 env를 재생성하고 컨테이너와 Dovecot 허용 목록을 적용합니다. 허용 목록 적용만 별도로 해야 하면 같은 루트에서 `sudo bash scripts/apply-dovecot-admin-api.sh apply -y`를 사용합니다. 이것만 실행하면 관리 env의 예약 설정은 갱신되지 않습니다.
+
+켜면 기존 여섯 명령에 `index`, `mailbox status`, `user`, `fts-flatcurve stats`, `mailbox metadata get` 다섯 개를 추가합니다. **허용 목록 변경에 필요한 Dovecot reload는 접속 중인 IMAP·POP 세션을 끊습니다.** 사용자 공지 후 반영하고 대량 import·복사·이동 등 메일 작업과 겹치지 않게 합니다. 야간 색인 실행 자체에는 reload가 없습니다.
+
+시험에서는 대량 import 도중 reload와 겹쳐 쿼터가 실제 20,013통 대신 13통으로 남은 사례가 있었습니다(원인 확정용 대조 시험은 하지 않음). 쿼터 어긋남이나 `Quota is now desynced` 경고가 있으면 대량 작업 종료 후 해당 계정만 재계산하고 확인합니다. 주소와 설치 경로는 실제 값으로 바꿉니다.
+
+```bash
+cd /home/mailcow-dockerized
+docker compose exec -T dovecot-mailcow doveadm quota recalc -u user@example.test
+docker compose exec -T dovecot-mailcow doveadm quota get -u user@example.test
+```
+
+### 운영 현황의 '검색 색인' 읽기
+
+카드는 보기 전용입니다. 예약 켜짐·꺼짐, KST 시간 창, 다음 예약, 마지막 실행 시작·끝, 폴더별 마지막 측정 합계를 보여줍니다. 새로고침은 저장된 결과만 읽으며 전수 측정을 추가 실행하지 않습니다.
+
+| 표시 | 의미·조치 |
+|---|---|
+| 미실행 | 저장된 실행 기록이 없습니다. 예약 켜짐과 다음 창을 확인합니다. 상태 손상 초기화 직후에도 이렇게 보입니다 |
+| 실행 중 | 측정 또는 순차 색인 중입니다. 현재 폴더가 표시되면 그 폴더를 처리하고 있습니다 |
+| 종료 시각 초과·마무리 중 | 끝 시각을 지났지만 현재 작업을 기다립니다. 앱을 재시작해도 원격 색인이 멈추는 것은 아닙니다 |
+| 완료 | 이번 실행이 정상 종료됐습니다. 제외 폴더나 이후 새로 도착·이동한 메일까지 모두 색인됐다는 뜻은 아닙니다 |
+| 시간 창 종료 | 시간 창이 끝나 측정 또는 남은 폴더 처리를 마치지 못했습니다. 다음 날 재측정해 이어갑니다 |
+| 일부 실패 | 일부 측정·색인이 실패했습니다. 상세의 계정·폴더와 실패 사유를 확인합니다 |
+| 종료 확인 필요 | 타임아웃·연결 단절·앱 재시작 뒤 원격 작업 종료를 확정하지 못했습니다. 자동 재실행이 차단되며 아래 수동 복구가 필요합니다 |
+| 상태 손상 | 저장된 상태를 읽을 수 없어 자동 작업을 막았습니다. 원격 종료 확인 후 손상 상태 복구가 필요합니다 |
+| 측정 미완료 | 전수 측정을 끝내지 못해 미확인 폴더 수·잔량을 알 수 없습니다. 합계를 확정 총수로 읽지 않습니다 |
+| 오래된 측정 | 마지막 측정이 24시간을 넘겼습니다. 현재 잔량으로 보지 말고 예약·앱 상태를 확인합니다 |
+
+미색인 추정은 각 폴더의 `메일 수 − 색인 수`를 바탕으로 한 마지막 측정값입니다. 전체 실시간 잔량이 아닙니다. 미측정·실패 폴더는 합계에서 빠지므로 **합계 0통이어도 측정 실패 수와 제외 폴더를 함께 확인**합니다. '색인 상세'에서 미색인 상위 20개와 실패·미측정·제외 사유, 폴더별 측정 시각·샤드 수를 볼 수 있습니다. 수동 복구한 폴더는 다음 예약 재측정 전까지 '미측정 · 수동 복구 · 실행 결과 미확인'으로 남을 수 있습니다.
+
+### '종료 확인 필요' 수동 복구
+
+**시간이 지났다는 이유로 잠금을 자동 해제하지 않습니다.** HTTP 타임아웃·앱 종료·재시작은 Dovecot에서 실행 중인 색인의 중단을 보장하지 않습니다. 원격 작업 종료를 확인할 수 없으면 잠금을 그대로 두고 조사합니다.
+
+1. 카드의 대상 계정·폴더와 발생 시각을 기록합니다. 스택 `.env`를 `MAIL_FTS_NIGHTLY_ENABLE=false`로 바꾸고 `/home/webmail`에서 `sudo docker compose --profile admin stop webmail-admin`으로 예약 프로세스를 멈춥니다. 이 단계도 원격 색인을 중단하지는 않습니다.
+2. Mailcow 호스트에서 Dovecot 컨테이너의 `doveadm-server` 프로세스와 CPU 사용을 간격을 두고 확인합니다. 다음 명령을 반복해 PID·누적 CPU 시간의 증가와 작업 종료를 살핍니다. 프로세스 제목만으로 대상 계정·폴더를 식별할 수 없으므로 PID가 없다는 사실만으로 종료를 단정하지 않습니다.
+
+   ```bash
+   cd /home/mailcow-dockerized
+   docker top "$(docker compose ps -q dovecot-mailcow)" -eo pid,ppid,pcpu,time,args
+   docker stats --no-stream "$(docker compose ps -q dovecot-mailcow)"
+   ```
+
+3. 기록한 해당 폴더의 메일 수·색인 수를 직접 대조합니다. `Archive`와 예시 주소는 해당 값으로 바꾸며, 폴더에 `*`·`%`가 있으면 패턴으로 여러 폴더가 조회될 수 있으므로 그대로 쓰지 않습니다. 실행 중에는 수치가 증가할 수 있습니다. 색인 수가 메일 수에 도달했는지, 프로세스와 CPU 활동이 끝났는지 함께 확인합니다. 불일치나 실패가 남으면 그 상태와 종료 확인 근거를 기록합니다.
+
+   ```bash
+   docker compose exec -T dovecot-mailcow doveadm mailbox status -u user@example.test 'messages guid uidvalidity' 'Archive'
+   docker compose exec -T dovecot-mailcow doveadm fts flatcurve stats -u user@example.test 'Archive'
+   ```
+
+4. 원격 작업이 끝났음을 확인한 뒤 스택 루트에서 위 update를 실행해 예약 꺼짐을 적용하고 관리 컨테이너를 다시 올립니다. 이후 아래 명령으로 **요약만 먼저 확인**합니다. `--by`에는 담당자 이름, `--reason`에는 대상·확인 시각·프로세스와 수치 대조 근거를 적습니다. `--remote-stopped`는 운영자가 원격 종료를 확인했다는 선언이며 도구가 대신 확인해 주지 않습니다.
+
+   ```bash
+   docker exec webmail-admin node bin/fts-unlock.js --by operator --reason '원격 종료와 대상 폴더 수치 확인' --remote-stopped
+   ```
+
+   `--yes`가 없으면 요약을 출력한 뒤 `CLI_CONFIRM_REQUIRED`(종료 코드 2)로 끝나며 상태·잠금은 바꾸지 않습니다. 대상과 상태가 맞으면 같은 인수에 `--yes`를 붙여 해제합니다.
+
+   ```bash
+   docker exec webmail-admin node bin/fts-unlock.js --by operator --reason '원격 종료와 대상 폴더 수치 확인' --remote-stopped --yes
+   ```
+
+5. '상태 손상'이면 같은 종료 확인을 거친 뒤 위 요약 명령과 실제 해제 명령에 `--reset-damaged`를 추가합니다. 손상 원본은 관리 컨테이너의 `/data/fts-nightly/state.json.damaged-<시각>`에 보존하고 빈 상태로 복구합니다. `/data`의 영속 저장소와 보존 파일을 지우지 않습니다. 해제 결과의 `locked: false`, `indexBlocked: false`를 확인하고 카드를 다시 조회합니다. 다시 켜려면 `.env`를 `true`로 바꾸고 같은 update를 적용합니다. 복구 자체가 즉시 색인을 실행하지는 않습니다.
+
+### 부하와 실측 범위
+
+시험 VM의 합성 메일 기준으로 2만 통 폴더는 약 150초, 50,002통 폴더는 **371.6초**로 색인 요청의 600초 제한 안에 완료됐습니다. 228~232개 폴더 전수 측정은 약 35~55초였습니다. 메일 크기·내용·기존 샤드와 서버 성능에 따라 달라지며 운영 메일의 완료 시간을 보장하는 값은 아닙니다.
+
+색인 중 CPU 코어 하나를 거의 가득 사용했습니다. 동시 색인은 한 번에 한 폴더입니다. 5만 통 시험의 색인 디스크는 완료 후 약 24MiB 증가했고, 끝의 optimize 순간에는 약 49MiB로 약 두 배가 필요했습니다. 여유 공간을 확보하세요. 실행 중 폴더의 이동·삭제가 잠시 늦어질 수 있으며, **대량 MOVE의 목적지에는 새 미색인 적체가 생길 수 있습니다.**
+
+전수 측정은 하루 1회이며 처리할 폴더는 전후에 다시 측정합니다. 메일어드민 **한 개만 실행하는 구성**을 전제로 하며 관리 컨테이너 두 개의 동시 실행은 지원하지 않습니다. 여러 관리자가 카드를 열어도 측정 빈도는 늘지 않습니다.
+
+### 되돌리기
+
+1. 진행 중이거나 종료 확인이 필요한 작업은 위 절차로 원격 종료부터 확인합니다. `.env`의 `MAIL_FTS_NIGHTLY_ENABLE=false`를 적용하고 같은 update를 실행합니다.
+2. doveadm 허용 목록에서 야간 색인용 다섯 명령만 빠집니다. 기존 `search`, `expunge`, `quota get`, `quota recalc`, `mailbox list`, `acl get` 여섯 개와 키·remote 구조는 유지합니다. **이 기능만 끌 때 `apply-dovecot-admin-api.sh --revert`를 쓰면 기존 관리 기능까지 꺼지므로 사용하지 않습니다.** 허용 목록 축소도 reload와 세션 단절을 수반합니다.
+3. 앱 판도 되돌려야 하면 배포 전에 보관한 이전 이미지의 태그·다이제스트로 `/home/webmail/docker-compose.yml`의 해당 `image:`를 복원하고 `cd /home/webmail` 후 `sudo docker compose --profile admin up -d --no-build`로 다시 올립니다. 기존 이미지 복귀에 `build`를 섞지 않습니다. 예약 꺼짐을 유지하고 관리·웹메일 상태를 확인합니다.
+4. 관리 컨테이너의 `/data/fts-nightly`는 복구·조사와 이후 재적용을 위해 보존합니다. 이미 생성된 검색 색인은 그대로 둬도 됩니다. 메일이나 색인 파일을 삭제하는 작업은 되돌리기에 필요하지 않습니다.

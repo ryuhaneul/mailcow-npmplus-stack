@@ -414,7 +414,7 @@ ORDER_FIXTURE
     python3 - "$TMP/calls" "$selection" <<'ORDER_CHECK'
 import sys
 calls=open(sys.argv[1]).read().splitlines()
-expected='mysql redis memcached unbound php-fpm nginx dovecot postfix rspamd acme clamd dockerapi netfilter ofelia olefy postfix-tlspol sogo toolkit watchdog'.split()
+expected='redis memcached unbound php-fpm nginx mysql dovecot postfix rspamd acme clamd dockerapi netfilter ofelia olefy postfix-tlspol sogo toolkit watchdog'.split()
 if sys.argv[2]=='partial': expected='mysql dovecot postfix rspamd acme sogo'.split()
 expected=[name+'-mailcow' for name in expected]
 prefix='docker compose up -d --no-deps --no-build --wait --wait-timeout 180 '

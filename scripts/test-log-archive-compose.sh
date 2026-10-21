@@ -182,7 +182,7 @@ pass 'changed source builds then drains then replaces then releases in parent sh
 for selection in full partial; do
  if [ "$selection" = full ]; then
   SERVICES=$'z-future-mailcow\nrspamd-mailcow\nredis-mailcow\npostfix-mailcow\nphp-fpm-mailcow\nnginx-mailcow\nmysql-mailcow\nmemcached-mailcow\ndovecot-mailcow\nunbound-mailcow\na-future-mailcow'
-  expected='mysql-mailcow redis-mailcow memcached-mailcow unbound-mailcow php-fpm-mailcow nginx-mailcow dovecot-mailcow postfix-mailcow rspamd-mailcow a-future-mailcow z-future-mailcow'
+  expected='redis-mailcow memcached-mailcow unbound-mailcow php-fpm-mailcow nginx-mailcow mysql-mailcow dovecot-mailcow postfix-mailcow rspamd-mailcow a-future-mailcow z-future-mailcow'
  else
   SERVICES=$'z-future-mailcow\npostfix-mailcow\nnginx-mailcow\ndovecot-mailcow\nredis-mailcow\na-future-mailcow'
   expected='redis-mailcow nginx-mailcow dovecot-mailcow postfix-mailcow a-future-mailcow z-future-mailcow'

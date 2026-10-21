@@ -52,7 +52,7 @@ export function createDoveadm({ config }) {
         remoteRejected = !!value && typeof value === 'object' && !Array.isArray(value) && typeof value.type === 'string';
         if (command === 'index' && remoteRejected && (!value.type || (value.type === 'exitCode' && (!Number.isInteger(value.exitCode) || value.exitCode < 0 || value.exitCode > 255)))) remoteRejected = false;
         if (!remoteRejected) throw rejected();
-        if (command === 'aclGet' && value?.type === 'exitCode' && value.exitCode === 68) throw new AppError(404, 'MAILBOX_NOT_FOUND', '메일 폴더를 찾을 수 없어요.');
+        if (['aclGet', 'mailboxStatus'].includes(command) && value?.type === 'exitCode' && value.exitCode === 68) throw new AppError(404, 'MAILBOX_NOT_FOUND', '메일 폴더를 찾을 수 없어요.');
         if (value?.type === 'exitCode' && value.exitCode === 67) throw new AppError(404, 'NOT_FOUND', '메일함을 찾을 수 없어요.');
         throw rejected();
       }

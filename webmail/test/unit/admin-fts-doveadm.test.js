@@ -1,3 +1,4 @@
+import { createFtsMeasure } from '../../server/admin/services/fts-measure.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -142,4 +143,22 @@ test('index explicit command rejection is known, and connection refusal before s
   f.config.doveadmUrl = f.config.doveadmUrl.replace('127.0.0.1', 'localhost');
   await assert.rejects(f.client.indexMailbox(user, mailbox), { code: 'DOVEADM_UNAVAILABLE' });
   await assert.rejects(createDoveadm({ config: {} }).indexMailbox(user, mailbox), { code: 'CLEANUP_DISABLED' });
+});
+
+test('mailboxStatus exit 68 excludes nonexistent folders; other errors and commands keep their semantics', async t => {
+  const f = await fixture(t);
+  f.state.type = 'error';
+  const measure = createFtsMeasure({ doveadm: { ...f.client, specialUse: async () => [{ value: '' }] } });
+  for (const exitCode of [68, 67, 75]) {
+    f.state.value = { type: 'exitCode', exitCode };
+    await assert.rejects(f.client.mailboxStatus(user, mailbox), { code: exitCode === 68 ? 'MAILBOX_NOT_FOUND' : exitCode === 67 ? 'NOT_FOUND' : 'DOVEADM_REJECTED' });
+    const result = await measure.measureFolder(user, mailbox);
+    assert.equal(result.status, exitCode === 68 ? 'excluded' : 'unmeasured');
+    assert.equal(result.reason, exitCode === 68 ? 'nonexistent' : 'measurement-failed');
+    assert.equal(result.guid, null);
+  }
+  f.state.value = { type: 'exitCode', exitCode: 68 };
+  await assert.rejects(f.client.ftsStats(user, mailbox), { code: 'DOVEADM_REJECTED' });
+  await assert.rejects(f.client.specialUse(user, mailbox), { code: 'DOVEADM_REJECTED' });
+  await assert.rejects(f.client.call('aclGet', { user, mailbox }), { code: 'MAILBOX_NOT_FOUND' });
 });

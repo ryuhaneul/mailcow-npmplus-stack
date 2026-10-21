@@ -46,6 +46,7 @@ test('FTS overview uses KST scheduling, honest missing values and distinct run s
   });
   await t.test('row reasons translate exclusions, missing stats and remote failures', () => {
     assert.equal(ftsRowStatus({ status: 'excluded', reason: 'wildcard-name' }), '제외 · 이름에 * 또는 % 가 있어 자동 색인 제외');
+    assert.equal(ftsRowStatus({ status: 'excluded', reason: 'nonexistent' }), '제외 · 실체 없는 상위 폴더');
     assert.equal(ftsRowStatus({ status: 'unmeasured', reason: 'missing-stats' }), '미측정 · 색인 통계 없음');
     assert.equal(ftsRowStatus({ result: 'failed', status: 'ok', error: 'DOVEADM_UNAVAILABLE' }), '실패 · 서버 연결 불가');
   });

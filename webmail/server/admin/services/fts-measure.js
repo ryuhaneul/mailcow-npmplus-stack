@@ -1,4 +1,5 @@
 import { shared, virtual } from '../../mail/folders.js';
+import { AppError } from '../../errors.js';
 import { isMailboxAddress } from '../doveadm.js';
 
 const validGuid = value => typeof value === 'string' && /^[a-f0-9]{32}$/i.test(value);
@@ -22,19 +23,27 @@ export function createFtsMeasure({ doveadm, now = Date.now, folderList = user =>
       const flags = metadata[0].value.split(/\s+/);
       if (flags.includes('\\Trash')) return row(user, mailbox, 'excluded', 'trash');
       if (flags.includes('\\Junk')) return row(user, mailbox, 'excluded', 'junk');
-      const statuses = await doveadm.mailboxStatus(user, mailbox);
-      if (!Array.isArray(statuses)) return unknown('measurement-failed');
-      if (!statuses.length) return unknown('missing-status');
-      if (statuses.length !== 1 || statuses[0]?.mailbox !== mailbox || !validGuid(statuses[0]?.guid)) return unknown('guid-mismatch');
-      const status = statuses[0];
-      guid = status.guid.toLowerCase();
-      const stats = await doveadm.ftsStats(user, mailbox);
-      if (!Array.isArray(stats)) return unknown('measurement-failed', guid);
-      if (stats.length && (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid)) return unknown('guid-mismatch', guid);
-      const messages = status.messages, indexed = stats[0]?.messages ?? (stats.length ? undefined : 0);
-      if (!validCount(messages) || !validCount(indexed) || indexed > messages) return unknown('invalid-count', guid);
-      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, shards: stats.length ? stats[0].shards ?? null : 0,
-        measuredAt: new Date(now()).toISOString(), status: 'ok', reason: null };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let statuses;
+        try { statuses = await doveadm.mailboxStatus(user, mailbox); }
+        catch (error) {
+          if (error instanceof AppError && error.code === 'MAILBOX_NOT_FOUND') return row(user, mailbox, 'excluded', 'nonexistent');
+          throw error;
+        }
+        if (!Array.isArray(statuses)) return unknown('measurement-failed');
+        if (!statuses.length) return unknown('missing-status');
+        if (statuses.length !== 1 || statuses[0]?.mailbox !== mailbox || !validGuid(statuses[0]?.guid)) return unknown('guid-mismatch');
+        const status = statuses[0];
+        guid = status.guid.toLowerCase();
+        const stats = await doveadm.ftsStats(user, mailbox);
+        if (!Array.isArray(stats)) return unknown('measurement-failed', guid);
+        if (stats.length && (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid)) return unknown('guid-mismatch', guid);
+        const messages = status.messages, indexed = stats[0]?.messages ?? (stats.length ? undefined : 0);
+        if (!validCount(messages) || !validCount(indexed)) return unknown('invalid-count', guid);
+        if (indexed > messages && attempt === 0) continue;
+        return { user, mailbox, guid, messages, indexed, unindexed: Math.max(0, messages - indexed), shards: stats.length ? stats[0].shards ?? null : 0,
+          measuredAt: new Date(now()).toISOString(), status: 'ok', reason: indexed > messages ? 'index-ahead' : null };
+      }
     } catch { return unknown('measurement-failed', guid); }
   }
 

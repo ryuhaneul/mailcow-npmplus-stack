@@ -443,3 +443,53 @@ test('fts nightly: uninitialized flatcurve databases are indexed, empty folders 
   assert.equal(result.state.snapshot.totals.unmeasured, 0); assert.equal(result.state.snapshot.totals.unindexed, 0);
   assert.equal(result.state.folders[0].before.indexed, 0); assert.equal(result.state.folders[1].after.shards, 5);
 });
+
+for (const stage of ['snapshot', 'before', 'after']) test(`fts nightly: nonexistent at ${stage} is excluded without failing run`, async t => {
+  const f = await fixture(t);
+  const guid = 'a'.repeat(32);
+  let reads = 0;
+  f.deps.measure = createFtsMeasure({ now: f.deps.now, doveadm: {
+    async listUsers() { return ['user@example.test']; },
+    async call() { return [{ mailbox: 'INBOX' }]; },
+    async specialUse() { return [{ value: '' }]; },
+    async mailboxStatus(user, mailbox) {
+      reads++;
+      if (stage === 'snapshot' || stage === 'before' && reads === 2 || stage === 'after' && f.indexed.size) throw fault('MAILBOX_NOT_FOUND');
+      return [{ mailbox, guid, messages: 100 }];
+    },
+    async ftsStats(user, mailbox) { return [{ mailbox, guid, messages: 90 }]; },
+  } });
+  const result = await f.run();
+  assert.equal(result.status, 'done');
+  assert.equal(f.indexed.size, stage === 'after' ? 1 : 0);
+  const saved = (await f.state.read()).state;
+  const record = saved.folders[0], latest = record.after ?? record.before;
+  assert.equal(record.result, 'excluded'); assert.equal(record.error, null);
+  assert.equal(latest.reason, 'nonexistent'); assert.equal(latest.guid, null);
+  assert.equal(saved.snapshot.totals.excluded, 1); assert.equal(saved.snapshot.totals.unmeasured, 0);
+});
+
+for (const stage of ['snapshot', 'before', 'after']) for (const persistent of [false, true]) {
+  test(`fts nightly: index ahead at ${stage}, persistent=${persistent} completes without failure`, async t => {
+    const f = await fixture(t);
+    const guid = 'a'.repeat(32);
+    let measurements = 0, statsReads = 0;
+    const affected = () => stage === 'snapshot' || stage === 'before' && measurements >= 2 || stage === 'after' && f.indexed.size > 0;
+    f.deps.measure = createFtsMeasure({ now: f.deps.now, doveadm: {
+      async listUsers() { return ['user@example.test']; },
+      async call() { return [{ mailbox: 'INBOX' }]; },
+      async specialUse() { measurements++; statsReads = 0; return [{ value: '' }]; },
+      async mailboxStatus(user, mailbox) { return [{ mailbox, guid, messages: 215 }]; },
+      async ftsStats(user, mailbox) { statsReads++; return [{ mailbox, guid,
+        messages: affected() ? persistent || statsReads === 1 ? 216 : 215 : 200 }]; },
+    } });
+    const result = await f.run();
+    assert.equal(result.status, 'done'); assert.equal(f.indexed.size, stage === 'after' ? 1 : 0);
+    const saved = (await f.state.read()).state;
+    assert.equal(saved.folders[0].result, 'done'); assert.equal(saved.folders[0].error, null);
+    assert.equal(saved.snapshot.totals.unindexed, 0); assert.equal(saved.snapshot.totals.unmeasured, 0);
+    assert.equal(saved.snapshot.folders[0].indexed, persistent ? 216 : 215);
+    assert.equal(saved.snapshot.folders[0].reason, persistent ? 'index-ahead' : null);
+    assert.equal(statsReads, 2);
+  });
+}

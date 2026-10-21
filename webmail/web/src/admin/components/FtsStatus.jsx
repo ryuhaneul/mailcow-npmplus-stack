@@ -7,7 +7,7 @@ import '../pages/operations.css';
 const dayMs = 86_400_000;
 const reasons = {
   'wildcard-name': '이름에 * 또는 % 가 있어 자동 색인 제외', shared: '공유 폴더 제외', virtual: '가상 폴더 제외',
-  trash: '휴지통 제외', junk: '스팸 폴더 제외', 'measurement-failed': '측정 실패', 'missing-status': '폴더 상태 없음',
+  trash: '휴지통 제외', junk: '스팸 폴더 제외', nonexistent: '실체 없는 상위 폴더', 'measurement-failed': '측정 실패', 'missing-status': '폴더 상태 없음',
   'missing-stats': '색인 통계 없음', 'guid-mismatch': '폴더 식별 정보 불일치', 'invalid-count': '측정 수치 확인 필요',
   FTS_FOLDER_CHANGED: '폴더 변경 확인 필요', FTS_MEASURE_FAILED: '색인 후 측정 실패',
   'manual-unlock': '수동 복구 · 실행 결과 미확인',

@@ -50,7 +50,7 @@ for (const [messages, indexed] of [[0, 0], [30, 30], [30, 10], [Number.MAX_SAFE_
 }
 
 for (const [label, messages, indexed] of [
-  ['reversed', 2, 3], ['fractional total', 1.5, 1], ['fractional indexed', 3, 1.5],
+  ['fractional total', 1.5, 1], ['fractional indexed', 3, 1.5],
   ['negative total', -1, 0], ['negative indexed', 3, -1], ['unsafe total', Number.MAX_SAFE_INTEGER + 1, 1],
   ['unsafe indexed', 3, Number.MAX_SAFE_INTEGER + 1], ['NaN', NaN, 0], ['infinity', Infinity, 0],
   ['string total', '3', 0], ['string indexed', 3, '1'], ['missing count', undefined, 0],
@@ -272,3 +272,32 @@ for (const status of [[], [{ mailbox, guid: 'invalid', messages: 4 }], [{ mailbo
     assert.equal((await service.measureFolder(user, mailbox)).status, 'unmeasured');
   });
 }
+
+for (const persistent of [false, true]) test(`FTS index ahead retries once; persistent=${persistent}`, async () => {
+  let reads = 0;
+  const { service, calls } = fixture({
+    mailboxStatus: () => [{ mailbox, guid, messages: ++reads === 1 ? 215 : 216 }],
+    ftsStats: () => [{ mailbox, guid, messages: persistent && reads === 2 ? 217 : 216, shards: reads }],
+  });
+  const result = await service.measureAll();
+  assert.deepEqual(result.folders[0], { user, mailbox, guid, messages: 216, indexed: persistent ? 217 : 216,
+    unindexed: 0, shards: 2, measuredAt: new Date(at).toISOString(), status: 'ok', reason: persistent ? 'index-ahead' : null });
+  assert.deepEqual(result.totals, { messages: 216, indexed: persistent ? 217 : 216, unindexed: 0, unmeasured: 0, excluded: 0 });
+  assert.deepEqual(result.top, []);
+  for (const method of ['mailboxStatus', 'ftsStats']) assert.equal(calls.filter(([name]) => name === method).length, 2);
+  assert.equal(calls.filter(([name]) => name === 'specialUse').length, 1);
+});
+
+for (const [method, value, reason] of [
+  ['mailboxStatus', [{ mailbox, guid, messages: 1.5 }], 'invalid-count'],
+  ['ftsStats', [{ mailbox, guid, messages: -1 }], 'invalid-count'],
+  ['ftsStats', [{ mailbox, guid: otherGuid, messages: 216 }], 'guid-mismatch'],
+]) test(`FTS index ahead recheck preserves ${method} ${reason} failure`, async () => {
+  let reads = 0;
+  const { service, calls } = fixture({
+    mailboxStatus: () => { reads++; return reads === 2 && method === 'mailboxStatus' ? value : [{ mailbox, guid, messages: 215 }]; },
+    ftsStats: () => reads === 2 && method === 'ftsStats' ? value : [{ mailbox, guid, messages: 216 }],
+  });
+  unknown(await service.measureFolder(user, mailbox), reason);
+  assert.equal(calls.filter(([name]) => name === 'mailboxStatus').length, 2);
+});

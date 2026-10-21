@@ -85,7 +85,9 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
         try {
           const before = await measure.measureFolder(row.user, row.mailbox);
           record.before = before;
-          if (before.guid !== row.guid) {
+          if (before.status === 'excluded' && before.reason === 'nonexistent') {
+            record.result = 'excluded'; record.error = null;
+          } else if (before.guid !== row.guid) {
             record.result = 'failed'; record.error = 'FTS_FOLDER_CHANGED';
           } else if (!eligible(before)) {
             record.result = before.status === 'ok' ? 'done' : before.status;
@@ -124,7 +126,8 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
               throw error;
             }
             record.after = await measure.measureFolder(row.user, row.mailbox);
-            record.result = record.after.status === 'ok' && record.after.guid === row.guid ? 'done' : 'failed';
+            record.result = record.after.status === 'excluded' && record.after.reason === 'nonexistent' ? 'excluded' :
+              record.after.status === 'ok' && record.after.guid === row.guid ? 'done' : 'failed';
             if (record.result === 'failed') record.error = record.after.guid !== row.guid ? 'FTS_FOLDER_CHANGED' : 'FTS_MEASURE_FAILED';
           }
         } catch (error) {

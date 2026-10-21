@@ -31,12 +31,14 @@ webmail_options() {
     WEBMAIL_ADMIN_SESSION_MAX_HOURS="${WEBMAIL_ADMIN_SESSION_MAX_HOURS:-8}"
     LOG_ARCHIVE_ENABLE="${LOG_ARCHIVE_ENABLE:-false}"
     LOG_ARCHIVE_KEY="${LOG_ARCHIVE_KEY:-}"
-    LOG_ARCHIVE_REQUIRED_SOURCES="${LOG_ARCHIVE_REQUIRED_SOURCES:-postfix,dovecot,rspamd,php-fpm,nginx,npmplus}"
-    if [ "${WEBMAIL_ENABLE:-false}" = true ]; then
-        case ",$LOG_ARCHIVE_REQUIRED_SOURCES," in *,webmail,*) ;; *) LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail ;; esac
-    fi
-    if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
-        case ",$LOG_ARCHIVE_REQUIRED_SOURCES," in *,webmail-admin,*) ;; *) LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail-admin ;; esac
+    if [ -z "${LOG_ARCHIVE_REQUIRED_SOURCES:-}" ]; then
+        LOG_ARCHIVE_REQUIRED_SOURCES=postfix,dovecot,rspamd,php-fpm,nginx,npmplus
+        if [ "${WEBMAIL_ENABLE:-false}" = true ]; then
+            LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail
+        fi
+        if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+            LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail-admin
+        fi
     fi
     WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-false}"
     SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}"

@@ -126,8 +126,8 @@ def remove(delete_volume, delete_directory):
     # No -v: the default removal always preserves data and the install directory.
     if (install / 'docker-compose.yml').is_file(): compose('down', project=manifest['project'])
     elif container is not None: fail('cannot remove an existing container without its compose file')
-    subprocess.run(['bash', '-c', 'source "$1/lib/webmail-env.sh"; edge_remove_snappymail "$2" "$3"', 'bash',
-                    str(scripts), str(install), os.environ['SNAPPY_TOOL_NPMPLUS']], check=True)
+    subprocess.run(['bash', '-c', 'set -e; source "$4"; source "$1/lib/webmail-env.sh"; webmail_load_config "$4" "${MAILCOW_DIR:-/home/mailcow-dockerized}"; edge_remove_snappymail "$2" "$3"', 'bash',
+                    str(scripts), str(install), os.environ['SNAPPY_TOOL_NPMPLUS'], os.environ['SNAPPY_TOOL_ENV']], check=True)
     if delete_volume: docker('volume', 'rm', manifest['volume'])
     if delete_directory and install.exists(): shutil.rmtree(install)
     print('[snappymail-remove] container removed; volume ' + ('deleted' if delete_volume else 'preserved') + '; installation ' + ('deleted' if delete_directory else 'preserved'))

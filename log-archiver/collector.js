@@ -6,6 +6,7 @@ import { DEFAULT_RETENTION } from './store.js';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const identity = (stat) => `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
 const missing = (error) => ['ENOENT', 'ESTALE'].includes(error.code);
+const drainedAndStable = (checkpoint) => checkpoint.offset === checkpoint.observedSize && checkpoint.stableObservations >= 2;
 
 async function bytesAt(handle, position, length) {
   const buffer = Buffer.alloc(length);
@@ -42,7 +43,9 @@ async function fingerprint(handle, offset) {
  * Lines exceeding MAX_LINE_BYTES (including LF) are discarded through the next
  * LF with a line-too-long gap. lineTooLongFromOffset persists an unfinished
  * discard across batches/restarts; offsets include the discarded bytes.
- * Fully consumed historical files retire without a gap; an unseen suffix
+ * Fully consumed historical files and active files drained at the last of two
+ * consecutive equal-size observations retire without a gap. stableObservations
+ * persists those visible observations (capped at two); an unseen suffix
  * appended after the last observation and removed before the next poll is
  * inherently unobservable. requiredSources must match enabled deployment inputs.
  */
@@ -151,9 +154,9 @@ class Collector {
         this.gap(checkpoint, generation, 'copytruncate-window', stamp);
       } else {
         checkpoint.closed = true;
-        // A fully consumed historical rotation is safe to retire. Active source
-        // disappearance or a known unconsumed suffix remains a coverage gap.
-        if (original || checkpoint.active || checkpoint.observedSize > checkpoint.offset) {
+        // Stable, fully drained active files can retire after a managed stop.
+        // Rewrites and known unconsumed suffixes remain coverage gaps.
+        if (original || (checkpoint.active && !drainedAndStable(checkpoint)) || checkpoint.observedSize > checkpoint.offset) {
           this.gap(checkpoint, generation, original ? 'source-truncated-or-rewritten' : 'source-disappeared', stamp);
         }
       }
@@ -188,6 +191,10 @@ class Collector {
     for (const [generation, file] of work) {
       const checkpoint = checkpoints[generation];
       const stat = await file.handle.stat();
+      // Use the last visible observation before draining an unlinked descriptor;
+      // draining after disappearance must not qualify an active file as safe.
+      const safelyDrained = drainedAndStable(checkpoint) && stat.size === checkpoint.observedSize;
+      const stableObservations = stat.size === checkpoint.observedSize ? Math.min(2, (checkpoint.stableObservations ?? 0) + 1) : 1;
       checkpoint.observedSize = stat.size;
       checkpoint.path = file.path;
       checkpoint.active = file.active && file.visible;
@@ -209,9 +216,10 @@ class Collector {
         issues.push({ source: file.source, instance: file.instance, generation, reason: 'source-read-error' });
         continue;
       }
+      if (file.visible) checkpoint.stableObservations = stableObservations;
       if (!file.visible && (checkpoint.offset === checkpoint.observedSize || checkpoint.partialBytes > 0)) {
         checkpoint.closed = true;
-        if (file.active || checkpoint.observedSize > checkpoint.offset) this.gap(checkpoint, generation, 'source-disappeared', stamp);
+        if ((file.active && !safelyDrained) || checkpoint.observedSize > checkpoint.offset) this.gap(checkpoint, generation, 'source-disappeared', stamp);
       }
       if (checkpoint.offset === checkpoint.observedSize) checkpoint.pendingSince = null;
       checkpoint.lastObservedAt = stamp;

@@ -24,7 +24,6 @@ const hashes = (before, after) => ({ scriptSha256Before: sha256(before), scriptS
 export function inspectRedirects(source) {
   if (typeof source !== 'string') throw uninspectable();
   let values; try { values = tokens(source); } catch { throw uninspectable(); }
-  if (values.some(value => value && typeof value === 'object' && value.string.includes('${'))) throw uninspectable();
   const redirects = [];
   for (let i = 0; i < values.length; i++) {
     if (values[i] !== 'redirect') continue;

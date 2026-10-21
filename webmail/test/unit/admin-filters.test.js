@@ -89,7 +89,7 @@ test('admin filters: active alias domain is internal and apparent redirect in co
   const f = await fixture(t), source = '# redirect "outside@example.net";\n/* redirect "outside@example.net"; */\nif header :contains "Subject" "redirect outside@example.net" { redirect :copy "person@alias.example.com"; }';
   assert.equal((await edit(f, (await item(f)).etag, source)).script, source);
 });
-for (const source of ['redirect "${target}";', 'set "value" "${unknown}"; keep;', 'redirect :list "office";', 'redirect text:\nkeep@example.com\n.\n;', 'redirect :unknown "keep@example.com";', 'redirect "unterminated']) test(`admin filters: unsafe inspection rejected ${source}`, async t => {
+for (const source of ['redirect "${target}";', 'set "target" "outside@example.net"; redirect "${target}";', 'redirect :list "office";', 'redirect text:\nkeep@example.com\n.\n;', 'redirect :unknown "keep@example.com";', 'redirect "unterminated']) test(`admin filters: unsafe inspection rejected ${source}`, async t => {
   const f = await fixture(t); await assert.rejects(edit(f, (await item(f)).etag, source, { confirmMove: true }), { statusCode: 422, code: 'FILTER_UNINSPECTABLE' }); assert.equal(writes(f).length, 0);
 });
 test('admin filters: missing/stale filter and unchanged edits', async t => {
@@ -102,9 +102,9 @@ for (const failure of ['changed', 'missing-backup']) test(`admin filters: undo $
   if (failure === 'changed') f.filters[0].script_data += '# external change\n'; else await fs.rm(join(f.dir, 'filter-backups', `${result.auditId}.before.sieve`));
   await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: failure === 'changed' ? 'CHANGED_ELSEWHERE' : 'NOT_REVERTIBLE' }); assert.equal(writes(f).length, 1);
 });
-for (const source of ['redirect "${unknown}";', 'redirect :copy "outside@example.net";']) test(`admin filters: cleaning unsafe Before disables reversal ${source}`, async t => {
+for (const source of ['redirect "${unknown}";', 'set "target" "outside@example.net"; redirect "${target}";', 'redirect :copy "outside@example.net";']) test(`admin filters: cleaning unsafe Before disables reversal ${source}`, async t => {
   const f = await fixture(t); f.filters[0].script_data = source; const result = await edit(f, (await item(f)).etag), record = await f.history.detail(result.auditId);
-  assert.equal(record.revertible, false); assert.ok(record.detail.reason.includes('이전 원문')); if (source.includes('outside@')) assert.match(record.detail.reason, /스팸 제외 없는 외부 전달/); await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: 'NOT_REVERTIBLE' });
+  assert.equal(record.revertible, false); assert.ok(record.detail.reason.includes('이전 원문')); if (source.startsWith('redirect :copy')) assert.match(record.detail.reason, /스팸 제외 없는 외부 전달/); await assert.rejects(revert(f, result.auditId), { statusCode: 409, code: 'NOT_REVERTIBLE' });
 });
 test('admin filters: external redirect can be reversed and move rollback uses confirmation', async t => {
   const f = await fixture(t); f.filters[0].script_data = `${guard}\r\nredirect "outside@example.net";\r\n`; const moving = f.filters[0].script_data;
@@ -228,4 +228,37 @@ test('filter checks: admin parse failure does not hide valid user forwarding', a
   const result = await f.service.checks({});
   assert.deepEqual(result.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'admin', type: 'prefilter', id: '1' }]);
   assert.equal(result.external[0].filters[0].source, 'user');
+});
+
+const variableLiterals = [
+  'require ["variables", "fileinto", "copy"]; fileinto "Archive/${folder}"; redirect :copy "keep@example.com";',
+  'require ["variables", "copy"]; if header :contains "Subject" "${subject}" { keep; } redirect :copy "keep@example.com";',
+  'require ["variables", "copy"]; set "unused" "${other}"; redirect :copy "keep@example.com";',
+];
+for (const [index, source] of variableLiterals.entries()) test(`fixed redirect inspection, checks, save and exact reversal permit unrelated variable strings ${index + 1}`, async t => {
+  assert.deepEqual(inspectRedirects(source), [{ target: 'keep@example.com', copy: true }]);
+  const f = await fixture(t); f.scripts.set(owner, source);
+  const checked = await f.service.checks({}); assert.deepEqual(checked.uninspectable, []); assert.deepEqual(checked.external, []);
+  const saved = await edit(f, (await item(f)).etag, source); assert.equal(saved.script, source);
+  const changed = await edit(f, saved.etag, 'discard;\n');
+  assert.equal((await f.history.detail(changed.auditId)).canRevert, true);
+  await revert(f, changed.auditId); assert.equal(f.filters[0].script_data, source);
+});
+test('variable redirect targets remain uninspectable directly and in checks, including a set variable', async t => {
+  for (const source of ['redirect "${target}";', 'set "target" "outside@example.net"; redirect "${target}";']) {
+    assert.throws(() => inspectRedirects(source), { statusCode: 422, code: 'FILTER_UNINSPECTABLE' });
+    const f = await fixture(t); f.scripts.set(owner, source);
+    const checked = await f.service.checks({});
+    assert.deepEqual(checked.uninspectable, [{ address: owner, code: 'FILTER_UNINSPECTABLE', source: 'user', type: 'active-user' }]);
+  }
+});
+test('checks retain a fixed external target when other strings contain variables', async t => {
+  const f = await fixture(t); f.scripts.set(owner, 'fileinto "Archive/${folder}"; if header :contains "Subject" "${subject}" { keep; } redirect :copy "outside@example.net";');
+  const checked = await f.service.checks({}); assert.deepEqual(checked.uninspectable, []);
+  assert.deepEqual(checked.external[0].targets, ['outside@example.net']);
+});
+test('unused variable strings without redirect are inspectable and can be saved', async t => {
+  const f = await fixture(t), source = 'set "value" "${unknown}"; keep;';
+  assert.deepEqual(inspectRedirects(source), []);
+  assert.equal((await edit(f, (await item(f)).etag, source)).script, source);
 });

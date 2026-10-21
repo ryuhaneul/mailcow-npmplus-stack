@@ -18,7 +18,7 @@ node bin/webmail-rules.js gen rules.json --policy policy.json > webmail-rules.si
 }
 ```
 
-- `internalDomains`는 필수입니다. 누락하면 외부 전달 검사를 할 수 없으므로 종료 코드 2로 거부합니다. 빈 배열은 모든 전달을 거부합니다.
+- `internalDomains`는 필수입니다. 누락하면 외부 전달 여부를 판단할 수 없으므로 종료 코드 2로 거부합니다. 빈 배열이면 모든 전달 대상을 외부로 보고, 생성 스크립트 맨 앞에 스팸 제외 줄을 넣습니다.
 - `folders`는 선택입니다. 폴더 항목은 `path`와 필요한 경우 `specialUse`, `shared`, `virtual`, `personal`을 받습니다. 제공하면 W10의 폴더 검사를 수행합니다. 생략하면 존재 여부만 건너뛰고, 해당 항목의 `warnings`와 보고서의 `uncheckedFolders`에 미확인 내용을 남깁니다. 금지된 폴더 경로와 외부 전달 검사는 유지합니다.
 - `addresses`는 사용자가 보낼 수 있는 주소 전부입니다. 부재중 응답이 켜진 문서에서 이를 생략하면 W10 생성기의 422 오류와 종료 코드 2를 반환합니다.
 

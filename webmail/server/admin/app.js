@@ -101,7 +101,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('ftsState', ftsState);
   const ftsNightly = createFtsNightly({ state: ftsState, measure: createFtsMeasure({ doveadm }), doveadm, audit, history, logger: app.log });
   const ftsScheduler = createFtsScheduler({ config: ftsConfig, nightly: ftsNightly, logger: app.log });
-  app.addHook('onReady', async () => { ftsScheduler.start(); });
+  app.addHook('onReady', async () => { await ftsScheduler.start(); });
   app.addHook('preClose', async () => { ftsScheduler.stop(); });
   const aclFolders = createAclFolders({ doveadm, dockerapi, config });
   const aclReader = createAclReader({ doveadm, dockerapi, config });

@@ -15,9 +15,10 @@ export default async function ftsRoutes(app, { state, config }) {
         cutoff: stored.status === 'cutoff',
       } : null,
       indexBlocked: stored?.indexBlocked ?? false,
-      remoteUnknown: stored?.remoteUnknown ? pick(stored.remoteUnknown, ['user', 'mailbox', 'at']) : null,
+      remoteUnknown: stored?.remoteUnknown ? pick(stored.remoteUnknown, ['user', 'mailbox', 'at', 'reason']) : null,
       snapshot: snapshot ? {
         measuredAt: snapshot.measuredAt ?? null,
+        incomplete: snapshot.incomplete === true,
         totals: pick(snapshot.totals, ['messages', 'indexed', 'unindexed', 'unmeasured', 'excluded']),
         top20: (snapshot.top ?? []).slice(0, 20).map(measurement),
       } : null,

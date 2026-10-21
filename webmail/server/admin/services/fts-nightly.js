@@ -1,3 +1,4 @@
+import { summarizeFtsFolders } from './fts-measure.js';
 import { AppError } from '../../errors.js';
 
 const key = row => JSON.stringify([row.user, row.mailbox, row.guid]);
@@ -22,6 +23,12 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       logger?.warn({ code, stage }, '검색 색인 실행 기록을 확인해 주세요.');
     }
     async function save() {
+      if (state.snapshot) {
+        const folders = state.folders.map(row => row.after ?? row.before);
+        const times = folders.map(row => row.measuredAt).filter(value => Number.isFinite(Date.parse(value))).sort();
+        state.snapshot = { ...state.snapshot, measuredAt: times.at(-1) ?? state.snapshot.measuredAt,
+          folders, ...summarizeFtsFolders(folders) };
+      }
       try { state = await store.save(state, token); }
       catch (error) {
         keepLock = sentIndex || error.code === 'FTS_REMOTE_UNKNOWN';
@@ -41,7 +48,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
     async function execute(previous) {
       const priority = new Set(), remeasured = new Set();
       for (const row of previous?.folders ?? []) {
-        if (!unfinished(row) || remeasured.has(key(row))) continue;
+        if (!row.mailbox || !unfinished(row) || remeasured.has(key(row))) continue;
         remeasured.add(key(row));
         if (cutoff()) break;
         // Revalidate yesterday's identity before using it as a priority hint.
@@ -50,7 +57,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
           if (row.guid === null || fresh.guid === row.guid) priority.add(key(fresh));
         } catch (error) { warn(codeOf(error), 'priorityMeasure'); }
       }
-      const snapshot = await measure.measureAll();
+      const snapshot = await measure.measureAll({ shouldStop: cutoff });
       const seen = new Set();
       const rows = snapshot.folders.filter(row => {
         const id = key(row);
@@ -66,7 +73,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       await save();
       const queue = rows.filter(eligible).sort((a, b) => Number(priority.has(key(b))) - Number(priority.has(key(a))) ||
         b.unindexed - a.unindexed || key(a).localeCompare(key(b)));
-      for (const row of queue) {
+      for (const row of snapshot.incomplete ? [] : queue) {
         if (cutoff()) break;
         const record = state.folders.find(item => key(item) === key(row));
         try {
@@ -124,7 +131,7 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
       }
       state.current = null;
       const failed = state.folders.some(row => ['failed', 'unmeasured'].includes(row.result));
-      state.status = cutoff() ? 'cutoff' : failed || warnings.length ? 'failed' : 'done';
+      state.status = snapshot.incomplete || cutoff() ? 'cutoff' : failed || warnings.length ? 'failed' : 'done';
       state.finishedAt = timestamp();
       await save();
     }
@@ -168,5 +175,8 @@ export function createFtsNightly({ state: store, measure, doveadm, audit, histor
     }
     return { status: state?.status ?? 'failed', state, warnings };
   }
-  return { runOnce };
+  async function recoverAfterRestart() {
+    await store.markRemoteUnknown({ reason: 'restart' });
+  }
+  return { runOnce, recoverAfterRestart };
 }

@@ -34,14 +34,17 @@ export function createFtsMeasure({ doveadm, now = Date.now, folderList = user =>
       if (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid) return unknown('guid-mismatch', guid);
       const messages = status.messages, indexed = stats[0].messages;
       if (!validCount(messages) || !validCount(indexed) || indexed > messages) return unknown('invalid-count', guid);
-      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, status: 'ok', reason: null };
+      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, shards: stats[0].shards ?? null,
+        measuredAt: new Date(now()).toISOString(), status: 'ok', reason: null };
     } catch { return unknown('measurement-failed', guid); }
   }
 
-  async function measureAll() {
-    const users = await doveadm.listUsers();
+  async function measureAll({ shouldStop = () => false } = {}) {
     const folders = [];
-    for (const user of [...new Set(users)].sort()) {
+    let incomplete = shouldStop();
+    const users = incomplete ? [] : await doveadm.listUsers();
+    usersLoop: for (const user of [...new Set(users)].sort()) {
+      if (shouldStop()) { incomplete = true; break; }
       let listed;
       try {
         listed = await folderList(user);
@@ -50,7 +53,10 @@ export function createFtsMeasure({ doveadm, now = Date.now, folderList = user =>
         folders.push(row(user, null, 'unmeasured', 'measurement-failed'));
         continue;
       }
-      for (const mailbox of [...new Set(listed.map(item => item.mailbox))].sort()) folders.push(await measureFolder(user, mailbox));
+      for (const mailbox of [...new Set(listed.map(item => item.mailbox))].sort()) {
+        if (shouldStop()) { incomplete = true; break usersLoop; }
+        folders.push(await measureFolder(user, mailbox));
+      }
     }
     const byGuid = new Map();
     for (const folder of folders) {
@@ -62,16 +68,20 @@ export function createFtsMeasure({ doveadm, now = Date.now, folderList = user =>
         Object.assign(folder, row(folder.user, folder.mailbox, 'unmeasured', 'guid-mismatch', folder.guid));
       } else byGuid.set(key, folder);
     }
-    const totals = { messages: 0, indexed: 0, unindexed: 0, unmeasured: 0, excluded: 0 };
-    for (const folder of folders) {
-      if (folder.status !== 'ok') { totals[folder.status]++; continue; }
-      for (const key of ['messages', 'indexed', 'unindexed']) {
-        if (totals[key] !== null) totals[key] = Number.isSafeInteger(totals[key] + folder[key]) ? totals[key] + folder[key] : null;
-      }
-    }
-    const top = folders.filter(folder => folder.status === 'ok' && folder.unindexed > 0)
-      .sort((a, b) => b.unindexed - a.unindexed || a.user.localeCompare(b.user) || a.mailbox.localeCompare(b.mailbox)).slice(0, 20);
-    return { measuredAt: new Date(now()).toISOString(), folders, totals, top };
+    return { measuredAt: new Date(now()).toISOString(), folders, ...summarizeFtsFolders(folders), incomplete };
   }
   return { measureFolder, measureAll };
+}
+
+export function summarizeFtsFolders(folders) {
+  const totals = { messages: 0, indexed: 0, unindexed: 0, unmeasured: 0, excluded: 0 };
+  for (const folder of folders) {
+    if (folder.status !== 'ok') { totals[folder.status]++; continue; }
+    for (const key of ['messages', 'indexed', 'unindexed']) {
+      if (totals[key] !== null) totals[key] = Number.isSafeInteger(totals[key] + folder[key]) ? totals[key] + folder[key] : null;
+    }
+  }
+  const top = folders.filter(folder => folder.status === 'ok' && folder.unindexed > 0)
+    .sort((a, b) => b.unindexed - a.unindexed || a.user.localeCompare(b.user) || a.mailbox.localeCompare(b.mailbox)).slice(0, 20);
+  return { totals, top };
 }

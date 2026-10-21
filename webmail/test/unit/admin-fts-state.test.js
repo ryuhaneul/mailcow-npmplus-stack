@@ -191,3 +191,39 @@ test('fts state: recovery fsync failure never removes lock; failed acquisition i
   await assert.rejects(other.store.acquire(), /lock-sync/);
   assert.equal(await createFtsState({ dir: other.dir }).acquire(), null);
 });
+
+
+for (const status of ['running', 'failed', 'done']) for (const hasCurrent of [false, true]) {
+  test(`fts state: restart marks orphan ${status}, current=${hasCurrent}, preserves lock and blocks ownership`, async t => {
+    const f = await fixture(t); await f.store.acquire(); const run = await f.store.startRun();
+    const original = await f.store.save({ ...run, status, current: hasCurrent ? current : null });
+    const names = await fs.readdir(join(f.dir, 'lock'));
+    // The live owner must never be mistaken for an orphan.
+    assert.deepEqual(await f.store.markRemoteUnknown({ reason: 'restart' }), original);
+    const restarted = createFtsState({ dir: f.dir });
+    const marked = await restarted.markRemoteUnknown({ reason: 'restart' });
+    assert.equal(marked.status, 'unknown'); assert.equal(marked.indexBlocked, true);
+    assert.equal(marked.remoteUnknown.reason, 'restart');
+    assert.equal(marked.remoteUnknown.user, hasCurrent ? current.user : null);
+    assert.equal(marked.remoteUnknown.mailbox, hasCurrent ? current.mailbox : null);
+    assert.deepEqual((await restarted.read()).state, marked);
+    assert.deepEqual(await fs.readdir(join(f.dir, 'lock')), names);
+    assert.equal(await restarted.acquire(), null);
+    assert.deepEqual(await restarted.markRemoteUnknown({ reason: 'restart' }), marked);
+    await assert.rejects(restarted.markRemoteUnknown(current), { code: 'FTS_LOCK_OWNER' });
+  });
+}
+
+test('fts state: startup without leftover lock never marks a completed run unknown', async t => {
+  const f = await fixture(t); await f.store.acquire(); const run = await f.store.startRun();
+  const done = await f.store.save({ ...run, status: 'done' }); await f.store.release();
+  const restarted = createFtsState({ dir: f.dir });
+  assert.deepEqual(await restarted.markRemoteUnknown({ reason: 'restart' }), done);
+});
+
+test('fts state: restart preserves existing remote unknown evidence verbatim', async t => {
+  const f = await fixture(t); await f.store.acquire(); await f.store.startRun();
+  const unknown = await f.store.markRemoteUnknown(current);
+  const restarted = createFtsState({ dir: f.dir });
+  assert.deepEqual(await restarted.markRemoteUnknown({ reason: 'restart' }), unknown);
+});

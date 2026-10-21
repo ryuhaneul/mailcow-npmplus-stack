@@ -45,7 +45,7 @@ for (const [messages, indexed] of [[0, 0], [30, 30], [30, 10], [Number.MAX_SAFE_
       mailboxStatus: () => [{ mailbox, guid, messages }],
       ftsStats: () => [{ mailbox, guid, messages: indexed, last_uid: Number.MAX_SAFE_INTEGER }],
     });
-    assert.deepEqual(await service.measureFolder(user, mailbox), { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, status: 'ok', reason: null });
+    assert.deepEqual(await service.measureFolder(user, mailbox), { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, shards: null, measuredAt: new Date(at).toISOString(), status: 'ok', reason: null });
   });
 }
 
@@ -226,4 +226,33 @@ test('FTS invalid exact user or folder input triggers zero requests', async () =
     unknown(await service.measureFolder(u, name), 'measurement-failed');
   }
   assert.deepEqual(calls, []);
+});
+
+
+test('FTS preserves per-folder shards and actual measurement times', async () => {
+  let time = at;
+  const { service } = fixture({}, { now: () => time });
+  const first = await service.measureFolder(user, mailbox);
+  time += 2000;
+  const second = await service.measureFolder(user, mailbox);
+  assert.equal(first.shards, 1);
+  assert.equal(first.measuredAt, new Date(at).toISOString());
+  assert.equal(second.measuredAt, new Date(time).toISOString());
+});
+
+test('FTS full measurement stops before the next folder and preserves only observed rows', async () => {
+  let stop = false;
+  const { service, calls } = fixture({
+    call: () => ['A', 'B', 'C'].map(mailbox => ({ mailbox })),
+    ftsStats: (u, name) => { stop = true; return [{ mailbox: name, guid, messages: 10, shards: 4 }]; },
+  });
+  const snapshot = await service.measureAll({ shouldStop: () => stop });
+  assert.equal(snapshot.incomplete, true);
+  assert.deepEqual(snapshot.folders.map(row => row.mailbox), ['A']);
+  assert.equal(snapshot.totals.unindexed, 20);
+  assert.equal(snapshot.top[0].shards, 4);
+  assert.ok(!calls.some(call => call.includes('B') || call.includes('C')));
+  calls.length = 0;
+  const empty = await service.measureAll({ shouldStop: () => true });
+  assert.equal(empty.incomplete, true); assert.deepEqual(empty.folders, []); assert.deepEqual(calls, []);
 });

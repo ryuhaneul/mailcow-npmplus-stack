@@ -12,7 +12,7 @@ import { createFtsState } from '../../server/admin/fts-state.js';
 import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
 
 const instant = '2026-10-20T18:00:00.000Z';
-const row = (unindexed = 4) => ({ user: 'person@example.test', mailbox: '한글 폴더', guid: 'a'.repeat(32), messages: 10, indexed: 10 - unindexed, unindexed, status: 'ok', reason: null });
+const row = (unindexed = 4) => ({ user: 'person@example.test', mailbox: '한글 폴더', guid: 'a'.repeat(32), messages: 10, indexed: 10 - unindexed, unindexed, shards: 3, measuredAt: instant, status: 'ok', reason: null });
 const config = {
   adminHostname: 'mailadmin.example.test', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8,
   ftsNightly: { enabled: true, start: '03:15', end: '05:45', stateDir: '/synthetic/private-state-path' },
@@ -63,6 +63,8 @@ test('FTS cache GET100 verifies admin each time and reads only stored state', as
     assert.equal(body.remoteUnknown.at, instant); assert.equal(body.snapshot.measuredAt, instant);
     assert.deepEqual(body.snapshot.totals, { messages: 10, indexed: 6, unindexed: 4, unmeasured: 1, excluded: 2 });
     assert.equal(body.snapshot.top20[0].unindexed, 4);
+    assert.equal(body.snapshot.top20[0].shards, 3); assert.equal(body.snapshot.top20[0].measuredAt, instant);
+    assert.equal(body.folders[0].shards, 3); assert.equal(body.folders[0].measuredAt, instant);
     assert.equal(body.folders[0].unindexed, 0); assert.equal(body.folders[1].unindexed, 4);
     assert.equal(body.folders[1].mailbox, '대기');
     assert.equal(body.snapshot.folders, undefined); assert.equal(body.damaged, false);
@@ -136,4 +138,39 @@ test('FTS mounted admin route reads real state; GET100 starts no Dovecot/measure
   await writeFile(join(dir, 'state.json'), '{synthetic-corrupt');
   const damaged = await app.inject({ url: '/api/admin/fts-status', headers });
   assert.equal(damaged.statusCode, 200); assert.equal(damaged.json().damaged, true);
+});
+
+
+test('FTS API projects incomplete measurements and restart unknown without inventing a folder', async t => {
+  const stored = storedState();
+  stored.status = 'unknown'; stored.remoteUnknown = { user: null, mailbox: null, at: instant, reason: 'restart' };
+  stored.snapshot.incomplete = true;
+  stored.folders.push({ user: 'bad@example.test', mailbox: null, before: {
+    user: 'bad@example.test', mailbox: null, guid: null, status: 'unmeasured', reason: 'measurement-failed',
+  }, after: null, result: 'unmeasured', error: null });
+  const f = await fixture(t, { state: stored, damaged: false });
+  const body = (await f.app.inject({ url: '/api/admin/fts-status', headers: f.headers })).json();
+  assert.equal(body.snapshot.incomplete, true); assert.equal(body.lastRun.status, 'unknown');
+  assert.deepEqual(body.remoteUnknown, stored.remoteUnknown);
+  assert.equal(body.folders[2].mailbox, null); assert.equal(body.folders[2].status, 'unmeasured');
+  assert.equal(body.folders[2].reason, 'measurement-failed');
+});
+
+
+test('FTS app onReady persists restart warning before API reads even with scheduling disabled', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'fts-onready-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const owner = createFtsState({ dir }); await owner.acquire(); const run = await owner.startRun();
+  const lockFiles = await readdir(join(dir, 'lock'));
+  let remoteCalls = 0;
+  const doveadm = new Proxy({}, { get() { return async () => { remoteCalls++; throw new Error('synthetic'); }; } });
+  const app = await createAdminApp({ config: { ...config, ftsNightly: { ...config.ftsNightly, enabled: false, stateDir: dir }, auditDir: dir }, logger: false, doveadm,
+    auth: { client: { async login({ username }) { return { username, state: 'ready' }; }, async logout() {}, async call() { return { version: 'synthetic' }; } } } });
+  t.after(() => app.close());
+  const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.test' }, payload: { username: 'admin', password: 'synthetic' } });
+  const response = await app.inject({ url: '/api/admin/fts-status', headers: { cookie: login.headers['set-cookie'].split(';')[0] } });
+  assert.equal(response.statusCode, 200);
+  const body = response.json(); assert.equal(body.lastRun.runId, run.runId); assert.equal(body.lastRun.status, 'unknown');
+  assert.equal(body.indexBlocked, true); assert.equal(body.remoteUnknown.reason, 'restart');
+  assert.equal(body.remoteUnknown.user, null); assert.equal(body.remoteUnknown.mailbox, null);
+  assert.deepEqual(await readdir(join(dir, 'lock')), lockFiles); assert.equal(remoteCalls, 0);
 });

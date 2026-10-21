@@ -12,6 +12,10 @@ const validDay = day => typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(da
   !Number.isNaN(Date.parse(`${day}T00:00:00Z`)) && new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const folder = value => value && text(value.user) && text(value.mailbox);
+const unlisted = value => value && text(value.user) && value.mailbox === null && value.guid === null &&
+  value.result === 'unmeasured' && value.before?.status === 'unmeasured' &&
+  value.before?.user === value.user && value.before?.mailbox === null && value.before?.guid === null &&
+  value.before?.reason === 'measurement-failed' && value.after === null;
 const evidenceValid = value => value && ['by', 'at', 'reason'].every(key => text(value[key])) &&
   Number.isFinite(Date.parse(value.at)) && value.remoteStopped === true;
 function validState(value) {
@@ -22,8 +26,9 @@ function validState(value) {
       text(value.runId) && validDay(value.day) && value.runIds[value.day] === value.runId && statuses.includes(value.status) && text(value.startedAt)) &&
     (value.finishedAt === null || text(value.finishedAt)) &&
     (value.current === null || folder(value.current) && text(value.current.guid)) && Array.isArray(value.folders) &&
-    value.folders.every(item => folder(item) && (item.guid === null || text(item.guid)) && ['before', 'after', 'result', 'error'].every(key => Object.hasOwn(item, key))) &&
-    (value.remoteUnknown === null || folder(value.remoteUnknown) && text(value.remoteUnknown.at)) &&
+    value.folders.every(item => (folder(item) || unlisted(item)) && (item.guid === null || text(item.guid)) && ['before', 'after', 'result', 'error'].every(key => Object.hasOwn(item, key))) &&
+    (value.remoteUnknown === null || (folder(value.remoteUnknown) || value.remoteUnknown?.reason === 'restart' &&
+      value.remoteUnknown.user === null && value.remoteUnknown.mailbox === null) && text(value.remoteUnknown.at)) &&
     typeof value.indexBlocked === 'boolean' && (!value.remoteUnknown || value.indexBlocked === true);
 }
 const emptyState = () => ({ v: 1, runId: null, day: null, status: null, startedAt: null, finishedAt: null,
@@ -163,6 +168,19 @@ export function createFtsState({ dir = '/data/fts-nightly', now = Date.now, fs =
   }
   async function markRemoteUnknown(value) {
     return serial.run('state', async () => {
+      if (value?.reason === 'restart') {
+        const state = await load();
+        if (owned || state.remoteUnknown) return state;
+        try { await fs.stat(lockDir); }
+        catch (error) { if (error.code === 'ENOENT') return state; throw error; }
+        if (!state.runId) throw fail('FTS_STATE_INVALID', '시작된 실행이 없어요.');
+        state.remoteUnknown = { user: state.current?.user ?? null, mailbox: state.current?.mailbox ?? null,
+          at: timestamp(), reason: 'restart' };
+        state.indexBlocked = true;
+        state.status = 'unknown';
+        await write(state);
+        return state;
+      }
       await assertOwner();
       if (!folder(value)) throw fail('FTS_STATE_INVALID', '원격 작업 폴더를 확인해 주세요.');
       const state = await load();

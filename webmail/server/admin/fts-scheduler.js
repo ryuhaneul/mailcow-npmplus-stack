@@ -22,9 +22,12 @@ export function createFtsScheduler({ config, nightly, logger, now = Date.now,
       logger?.warn({ code: 'FTS_SCHEDULER_FAILED' }, '검색 색인 예약 실행을 확인해 주세요.');
     } finally { running = false; }
   }
-  function start() {
-    if (started || !config.enabled || controller.signal.aborted) return;
+  async function start() {
+    if (started || controller.signal.aborted) return;
     started = true;
+    try { if (nightly.recoverAfterRestart) await nightly.recoverAfterRestart(); }
+    catch { logger?.warn({ code: 'FTS_RESTART_RECOVERY_FAILED' }, '검색 색인 재시작 복구 기록을 확인해 주세요.'); }
+    if (!config.enabled || controller.signal.aborted) return;
     timer = schedule(() => { void tick(); }, 60_000);
     timer.unref?.();
     void tick();

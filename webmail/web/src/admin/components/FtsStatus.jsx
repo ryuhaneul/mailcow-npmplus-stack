@@ -48,11 +48,11 @@ export default function FtsStatus({ resource, now = Date.now() }) {
   const issues = data?.folders.filter(row => ['failed', 'unknown', 'unmeasured', 'excluded'].includes(row.result) || ['unmeasured', 'excluded'].includes(row.status)) ?? [];
   const running = data?.folders.find(row => row.result === 'running');
   const targetCount = snapshot && Number.isSafeInteger(totals.excluded) ? data.folders.length - totals.excluded : null;
-  const remaining = totals && (totals.unmeasured === 0 || targetCount > totals.unmeasured) ? totals.unindexed : null;
+  const remaining = !snapshot?.incomplete && totals && (totals.unmeasured === 0 || targetCount > totals.unmeasured) ? totals.unindexed : null;
   return <section class="overview-section card fts-status" aria-labelledby="fts-title" data-fts-status>
     <div class="section-title"><h2 id="fts-title">검색 색인</h2><span class="chip plain">보기 전용</span></div>
     {resource.loading ? <Loading/> : resource.error ? <LoadError error={resource.error} retry={resource.reload} title="검색 색인 상태를 불러오지 못했습니다"/> : data && <>
-      {blocked && <div class="alert danger" role="alert"><strong>종료 확인 필요 — 수동 복구</strong><p>원격 작업 종료를 확인하기 전에는 자동 색인을 다시 시작하지 않습니다.</p>{data.remoteUnknown && <p>{data.remoteUnknown.user} · {data.remoteUnknown.mailbox} · {at(data.remoteUnknown.at)}</p>}</div>}
+      {blocked && <div class="alert danger" role="alert"><strong>종료 확인 필요 — 수동 복구</strong><p>원격 작업 종료를 확인하기 전에는 자동 색인을 다시 시작하지 않습니다.</p>{data.remoteUnknown && <p>{data.remoteUnknown.reason === 'restart' ? '앱 재시작 뒤 남은 잠금' : `${data.remoteUnknown.user} · ${data.remoteUnknown.mailbox}`} · {at(data.remoteUnknown.at)}</p>}</div>}
       {data.damaged && <div class="alert danger" role="alert"><strong>상태 손상</strong><p>저장된 상태를 확인할 수 없습니다. 수동 복구가 필요합니다.</p></div>}
       <div class="mini-row"><span>예약 색인</span><span class={`chip ${data.enabled ? 'ok' : 'plain'}`}>{data.enabled ? '켜짐' : '꺼짐'}</span></div>
       <div class="mini-row"><span>시간 창 (KST)</span><span>{data.window.start} ~ {data.window.end}</span></div>
@@ -61,13 +61,14 @@ export default function FtsStatus({ resource, now = Date.now() }) {
       <div class="mini-row"><span>마지막 시작</span><span>{at(data.lastRun?.startedAt)}</span></div>
       <div class="mini-row"><span>마지막 끝</span><span>{at(data.lastRun?.finishedAt)}</span></div>
       {running && <p class="hint">현재 폴더: {running.user} · {running.mailbox}</p>}
-      <div class="mini-row"><span>남은 미색인 추정 합계</span><span class="num">{count(remaining)}{Number.isSafeInteger(remaining) ? '통' : ''}</span></div>
+      <div class="mini-row"><span>폴더별 마지막 측정 합계</span><span class="num">{count(remaining)}{Number.isSafeInteger(remaining) ? '통' : ''}</span></div>
+      {snapshot?.incomplete && <p class="hint">측정 미완료 — 측정하지 못한 폴더의 수와 잔량은 알 수 없습니다.</p>}
       {totals?.unmeasured > 0 && <p class="hint">측정된 폴더만의 합계입니다. 미측정·실패 폴더는 합계에서 제외됩니다.</p>}
       <div class="mini-row"><span>측정 실패 수</span><span>{count(totals?.unmeasured)}{Number.isSafeInteger(totals?.unmeasured) ? '개' : ''}</span></div>
       <div class="mini-row"><span>마지막 측정 시각</span><span>{snapshot?.measuredAt ? at(snapshot.measuredAt) : '미측정'} {stale && <span class="chip warn">오래된 측정</span>}</span></div>
-      {snapshot && <p class="hint">전체 대상 {count(targetCount)}개 · 측정 성공 {count(targetCount == null || totals.unmeasured == null ? null : targetCount - totals.unmeasured)}개 · 측정 실패 {count(totals.unmeasured)}개 · 제외 {count(totals.excluded)}개 (마지막 측정 기준)</p>}
+      {snapshot && <p class="hint">{snapshot.incomplete ? '확인한 대상' : '전체 대상'} {count(targetCount)}개 · 측정 성공 {count(targetCount == null || totals.unmeasured == null ? null : targetCount - totals.unmeasured)}개 · 측정 실패 {count(totals.unmeasured)}개 · 제외 {count(totals.excluded)}개 (마지막 측정 기준)</p>}
       <details><summary>색인 상세</summary>
-        {!snapshot ? <Empty>아직 측정한 정보가 없습니다.</Empty> : !snapshot.top20.length ? <Empty>마지막 측정에서 미색인으로 확인된 폴더가 없습니다.{totals.unmeasured > 0 ? ' 미측정·실패 폴더를 확인하세요.' : ''}</Empty> : <FolderTable rows={snapshot.top20} measuredAt={snapshot.measuredAt} label="미색인 상위 20개 · 마지막 측정 기준"/>}
+        {!snapshot ? <Empty>아직 측정한 정보가 없습니다.</Empty> : !snapshot.top20.length ? <Empty>{snapshot.incomplete ? '측정 미완료입니다.' : '마지막 측정에서 미색인으로 확인된 폴더가 없습니다.'}{totals.unmeasured > 0 ? ' 미측정·실패 폴더를 확인하세요.' : ''}</Empty> : <FolderTable rows={snapshot.top20} measuredAt={snapshot.measuredAt} label="미색인 상위 20개 · 마지막 측정 기준"/>}
         {issues.length > 0 && <FolderTable rows={issues} label="실패·미측정·자동 색인 제외 폴더"/>}
       </details>
     </>}

@@ -109,3 +109,26 @@ test('fts scheduler: real persistent orphan lock remains busy across restart and
   assert.equal(measurements, 0); assert.equal(await store.acquire(), null);
   await owner.release();
 });
+
+
+for (const enabled of [true, false]) test(`fts scheduler: startup recovers orphan outside window even enabled=${enabled}`, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'fts-restart-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const owner = createFtsState({ dir }); await owner.acquire(); await owner.startRun();
+  const state = createFtsState({ dir }); let remoteCalls = 0;
+  const nightly = createFtsNightly({ state, measure: { async measureAll() { remoteCalls++; } } });
+  const f = fixture({ nightly, config: { ...config, enabled } });
+  f.setTime('2026-10-20T22:00:00Z');
+  await f.scheduler.start(); t.after(() => f.scheduler.stop());
+  assert.equal((await state.read()).state.status, 'unknown');
+  assert.equal((await state.read()).state.remoteUnknown.reason, 'restart');
+  assert.equal(remoteCalls, 0); assert.equal(await state.acquire(), null);
+});
+
+test('fts scheduler: failed recovery logs a safe warning and does not block startup', async () => {
+  const f = fixture({ nightly: { async recoverAfterRestart() { throw new Error('synthetic-secret'); }, async runOnce() {} } });
+  f.setTime('2026-10-20T22:00:00Z');
+  await f.scheduler.start();
+  assert.equal(f.counts().scheduled, 1);
+  assert.equal(f.warnings[0][0].code, 'FTS_RESTART_RECOVERY_FAILED');
+  assert.ok(!JSON.stringify(f.warnings).includes('synthetic-secret')); f.scheduler.stop();
+});

@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFtsNightly } from '../../server/admin/services/fts-nightly.js';
+import { createFtsMeasure } from '../../server/admin/services/fts-measure.js';
 import { createFtsState } from '../../server/admin/fts-state.js';
 import { createAudit } from '../../server/admin/audit.js';
 import { createHistoryService } from '../../server/admin/services/history.js';
@@ -348,4 +349,65 @@ test('fts nightly: shutdown does not release remote unknown lock', async t => {
   const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
   assert.equal(result.status, 'unknown'); assert.equal(await f.state.acquire(), null);
   assert.equal(result.state.indexBlocked, true); assert.equal(f.indexed.size, 0);
+});
+
+
+test('fts nightly: failed account folder list remains durable while healthy account indexes', async t => {
+  const f = await fixture(t);
+  const guid = 'a'.repeat(32);
+  f.deps.measure = createFtsMeasure({ now: f.deps.now, doveadm: {
+    async listUsers() { return ['bad@example.test', 'user@example.test']; },
+    async call(_command, { user }) { if (user === 'bad@example.test') throw new Error('synthetic'); return [{ mailbox: 'INBOX' }]; },
+    async specialUse() { return [{ value: '' }]; },
+    async mailboxStatus() { return [{ mailbox: 'INBOX', guid, messages: 100 }]; },
+    async ftsStats() { return [{ mailbox: 'INBOX', guid, messages: f.indexed.size ? 100 : 90, shards: 3 }]; },
+  } });
+  const result = await f.run();
+  assert.equal(result.status, 'failed'); assert.deepEqual([...f.indexed], ['INBOX']);
+  const saved = (await f.state.read()).state;
+  assert.equal(saved.folders[0].mailbox, null); assert.equal(saved.folders[0].result, 'unmeasured');
+  assert.equal(saved.snapshot.totals.unmeasured, 1); assert.equal(saved.snapshot.totals.unindexed, 0);
+  assert.deepEqual(saved.snapshot.top, []); assert.equal(saved.folders[1].after.shards, 3);
+  assert.equal(saved.folders[1].after.measuredAt, new Date(start).toISOString());
+  assert.equal(saved.current, null); assert.ok(await f.state.acquire()); await f.state.release();
+});
+
+test('fts nightly: each completed folder updates durable totals/top using after or latest before', async t => {
+  const f = await fixture(t, [row('first', 30), row('second', 20), row('third', 10)]);
+  const save = f.state.save, snapshots = [];
+  f.state.save = async (...args) => { const saved = await save(...args); snapshots.push(structuredClone(saved)); return saved; };
+  const measure = f.deps.measure.measureFolder;
+  f.deps.measure.measureFolder = async (user, mailbox) => {
+    const value = await measure(user, mailbox);
+    return mailbox === 'second' && f.indexed.has(mailbox) ? { ...value, status: 'unmeasured', messages: null, indexed: null, unindexed: null } : value;
+  };
+  const result = await f.run();
+  const afterFirst = snapshots.find(state => state.folders[0].result === 'done' && state.folders[1].result === 'pending');
+  assert.equal(afterFirst.snapshot.totals.unindexed, 30);
+  assert.deepEqual(afterFirst.snapshot.top.map(row => row.mailbox), ['second', 'third']);
+  assert.equal(result.state.snapshot.totals.unindexed, 0);
+  assert.equal(result.state.snapshot.totals.unmeasured, 1);
+  assert.deepEqual(result.state.snapshot.top, []);
+  assert.equal(result.state.status, 'failed');
+});
+
+for (const stop of ['deadline', 'signal']) test(`fts nightly: real full measurement ${stop} stops before next folder, indexes zero and persists cutoff`, async t => {
+  const f = await fixture(t), controller = new AbortController(), calls = [];
+  const guid = 'b'.repeat(32);
+  f.deps.measure = createFtsMeasure({ now: f.deps.now, doveadm: {
+    async listUsers() { return ['user@example.test']; },
+    async call() { return ['A', 'B', 'C'].map(mailbox => ({ mailbox })); },
+    async specialUse(user, mailbox) { calls.push(mailbox); return [{ value: '' }]; },
+    async mailboxStatus(user, mailbox) { return [{ mailbox, guid, messages: 100 }]; },
+    async ftsStats(user, mailbox) {
+      if (stop === 'deadline') f.setTime(end); else controller.abort();
+      return [{ mailbox, guid, messages: 0, shards: 2 }];
+    },
+  } });
+  const result = await createFtsNightly(f.deps).runOnce({ deadline: end, signal: controller.signal });
+  assert.equal(result.status, 'cutoff'); assert.equal(f.indexed.size, 0);
+  assert.deepEqual(calls, ['A']); assert.equal(result.state.snapshot.incomplete, true);
+  assert.equal(result.state.folders.length, 1); assert.equal(result.state.folders[0].result, 'pending');
+  assert.equal((await f.state.read()).state.status, 'cutoff');
+  assert.ok(await f.state.acquire()); await f.state.release();
 });

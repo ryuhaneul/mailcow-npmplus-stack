@@ -56,4 +56,16 @@ test('FTS overview uses KST scheduling, honest missing values and distinct run s
     const allUnknown = { ...data, folders: [data.folders[1]] };
     assert.doesNotMatch(render(allUnknown), /0 통/);
   });
+  await t.test('incomplete measurement hides unknown total and restart needs manual recovery', () => {
+    const data = { ...base, lastRun: { status: 'cutoff' }, folders: [], snapshot: {
+      incomplete: true, measuredAt: '2026-10-21T18:00:00Z', totals: { unindexed: 0, unmeasured: 0, excluded: 0 }, top20: [],
+    } };
+    const output = render(data);
+    assert.match(output, /폴더별 마지막 측정 합계/); assert.match(output, /측정 미완료/);
+    assert.match(output, /측정하지 못한 폴더의 수와 잔량은 알 수 없습니다/);
+    assert.doesNotMatch(output, /0 통|전체 대상/);
+    const blocked = render({ ...data, indexBlocked: true, remoteUnknown: { user: null, mailbox: null, reason: 'restart', at: data.snapshot.measuredAt } });
+    assert.match(blocked, /종료 확인 필요 — 수동 복구/); assert.match(blocked, /앱 재시작 뒤 남은 잠금/);
+  });
+
 });

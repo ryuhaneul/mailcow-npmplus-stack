@@ -9,13 +9,14 @@ import { createFakeAdminApi } from '../../web/dev/fake-admin-api.js';
 const captures = process.env.FTS_CAPTURE_DIR || '/tmp/webmail-fts-captures';
 const measuredAt = '2026-10-20T18:00:00.000Z';
 const empty = { enabled: false, window: { start: '03:00', end: '06:00', timeZone: 'Asia/Seoul' }, lastRun: null, indexBlocked: false, remoteUnknown: null, snapshot: null, folders: [], damaged: false };
-const rows = Array.from({ length: 20 }, (_, index) => ({ user: `person${index}@example.test`, mailbox: index === 0 ? `프로젝트/아주 긴 한글 폴더 이름 ${'상세자료'.repeat(30)}` : `합성 폴더 ${index}`, messages: 1000, indexed: 800 + index, unindexed: 200 - index, shards: 2, status: 'ok', reason: null, measuredAt: null }));
+const rows = Array.from({ length: 20 }, (_, index) => ({ user: `person${index}@example.test`, mailbox: index === 0 ? `프로젝트/아주 긴 한글 폴더 이름 ${'상세자료'.repeat(30)}` : `합성 폴더 ${index}`, messages: 1000, indexed: 800 + index, unindexed: 200 - index, shards: 2, status: 'ok', reason: null, measuredAt: new Date(Date.parse(measuredAt) + index * 1000).toISOString() }));
 const complete = { ...empty, enabled: true, lastRun: { day: '2026-10-21', status: 'done', startedAt: measuredAt, finishedAt: '2026-10-20T18:20:00Z' }, snapshot: { measuredAt, totals: { messages: 20000, indexed: 16190, unindexed: 3810, unmeasured: 0, excluded: 0 }, top20: rows }, folders: rows.map(row => ({ ...row, result: 'done', error: null })) };
 const states = {
   disabled: empty,
   complete,
-  blocked: { ...complete, indexBlocked: true, remoteUnknown: { user: 'person0@example.test', mailbox: '종료 미확인 폴더', at: measuredAt }, lastRun: { ...complete.lastRun, status: 'unknown' } },
+  blocked: { ...complete, indexBlocked: true, remoteUnknown: { user: null, mailbox: null, at: measuredAt, reason: 'restart' }, lastRun: { ...complete.lastRun, status: 'unknown' } },
   damaged: { ...empty, enabled: true, damaged: true },
+  incomplete: { ...complete, lastRun: { ...complete.lastRun, status: 'cutoff' }, snapshot: { ...complete.snapshot, incomplete: true } },
 };
 await test('FTS overview synthetic responses, independent errors and responsive captures', async t => {
   const fake = createFakeAdminApi();
@@ -43,6 +44,13 @@ await test('FTS overview synthetic responses, independent errors and responsive 
       await expect(card.getByText(name === 'disabled' ? '꺼짐' : '켜짐', { exact: true })).toBeVisible();
       if (name === 'disabled' || name === 'damaged') { await expect(card.getByText('미측정', { exact: true })).toHaveCount(3); assert.doesNotMatch(await card.innerText(), /0통|0개/); }
       if (name === 'blocked') await expect(card.getByText('종료 확인 필요 — 수동 복구', { exact: true })).toBeVisible();
+      if (name === 'incomplete') {
+        await expect(card).toContainText('측정 미완료');
+        await expect(card).toContainText('측정하지 못한 폴더의 수와 잔량은 알 수 없습니다.');
+        await expect(card).not.toContainText('3,810통');
+      }
+      if (name === 'blocked') await expect(card).toContainText('앱 재시작 뒤 남은 잠금');
+      await expect(card).toContainText('폴더별 마지막 측정 합계');
       if (name === 'damaged') await expect(card.getByRole('alert')).toContainText('상태 손상');
       if (name === 'complete' || name === 'blocked') {
         await expect(card.getByText('오래된 측정', { exact: true })).toBeVisible();
@@ -64,14 +72,14 @@ await test('FTS overview synthetic responses, independent errors and responsive 
       diagnostics.push({ name, width, errors, requests });
     } finally { await context.close(); }
   });
-  await t.test('partial measurement, exclusions, zero/null and row failures are separate from top20', async () => {
+  for (const width of [1280, 375]) await t.test(`partial account listing failure and exclusions ${width}`, async () => {
     const issueRows = [
-      { user: 'partial@example.test', mailbox: '미측정', messages: null, indexed: null, unindexed: null, status: 'unmeasured', result: 'unmeasured', reason: 'missing-stats' },
+      { user: 'partial@example.test', mailbox: null, messages: null, indexed: null, unindexed: null, status: 'unmeasured', result: 'unmeasured', reason: 'measurement-failed' },
       { user: 'partial@example.test', mailbox: '별표*폴더', messages: null, indexed: null, unindexed: null, status: 'excluded', result: 'excluded', reason: 'wildcard-name' },
       { user: 'partial@example.test', mailbox: '연결 실패', messages: 4, indexed: 0, unindexed: 4, status: 'ok', result: 'failed', error: 'DOVEADM_UNAVAILABLE' },
     ];
     const data = { ...complete, lastRun: { ...complete.lastRun, status: 'failed' }, folders: [...complete.folders, ...issueRows], snapshot: { ...complete.snapshot, totals: { ...complete.snapshot.totals, unmeasured: 1, excluded: 1 } } };
-    const { page, card, context, errors, requests } = await open(data, 375);
+    const { page, card, context, errors, requests } = await open(data, width);
     try {
       await expect(card.getByText('일부 실패', { exact: true })).toBeVisible();
       await expect(card).toContainText('측정된 폴더만의 합계'); await expect(card).toContainText('전체 대상 22개 · 측정 성공 21개 · 측정 실패 1개 · 제외 1개');
@@ -79,6 +87,8 @@ await test('FTS overview synthetic responses, independent errors and responsive 
       await expect(card.locator('table').last()).toContainText('이름에 * 또는 % 가 있어 자동 색인 제외');
       await expect(card.locator('table').last()).toContainText('서버 연결 불가');
       const nullRow = card.locator('table').last().locator('tbody tr').first();
+      await expect(nullRow).toContainText('폴더 목록 확인 불가');
+      await page.screenshot({ path: `${captures}/partial-${width}.png`, fullPage: true });
       await expect(nullRow).toContainText('미측정'); assert.doesNotMatch(await nullRow.innerText(), /\b0\b/);
       await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/admin/fts-status')), page.getByRole('button', { name: '새로고침', exact: true }).click()]);
       await expect(card.getByText('일부 실패', { exact: true })).toBeVisible(); assert.deepEqual(requests, ['GET', 'GET']); assert.deepEqual(errors, []);

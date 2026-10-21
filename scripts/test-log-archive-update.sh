@@ -522,4 +522,92 @@ before=$(sha256sum "$TMP/snappy-runtime.yml")
 if edge_sync_snappymail_compose "$TMP/snappy-desired.yml" "$TMP/snappy-runtime.yml"; then fail snappy-custom-logging; fi
 [ "$(sha256sum "$TMP/snappy-runtime.yml")" = "$before" ] || fail custom-logging-overwrite
 pass 'SnappyMail custom logging remains untouched and fails closed'
+# Run the production startup prefix in a disposable checkout. Exported spies
+# survive exec, exercising real process replacement without remote repositories.
+python3 - "$ROOT" "$TMP" <<'STARTUP'
+from pathlib import Path
+import sys
+root,dest=map(Path,sys.argv[1:])
+s=(root/'scripts/update.sh').read_text()
+a=s.index('# Refresh this checkout')
+b=s.index('# Read feature selection',a)
+assert s.index('docker compose version') < a < b < s.index('source "$SCRIPT_DIR/lib/webmail-env.sh"')
+assert s.count('git_pull_if_repo "$PROJECT_DIR"') == 1
+assert s.index('command -v rsync') < s.index('waf_resolve_bouncer_key') < s.index('log_archive_prepare "$PROJECT_DIR"')
+fixture=dest/'startup'
+(fixture/'scripts/lib').mkdir(parents=True)
+(fixture/'.git').mkdir()
+(fixture/'scripts/lib/waf.sh').write_text('')
+end=s.index('waf_options || die')
+prefix=s[:end].replace('set -euo pipefail\n', 'set -euo pipefail\necho entry >> "$TMP/startup-calls"\n', 1)
+(fixture/'scripts/update.sh').write_text(prefix+'''printf 'complete:%s:%s\\n' "$STARTUP_LIBRARY" "$*" >> "$TMP/startup-calls"
+''')
+setup=(root/'scripts/setup.sh').read_text()
+line=next(line for line in setup.splitlines() if 'then install_pkg rsync; fi' in line)
+(dest/'setup-rsync.sh').write_text(line+'\n')
+STARTUP
+startup_case() (
+    trap - EXIT
+    unset MAILSTACK_UPDATE_REEXEC
+    export STARTUP_CHANGE="$1" STARTUP_RSYNC="$2"
+    printf 'old\n' > "$TMP/startup-head"
+    : > "$TMP/startup-calls"
+    printf 'STARTUP_LIBRARY=old\nwebmail_options() { :; }\n' > "$TMP/startup/scripts/lib/webmail-env.sh"
+    printf 'WEBMAIL_ENABLE=%s\nTOOLKIT_ENABLE=%s\n' "$3" "$4" > "$TMP/startup/.env"
+    git() {
+        case "$*" in
+            *'rev-parse --abbrev-ref HEAD') echo synthetic ;;
+            *'rev-parse HEAD') cat "$TMP/startup-head" ;;
+            *'pull --ff-only')
+                echo pull >> "$TMP/startup-calls"
+                if [ "$STARTUP_CHANGE" = true ]; then
+                    echo new > "$TMP/startup-head"
+                    printf 'STARTUP_LIBRARY=new\nwebmail_options() { :; }\n' > "$TMP/startup/scripts/lib/webmail-env.sh"
+                fi ;;
+            *) return 98 ;;
+        esac
+    }
+    docker() { [ "$*" = 'compose version' ]; }
+    id() { echo 0; }
+    command() {
+        if [ "${2:-}" = rsync ]; then
+            [ "$STARTUP_RSYNC" = true ]
+        else builtin command "$@"; fi
+    }
+    export -f git docker id command
+    LOGFILE="$TMP/startup.log" bash "$TMP/startup/scripts/update.sh" -y --skip-mailcow-update > "$TMP/startup-output" 2>&1
+)
+startup_case true true false true || fail self-reexec
+[ "$(grep -c '^entry$' "$TMP/startup-calls")" = 2 ] || fail missing-exec
+[ "$(grep -c '^pull$' "$TMP/startup-calls")" = 1 ] || fail repeated-self-pull
+[ "$(grep -c '^complete:' "$TMP/startup-calls")" = 1 ] || fail repeated-startup
+grep -qx 'complete:new:-y --skip-mailcow-update' "$TMP/startup-calls" || fail stale-library-or-args
+pass 'changed self HEAD execs once, preserves flags and loads refreshed libraries'
+startup_case false true false true || fail unchanged-startup
+[ "$(grep -c '^entry$' "$TMP/startup-calls")" = 1 ] || fail unnecessary-exec
+grep -qx 'complete:old:-y --skip-mailcow-update' "$TMP/startup-calls" || fail unchanged-flow
+[ "$(grep -c '^pull$' "$TMP/startup-calls")" = 1 ] || fail unchanged-pulls
+pass 'unchanged self HEAD continues without re-execution'
+for features in 'true false' 'false true' 'true true'; do
+    read -r webmail toolkit <<< "$features"
+    if startup_case false false "$webmail" "$toolkit"; then fail missing-rsync; fi
+    ! grep -q '^complete:' "$TMP/startup-calls" || fail rsync-late-stop
+    grep -q 'rsync not found; install it with' "$TMP/startup-output" || fail missing-install-guidance
+    pass "missing rsync stops before deployment for Webmail=$webmail Toolkit=$toolkit"
+done
+startup_case false false false false || fail unused-rsync
+pass 'rsync is optional when both consuming features are disabled'
+for webmail in true false; do
+    for toolkit in true false; do
+        calls=$(
+            WEBMAIL_ENABLE=$webmail TOOLKIT_ENABLE=$toolkit
+            install_pkg() { echo "$1"; }
+            source "$TMP/setup-rsync.sh"
+        )
+        if [ "$webmail" = true ] || [ "$toolkit" = true ]; then
+            [ "$calls" = rsync ] || fail setup-rsync-required
+        else [ -z "$calls" ] || fail setup-rsync-unused; fi
+    done
+done
+pass 'setup installs rsync for the same Webmail or Toolkit feature combinations'
 echo "$n synthetic tests passed"

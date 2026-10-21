@@ -16,7 +16,7 @@ try {
   document.title = config.value.brandName;
   loadPrefs(config.value);
   initTheme(); initRouter();
-  try { await api('/api/auth/session'); await loadSessionPrefs(); } catch (error) {
+  try { await api('/api/auth/session', { silentSessionErrors: true }); await loadSessionPrefs(); } catch (error) {
     if (!['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) throw error;
   }
   render(<App/>, document.getElementById('app'));

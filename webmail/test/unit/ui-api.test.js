@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { api } from '../../web/src/api.js';
-import { session } from '../../web/src/state/session.js';
+import { session, sessionReady } from '../../web/src/state/session.js';
 import { toast } from '../../web/src/state/toast.js';
 import { parseRoute } from '../../web/src/router.js';
 import { quotaView } from '../../web/src/format.js';
@@ -42,6 +42,23 @@ test('API: NO_SESSION clears session without a login notice', async t => {
   await assert.rejects(api('/api/folders'));
   assert.equal(session.value,null);assert.equal(toast.value,null);
 });
+for (const code of ['NO_SESSION', 'SESSION_EXPIRED']) {
+  test(`API: initial session check with ${code} returns to login without a notice`, async t => {
+    mock(t, async (_path, options) => {
+      assert.equal(Object.hasOwn(options, 'silentSessionErrors'), false);
+      return Response.json({ error: { code, message: 'synthetic session error' } }, { status: 403 });
+    });
+    t.after(() => { sessionReady.value = false; });
+    sessionReady.value = true;
+    await assert.rejects(api('/api/auth/session', { silentSessionErrors: true }), error => error.code === code);
+    assert.equal(session.value, null);
+    assert.equal(sessionReady.value, false);
+    assert.equal(toast.value, null);
+    toast.value = { kind: 'password-changed', message: '암호를 바꿨어요.' };
+    await assert.rejects(api('/api/auth/session', { silentSessionErrors: true }));
+    assert.equal(toast.value.kind, 'password-changed');
+  });
+}
 test('API: SESSION_EXPIRED clears session and sets the approved notice; password-change notice wins', async t => {
   mock(t,async()=>Response.json({error:{code:'SESSION_EXPIRED',message:'expired'}},{status:403}));
   session.value=user;

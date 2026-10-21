@@ -140,6 +140,123 @@ webmail_options || die "Invalid Webmail/SnappyMail/retention options"
 case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 
 
+# Setup log-archive helpers (also exercised by synthetic Docker spies).
+setup_archive_sync() {
+    [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] || return 0
+    local source service project ids existing=""
+    for source in ${SETUP_ARCHIVE_REQUIRED//,/ }; do
+        service=$source; project=webmail
+        case "$source" in
+            postfix|dovecot|rspamd|php-fpm|nginx) service+=-mailcow; project=mailcowdockerized ;;
+            npmplus) project=npmplus ;;
+        esac
+        if [ "$source" = npmplus ]; then
+            ids=$(docker inspect npmplus --format '{{.Id}}' 2>/dev/null) || ids=""
+        else
+            ids=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service") || return 1
+        fi
+        [ -z "$ids" ] || existing+="${existing:+,}$source"
+    done
+    # An empty installation still needs a valid env and the independent network.
+    LOG_ARCHIVE_REQUIRED_SOURCES=${existing:-$SETUP_ARCHIVE_REQUIRED}
+    log_archive_ensure_key || return 1
+    if [ -n "$existing" ]; then
+        log_archive_prepare "$PROJECT_DIR" || return 1
+    else
+        log_archive_generate_env "${LOG_ARCHIVE_DIR:-$PROJECT_DIR/log-archiver}" || return 1
+        (cd "${LOG_ARCHIVE_DIR:-$PROJECT_DIR/log-archiver}" && docker compose -p log-archiver -f compose.yml up -d --build) || return 1
+    fi
+}
+
+setup_archive_finish() {
+    [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] || return 0
+    LOG_ARCHIVE_REQUIRED_SOURCES=$SETUP_ARCHIVE_REQUIRED
+    log_archive_prepare "$PROJECT_DIR"
+}
+
+setup_cleanup() {
+    local status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then log_archive_restore || true; fi
+    [ -z "${COOKIE_JAR:-}" ] || rm -f "$COOKIE_JAR"
+    [ -z "${LOGIN_PAYLOAD:-}" ] || rm -f "$LOGIN_PAYLOAD"
+    exit "$status"
+}
+
+setup_compose_will_replace() {
+    local dir="$1" service="$2" plan changed
+    plan=$(cd "$dir" && docker compose --ansi never --dry-run up -d --no-deps --no-build "$service" 2>&1) || return 1
+    changed=$(printf '%s\n' "$plan" | python3 -c '
+import re,sys
+states={"Recreate","Recreated","Remove","Removing","Removed","Create","Created","Running","Start","Started","Starting","Healthy","Waiting","Stopping","Stopped","Pulling","Pulled","Building","Built"}
+actions=[]
+for line in sys.stdin:
+ line=line.strip()
+ if not line or re.fullmatch(r"\[\+\].*",line) or re.match(r"(?:WARN\[|time=.+ level=warning )",line): continue
+ m=re.search(r"(?:DRY-RUN MODE -\s+)?(Container|Network|Volume|Image)\s+\S+\s+([A-Za-z]+)(?:\s|$)",line)
+ if not m or m[2] not in states: sys.exit(1)
+ if m[1]=="Container": actions.append(m[2])
+if not actions: sys.exit(1)
+print("true" if any(a in ("Recreate","Recreated","Remove","Removing","Removed") for a in actions) else "false")
+') || { err "Cannot interpret Compose dry-run; replacement aborted"; return 1; }
+    printf '%s\n' "$changed"
+}
+
+setup_compose_start() {
+    local dir="$1" service="$2" id state recovery=0
+    local -a surviving=()
+    if (cd "$dir" && docker compose up -d --no-deps --no-build --wait --wait-timeout 180 "$service"); then
+        log_archive_release
+        return 0
+    fi
+    # A failed recreation may already have removed the previous ID. Recover the
+    # current service once, then restore only old IDs which still exist.
+    (cd "$dir" && docker compose up -d --no-deps --no-build --wait --wait-timeout 180 "$service") || recovery=1
+    for id in "${LOG_ARCHIVE_RUNNING_IDS[@]}"; do
+        if docker inspect "$id" >/dev/null 2>&1; then surviving+=("$id"); fi
+    done
+    LOG_ARCHIVE_RUNNING_IDS=("${surviving[@]}")
+    log_archive_restore || recovery=1
+    state=$(cd "$dir" && docker compose ps -a --format '{{.State}} {{.Health}}' "$service") || state=unknown
+    err "Service $service replacement failed; recoveryFailed=$recovery; current state: ${state:-missing}"
+    log_archive_release
+    return 1
+}
+
+setup_mailcow_up() {
+    if [ "${LOG_ARCHIVE_ENABLE:-false}" != true ]; then
+        (cd "$MAILCOW_DIR" && docker compose up -d)
+        return
+    fi
+    local services service ids changed
+    (cd "$MAILCOW_DIR" && docker compose pull --policy missing --ignore-buildable && docker compose build) || return 1
+    services=$(cd "$MAILCOW_DIR" && docker compose config --services) || return 1
+    services=$(printf '%s\n' "$services" | log_archive_order_mailcow_services) || return 1
+    for service in $services; do
+        ids=$(cd "$MAILCOW_DIR" && docker compose ps -a -q "$service") || return 1
+        if [ -z "$ids" ]; then
+            (cd "$MAILCOW_DIR" && docker compose up -d --no-recreate --no-build "$service") || return 1
+            setup_archive_sync || return 1
+            continue
+        fi
+        changed=$(setup_compose_will_replace "$MAILCOW_DIR" "$service") || return 1
+        if [ "$changed" = true ]; then
+            case "$service" in
+                postfix-mailcow|dovecot-mailcow|rspamd-mailcow|php-fpm-mailcow|nginx-mailcow)
+                    log_archive_stop_and_drain "$MAILCOW_DIR" "$service" || return 1 ;;
+            esac
+        fi
+        setup_compose_start "$MAILCOW_DIR" "$service" || return 1
+    done
+}
+# End setup log-archive helpers.
+
+SETUP_ARCHIVE_REQUIRED=$LOG_ARCHIVE_REQUIRED_SOURCES
+WEBMAIL_STACK_ENV=$ENV_FILE
+trap setup_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # ============================================================
 # Phase 0: System Packages
 # ============================================================
@@ -264,6 +381,13 @@ fi
 # Verify Docker Compose
 docker compose version >/dev/null 2>&1 || die "Docker Compose plugin not available"
 log "Docker Compose: $(docker compose version --short 2>/dev/null)"
+warn "Docker log limits (json-file 20m × 5, compress=false) apply even when archiving is disabled and recreate changed containers."
+if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
+    if ! docker inspect npmplus >/dev/null 2>&1; then
+        docker volume inspect npmplus_npmplus-data >/dev/null 2>&1 || docker volume create npmplus_npmplus-data >/dev/null
+    fi
+    setup_archive_sync || die "Log archiver preparation/backfill failed before container changes"
+fi
 
 # ============================================================
 # Phase 2: Configuration
@@ -408,6 +532,7 @@ path.write_text(text)
 TKOVERRIDE
 fi
 log "docker-compose.override.yml installed"
+log_archive_check_logging "$MAILCOW_DIR" || die "Mailcow service logging policy is incomplete"
 
 # --- Optional: bind vmail-vol-1 to a host path (single-disk servers leave VMAIL_DEVICE empty) ---
 if [ -n "${VMAIL_DEVICE:-}" ]; then
@@ -466,7 +591,7 @@ fi
 # --- Start Mailcow ---
 log "Starting Mailcow (internal ports)..."
 cd "$MAILCOW_DIR"
-docker compose up -d 2>&1 | tee -a "$LOGFILE" | tail -5
+setup_mailcow_up
 
 # Wait for unbound to be healthy (other containers depend on it)
 log "Waiting for unbound-mailcow health check..."
@@ -496,7 +621,7 @@ done
 
 # Ensure all Mailcow containers are up
 log "Ensuring all Mailcow containers are started..."
-docker compose up -d 2>&1 | tail -3
+setup_mailcow_up
 
 # --- Generate DKIM key ---
 REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2 || true)
@@ -563,7 +688,7 @@ if ! grep -q "^API_KEY=${MAILCOW_API_KEY}" "$MAILCOW_DIR/mailcow.conf"; then
     grep -q "^API_KEY=" "$MAILCOW_DIR/mailcow.conf" || echo "API_KEY=${MAILCOW_API_KEY}" >> "$MAILCOW_DIR/mailcow.conf"
     log "API_KEY written to mailcow.conf"
     # Restart containers to pick up new API_KEY env var
-    docker compose up -d 2>&1 | tail -3
+    setup_mailcow_up
     # Wait for MySQL to be ready after restart
     log "Waiting for MySQL after restart..."
     for i in $(seq 1 30); do
@@ -701,6 +826,7 @@ fi
 
 # Edge stages 1/2 run before NPMplus is attached to the app networks.
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+setup_archive_sync || die "Log archive readiness failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
@@ -722,6 +848,7 @@ NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
+log_archive_check_logging "$NPMPLUS_DIR" || die "NPMplus service logging policy is incomplete"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
 log "Waiting for NPMplus health check..."
@@ -900,12 +1027,22 @@ fi
 if [ "$WEBMAIL_ENABLE" = true ]; then log "Webmail edge project already prepared and started"; fi
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
-    (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+    setup_archive_sync || die "Log archive readiness failed before admin changes"
+    if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
+        ADMIN_REPLACE=$(COMPOSE_PROFILES=admin setup_compose_will_replace "$WEBMAIL_DIR" webmail-admin) || die "Cannot inspect admin replacement plan"
+        if [ "$ADMIN_REPLACE" = true ]; then
+            log_archive_stop_and_drain "$WEBMAIL_DIR" webmail-admin || die "Webmail admin log drain failed"
+        fi
+        COMPOSE_PROFILES=admin setup_compose_start "$WEBMAIL_DIR" webmail-admin || die "Webmail admin startup failed"
+    else
+        (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+    fi
 fi
 
 # ============================================================
 # Phase 6c: Junk/Trash retention (independent of Webmail)
 # ============================================================
+setup_archive_finish || die "Full-source log archive backfill failed"
 webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
 
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
@@ -926,7 +1063,7 @@ NPM_API="${NPM_API:-https://127.0.0.1:81/api}"
 COOKIE_JAR=$(mktemp)
 LOGIN_PAYLOAD=$(mktemp)
 chmod 600 "$LOGIN_PAYLOAD"
-trap 'rm -f "$COOKIE_JAR" "$LOGIN_PAYLOAD"' EXIT
+# setup_cleanup also removes these temporary authentication files.
 python3 -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_ADMIN_EMAIL"],"secret":os.environ["NPM_ADMIN_PASSWORD"]}))' > "$LOGIN_PAYLOAD"
 
 # --- NPM admin login ---

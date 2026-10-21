@@ -1,5 +1,11 @@
 services:
   webmail:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     build: /home/webmail
     image: mailstack-webmail:local
     container_name: webmail
@@ -21,6 +27,12 @@ services:
       mailstack-webmail-edge:
         aliases: [webmail]
   webmail-admin:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     image: mailstack-webmail:local
     container_name: webmail-admin
     profiles: ["admin"]
@@ -43,6 +55,12 @@ services:
       mailcow-network:
         aliases: [webmail-admin]
   mailrelay-webmail:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        compress: "false"
     image: haproxy:3.4.7-alpine@sha256:251da69821897ec8c4819f12b1babbc4b71f562943addc9b9eb14bb6ece40dc6
     container_name: mailrelay-webmail
     restart: always

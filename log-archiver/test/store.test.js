@@ -45,6 +45,112 @@ async function child(script, env = {}) {
   return result;
 }
 
+// Intercept real filesystem writes, including atomicJson's temporary-file writes
+// and rename, so initialization crashes do not depend on transaction fault hooks.
+const crashInitializer = `
+  import { syncBuiltinESMExports } from 'node:module';
+  import fs from 'node:fs/promises';
+  import path from 'node:path';
+  const steps = [];
+  function step(label) {
+    steps.push(label);
+    if (steps.length === Number(process.env.CRASH_STEP)) process.kill(process.pid, 'SIGKILL');
+  }
+  const label = (file) => path.relative(process.env.ARCHIVE_ROOT, String(file)).replace(/\\.[^/.]+\\.tmp$/, '.tmp');
+  for (const method of ['mkdir', 'chmod', 'rename']) {
+    const original = fs[method];
+    fs[method] = async (...args) => {
+      const name = method + ':' + label(method === 'rename' ? args[1] : args[0]);
+      step('before:' + name);
+      const result = await original(...args);
+      step('after:' + name);
+      return result;
+    };
+  }
+  const originalOpen = fs.open;
+  fs.open = async (...args) => {
+    const name = label(args[0]);
+    if (args[1] === 'wx') step('before:open:' + name);
+    const handle = await originalOpen(...args);
+    if (args[1] === 'wx') step('after:open:' + name);
+    for (const method of ['writeFile', 'sync']) {
+      const original = handle[method].bind(handle);
+      handle[method] = async (...values) => {
+        step('before:' + method + ':' + name);
+        if (method === 'writeFile' && name === process.env.CRASH_PARTIAL) {
+          const bytes = Buffer.from(values[0]);
+          await handle.write(bytes.subarray(0, Math.floor(bytes.length / 2)));
+          process.kill(process.pid, 'SIGKILL');
+        }
+        const result = await original(...values);
+        step('after:' + method + ':' + name);
+        return result;
+      };
+    }
+    return handle;
+  };
+  syncBuiltinESMExports();
+  const {openStore} = await import(process.env.STORE_MODULE);
+  const store = await openStore({root: process.env.ARCHIVE_ROOT});
+  await store.close();
+  console.log(JSON.stringify(steps));
+`;
+
+test('SIGKILL at every initial filesystem write recovers an empty archive without manual cleanup', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'archive-init-crash-test-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const baseline = await child(crashInitializer, { ARCHIVE_ROOT: path.join(dir, 'baseline') });
+  assert.equal(baseline.code, 0, baseline.output);
+  const steps = JSON.parse(baseline.output);
+  assert.ok(steps.includes('after:rename:state/catalog.json'));
+  assert.ok(steps.includes('after:rename:state/checkpoint.json'));
+  const cases = steps.map((name, index) => ({ name, CRASH_STEP: String(index + 1) }));
+  for (const file of ['catalog', 'checkpoint']) cases.push({ name: `partial ${file} temporary write`, CRASH_PARTIAL: `state/${file}.json.tmp` });
+  for (const [index, crash] of cases.entries()) {
+    await t.test(crash.name, async () => {
+      const root = path.join(dir, String(index));
+      const result = await child(crashInitializer, { ARCHIVE_ROOT: root, ...crash });
+      assert.equal(result.signal, 'SIGKILL', result.output);
+      for (let reopen = 0; reopen < 2; reopen++) {
+        const store = await openStore({ root });
+        try {
+          assert.deepEqual(await store.snapshot(), {
+            transactionId: '0',
+            catalog: { version: 1, transactionId: '0', hours: [] },
+            checkpoint: { version: 1, transactionId: '0', generations: {} },
+          });
+          if (reopen === 1) {
+            await store.commit({ records: [row('after recovered initialization')], checkpoints: { g: { offset: 31 } } });
+            assert.deepEqual(await contents(store), ['after recovered initialization']);
+          }
+        } finally { await store.close(); }
+      }
+    });
+  }
+});
+
+test('missing checkpoint only completes a pristine initial catalog without pending or data', async (t) => {
+  const initial = { version: 1, transactionId: '0', hours: [] };
+  for (const change of [
+    { catalog: { ...initial, transactionId: 'previous-commit' } },
+    { catalog: { ...initial, version: 2 } },
+    { catalog: { ...initial, hours: [{ source: 'postfix' }] } },
+    { data: true },
+    { pending: true },
+  ]) {
+    const { store, root } = await fixture(t);
+    await store.close();
+    const catalog = JSON.stringify(change.catalog ?? initial);
+    await fs.writeFile(path.join(root, 'state/catalog.json'), catalog);
+    await fs.unlink(path.join(root, 'state/checkpoint.json'));
+    if (change.data) await fs.mkdir(path.join(root, 'data'));
+    if (change.pending) await fs.writeFile(path.join(root, 'state/pending.json'), '{}');
+    await assert.rejects(openStore({ root }), { code: 'ARCHIVE_RECOVERY_FAILED' });
+    assert.equal(await fs.readFile(path.join(root, 'state/catalog.json'), 'utf8'), catalog);
+    await assert.rejects(fs.stat(path.join(root, 'state/checkpoint.json')), { code: 'ENOENT' });
+  }
+});
+
 test('raw bytes, identical lines, nanosecond times, late hours and bounded members', async (t) => {
   const { store, root } = await fixture(t, { memberBytes: 80 });
   const records = [row('한글 같은 줄\r'), row('한글 같은 줄\r'), row('reversed', '2026-10-21T08:00:00.000000001Z'), row('other hour', '2026-10-21T07:00:00Z'), row('unparseable', null)];

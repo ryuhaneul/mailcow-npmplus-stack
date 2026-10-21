@@ -121,7 +121,10 @@ export class ArchiveStore {
       this.catalog = await readJson(this.file('state/catalog.json'));
       this.checkpoint = await readJson(this.file('state/checkpoint.json'));
       const pending = await readJson(this.file('state/pending.json'));
-      if (!this.catalog && !this.checkpoint && !pending) {
+      // The first catalog can be published before the first checkpoint. Only
+      // this pristine state may finish initialization; never reset archive data.
+      const initialCatalog = !this.catalog || (this.catalog.version === 1 && this.catalog.transactionId === '0' && Array.isArray(this.catalog.hours) && this.catalog.hours.length === 0);
+      if (initialCatalog && !this.checkpoint && !pending) {
         try { await fs.stat(this.file('data')); throw recoveryError(); }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
         this.catalog = emptyCatalog();

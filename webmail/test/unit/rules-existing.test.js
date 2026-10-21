@@ -119,7 +119,7 @@ test('rules apply-existing ignores external forwarding but validates all address
   assert.deepEqual(ok(await f.request('apply-existing', rule({ forward: ['outside@example.net'] }))), { matched: 2, moved: 0, trashed: 0, flagged: 0, failed: [] });
   assert.equal(ok(await f.request('apply-existing', rule({ forward: ['outside@example.net'], read: true }))).flagged, 2);
   assert.ok(f.commands.every(row => ['UID SORT', 'MYRIGHTS', 'FETCH', 'STORE'].includes(row[0])));
-  rejected(await f.request('preview', rule({ forward: ['outside@example.net'] })), 422, 'FORWARD_EXTERNAL');
+  assert.equal(ok(await f.request('preview', rule({ forward: ['outside@example.net'] }))).count, 2);
   rejected(await f.request('apply-existing', rule({ forward: ['outside@example.net', 'malformed'] })), 422, 'RULES_INVALID');
   rejected(await f.request('apply-existing', rule({ forward: ['outside@example.net'], move: 'Missing' })), 422, 'RULES_INVALID');
 });

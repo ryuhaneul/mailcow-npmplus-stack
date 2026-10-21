@@ -75,7 +75,7 @@ export default function FiltersPage() {
         <ImportDropped info={data.importInfo}/>
         {data.doc && data.state !== 'newer_version' && <>{data.doc.rules.length ? <RuleList rules={data.doc.rules} editable={editable} busy={busy} missingFolders={data.missingFolders} onChange={rules => mutate('', {baseRev: data.rev, doc: {...data.doc, rules}}, 'PUT')}/> : <p>아직 규칙이 없어요.</p>}</>}
         {['import_pending','import_blocked'].includes(data.state) && data.importReport && <ImportReview key={data.importReport.planSha256 ?? data.importReport.sourceSha256} report={data.importReport} pending={data.state === 'import_pending'} busy={busy || reloadNeeded} onConfirm={() => mutate('/import', {confirm: true, sourceName: data.importReport.sourceName, sourceSha256: data.importReport.sourceSha256, planSha256: data.importReport.planSha256})}/>}
-        <div class="hint"><Icon name="funnel" size="s"/>회사 정책상 회사 밖 주소로 자동 전달하는 규칙은 만들 수 없습니다. 사내 주소{data.internalDomains?.length > 0 && `(@${data.internalDomains[0]}${data.internalDomains.length > 1 ? ' 등' : ''})`}로만 전달됩니다. 전달은 앞으로 오는 메일에만 해요.</div>
+        <div class="hint"><Icon name="funnel" size="s"/>외부로 전달하면 스팸으로 판정된 메일은 전달하지 않아요. 전달은 앞으로 오는 메일에만 해요.</div>
       </>}
       {identityTab && <IdentityTabs key={tab} tab={tab}/>}
       {['vacation','blocked'].includes(tab) && data && !sieveDisabled && <>

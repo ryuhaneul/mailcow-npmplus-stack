@@ -35,9 +35,12 @@ export function generateScript(doc, { addresses = [], trashPath = 'Trash', ...po
     throw error;
   }
   const targets = uniqueAddresses(doc.rules.filter(rule => rule.enabled).flatMap(rule => rule.actions.forward ?? []));
+  const internal = new Set((policy.internalDomains ?? []).map(asciiLower));
+  const externalForward = targets.some(target => !internal.has(target.split('@')[1]));
   const forwardIndex = new Map(targets.map((target, i) => [target, i]));
   const lines = [
     'require ["fileinto", "imap4flags", "variables", "copy", "vacation", "date", "relational"];',
+    ...(externalForward ? ['if header :contains "X-Spam-Flag" "YES" { stop; }'] : []),
     'if not header :is "X-Spam-Flag" "YES" {',
     '  set "wm_stop" "0";',
     '  set "wm_folder" "";',

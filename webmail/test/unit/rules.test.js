@@ -200,10 +200,14 @@ test('import validates source identity, preserves the original and records impor
   assert.deepEqual(useful(f.server.commands).slice(-3), ['CHECKSCRIPT', `PUTSCRIPT ${web}`, `SETACTIVE ${web}`]);
 });
 
-test('external forwarding is 422 with path and reason, before CHECKSCRIPT or writes', async t => {
+test('external forwarding saves a generated spam guard before CHECKSCRIPT and writes', async t => {
   const f = await fixture(t); const doc = document(); doc.rules[0].actions = { forward: ['member@outside.example.com'] };
-  const response = await f.request('PUT', '/api/rules', { baseRev: 3, doc }); status(response, 422, 'FORWARD_EXTERNAL');
-  assert.ok(response.json().error.path.endsWith('forward[0]')); assert.equal(response.json().error.reason, 'external_domain'); assert.deepEqual(mutating(f.server.commands), []);
+  status(await f.request('PUT', '/api/rules', { baseRev: 3, doc }), 200);
+  const script = f.server.scripts.get(web);
+  assert.ok(script.includes('if header :contains "X-Spam-Flag" "YES" { stop; }'));
+  assert.ok(script.indexOf('stop;') < script.indexOf('redirect :copy'));
+  assert.deepEqual(parseScript(script).doc.rules[0].actions.forward, doc.rules[0].actions.forward);
+  assert.ok(f.server.commands.some(row => row.command === 'CHECKSCRIPT'));
 });
 
 test('vacation and blocking are persisted in the document and generated under the spam guard', async t => {

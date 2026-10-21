@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseGmailSearch } from './gmail-search.js';
-import { allowedMoveFolder, asciiLower, validateAddress, validateDocument } from './model.js';
+import { allowedMoveFolder, validateAddress, validateDocument } from './model.js';
 import { generateScript } from './generate.js';
 import { normalizeConditionTree, validateConditionTree } from './condition-tree.js';
 import { patternProblem } from './glob.js';
@@ -132,7 +132,7 @@ function convertConditions(props, changes, stage) {
   }
 }
 
-function convertActions(props, changes, policy, folders) {
+function convertActions(props, changes, folders) {
   const actions = {};
   for (const [key, action] of [['shouldMarkAsRead', 'read'], ['shouldStar', 'star'], ['shouldTrash', 'trash']]) {
     if (props[key] === 'true') actions[action] = true;
@@ -163,11 +163,9 @@ function convertActions(props, changes, policy, folders) {
     } else changes.push('shouldArchive 동작 생략: 개인 Archive 폴더가 없어요');
   }
   if (props.forwardTo) {
-    let domain;
-    try { domain = validateAddress(props.forwardTo); }
+    try { validateAddress(props.forwardTo); }
     catch { fail('전달 주소 형식을 확인해 주세요'); }
-    if ((policy.internalDomains ?? []).some(allowed => asciiLower(allowed) === domain)) actions.forward = [props.forwardTo];
-    else changes.push('forwardTo 동작 생략: 회사 정책 P10으로 외부 주소 전달을 허용하지 않아요');
+    actions.forward = [props.forwardTo];
   }
   for (const key of OMIT) {
     if (BOOL.includes(key) ? props[key] === 'true' : Boolean(props[key])) changes.push(`${key} 동작 생략: 대응하는 동작을 옮길 수 없어요`);
@@ -192,7 +190,7 @@ export function convertGmailEntries(entries, { policy = {}, folders = [], existi
     try {
       const p = properties(props);
       const condition = convertConditions(p, item.changes, stage);
-      const actions = convertActions(p, item.changes, policy, folders);
+      const actions = convertActions(p, item.changes, folders);
       let id;
       let salt = 0;
       do { id = createHash('sha256').update(JSON.stringify([n, props, salt++])).digest('hex').slice(0, 8); } while (ids.has(id));

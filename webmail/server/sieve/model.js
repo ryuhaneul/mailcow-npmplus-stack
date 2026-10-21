@@ -65,14 +65,13 @@ export function minimumDocumentVersion(rules) {
  * checkPolicy:false is for decoding stored data, whose folders/domains may since have changed.
  * checkFolders:false skips only existence checks for an explicitly requested offline import.
  */
-export function validateDocument(doc, { internalDomains = [], folders = [], maxRedirects = 100, checkPolicy = true, checkFolders = true } = {}) {
+export function validateDocument(doc, { folders = [], maxRedirects = 100, checkPolicy = true, checkFolders = true } = {}) {
   object(doc, '$', ['v', 'rev', 'rules', 'blocked', 'vacation', 'importedFrom'], ['v', 'rev', 'rules', 'blocked', 'vacation']);
   if (![1, 2].includes(doc.v)) invalid('$.v', 'version');
   if (!Number.isSafeInteger(doc.rev) || doc.rev < 0) invalid('$.rev', 'revision');
   list(doc.rules, '$.rules', 0, 100);
   const ids = new Set();
   const forwards = new Set();
-  const domains = new Set(internalDomains.map(asciiLower));
   for (const [i, rule] of doc.rules.entries()) {
     const p = `$.rules[${i}]`;
     object(rule, p, ['id', 'enabled', 'match', 'conditions', 'actions', 'stop']);
@@ -117,8 +116,7 @@ export function validateDocument(doc, { internalDomains = [], folders = [], maxR
     if (Object.hasOwn(actions, 'forward')) {
       list(actions.forward, `${a}.forward`, 1, 3);
       for (const [j, target] of actions.forward.entries()) {
-        const targetDomain = address(target, `${a}.forward[${j}]`);
-        if (checkPolicy && !domains.has(targetDomain)) invalid(`${a}.forward[${j}]`, 'external_domain', 'FORWARD_EXTERNAL');
+        address(target, `${a}.forward[${j}]`);
         forwards.add(asciiLower(target));
       }
     }

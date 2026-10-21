@@ -32,7 +32,7 @@ const cases = [
   ['gmail-mixed', 'gmail2sieve', ['changed', 'same', 'unconvertible', 'unconvertible'], 2],
   ['rainloop-move', 'rainloop', ['same'], 1],
   ['rainloop-actions', 'rainloop', ['changed', 'same'], 2],
-  ['rainloop-forward', 'rainloop', ['same', 'unconvertible', 'unconvertible'], 1],
+  ['rainloop-forward', 'rainloop', ['same', 'same', 'unconvertible'], 2],
   ['unknown-one', 'unknown', ['unconvertible'], 0],
   ['unknown-two', 'unknown', ['unconvertible', 'unconvertible'], 0],
 ];
@@ -111,7 +111,7 @@ test('SnappyMail metadata preserves disabled, read, stop and mapped Header condi
   assert.deepEqual(actions.rules[1].conditions, [{ field: 'subject', op: 'not', value: 'newsletter' }]);
   const forward = importScript(await read('rainloop-forward.sieve'), { name: 'rainloop.user', policy });
   assert.deepEqual(forward.rules[0].actions, { forward: ['member@example.com'] });
-  assert.ok(forward.items[1].reason.includes('외부 주소'));
+  assert.deepEqual(forward.rules[1].actions, { forward: ['member@outside.example.com'] });
   assert.ok(forward.items[2].reason.includes('헤더와 Sieve 본문'));
 });
 
@@ -171,17 +171,17 @@ test('missing folder policy adds warnings without changing import status; explic
   assert.equal(denied.rules.length, 0);
 });
 
-test('skipping folder existence never skips external forwarding or forbidden folder paths', async () => {
-  const denied = importScript(await read('rainloop-forward.sieve'), { name: 'rainloop.user', policy: { internalDomains: [] } });
-  assert.equal(denied.rules.length, 0);
-  assert.ok(denied.items[0].reason.includes('외부 주소'));
+test('external forwarding imports with mandatory spam exclusion; forbidden folders still fail', async () => {
+  const imported = importScript(await read('rainloop-forward.sieve'), { name: 'rainloop.user', policy: { internalDomains: [] } });
+  assert.equal(imported.rules.length, 2);
+  assert.ok(generateScript(rulesDocument(imported.rules)).includes('if header :contains "X-Spam-Flag" "YES" { stop; }'));
   const original = JSON.parse(await read('import-rules.json'));
   for (const folder of ['INBOX', 'Trash', 'Junk', 'Drafts', 'Shared/team', 'WebmailVirtual/AllMail']) {
     const doc = structuredClone(original); doc.rules[0].actions.move = folder;
     assert.throws(() => generateScript(doc, importPolicy(unchecked)), { code: 'RULES_INVALID' });
   }
   const doc = structuredClone(original); doc.rules[0].actions.forward = ['member@outside.example.com'];
-  assert.throws(() => generateScript(doc, importPolicy(unchecked)), { code: 'FORWARD_EXTERNAL' });
+  assert.ok(generateScript(doc, importPolicy(unchecked)).includes('if header :contains "X-Spam-Flag" "YES" { stop; }'));
 });
 
 test('policy permissions are explicit and cannot be inferred or overridden by extra fields', () => {

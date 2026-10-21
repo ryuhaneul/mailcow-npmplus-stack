@@ -108,7 +108,7 @@ function coverageOf(snapshot, retention, source) {
     const newest = hours.reduce((value, entry) => !value || timeKey(entry.maxTime) > timeKey(value) ? entry.maxTime : value, null);
     const generations = Object.values(snapshot.checkpoint.generations ?? {}).filter(item => item.source === name);
     const observed = generations.map(item => item.observedAt).filter(value => typeof value === 'string' && Number.isFinite(Date.parse(value))).sort();
-    const gaps = (snapshot.checkpoint.gaps ?? []).filter(gap => gap.source === name).map(gap => ({ source: name, from: projectedTime(gap.from), to: projectedTime(gap.to), reason: cleanText(gap.reason) }));
+    const gaps = generations.flatMap(item => item.gaps ?? []).filter(gap => gap.source === name).map(gap => ({ source: name, from: projectedTime(gap.start), to: projectedTime(gap.end), reason: cleanText(gap.reason) }));
     return { source: name, retentionDays: retention[name], oldest, newest, gaps, unknownTimeCount: hours.reduce((sum, entry) => sum + entry.unknownTimeCount, 0), backfill: generations.length ? (generations.every(item => item.backfillComplete === true) ? 'complete' : 'unknown') : 'unknown', collectionLagSeconds: observed.length ? Math.max(0, (Date.now() - Date.parse(observed.at(-1))) / 1000) : null };
   });
 }

@@ -373,6 +373,19 @@ webmail_generate_admin_env() (
     set +x
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
     local dest="$1" tmp auto_days="" pin_file="" doveadm_url="" doveadm_key="" relay_files="" trusted_file=""
+    local mailcow_api_key
+    # Check the raw line before the shared reader strips CR or Bash drops NUL.
+    if sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1 | LC_ALL=C grep -aq '[[:cntrl:]]'; then
+        webmail_error "invalid mailcow API key"
+        return 1
+    fi
+    mailcow_api_key=$(sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1) || return 1
+    # A quoted value must fit on one line; never source/evaluate mailcow.conf.
+    case "$mailcow_api_key" in
+        \"*\"|\'*\') ;;
+        \"*|\'*) webmail_error "invalid mailcow API key"; return 1 ;;
+    esac
+    mailcow_api_key=$(webmail_mailcow_value API_KEY) || return 1
     if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
         [ -n "$WEBMAIL_ADMIN_DOVEADM_KEY" ] || { webmail_error "doveadm key is empty; call webmail_ensure_admin_key first"; return 1; }
         doveadm_url=http://dovecot:12346
@@ -415,7 +428,8 @@ webmail_generate_admin_env() (
         webmail_env_line LOGO_DIR /brand &&
         webmail_env_line AUDIT_DIR /data/audit &&
         webmail_env_line ADMIN_RSPAMD_MAP_DIR /rspamd_custom_maps &&
-        webmail_env_line LOG_LEVEL info
+        webmail_env_line LOG_LEVEL info &&
+        { [ -z "$mailcow_api_key" ] || webmail_env_line MAILCOW_API_KEY "$mailcow_api_key"; }
     } > "$tmp" || return 1
     if [ -f "$dest/webmail-admin.env" ] && cmp -s "$tmp" "$dest/webmail-admin.env" && [ "$(stat -c %a "$dest/webmail-admin.env")" = 600 ]; then return 0; fi
     chmod 600 "$tmp" && mv "$tmp" "$dest/webmail-admin.env"

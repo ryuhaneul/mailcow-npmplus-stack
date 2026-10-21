@@ -1,7 +1,7 @@
 import { session, sessionReady } from './state/session.js';
 import { toast } from './state/toast.js';
 
-export async function api(path, { method = 'GET', body, ...options } = {}) {
+export async function api(path, { method = 'GET', body, silentSessionErrors = false, ...options } = {}) {
   const headers = new Headers(options.headers);
   const multipart = body instanceof FormData;
   if (body !== undefined && !multipart) headers.set('Content-Type', 'application/json');
@@ -13,7 +13,7 @@ export async function api(path, { method = 'GET', body, ...options } = {}) {
   if (!response.ok) {
     const error = payload.error;
     if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
-      endSession(error.code);
+      endSession(error.code, { notify: !silentSessionErrors });
     }
     throw error;
   }
@@ -29,9 +29,9 @@ export async function logout() {
   finally { session.value = null; sessionReady.value = false; }
 }
 
-export function endSession(code) {
+export function endSession(code, { notify = true } = {}) {
   session.value = null; sessionReady.value = false;
   if (toast.value?.kind !== 'password-changed') {
-    toast.value = code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
+    toast.value = notify && code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
   }
 }

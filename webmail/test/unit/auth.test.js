@@ -180,6 +180,35 @@ test('session: no cookie, invented cookie and inbound bearer never authenticate'
   assertFailure(await f.app.inject({ url: '/api/auth/session', headers: { authorization: `Bearer ${token}` } }), 403, 'NO_SESSION');
 });
 
+test('session: invalid, missing-store and expired cookies are cleared with logout cookie options', async t => {
+  const f = await fixture(t, { overrides: { SESSION_IDLE_MIN: '1' } });
+  const noCookie = await f.app.inject('/api/auth/session');
+  assertFailure(noCookie, 403, 'NO_SESSION');
+  assert.equal(noCookie.headers['set-cookie'], undefined);
+  const logged = await login(f.app);
+  const headers = credentials(logged);
+  f.advance(60_000);
+  for (const [cookie, code] of [
+    ['webmail_sid=invalid', 'NO_SESSION'],
+    ['webmail_sid=', 'NO_SESSION'],
+    [`webmail_sid=${'a'.repeat(43)}`, 'SESSION_EXPIRED'],
+    [headers.cookie, 'SESSION_EXPIRED'],
+  ]) {
+    const response = await f.app.inject({ url: '/api/auth/session', headers: { cookie } });
+    assertFailure(response, 403, code);
+    assert.match(response.headers['set-cookie'], /^webmail_sid=;/);
+    for (const attr of ['Max-Age=0', 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(response.headers['set-cookie'].includes(attr));
+    assert.equal(response.headers['cache-control'], 'no-store');
+  }
+  const renewed = await login(f.app);
+  const active = await f.app.inject({ url: '/api/auth/session', headers: credentials(renewed) });
+  assert.equal(active.statusCode, 200);
+  assert.equal(active.headers['set-cookie'], undefined);
+  const csrfFailure = await f.app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie: credentials(renewed).cookie, origin: 'https://newmail.example.com' } });
+  assertFailure(csrfFailure, 403, 'CSRF');
+  assert.equal(csrfFailure.headers['set-cookie'], undefined);
+});
+
 test('CSRF: missing, wrong and body-only token fail; logout requires allowed Origin', async t => {
   const f = await fixture(t);
   const response = await login(f.app);

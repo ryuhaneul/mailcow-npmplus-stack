@@ -37,7 +37,14 @@ export async function installAuth(app, { config, verifyLogin, clientFactory, now
       return;
     }
     reply.header('cache-control', 'no-store');
-    request.session = await sessions.get(request.cookies[cookieName]);
+    try {
+      request.session = await sessions.get(request.cookies[cookieName]);
+    } catch (error) {
+      if (request.cookies[cookieName] !== undefined && error.statusCode === 403 && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
+        reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
+      }
+      throw error;
+    }
     if (changing.has(request.method)) {
       checkOrigin(request, config.publicHostnames);
       checkCsrf(request);

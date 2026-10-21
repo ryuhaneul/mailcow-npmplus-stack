@@ -2,7 +2,7 @@ const KST_OFFSET = 9 * 3_600_000;
 const minutes = time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
 
 // Only process-local tick deduplication lives here. Persistent ownership and
-// same-day run IDs belong to fts-state, including after an application restart.
+// window-start-day run IDs belong to fts-state, including after an application restart.
 export function createFtsScheduler({ config, nightly, logger, now = Date.now,
   setInterval: schedule = globalThis.setInterval, clearInterval: cancel = globalThis.clearInterval }) {
   const controller = new AbortController();
@@ -11,13 +11,19 @@ export function createFtsScheduler({ config, nightly, logger, now = Date.now,
     if (!config.enabled || controller.signal.aborted || running) return;
     const time = now();
     const local = new Date(time + KST_OFFSET);
-    const day = local.toISOString().slice(0, 10);
     const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
-    if (minute < minutes(config.start) || minute >= minutes(config.end) || lastDay === day) return;
+    const start = minutes(config.start), end = minutes(config.end);
+    const overnight = start > end;
+    const inWindow = overnight ? minute >= start || minute < end : minute >= start && minute < end;
+    if (!inWindow) return;
+    // After midnight, retain the date on which this window opened.
+    const dayTime = time + KST_OFFSET - (overnight && minute < end ? 86_400_000 : 0);
+    const day = new Date(dayTime).toISOString().slice(0, 10);
+    if (lastDay === day) return;
     lastDay = day;
     running = true;
-    const deadline = Date.parse(`${day}T${config.end}:00+09:00`);
-    try { return await nightly.runOnce({ deadline, signal: controller.signal }); }
+    const deadline = Date.parse(`${day}T${config.end}:00+09:00`) + (overnight ? 86_400_000 : 0);
+    try { return await nightly.runOnce({ day, deadline, signal: controller.signal }); }
     catch {
       logger?.warn({ code: 'FTS_SCHEDULER_FAILED' }, '검색 색인 예약 실행을 확인해 주세요.');
     } finally { running = false; }

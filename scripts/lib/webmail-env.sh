@@ -43,6 +43,7 @@ webmail_options() {
     for time in "$MAIL_FTS_NIGHTLY_START" "$MAIL_FTS_NIGHTLY_END"; do
         [[ "$time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { webmail_error "nightly FTS times must be HH:MM (Asia/Seoul)"; return 1; }
     done
+    [[ "$MAIL_FTS_NIGHTLY_START" != "$MAIL_FTS_NIGHTLY_END" ]] || { webmail_error "nightly FTS start and end must differ"; return 1; }
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
     IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
     if [ "$WEBMAIL_ENABLE" = true ] && [ "$SNAPPYMAIL_ENABLE" = false ]; then hosts+=("mail.${DOMAIN}"); fi

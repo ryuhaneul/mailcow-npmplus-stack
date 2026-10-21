@@ -346,6 +346,16 @@ for field in MAIL_FTS_NIGHTLY_START MAIL_FTS_NIGHTLY_END; do
         if ( printf -v "$field" %s "$invalid"; webmail_options ); then exit 1; fi
     done
 done
+WEBMAIL_ADMIN_DOVEADM_KEY=synthetic-doveadm-key-example.com
+MAIL_FTS_NIGHTLY_START=22:00
+MAIL_FTS_NIGHTLY_END=06:00
+webmail_options
+webmail_generate_admin_env "$2/generated"
+grep -q '^FTS_NIGHTLY_START="22:00"$' "$2/generated/webmail-admin.env"
+grep -q '^FTS_NIGHTLY_END="06:00"$' "$2/generated/webmail-admin.env"
+for equal_time in 00:00 03:00 22:00; do
+    if ( MAIL_FTS_NIGHTLY_START=$equal_time; MAIL_FTS_NIGHTLY_END=$equal_time; webmail_options ); then exit 1; fi
+done
 if ( MAIL_FTS_NIGHTLY_ENABLE=yes; webmail_options ); then exit 1; fi
 WEBMAIL_ADMIN_DOVEADM_KEY=synthetic-doveadm-key-example.com
 webmail_reconcile_admin_api "$2/scripts"

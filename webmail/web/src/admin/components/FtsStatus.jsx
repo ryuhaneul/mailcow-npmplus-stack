@@ -19,6 +19,7 @@ export function nextFtsStart(data, now = Date.now()) {
   if (!data.enabled) return null;
   const day = new Date(now + 9 * 3_600_000).toISOString().slice(0, 10);
   const start = Date.parse(`${day}T${data.window.start}:00+09:00`);
+  // The next daily opening is today or tomorrow, including after an overnight window.
   return new Date(start > now ? start : start + dayMs).toISOString();
 }
 export function ftsResult(data, now = Date.now()) {
@@ -27,7 +28,8 @@ export function ftsResult(data, now = Date.now()) {
   const run = data.lastRun;
   if (!run) return '미실행';
   if (run.status === 'running') {
-    const end = Date.parse(`${run.day}T${data.window.end}:00+09:00`);
+    const end = Date.parse(`${run.day}T${data.window.end}:00+09:00`) +
+      (data.window.start > data.window.end ? dayMs : 0);
     return now >= end ? '종료 시각 초과·마무리 중' : '실행 중';
   }
   return { done: '완료', cutoff: '시간 창 종료', failed: '일부 실패' }[run.status] ?? '확인 필요';

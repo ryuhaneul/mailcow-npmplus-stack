@@ -207,11 +207,13 @@ test('admin config: trusted sender file only accepts the agreed enabled and disa
   for (const value of ['/run/trusted/other.map', ' ', false]) assert.throws(() => loadAdminConfig({ ...env, TRUSTED_SENDER_FILE: value }), /TRUSTED_SENDER_FILE/);
 });
 
-test('admin config: FTS nightly defaults and explicit same-day KST window', () => {
+test('admin config: FTS nightly defaults and explicit same-day and overnight KST windows', () => {
   assert.deepEqual(loadAdminConfig(env).ftsNightly, { enabled: false, start: '03:00', end: '06:00', stateDir: '/data/fts-nightly' });
   const result = loadAdminConfig({ ...env, FTS_NIGHTLY_ENABLE: 'true', FTS_NIGHTLY_START: '00:00', FTS_NIGHTLY_END: '23:59' });
   assert.deepEqual(result.ftsNightly, { enabled: true, start: '00:00', end: '23:59', stateDir: '/data/fts-nightly' });
   assert.ok(Object.isFrozen(result.ftsNightly));
+  assert.deepEqual(loadAdminConfig({ ...env, FTS_NIGHTLY_START: '22:00', FTS_NIGHTLY_END: '06:00' }).ftsNightly,
+    { enabled: false, start: '22:00', end: '06:00', stateDir: '/data/fts-nightly' });
 });
 
 test('admin config: invalid FTS env fails in the existing config error format even when disabled', () => {
@@ -222,7 +224,7 @@ test('admin config: invalid FTS env fails in the existing config error format ev
   ]) for (const value of values) {
     assert.throws(() => loadAdminConfig({ ...env, [key]: value }), { message: `환경변수 ${key} 형식이 올바르지 않습니다.` });
   }
-  for (const [start, end] of [['03:00', '03:00'], ['23:00', '02:00']]) {
+  for (const [start, end] of [['03:00', '03:00'], ['00:00', '00:00'], ['22:00', '22:00']]) {
     assert.throws(() => loadAdminConfig({ ...env, FTS_NIGHTLY_START: start, FTS_NIGHTLY_END: end }), /FTS_NIGHTLY_END/);
   }
 });

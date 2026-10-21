@@ -6,6 +6,7 @@ import { etag, assertUnchanged } from '../lock.js';
 import { createFilterBackups } from './teams.js';
 import { addressPattern } from '../sieve-team.js';
 import { tokens } from '../../sieve/import-syntax.js';
+import { externalRedirectPreview, externalSpamGuardMessage } from '../filter-script.js';
 import { SCRIPT_NAME } from '../../sieve/model.js';
 
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -69,6 +70,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
   }
   async function validate(session, source, confirmMove) {
     const redirects = inspectRedirects(source);
+    if (externalRedirectPreview(source, [...await internalDomains(session)]).needsSpamGuard) throw new AppError(422, 'EXTERNAL_SPAM_GUARD', externalSpamGuardMessage);
     if (redirects.some(row => !row.copy) && confirmMove !== true) throw new AppError(422, 'MOVE_CONFIRM', '원본을 옮기는 전달이 있어요. 원본 보존 여부를 확인해 주세요.');
   }
   const dto = row => ({ id: String(row.id), type: row.filter_type, active: String(row.active) === '1', description: row.script_desc, script: row.script_data, etag: etag(state(row)) });
@@ -86,12 +88,13 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
       await owner(session, addr); const row = (await filterRows(session, addr)).find(row => String(row.id) === id); if (!row) throw missing();
       const before = state(row); assertUnchanged(data.etag, before); await validate(session, data.script, data.confirmMove);
       const after = state({ ...row, script_data: data.script }); if (isDeepStrictEqual(before, after)) return { ...dto(row), unchanged: true };
-      let revertible = true;
+      let revertible = true, reason;
       try { await validate(session, row.script_data, true); } catch (error) {
-        if (!(error instanceof AppError) || error.code !== 'FILTER_UNINSPECTABLE') throw error;
+        if (!(error instanceof AppError) || !['FILTER_UNINSPECTABLE', 'EXTERNAL_SPAM_GUARD'].includes(error.code)) throw error;
         revertible = false;
+        reason = error.code === 'EXTERNAL_SPAM_GUARD' ? '이전 원문에 스팸 제외 없는 외부 전달이 있어 이 도구로 되돌릴 수 없음' : '이전 원문에 해석 불가 문법이 있어 이 도구로 되돌릴 수 없음';
       }
-      const detail = revertible ? {} : { reason: '이전 원문에 해석 불가 문법이 있어 이 도구로 되돌릴 수 없음' };
+      const detail = revertible ? {} : { reason };
       return audit.run({ actor, ip, action: 'filter.edit', target: addr, kind: 'config', revertible, before, after, ...hashes(row.script_data, data.script) }, async intent => {
         const saved = await apply(session, addr, id, before, after, data.script); return { ...dto(saved), auditId: intent.id, detail };
       }, { prepare: ({ id }) => backups.write(id, row.script_data, data.script) });

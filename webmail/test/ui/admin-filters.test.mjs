@@ -9,7 +9,7 @@ import { createFakeAdminApi } from '../../web/dev/fake-admin-api.js';
 const captures = process.env.EXTFWD_CAPTURE_DIR || '/tmp/extfwd-captures';
 const guard = 'if header :contains "X-Spam-Flag" "YES" { stop; }';
 const redirect = 'require ["copy"];\nredirect :copy "outside@example.net";\n';
-const warning = '스팸으로 표시된 메일도 외부로 전달돼요';
+const warning = '외부로 전달하는 필터는 맨 앞에 스팸 메일 전달 제외 줄이 있어야 저장할 수 있어요.';
 test('administrator filter external forwarding preview', async t => {
   const fake = createFakeAdminApi();
   const server = await createServer({ root: fileURLToPath(new URL('../../web', import.meta.url)), configFile: fileURLToPath(new URL('../../web/vite.admin.config.js', import.meta.url)), logLevel: 'error', plugins: [{ name: 'filter-test-api', configureServer(server) { server.middlewares.use(fake.middleware); } }], server: { host: '127.0.0.1', port: 0 } });
@@ -43,28 +43,42 @@ test('administrator filter external forwarding preview', async t => {
     ['guard nested in other condition', `if false { ${guard} }\n${redirect}`, true, true],
   ]) await t.test(name, async () => {
     const { page, context, errors } = await open();
-    try { const dialog = await preview(page, script); await expect(dialog.getByText('외부로 전달: outside@example.net', { exact: true })).toHaveCount(external ? 1 : 0); await expect(dialog.getByText(warning, { exact: false })).toHaveCount(warn ? 1 : 0); await expect(dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' })).toHaveCount(warn ? 1 : 0); await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled(); assert.deepEqual(errors, []); }
+    try { const dialog = await preview(page, script); await expect(dialog.getByText('외부로 전달: outside@example.net', { exact: true })).toHaveCount(external ? 1 : 0); await expect(dialog.getByText(warning, { exact: false })).toHaveCount(warn ? 1 : 0); await expect(dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' })).toHaveCount(warn ? 1 : 0); if (warn) await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); else await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled(); assert.deepEqual(errors, []); }
     finally { await context.close(); }
   });
-  await t.test('warning permits administrator save without insertion', async () => {
+  await t.test('missing guard blocks administrator save without insertion', async () => {
     const { page, context, writes } = await open();
-    try { const dialog = await preview(page, redirect); await dialog.getByRole('button', { name: '저장', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0); assert.deepEqual(writes, [{ etag: 'filter-1', script: redirect }]); }
+    try { const dialog = await preview(page, redirect); await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); assert.deepEqual(writes, []); }
     finally { await context.close(); }
   });
   await t.test('move redirect retains confirmation', async () => {
     const { page, context, writes } = await open();
-    try { const script = 'redirect "outside@example.net";'; const dialog = await preview(page, script); await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); await dialog.getByRole('checkbox').check(); await dialog.getByRole('button', { name: '저장', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0); assert.deepEqual(writes, [{ etag: 'filter-1', script, confirmMove: true }]); }
+    try { const script = `${guard}\nredirect "outside@example.net";`; const dialog = await preview(page, script); await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); await dialog.getByRole('checkbox').check(); await dialog.getByRole('button', { name: '저장', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0); assert.deepEqual(writes, [{ etag: 'filter-1', script, confirmMove: true }]); }
     finally { await context.close(); }
+  });
+  await t.test('server EXTERNAL_SPAM_GUARD response shows blocking message and insertion action', async () => {
+    const { page, context } = await open();
+    try {
+      await page.route('**/api/admin/filters/**/1', route => route.fulfill({ status: 422, json: { error: { code: 'EXTERNAL_SPAM_GUARD', message: warning } } }));
+      const dialog = await preview(page, 'redirect :copy "person@example.com";');
+      await dialog.getByRole('button', { name: '저장', exact: true }).click();
+      await expect(dialog.locator('[data-error-code=EXTERNAL_SPAM_GUARD]')).toHaveText(warning);
+      await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+      await dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' }).click();
+      await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
+    } finally { await context.close(); }
   });
   for (const width of [1280, 768, 390, 375]) await t.test(`insertion and captures ${width}`, async () => {
     const { page, context, errors, writes } = await open(width);
     try {
       const dialog = await preview(page, redirect);
       await page.evaluate(() => document.fonts.ready);
+      await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
       await page.screenshot({ path: `${captures}/external-warning-${width}.png`, fullPage: true });
       await dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' }).click();
       await expect(dialog.getByRole('button', { name: '스팸 메일 전달 제외 넣기' })).toHaveCount(0);
       await expect(dialog.getByText(warning, { exact: false })).toHaveCount(0);
+      await expect(dialog.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
       const expected = `require ["copy"];\n${guard}\nredirect :copy "outside@example.net";\n`;
       await expect(page.getByLabel('Sieve 스크립트', { exact: true })).toHaveValue(expected);
       await page.screenshot({ path: `${captures}/external-guard-${width}.png`, fullPage: true });

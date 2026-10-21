@@ -300,6 +300,8 @@ test('Docker web-build copies every browser server import and its relative depen
     return parts.map(source => ({ source: resolve(root, source), destination }));
   });
   assert.ok(required.size > 0, 'Browser server imports must be discovered');
+  assert.ok(required.has(join(server, 'admin/filter-script.js')), 'Shared filter rules must be discovered through browser re-exports');
+  assert.match(dockerfile.split(/^FROM .* AS runtime\s*$/mi)[1], /^COPY[^\n]* server \.\/server$/m, 'Runtime must include the shared server module');
   const missing = [...required].filter(file => !copies.some(({ source, destination }) => {
     const suffix = relative(source, file);
     if (statSync(source).isDirectory()) return !suffix.startsWith('..') && resolve(destination, suffix) === file;

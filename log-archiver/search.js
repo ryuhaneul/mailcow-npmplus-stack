@@ -61,7 +61,12 @@ function cleanText(value) {
   if (/\b(?:authorization|proxy-authorization|cookie|set-cookie|subject|mail[_ -]?body|raw[_ -]?mail|headers)["']?\s*[:=]/i.test(text)) return '[민감 정보가 포함된 로그]';
   text = text.replace(/https?:\/\/[^\s<>"']+/gi, value => {
     try { const url = new URL(value); return `${url.protocol}//${url.host}${url.pathname}`; } catch { return '[URL]'; }
-  }).replace(/(\/[^\s?"'<>]*)\?[^\s"'<>]*/g, '$1');
+  }).replace(/[^\s"'<>]+/g, token => {
+    // Consume each token once, including paths with no query, to avoid retrying at every slash.
+    const slash = token.indexOf('/');
+    const query = slash < 0 ? -1 : token.indexOf('?', slash);
+    return query < 0 ? token : token.slice(0, query);
+  });
   text = text.replace(/\b((?:password\w*|passwd\w*|passfile\w*|\w*token\w*|\w*secret\w*|api[_-]?key|\w+_key)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi, '$1***');
   return sanitizeSyncResponse(text);
 }

@@ -102,7 +102,7 @@ SERVER_IP=                   # 비워두면 자동 감지
 
 # === NPMplus 관리자 ===
 NPM_ADMIN_EMAIL=admin@example.com
-NPM_ADMIN_PASSWORD=ChangeMe!Str0ng   # 비워두면 자동 생성
+NPM_ADMIN_PASSWORD=   # 비워두면 자동 생성(권장)
 
 # === 자동 생성 (비워두면 setup.sh가 생성) ===
 CROWDSEC_BOUNCER_KEY=
@@ -349,7 +349,7 @@ SERVER_IP=                   # Auto-detected if empty
 
 # === NPMplus Admin ===
 NPM_ADMIN_EMAIL=admin@example.com
-NPM_ADMIN_PASSWORD=ChangeMe!Str0ng   # Auto-generated if empty
+NPM_ADMIN_PASSWORD=   # Auto-generated if empty (recommended)
 
 # === Auto-generated (leave empty for setup.sh to generate) ===
 CROWDSEC_BOUNCER_KEY=

@@ -113,10 +113,6 @@ check_disk_space() {
 # --- Root check ---
 [ "$(id -u)" -eq 0 ] || die "This script must be run as root (use sudo)"
 
-# --- Start log ---
-mkdir -p "$(dirname "$LOGFILE")"
-echo "=== Setup started at $(date) ===" >> "$LOGFILE"
-
 # --- Load .env ---
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || die ".env file not found. Copy .env.example to .env and fill in values."
@@ -127,6 +123,15 @@ MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
 TOOLKIT_ENABLE=true
 set -a; source "$ENV_FILE"; set +a
+
+# Reject the old example before creating logs or changing the installation.
+if [ "${NPM_ADMIN_PASSWORD:-}" = 'ChangeMe!Str0ng' ]; then
+    LOGFILE=/dev/null die "NPM_ADMIN_PASSWORD uses the known example password. Leave it empty to auto-generate a password (recommended)."
+fi
+
+# --- Start log ---
+mkdir -p "$(dirname "$LOGFILE")"
+echo "=== Setup started at $(date) ===" >> "$LOGFILE"
 
 [ -z "${DOMAIN:-}" ] && die "DOMAIN is required in .env"
 # shellcheck source-path=SCRIPTDIR
@@ -725,17 +730,29 @@ done
 if [ -n "${MAILCOW_API_KEY:-}" ]; then
     # Always set admin password via API key (basic auth check is unreliable)
     log "Setting Mailcow admin password..."
-    CHANGE_RESULT=$(curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
+    CHANGE_RESULT=$(printf '%s' "$NPM_ADMIN_PASSWORD" | python3 -c '
+import json, sys
+password = sys.stdin.read()
+print(json.dumps({"items": ["admin"], "attr": {"password": password, "password2": password}}))
+' | curl -sk -X POST "https://127.0.0.1:8443/api/v1/edit/admin" \
         -H "Content-Type: application/json" \
         -H "X-API-Key: ${MAILCOW_API_KEY}" \
-        -d "{\"items\":[\"admin\"],\"attr\":{\"password\":\"${NPM_ADMIN_PASSWORD}\",\"password2\":\"${NPM_ADMIN_PASSWORD}\"}}" 2>/dev/null || true)
-    if echo "$CHANGE_RESULT" | grep -q '"type":"success"'; then
+        -d @- 2>/dev/null || true)
+    if printf '%s' "$CHANGE_RESULT" | python3 -c '
+import json, sys
+try:
+    result = json.load(sys.stdin)
+    sys.exit(0 if isinstance(result, list) and result and all(isinstance(item, dict) and item.get("type") == "success" for item in result) else 1)
+except (ValueError, TypeError):
+    sys.exit(1)
+'; then
         log "Mailcow admin password set"
     else
-        warn "Could not set Mailcow admin password (response: ${CHANGE_RESULT})"
+        # API responses may echo submitted attributes; do not log the body.
+        die "Could not set Mailcow admin password — stopping before publishing admin proxy hosts"
     fi
 else
-    warn "No API key — Mailcow admin password remains default (moohoo)"
+    die "No API key — cannot secure Mailcow admin password; stopping before publishing admin proxy hosts"
 fi
 
 # --- Add domain to Mailcow (skip if already exists) ---
@@ -1000,21 +1017,27 @@ log "Snappymail: default_domain set to ${DOMAIN}"
 # Change Snappymail admin password to NPM_ADMIN_PASSWORD
 # Always set it — Snappymail's default password varies by version (not always '12345')
 log "Setting Snappymail admin password..."
-SNAPPY_HASH=$(docker exec snappymail php -r "echo password_hash('${NPM_ADMIN_PASSWORD}', PASSWORD_BCRYPT);" 2>/dev/null || echo "")
+SNAPPY_HASH=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r 'echo password_hash(stream_get_contents(STDIN), PASSWORD_BCRYPT);' 2>/dev/null) || die "Could not generate Snappymail admin password hash"
 if [ -n "$SNAPPY_HASH" ]; then
     # Check if password is already correct
-    SNAPPY_ALREADY=$(docker exec snappymail php -r "
-\$ini = parse_ini_file('/var/lib/snappymail/_data_/_default_/configs/application.ini');
-echo password_verify('${NPM_ADMIN_PASSWORD}', \$ini['admin_password'] ?? '') ? 'yes' : 'no';
-" 2>/dev/null || echo "no")
+    SNAPPY_ALREADY=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r '
+$ini = parse_ini_file("/var/lib/snappymail/_data_/_default_/configs/application.ini");
+echo password_verify(stream_get_contents(STDIN), $ini["admin_password"] ?? "") ? "yes" : "no";
+' 2>/dev/null || echo "no")
     if [ "$SNAPPY_ALREADY" = "yes" ]; then
         log "Snappymail admin password: already set"
     else
-        docker exec snappymail sh -c "sed -i 's|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|' /var/lib/snappymail/_data_/_default_/configs/application.ini"
+        # Bcrypt uses $ . / and alphanumerics: safe with | and no inner shell.
+        docker exec snappymail sed -i "s|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini || die "Could not apply Snappymail admin password hash"
+        SNAPPY_VERIFIED=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r '
+$ini = parse_ini_file("/var/lib/snappymail/_data_/_default_/configs/application.ini");
+echo password_verify(stream_get_contents(STDIN), $ini["admin_password"] ?? "") ? "yes" : "no";
+' 2>/dev/null || echo "no")
+        [ "$SNAPPY_VERIFIED" = "yes" ] || die "Snappymail admin password verification failed"
         log "Snappymail admin password set"
     fi
 else
-    warn "Could not generate Snappymail admin password hash"
+    die "Could not generate Snappymail admin password hash"
 fi
 
 else
@@ -1551,6 +1574,10 @@ else
 fi
 
 header "Setup Complete"
+
+if [ -z "${ADMIN_ACCESS_LIST:-}" ]; then
+    warn "관리자 화면(NPMplus·Mailcow·메일어드민 등)이 IP 제한 없이 공개 상태 — ADMIN_ACCESS_LIST 설정 권장"
+fi
 
 echo "  Services:"
 if [ "$SNAPPYMAIL_ENABLE" = true ] || [ "$WEBMAIL_ENABLE" = true ]; then

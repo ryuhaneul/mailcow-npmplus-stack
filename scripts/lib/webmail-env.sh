@@ -374,8 +374,8 @@ webmail_generate_admin_env() (
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
     local dest="$1" tmp auto_days="" pin_file="" doveadm_url="" doveadm_key="" relay_files="" trusted_file=""
     local mailcow_api_key
-    # Check the raw line before the shared reader strips CR or Bash drops NUL.
-    if sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1 | LC_ALL=C grep -aq '[[:cntrl:]]'; then
+    # Allow only printable non-space ASCII before the reader strips CR or Bash drops NUL.
+    if sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1 | LC_ALL=C grep -a '[^!-~]' > /dev/null; then
         webmail_error "invalid mailcow API key"
         return 1
     fi

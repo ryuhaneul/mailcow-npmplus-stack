@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { loadAdminConfig } from '../../server/admin/config.js';
 
 const library = fileURLToPath(new URL('../../../scripts/lib/webmail-env.sh', import.meta.url));
 const baseConfig = 'DBNAME=mailcow\nIPV4_NETWORK=172.22.1\nMAILCOW_HOSTNAME=mail.example.test\nENABLE_IPV6=false\n';
@@ -43,7 +44,7 @@ test('admin API env: optional server key changes only admin key line; repeat pre
   const previousAdmin = await f.admin();
   const previousPublic = await f.public();
   assert.ok(!previousAdmin.includes('MAILCOW_API_KEY'));
-  const secret = 'synthetic-$dollar-"quote"-\\slash-$(touch SHOULD_NOT_EXIST)-`false`';
+  const secret = 'synthetic-$dollar-"quote"-\\slash-$(touch${IFS}SHOULD_NOT_EXIST)-`false`';
   await f.configure(`API_KEY='${secret}'\n`);
   const first = f.generate(true);
   assert.equal(first.status, 0);
@@ -69,6 +70,7 @@ test('admin API env: optional server key changes only admin key line; repeat pre
 
 for (const [label, line, expected] of [
   ['unquoted', 'API_KEY=synthetic-plain\n', 'synthetic-plain'],
+  ['ASCII boundaries', 'API_KEY=!synthetic-boundary~\n', '!synthetic-boundary~'],
   ['double quoted', 'API_KEY="synthetic-double"\n', 'synthetic-double'],
   ['literal leading quote', 'API_KEY=\'"synthetic-leading\'\n', '\\"synthetic-leading'],
   ['last assignment', 'API_KEY=synthetic-old\nAPI_KEY=synthetic-last\n', 'synthetic-last'],
@@ -86,12 +88,21 @@ for (const [label, line, expected] of [
     if (expected === null) assert.ok(!admin.includes('MAILCOW_API_KEY'));
     else assert.ok(admin.includes(`MAILCOW_API_KEY="${expected}"\n`));
     assert.ok(!(await f.public()).includes('MAILCOW_API_KEY'));
+    const appEnv = Object.fromEntries(admin.trimEnd().split('\n').map(line => {
+      const separator = line.indexOf('=');
+      return [line.slice(0, separator), JSON.parse(line.slice(separator + 1)).replaceAll('$$', '$')];
+    }));
+    assert.equal(loadAdminConfig(appEnv).mailcowApiKey, appEnv.MAILCOW_API_KEY ?? '');
   });
 }
 for (const [label, value] of [
   ['CR', 'synthetic-invalid\r'], ['CRLF', 'synthetic-invalid\r\nINJECTED=true'],
   ['LF', '"synthetic-invalid\nINJECTED=true"'], ['tab', 'synthetic-invalid\t'],
   ['NUL', 'synthetic-invalid\0'], ['escape', 'synthetic-invalid\x1b'], ['DEL', 'synthetic-invalid\x7f'],
+  ['U+0085', 'synthetic-invalid\u0085'], ['U+2028', 'synthetic-invalid\u2028'],
+  ['U+2029', 'synthetic-invalid\u2029'], ['non-ASCII printable', 'synthetic-invalid한'],
+  ['internal space', 'synthetic-invalid value'], ['leading space', ' synthetic-invalid'],
+  ['trailing space', 'synthetic-invalid '],
   ['single quote multiline', "'synthetic-invalid\nINJECTED=true'"],
 ]) {
   test(`admin API env: ${label} rejected without secret output or replacing existing admin env`, async t => {

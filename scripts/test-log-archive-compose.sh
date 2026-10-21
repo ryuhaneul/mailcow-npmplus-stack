@@ -23,6 +23,7 @@ for app in ('webmail','snappymail'):
  assert 'log-archive-internal' not in (root/app/'docker-compose.yml').read_text()
 PY
 pass 'YAML parsed: every operational and local service has exact 20m x 5 uncompressed json-file policy'
+source "$ROOT/scripts/lib/log-archive.sh"
 # Extract only the public setup helpers, without running the installer.
 sed -n '/^# Setup log-archive helpers/,/^# End setup log-archive helpers/p' "$ROOT/scripts/setup.sh" > "$TMP/helpers.sh"
 source "$TMP/helpers.sh"
@@ -55,6 +56,18 @@ docker() {
   'ps -aq '*)
    for service in $EXISTING; do [[ "$*" != *"service=$service" ]] || echo "old-$service"; done ;;
   'compose config --services') printf '%s\n' $SERVICES ;;
+  'compose config --format json')
+   python3 - "$PWD" "$SERVICES" <<'RENDER'
+import json,pathlib,sys,yaml
+root=pathlib.Path(sys.argv[1]); services={s:{} for s in sys.argv[2].splitlines()}
+for name in ('docker-compose.yml','docker-compose.override.yml'):
+ p=root/name
+ if p.exists():
+  for key,value in yaml.safe_load(p.read_text()).get('services',{}).items():
+   if key in services: services[key].update(value)
+print(json.dumps({'services':services}))
+RENDER
+   ;;
   'compose ps -a -q '*)
    for service in $EXISTING; do [ "$service" != "${*: -1}" ] || echo "old-$service"; done ;;
   'compose --ansi never --dry-run '*) [ ! -f "$TMP/dry-fail" ] || return 1; echo "$PLAN" ;;
@@ -66,9 +79,9 @@ docker() {
  return 0
 }
 : > "$TMP/calls"
-setup_check_mailcow_logging
+log_archive_check_logging "$MAILCOW_DIR"
 SERVICES=$'postfix-mailcow\nfuture-mailcow'
-if setup_check_mailcow_logging 2>/dev/null; then fail 'missing future service'; fi
+if log_archive_check_logging "$MAILCOW_DIR" 2>/dev/null; then fail 'missing future service'; fi
 SERVICES=postfix-mailcow
 pass 'runtime service list detects future upstream service missing logging'
 SERVICES=$(python3 - "$ROOT" <<'PY'
@@ -76,9 +89,65 @@ import yaml,sys
 print('\n'.join(s for s in yaml.safe_load(open(sys.argv[1]+'/mailcow-override/docker-compose.override.yml'))['services'] if s!='toolkit-mailcow'))
 PY
 )
-setup_check_mailcow_logging
+log_archive_check_logging "$MAILCOW_DIR"
 SERVICES=postfix-mailcow
 pass 'toolkit absent from deployed service list is accepted'
+# Legacy installs may have custom override fields but no logging yet.
+cat > "$MAILCOW_DIR/docker-compose.override.yml" <<'LEGACY'
+services:
+  postfix-mailcow:
+    environment:
+      OPERATOR_SETTING: keep
+volumes:
+  operator-data:
+    external: true
+LEGACY
+LOG_ARCHIVE_ENABLE=false log_archive_ensure_logging "$MAILCOW_DIR" "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
+python3 - "$MAILCOW_DIR/docker-compose.override.yml" <<'CHECK'
+import pathlib,sys,yaml
+s=pathlib.Path(sys.argv[1]).read_text(); data=yaml.safe_load(s)
+assert data['services']['postfix-mailcow']['environment']=={'OPERATOR_SETTING':'keep'}
+assert data['volumes']=={'operator-data':{'external':True}}
+assert data['services']['postfix-mailcow']['logging']['options']['max-size']=='20m'
+CHECK
+before=$(sha256sum "$MAILCOW_DIR/docker-compose.override.yml")
+log_archive_ensure_logging "$MAILCOW_DIR" "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
+[ "$(sha256sum "$MAILCOW_DIR/docker-compose.override.yml")" = "$before" ] || fail logging-idempotence
+pass 'legacy override receives logging even OFF, preserving custom fields; repeated update is unchanged'
+SERVICES=$'postfix-mailcow\nfuture-mailcow'
+if log_archive_ensure_logging "$MAILCOW_DIR" "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml" 2>/dev/null; then fail unknown-service; fi
+[ "$(sha256sum "$MAILCOW_DIR/docker-compose.override.yml")" = "$before" ] || fail unknown-service-mutation
+SERVICES=postfix-mailcow
+pass 'unknown upstream service fails closed before modifying override'
+sed -i 's/max-size: "20m"/max-size: "1m"/' "$MAILCOW_DIR/docker-compose.override.yml"
+before=$(sha256sum "$MAILCOW_DIR/docker-compose.override.yml")
+if log_archive_ensure_logging "$MAILCOW_DIR" "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml" 2>/dev/null; then fail custom-policy; fi
+[ "$(sha256sum "$MAILCOW_DIR/docker-compose.override.yml")" = "$before" ] || fail custom-policy-mutation
+pass 'conflicting operator logging is rejected without overwrite'
+rm "$MAILCOW_DIR/docker-compose.override.yml"
+log_archive_ensure_logging "$MAILCOW_DIR" "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
+log_archive_check_logging "$MAILCOW_DIR"
+pass 'absent override is created with logging for actual services only'
+mkdir -p "$TMP/npmplus"
+python3 - "$ROOT/npmplus/docker-compose.yml" "$TMP/npmplus/docker-compose.yml" <<'LEGACY_NPM'
+import pathlib,re,sys
+s=pathlib.Path(sys.argv[1]).read_text()
+s=re.sub(r'^    logging:\n(?:^      .*\n|^        .*\n)*','',s,flags=re.M)
+s=s.replace('zoeyvid/npmplus:', 'operator.invalid/npmplus:')
+pathlib.Path(sys.argv[2]).write_text(s)
+LEGACY_NPM
+SERVICES=$'npmplus\ncrowdsec'
+LOG_ARCHIVE_ENABLE=false log_archive_ensure_logging "$TMP/npmplus" "$ROOT/npmplus/docker-compose.yml" "$TMP/npmplus/docker-compose.yml"
+python3 - "$TMP/npmplus/docker-compose.yml" <<'CHECK_NPM'
+import pathlib,sys,yaml
+s=pathlib.Path(sys.argv[1]).read_text(); data=yaml.safe_load(s)
+assert data['services']['npmplus']['environment']['LOGROTATE']=='true'
+assert data['services']['npmplus']['image'].startswith('operator.invalid/npmplus:')
+assert all(v['logging']['options']['max-file']=='5' for v in data['services'].values())
+CHECK_NPM
+pass 'legacy NPMplus and crowdsec receive limits even OFF; operator image and access rotation stay unchanged'
+SERVICES=postfix-mailcow
+cp "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
 : > "$TMP/calls"
 setup_archive_sync
 grep -qx 'prepare:postfix' "$TMP/calls" || fail existing-sources

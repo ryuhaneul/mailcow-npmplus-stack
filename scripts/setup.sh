@@ -183,24 +183,6 @@ setup_cleanup() {
     exit "$status"
 }
 
-# Compare actual rendered services, including future upstream additions, to our
-# override. Never silently deploy a service without the disk protection policy.
-setup_check_mailcow_logging() {
-    local services
-    services=$(cd "$MAILCOW_DIR" && docker compose config --services) || return 1
-    [ -n "$services" ] || return 1
-    python3 - "$MAILCOW_DIR/docker-compose.override.yml" "$services" <<'LOGGING'
-import pathlib,re,sys
-text=pathlib.Path(sys.argv[1]).read_text().split('\nvolumes:',1)[0]
-blocks=dict(re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)',text,re.M|re.S))
-for service in sys.argv[2].splitlines():
-    block=blocks.get(service,'')
-    for required in ('    logging:', '      driver: json-file', '        max-size: "20m"', '        max-file: "5"', '        compress: "false"'):
-        if required not in block.splitlines():
-            sys.exit('[setup] ERROR: Docker logging policy missing for '+service)
-LOGGING
-}
-
 setup_compose_will_replace() {
     local dir="$1" service="$2" plan changed
     plan=$(cd "$dir" && docker compose --ansi never --dry-run up -d --no-deps --no-build "$service" 2>&1) || return 1
@@ -549,7 +531,7 @@ path.write_text(text)
 TKOVERRIDE
 fi
 log "docker-compose.override.yml installed"
-setup_check_mailcow_logging || die "Mailcow service logging policy is incomplete"
+log_archive_check_logging "$MAILCOW_DIR" || die "Mailcow service logging policy is incomplete"
 
 # --- Optional: bind vmail-vol-1 to a host path (single-disk servers leave VMAIL_DEVICE empty) ---
 if [ -n "${VMAIL_DEVICE:-}" ]; then
@@ -865,6 +847,7 @@ NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
+log_archive_check_logging "$NPMPLUS_DIR" || die "NPMplus service logging policy is incomplete"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
 log "Waiting for NPMplus health check..."

@@ -1,5 +1,6 @@
 import { AppError } from '../../errors.js';
 import { sanitizeSyncResponse } from './sync.js';
+import { archiveUnavailable, LOG_ARCHIVE_MAX_BYTES } from '../log-archive-client.js';
 
 const kinds = ['postfix', 'dovecot', 'rspamd-history', 'netfilter', 'ui', 'api', 'sasl'];
 const presets = { sender_rejected: 'postfix', noqueue: 'postfix', storage_errors: 'dovecot', protocol_by_account: 'dovecot' };
@@ -39,7 +40,34 @@ function groupKey(preset, line) {
   if (preset === 'protocol_by_account') { const found = login(line); if (found?.account) return `${found.account} · ${found.protocol}`; }
   return null;
 }
-export function createLogsService({ mailcow, config }) {
+const archiveSources = { postfix: 90, dovecot: 90, rspamd: 7, 'php-fpm': 1, nginx: 1, webmail: 90, 'webmail-admin': 90, npmplus: 90 };
+function archiveQuery(query) {
+  if (!query || Object.keys(query).some(key => !['source', 'from', 'to', 'q', 'limit', 'cursor'].includes(key)) || Object.values(query).some(value => typeof value !== 'string')) throw invalid();
+  const stamp = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value)) throw invalid();
+    const day = new Date(`${value.slice(0, 10)}T00:00:00Z`), zone = /[+-](\d\d):(\d\d)$/.exec(value);
+    if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== value.slice(0, 10) || Number(value.slice(11, 13)) > 23 || Number(value.slice(14, 16)) > 59 || Number(value.slice(17, 19)) > 59 || zone && (Number(zone[1]) > 23 || Number(zone[2]) > 59) || !Number.isFinite(Date.parse(value))) throw invalid();
+    const date = new Date(value), fraction = /\.(\d+)/.exec(value)?.[1] ?? '';
+    return { milliseconds: date.getTime(), key: `${date.toISOString().slice(0, 19)}.${fraction.padEnd(9, '0')}Z` };
+  };
+  const start = stamp(query.from), end = stamp(query.to), limit = query.limit ?? '200';
+  if (!Object.hasOwn(archiveSources, query.source) || start.key >= end.key || end.milliseconds - start.milliseconds > archiveSources[query.source] * 86400000 || !/^[1-9]\d*$/.test(limit) || Number(limit) > 1000 || Array.from(query.q ?? '').length > 200 || query.cursor !== undefined && (!query.cursor || query.cursor.length > 4096)) throw invalid();
+  return { source: query.source, start: query.from, end: query.to, q: query.q ?? '', limit, ...(query.cursor === undefined ? {} : { cursor: query.cursor }) };
+}
+const object = value => value && typeof value === 'object' && !Array.isArray(value);
+const nullableTime = value => value === null || typeof value === 'string' && Number.isFinite(Date.parse(value));
+function archiveCoverage(value, source) {
+  if (!object(value) || !Object.hasOwn(archiveSources, value.source) || source && value.source !== source || !nullableTime(value.oldest) || !nullableTime(value.newest) || !Array.isArray(value.gaps)) throw archiveUnavailable();
+  return { source: value.source, oldest: value.oldest, newest: value.newest, gaps: value.gaps.map(gap => {
+    if (!object(gap) || !nullableTime(gap.from) || !nullableTime(gap.to) || typeof gap.reason !== 'string') throw archiveUnavailable();
+    return { from: gap.from, to: gap.to, reason: cut(sanitizeSyncResponse(gap.reason)) };
+  }) };
+}
+function archiveBounded(value) {
+  if (Buffer.byteLength(JSON.stringify(value)) > LOG_ARCHIVE_MAX_BYTES) throw archiveUnavailable();
+  return value;
+}
+export function createLogsService({ mailcow, config, logArchive }) {
   async function fetch(session, kind, n) { return rows(await mailcow.call(session, 'GET', `/api/v1/get/logs/${kind}/${n}`)).slice(0, n); }
   async function logs(session, query = {}) {
     if (!query || Object.keys(query).some(key => !['kind', 'preset', 'q', 'n'].includes(key)) || query.preset !== undefined && (!Object.hasOwn(presets, query.preset) || query.kind !== undefined)) throw invalid();
@@ -52,6 +80,30 @@ export function createLogsService({ mailcow, config }) {
       result.preset = query.preset; result.groups = [...groups.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
     }
     return bounded(result);
+  }
+  async function archive(query = {}) {
+    if (!logArchive?.enabled) return { enabled: false, lines: [], cursor: null, partialReason: null, incomplete: false, coverage: null };
+    const upstreamQuery = archiveQuery(query), data = await logArchive.search(upstreamQuery);
+    if (!object(data) || !Array.isArray(data.lines) || data.lines.length > Number(upstreamQuery.limit) || !(data.nextCursor === null || typeof data.nextCursor === 'string' && data.nextCursor.length > 0 && data.nextCursor.length <= 4096) || ![null, 'limit', 'response_bytes', 'scan_bytes', 'timeout'].includes(data.partialReason) || typeof data.incomplete !== 'boolean') throw archiveUnavailable();
+    const lines = data.lines.map(row => {
+      if (!object(row) || !nullableTime(row.time) || typeof row.message !== 'string' || typeof row.program !== 'string' || typeof row.priority !== 'string') throw archiveUnavailable();
+      const safe = sanitizeSyncResponse(row, [], ['program', 'priority', 'method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code']);
+      const fields = Object.fromEntries(['method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code'].filter(key => ['string', 'number', 'boolean'].includes(typeof safe.fields?.[key])).map(key => [key, safe.fields[key]]));
+      return { time: safe.time, source: upstreamQuery.source, program: safe.program, priority: safe.priority, message: safe.message, ...(Object.keys(fields).length ? { fields } : {}) };
+    }).filter(line => searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(upstreamQuery.q.toLowerCase())).map(trimValues);
+    return archiveBounded({ enabled: true, lines, cursor: data.nextCursor, partialReason: data.partialReason, incomplete: data.incomplete, coverage: archiveCoverage(data.coverage, upstreamQuery.source) });
+  }
+  async function archiveStatus() {
+    if (!logArchive?.enabled) return { enabled: false, sources: [] };
+    const [status, coverage] = await Promise.all([logArchive.status(), logArchive.coverage()]);
+    if (!object(status) || !Array.isArray(status.generations) || !Array.isArray(status.issues) || !(status.collectionLagSeconds === null || Number.isFinite(status.collectionLagSeconds) && status.collectionLagSeconds >= 0) || !object(coverage) || !Array.isArray(coverage.sources)) throw archiveUnavailable();
+    for (const generation of status.generations) if (!object(generation) || !Object.hasOwn(archiveSources, generation.source) || !Number.isSafeInteger(generation.pendingBytes) || generation.pendingBytes < 0) throw archiveUnavailable();
+    for (const issue of status.issues) if (!object(issue) || !Object.hasOwn(archiveSources, issue.source) || typeof issue.reason !== 'string') throw archiveUnavailable();
+    const sources = coverage.sources.map(value => {
+      const covered = archiveCoverage(value), generations = status.generations.filter(item => item.source === covered.source), issues = status.issues.filter(item => item.source === covered.source).map(item => cut(sanitizeSyncResponse(item.reason)));
+      return { source: covered.source, oldest: covered.oldest, newest: covered.newest, lagSeconds: status.collectionLagSeconds, backfillComplete: generations.length > 0 && generations.every(item => item.pendingBytes === 0) && issues.length === 0, issues };
+    });
+    return archiveBounded({ enabled: true, sources });
   }
   async function compatUsage(session) {
     const n = 1000, [dovecot, postfix] = await Promise.all([fetch(session, 'dovecot', n), fetch(session, 'postfix', n)]), plain = new Map(), smtp = new Map(); let uncertain = false;
@@ -73,5 +125,5 @@ export function createLogsService({ mailcow, config }) {
     const yes = value => value === true || String(value) === '1';
     return { items: data.map(row => ({ username: String(row.username), active: yes(row.active_int ?? row.active), tfaActive: yes(row.tfa_active_int ?? row.tfa_active), created: String(row.created ?? ''), forceTfa: yes(row.attributes?.force_tfa), forcePwUpdate: yes(row.attributes?.force_pw_update) })) };
   }
-  return { logs, compatUsage, admins, autoexpunge: () => ({ days: config.autoexpungeDays }) };
+  return { logs, archive, archiveStatus, compatUsage, admins, autoexpunge: () => ({ days: config.autoexpungeDays }) };
 }

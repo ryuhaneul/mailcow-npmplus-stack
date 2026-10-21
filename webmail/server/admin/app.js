@@ -44,6 +44,7 @@ import securityRoutes from './routes/security.js';
 import { createStatusService } from './services/status.js';
 import statusRoutes from './routes/status.js';
 import ftsRoutes from './routes/fts.js';
+import { createLogArchiveClient } from './log-archive-client.js';
 import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
 import { createLogoService } from './services/logo.js';
@@ -75,6 +76,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
       paths: [...new Set([...base.redact.paths, ...(logger?.redact?.paths ?? []),
         'req.headers.cookie', 'req.headers["x-mailadmin-csrf"]', 'req.body',
         'req.headers["x-mailadmin-api-key"]', 'mailcowApiKey', 'MAILCOW_API_KEY', '*.mailcowApiKey', '*.MAILCOW_API_KEY',
+        'logArchiveKey', 'LOG_ARCHIVE_KEY', '*.logArchiveKey', '*.LOG_ARCHIVE_KEY', 'req.headers["x-log-archive-key"]',
         '*.token', '*.digest', '*.password', '*.code', '*.dataBase64', '*.script'])] } };
   }
   const app = Fastify({ logger, trustProxy: config.trustProxy, bodyLimit: 64 * 1024, logController: new LogController({ disableRequestLogging: true }) });
@@ -160,7 +162,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('status', status);
   await app.register(statusRoutes, { service: status });
   await app.register(ftsRoutes, { state: ftsState, config });
-  const logs = createLogsService({ mailcow: app.mailcow, config });
+  const logs = createLogsService({ mailcow: app.mailcow, config, logArchive: createLogArchiveClient({ config, logger: app.log }) });
   app.decorate('logs', logs);
   await app.register(logsRoutes, { service: logs });
   const logo = createLogoService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });

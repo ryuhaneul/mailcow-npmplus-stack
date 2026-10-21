@@ -42,11 +42,12 @@ reload_service() {
 failed=0
 reload_service postfix-mailcow postfix reload || failed=1
 reload_service dovecot-mailcow doveadm reload || failed=1
+reload_service nginx-mailcow nginx -s reload || failed=1
 if [ "$failed" -eq 0 ]; then
     if [ "$CHECK_ONLY" = true ]; then
-        echo "Postfix/Dovecot containers uniquely resolved"
+        echo "Postfix/Dovecot/Nginx containers uniquely resolved"
     else
-        report "SUCCESS: Postfix/Dovecot certificates reloaded"
+        report "SUCCESS: Postfix/Dovecot/Nginx certificates reloaded"
     fi
 fi
 exit "$failed"

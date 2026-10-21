@@ -17,7 +17,7 @@ export function forwardStatus(text, internalDomains) {
       && !parts[0].startsWith('.') && !parts[0].endsWith('.') && !parts[0].includes('..') && parts[1].length <= 253
       && parts[1].split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
   });
-  return { addresses, external, valid: valid && !external };
+  return { addresses, external, valid };
 }
 export function ruleProblem(rule, allFolders, internalDomains, forwardText) {
   if (validateConditionTree(rule)) return '조건 묶음 모양을 확인해 주세요. 조건은 묶음마다 2~10개, 전체 20개까지 넣을 수 있어요.';
@@ -42,7 +42,7 @@ export function ruleProblem(rule, allFolders, internalDomains, forwardText) {
   if (problem) return problem;
   const a = rule.actions;
   if (Object.hasOwn(a, 'move') && (!allFolders.some(f => f.path === a.move && personalFolder(f)) || a.trash)) return '옮길 개인 폴더를 선택해 주세요. 삭제와 함께 고를 수 없습니다.';
-  if (a.forward && !forwardStatus(forwardText, internalDomains).valid) return '전달 받을 사내 메일 주소를 쉼표로 나누어 1~3개 입력해 주세요.';
+  if (a.forward && !forwardStatus(forwardText, internalDomains).valid) return '전달 받을 메일 주소를 쉼표로 나누어 1~3개 입력해 주세요.';
   if (!a.move && !a.trash && !a.read && !a.star && !a.forward) return '동작을 하나 이상 선택해 주세요.';
   return null;
 }

@@ -10,12 +10,13 @@ test('rule hash query decodes seed values without confusing slash or ampersand',
   assert.deepEqual(seededConditions(route.query),[{field:'from',op:'has',value:'sales@example.com'},{field:'subject',op:'has',value:'A/B&C'},{field:'attachment',op:'has',value:''}]);
   assert.equal(parseRoute('#rule/abcd1234').value,'abcd1234');
 });
-test('forward policy accepts only exact configured domains and 1–3 valid addresses', () => {
+test('forward policy accepts internal and external domains and 1–3 valid addresses', () => {
   const domains=['example.com'];
   assert.equal(forwardStatus('user@EXAMPLE.com, team@example.com',domains).valid,true);
   for(const value of ['user@external.example.org','user@sub.example.com','user@example.com.evil.test'])assert.equal(forwardStatus(value,domains).external,true);
   for(const value of ['', 'a..b@example.com','a@example.com,','a@example.com,b@example.com,c@example.com,d@example.com','a@example.com\n','a@-example.com'])assert.equal(forwardStatus(value,domains).valid,false,value);
-  assert.equal(forwardStatus('user@example.com',[]).valid,false);
+  assert.equal(forwardStatus('user@example.com',[]).valid,true);
+  assert.equal(forwardStatus('user@outside.test',domains).valid,true);
 });
 test('move choices exclude shared, virtual, system and unsafe folders', () => {
   assert.equal(personalFolder(folder),true);
@@ -30,7 +31,7 @@ test('rule validation blocks unsafe conditions, missing folders, empty actions a
   assert.match(ruleProblem({...rule,actions:{move:''}},[folder],[],''),/옮길 개인 폴더를 선택/);
   assert.ok(ruleProblem({...rule,actions:{move:'Projects',trash:true}},[folder],[],''));
   assert.ok(ruleProblem({...rule,actions:{}},[folder],[],''));
-  assert.ok(ruleProblem({...rule,actions:{forward:['user@external.example.org']}},[folder],['example.com'],'user@external.example.org'));
+  assert.equal(ruleProblem({...rule,actions:{forward:['user@external.example.org']}},[folder],['example.com'],'user@external.example.org'),null);
 });
 
 test('browser rule form accepts nested opposite joins and escaped literal question patterns', () => {

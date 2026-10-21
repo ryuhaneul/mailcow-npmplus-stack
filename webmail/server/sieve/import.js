@@ -71,7 +71,7 @@ export function importScript(source, { name = '', policy } = {}) {
       if (!context.checkFolders && entry.rule.actions.move) entry.item.warnings = ['폴더 존재 미확인'];
     } catch (error) {
       entry.item.status = 'unconvertible';
-      entry.item.reason = error.code === 'FORWARD_EXTERNAL' ? '외부 주소 전달은 가져올 수 없어요.' : '규칙의 값이나 형식을 옮길 수 없어요.';
+      entry.item.reason = '규칙의 값이나 형식을 옮길 수 없어요.';
       delete entry.rule;
     }
   }

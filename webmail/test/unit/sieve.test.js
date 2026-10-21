@@ -232,17 +232,17 @@ test('unsafe input cannot inject variables, commands or metadata lines', () => {
   assert.throws(() => generateScript(doc, { ...context, addresses: ['bad\n@example.com'] }), { code: 'RULES_INVALID' });
 });
 
-test('external forwarding, subdomain lookalikes and move plus trash return 422', () => {
+test('external forwarding and subdomain lookalikes are allowed; move plus trash returns 422', () => {
   for (const target of ['a@outside.example.com', 'a@example.com.invalid', 'a@sub.example.com']) {
     const doc = document(); doc.rules[0].actions = { forward: [target] };
-    expectInvalid(doc, 'FORWARD_EXTERNAL');
+    assert.equal(validateDocument(doc, context), doc);
   }
   const doc = document();
   doc.rules[0].actions = { move: 'Archive', trash: true };
   expectInvalid(doc);
   doc.rules[0].actions = { forward: ['a@EXAMPLE.COM', 'a@alias.example.com'] };
   assert.equal(validateDocument(doc, context), doc);
-  expectInvalid(doc, 'FORWARD_EXTERNAL', {});
+  assert.equal(validateDocument(doc), doc);
 });
 
 test('move requires an existing personal allowed folder', () => {
@@ -354,7 +354,7 @@ test('removed folders and changed domain policies warn without damaging stored d
   assert.equal(parseScript(script).state, 'ok');
   assert.deepEqual(classifyState({ activeName: 'webmail-rules', webmailScript: script }).missingFolders, ['Projects/팀']);
   assert.deepEqual(classifyState({ activeName: 'webmail-rules', webmailScript: script, folders: context.folders }).missingFolders, []);
-  expectInvalid(doc, 'FORWARD_EXTERNAL', { ...context, internalDomains: [] });
+  assert.equal(validateDocument(doc, { ...context, internalDomains: [] }), doc);
 });
 
 
@@ -499,4 +499,25 @@ test('import and generation share minimum versions for groups, patterns and flat
     assert.equal(rulesDocument(doc.rules).v, expected);
     assert.equal(parseScript(generateScript(doc, context)).doc.v, expected);
   }
+});
+
+
+test('external forwarding adds exactly one mandatory standalone spam guard after require, with no bounce guard', () => {
+  const guard = 'if header :contains "X-Spam-Flag" "YES" { stop; }';
+  const doc = document();
+  doc.rules[0].actions = { forward: ['A@EXAMPLE.COM', 'outside@example.net'] };
+  doc.rules.push({ ...rule(2, { forward: ['second@other.test'] }), stop: true });
+  const script = generateScript(doc, context);
+  const body = script.slice(script.indexOf('require ['));
+  assert.equal(body.split('\n')[1], guard);
+  assert.equal(body.split(guard).length - 1, 1);
+  assert.ok(body.indexOf(guard) < body.indexOf('redirect :copy'));
+  assert.equal(body.includes('if envelope :is "from" ""'), false);
+  assert.equal(parseScript(script).state, 'ok');
+  assert.equal(generateScript(parseScript(script).doc, context), script);
+  doc.rules.forEach(rule => { rule.enabled = false; });
+  assert.equal(generateScript(doc, context).includes(guard), false);
+  doc.rules = [rule(1, { forward: ['a@EXAMPLE.COM', 'a@alias.example.com'] })];
+  assert.equal(generateScript(doc, context).includes(guard), false);
+  assert.equal(generateScript(doc, { ...context, internalDomains: [] }).includes(guard), true);
 });

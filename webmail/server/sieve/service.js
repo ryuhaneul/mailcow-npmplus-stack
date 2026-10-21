@@ -417,28 +417,26 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (changed) { doc.rev++; await write(client, current, doc, policy); }
     });
   }
-  async function validateRule(session, body, ignoreExternalForward = false, previewOnly = false) {
+  async function validateRule(session, body, previewOnly = false) {
     object(body, ['rule']);
     const doc = rulesDocument([body.rule]);
-    // Validate every address before selectively ignoring the forwarding policy.
-    // A first external recipient must not hide a malformed later recipient.
+    // Validate every address before loading the folder policy.
     validateDocument(doc, { checkPolicy: false });
     const policy = previewOnly ? { internalDomains: await directory.internalDomains(), checkFolders: false } : await context(session);
-    try { validateDocument(doc, policy); }
-    catch (error) { if (!ignoreExternalForward || error.code !== 'FORWARD_EXTERNAL') throw error; }
+    validateDocument(doc, policy);
     return body.rule;
   }
   async function previewRule(session, body) {
     const started = performance.now();
-    const rule = await validateRule(session, body, false, true);
+    const rule = await validateRule(session, body, true);
     return previewMatches(rule, await loadInboxHeaders(imap, session, { now, budgetMs: Math.max(0, 3500 - (performance.now() - started)) }));
   }
   async function applyExisting(session, body) {
     // Do not queue folder validation behind an unfinished scan.
-    await validateRule(session, body, true, true);
+    await validateRule(session, body, true);
     const snapshot = await loadInboxHeaders(imap, session, { now, budgetMs: 0 });
     if (snapshot.partial) throw new AppError(409, 'PREVIEW_NOT_READY', '받은 메일 확인이 끝난 뒤 적용해 주세요.');
-    const rule = await validateRule(session, body, true);
+    const rule = await validateRule(session, body);
     try {
       const candidates = snapshot.items.filter(record => matches(rule, record.headers));
       const found = [];

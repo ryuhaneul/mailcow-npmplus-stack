@@ -118,8 +118,8 @@ const cases = [
   ['read', { from: 'notice@example.com' }, { shouldMarkAsRead: 'true' }, 'same', 'from'],
   ['star', { from: 'notice@example.com' }, { shouldStar: 'true' }, 'same', 'from'],
   ['internal forward', { from: 'notice@example.com' }, { forwardTo: 'team@example.com' }, 'same', 'from'],
-  ['external forward omitted', { from: 'notice@example.com' }, { forwardTo: 'team@outside.example', shouldStar: 'true' }, 'changed', 'from'],
-  ['external forward alone', { from: 'notice@example.com' }, { forwardTo: 'team@outside.example' }, 'no', /동작/],
+  ['external forward with star', { from: 'notice@example.com' }, { forwardTo: 'team@outside.example', shouldStar: 'true' }, 'same', 'from'],
+  ['external forward alone', { from: 'notice@example.com' }, { forwardTo: 'team@outside.example' }, 'same', 'from'],
   ['never spam omitted', { from: 'notice@example.com' }, { shouldNeverSpam: 'true', shouldStar: 'true' }, 'changed', 'from'],
   ['importance omitted', { from: 'notice@example.com' }, { shouldAlwaysMarkAsImportant: 'true', shouldStar: 'true' }, 'changed', 'from'],
   ['unimportant omitted', { from: 'notice@example.com' }, { shouldNeverMarkAsImportant: 'true', shouldStar: 'true' }, 'changed', 'from'],
@@ -172,7 +172,7 @@ test('search limits and malformed or unsupported syntax reject their entry', () 
 
 test('action omissions disclose names, archive availability and folder precedence', () => {
   const item = one(props({ ...valid, shouldNeverSpam: 'true', shouldAlwaysMarkAsImportant: 'true', shouldNeverMarkAsImportant: 'true', smartLabelToApply: 'category', forwardTo: 'x@outside.example' }));
-  for (const key of ['shouldNeverSpam', 'shouldAlwaysMarkAsImportant', 'shouldNeverMarkAsImportant', 'smartLabelToApply', 'forwardTo']) assert.ok(item.changes.some(change => change.includes(key)));
+  for (const key of ['shouldNeverSpam', 'shouldAlwaysMarkAsImportant', 'shouldNeverMarkAsImportant', 'smartLabelToApply']) assert.ok(item.changes.some(change => change.includes(key)));
   const missing = one(props({ ...valid, shouldArchive: 'true' }), { folders: [] });
   assert.equal(missing.status, 'changed');
   assert.ok(missing.changes.some(change => change.includes('shouldArchive')));
@@ -345,5 +345,17 @@ test('new folder validation shares creation limits and preserves existing names'
   for (const label of ['a'.repeat(100), '업무/견적', '.existing', ' Existing ', '.parent/New', '.old/Existing']) {
     const existing = [{ path: '.existing' }, { path: ' Existing ' }, { path: '.parent' }, { path: '.old/Existing' }];
     assert.notEqual(one(props({ ...valid, label }), { folders: existing }).status, 'no', label);
+  }
+});
+
+
+test('Gmail XML external-only forwarding imports in both stages and generates spam exclusion', () => {
+  for (const stage of [1, 2]) {
+    const result = convertGmailEntries(readGmailXml(feed(entryXml(props({ from: 'notice@example.test', forwardTo: 'target@outside.test' })))).entries, { policy, folders, stage });
+    assert.equal(result.items[0].status, 'same');
+    assert.deepEqual(result.rules[0].actions.forward, ['target@outside.test']);
+    const script = generateScript(doc(result.rules), policy);
+    assert.ok(script.includes('if header :contains "X-Spam-Flag" "YES" { stop; }'));
+    assert.ok(script.includes('redirect :copy "target@outside.test";'));
   }
 });

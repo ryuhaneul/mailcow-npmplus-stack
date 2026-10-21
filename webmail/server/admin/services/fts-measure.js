@@ -1,0 +1,77 @@
+import { shared, virtual } from '../../mail/folders.js';
+import { isMailboxAddress } from '../doveadm.js';
+
+const validGuid = value => typeof value === 'string' && /^[a-f0-9]{32}$/i.test(value);
+const validCount = value => Number.isSafeInteger(value) && value >= 0;
+const folderName = value => typeof value === 'string' && !!value.trim() && value.length <= 1000 && !/[\0\r\n]/.test(value);
+const row = (user, mailbox, status, reason, guid = null) => ({ user, mailbox, guid, messages: null, indexed: null, unindexed: null, status, reason });
+
+// No timers, cache, or eager requests: only the nightly caller starts measurement.
+// folderList(user) uses the installed mailboxList shape: [{mailbox}].
+export function createFtsMeasure({ doveadm, now = Date.now, folderList = user => doveadm.call('mailboxList', { user }) }) {
+  async function measureFolder(user, mailbox) {
+    const unknown = (reason, guid = null) => row(user, mailbox, 'unmeasured', reason, guid);
+    if (!isMailboxAddress(user) || !folderName(mailbox)) return unknown('measurement-failed');
+    if (shared(mailbox)) return row(user, mailbox, 'excluded', 'shared');
+    if (virtual(mailbox)) return row(user, mailbox, 'excluded', 'virtual');
+    if (/[*%]/.test(mailbox)) return row(user, mailbox, 'excluded', 'wildcard-name');
+    let guid = null;
+    try {
+      const metadata = await doveadm.specialUse(user, mailbox);
+      if (!Array.isArray(metadata) || metadata.length !== 1 || typeof metadata[0]?.value !== 'string') return unknown('measurement-failed');
+      const flags = metadata[0].value.split(/\s+/);
+      if (flags.includes('\\Trash')) return row(user, mailbox, 'excluded', 'trash');
+      if (flags.includes('\\Junk')) return row(user, mailbox, 'excluded', 'junk');
+      const statuses = await doveadm.mailboxStatus(user, mailbox);
+      if (!Array.isArray(statuses)) return unknown('measurement-failed');
+      if (!statuses.length) return unknown('missing-status');
+      if (statuses.length !== 1 || statuses[0]?.mailbox !== mailbox || !validGuid(statuses[0]?.guid)) return unknown('guid-mismatch');
+      const status = statuses[0];
+      guid = status.guid.toLowerCase();
+      const stats = await doveadm.ftsStats(user, mailbox);
+      if (!Array.isArray(stats)) return unknown('measurement-failed', guid);
+      if (!stats.length) return unknown('missing-stats', guid);
+      if (stats.length !== 1 || stats[0]?.mailbox !== mailbox || !validGuid(stats[0]?.guid) || stats[0].guid.toLowerCase() !== guid) return unknown('guid-mismatch', guid);
+      const messages = status.messages, indexed = stats[0].messages;
+      if (!validCount(messages) || !validCount(indexed) || indexed > messages) return unknown('invalid-count', guid);
+      return { user, mailbox, guid, messages, indexed, unindexed: messages - indexed, status: 'ok', reason: null };
+    } catch { return unknown('measurement-failed', guid); }
+  }
+
+  async function measureAll() {
+    const users = await doveadm.listUsers();
+    const folders = [];
+    for (const user of [...new Set(users)].sort()) {
+      let listed;
+      try {
+        listed = await folderList(user);
+        if (!Array.isArray(listed) || listed.some(item => !folderName(item?.mailbox))) throw new Error('Invalid folder list');
+      } catch {
+        folders.push(row(user, null, 'unmeasured', 'measurement-failed'));
+        continue;
+      }
+      for (const mailbox of [...new Set(listed.map(item => item.mailbox))].sort()) folders.push(await measureFolder(user, mailbox));
+    }
+    const byGuid = new Map();
+    for (const folder of folders) {
+      if (!folder.guid) continue;
+      const key = folder.guid;
+      const previous = byGuid.get(key);
+      if (previous) {
+        Object.assign(previous, row(previous.user, previous.mailbox, 'unmeasured', 'guid-mismatch', previous.guid));
+        Object.assign(folder, row(folder.user, folder.mailbox, 'unmeasured', 'guid-mismatch', folder.guid));
+      } else byGuid.set(key, folder);
+    }
+    const totals = { messages: 0, indexed: 0, unindexed: 0, unmeasured: 0, excluded: 0 };
+    for (const folder of folders) {
+      if (folder.status !== 'ok') { totals[folder.status]++; continue; }
+      for (const key of ['messages', 'indexed', 'unindexed']) {
+        if (totals[key] !== null) totals[key] = Number.isSafeInteger(totals[key] + folder[key]) ? totals[key] + folder[key] : null;
+      }
+    }
+    const top = folders.filter(folder => folder.status === 'ok' && folder.unindexed > 0)
+      .sort((a, b) => b.unindexed - a.unindexed || a.user.localeCompare(b.user) || a.mailbox.localeCompare(b.mailbox)).slice(0, 20);
+    return { measuredAt: new Date(now()).toISOString(), folders, totals, top };
+  }
+  return { measureFolder, measureAll };
+}

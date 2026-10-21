@@ -3,8 +3,8 @@ import { AppError } from '../errors.js';
 import { mailboxStatus } from './imap-raw.js';
 import { assertUidValidity } from './ref.js';
 
-const virtual = path => path === 'WebmailVirtual' || path.startsWith('WebmailVirtual/');
-const shared = path => path === 'Shared' || path.startsWith('Shared/');
+export const virtual = path => path === 'WebmailVirtual' || path.startsWith('WebmailVirtual/');
+export const shared = path => path === 'Shared' || path.startsWith('Shared/');
 const specialNames = { INBOX: '\\Inbox', Sent: '\\Sent', Drafts: '\\Drafts', Trash: '\\Trash', Junk: '\\Junk', Archive: '\\Archive' };
 const unavailable = () => new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
 const readonly = () => new AppError(403, 'FOLDER_READONLY', '이 폴더는 변경할 수 없어요.');

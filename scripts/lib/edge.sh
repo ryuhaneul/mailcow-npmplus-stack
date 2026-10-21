@@ -250,7 +250,13 @@ if normalized(original) == normalized(desired): sys.exit(0)
 legacy = re.sub(rb'\n  mailrelay-snappymail:.*?(?=\nvolumes:)', b'', desired, flags=re.S)
 legacy = legacy.replace(b'      mailstack-snappymail-edge:', b'      mailcow-network:', 1)
 legacy = re.sub(rb'(?m)^  mailstack-snappymail-edge:\n.*?(?=^  mailcow-network:)', b'', legacy, flags=re.S)
-if normalized(original) != normalized(legacy):
+# Accept exactly the stack-managed logging block as a migration, while
+# preserving the existing refusal to overwrite operator logging settings.
+def without_managed_logging(data):
+    return re.sub(rb'(?m)^    logging:\n      driver: json-file\n      options:\n        max-size: "20m"\n        max-file: "5"\n        compress: "false"\n', b'', data)
+if without_managed_logging(normalized(original)) not in (
+        without_managed_logging(normalized(desired)),
+        without_managed_logging(normalized(legacy))):
     changes = difflib.SequenceMatcher(a=normalized(original).splitlines(), b=normalized(desired).splitlines())
     summary = '; '.join(f'installed lines {a+1}-{b}, repository lines {c+1}-{d}' for tag,a,b,c,d in changes.get_opcodes() if tag != 'equal')
     sys.exit(f'[edge] ERROR: custom SnappyMail compose {target}: {summary}; align its structure with {source} manually, then rerun update')
@@ -282,7 +288,7 @@ edge_prepare_apps() {
     if [ "$WEBMAIL_ENABLE" = true ]; then
         mkdir -p "$webdir" || return 1
         rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
-            --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
+            --exclude=.env --exclude=log-archiver/ --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then before=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || true; fi
         webmail_ensure_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" && webmail_generate_admin_env "$webdir" \
             && edge_generate_relay webmail "$webdir" || return 1
@@ -302,35 +308,131 @@ edge_prepare_apps() {
     edge_log 'step 1 complete: app files prepared; containers unchanged'
 }
 
+# Compose runners accept a mode so the preview uses exactly the apply arguments.
+edge_compose_up() {
+    local mode="$1"; shift
+    if [ "$mode" = preview ]; then docker compose --dry-run "$@"
+    else docker compose "$@"; fi
+}
+
+edge_npmplus_up() {
+    local mode="$1"; shift
+    local -a flags=()
+    [ "$mode" != preview ] || flags+=(--dry-run)
+    if declare -F _waf_npmplus_compose >/dev/null; then _waf_npmplus_compose "${flags[@]}" "$@"
+    else docker compose "${flags[@]}" "$@"; fi
+}
+
+# Only known Compose progress records are accepted. An unfamiliar preview must
+# never be interpreted as proof that replacing a container is safe.
+edge_archive_preview_targets() {
+    python3 -c '
+import re,sys
+names={}
+archived={"postfix-mailcow","dovecot-mailcow","rspamd-mailcow","php-fpm-mailcow","nginx-mailcow","webmail","webmail-admin","npmplus"}
+for row in sys.argv[1].splitlines():
+ name,service=row.split("|",1)
+ names[name]=service
+states={"Running","Starting","Started","Recreate","Recreated","Stopping","Stopped","Remove","Removing","Removed","Create","Created","Healthy","Waiting","Pulling","Pulled","Building","Built"}
+targets=set(); records=0
+for line in sys.stdin:
+ line=re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
+ if not line: continue
+ if re.fullmatch(r"\[\+\].*",line): continue
+ if re.match(r"(?:WARN\[|time=.+ level=warning )",line): continue
+ match=re.search(r"(?:DRY-RUN MODE -\s+)?(Container|Network|Volume|Image)\s+(\S+)\s+([A-Za-z]+)(?:\s+.*)?$",line)
+ if not match or match[3] not in states: sys.exit(1)
+ records+=1
+ if match[1]=="Container" and match[3] in {"Recreate","Recreated","Remove","Removing","Removed"}:
+  if match[2] not in names: sys.exit(1)
+  if names[match[2]] in archived: targets.add(names[match[2]])
+if not records: sys.exit(1)
+if sys.argv[2]=="true": targets.update(service for service in names.values() if service in archived)
+print("\n".join(sorted(targets)))
+' "$1" "$2"
+}
+
+# edge_archive_apply <compose dir> <legacy down true|false> <runner> <args>...
+# The subshell owns its traps and running set, including down + subsequent up.
+edge_archive_apply() (
+    local dir="$1" down="$2"; shift 2
+    cd "$dir" || return 1
+    if [ "${LOG_ARCHIVE_ENABLE:-false}" != true ]; then
+        [ "$down" != true ] || docker compose down --remove-orphans || return 1
+        local runner="$1"; shift
+        "$runner" apply "$@"
+        return $?
+    fi
+    local preview names targets snapshot service status replacing=false
+    local -a drained=() running=()
+    log_archive_release
+    trap 'status=$?
+        trap - EXIT INT TERM HUP
+        if [ "$status" -ne 0 ]; then
+            log_archive_restore || status=1
+            if [ "$replacing" = true ] && [ "${#running[@]}" -gt 0 ]; then
+                docker compose --profile admin up -d --no-deps --no-recreate --wait --wait-timeout 30 "${running[@]}" || status=1
+            fi
+        fi
+        exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    # Runner arguments follow the mode; preserve the exact apply command.
+    local runner="$1"; shift
+    preview=$("$runner" preview "$@" 2>&1) || { edge_error 'Compose dry-run failed; replacement stopped'; return 1; }
+    names=$(docker compose --profile admin ps -a --format '{{.Name}}|{{.Service}}') || return 1
+    targets=$(printf '%s\n' "$preview" | edge_archive_preview_targets "$names" "$down") \
+        || { edge_error 'unrecognized Compose dry-run output; replacement stopped'; return 1; }
+    if [ -n "$targets" ]; then
+        snapshot=$(docker compose --profile admin ps --status running --services) || return 1
+        while IFS= read -r service; do
+            drained+=("$service")
+            if grep -qFx "$service" <<< "$snapshot"; then running+=("$service"); fi
+        done <<< "$targets"
+        log_archive_stop_and_drain "$dir" "${drained[@]}" || return 1
+    fi
+    replacing=true
+    [ "$down" != true ] || docker compose down --remove-orphans || return 1
+    "$runner" apply "$@" || return 1
+    log_archive_release
+)
+
+edge_app_up() {
+    local mode="$1" app="$2"
+    if [ "$mode" = apply ] && [ "${LOG_ARCHIVE_ENABLE:-false}" != true ] && [ "$app" = webmail ]; then
+        BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull webmail || return 1
+    fi
+    if [ "$app" = webmail ] && [ "${EDGE_WEBMAIL_PIN_CHANGED:-false}" = true ]; then
+        edge_compose_up "$mode" up -d mailrelay-webmail || return 1
+        if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
+            edge_compose_up "$mode" --profile admin up -d --force-recreate webmail webmail-admin
+        else edge_compose_up "$mode" up -d --force-recreate webmail; fi
+    else edge_compose_up "$mode" up -d; fi
+}
+
 # Stage 2: only legacy app attachments require down; normal up is idempotent.
 edge_up_apps() {
-    local webdir="$1" snappydir="$2" app dir enabled networks
+    local webdir="$1" snappydir="$2" app dir enabled networks down
     for app in webmail snappymail; do
         if [ "$app" = webmail ]; then enabled="$WEBMAIL_ENABLE"; dir="$webdir"
         else enabled="$SNAPPYMAIL_ENABLE"; dir="$snappydir"; fi
         [ "$enabled" = true ] || continue
+        if [ "$app" = webmail ] && [ "${LOG_ARCHIVE_ENABLE:-false}" = true ]; then
+            (cd "$dir" && BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull webmail) || return 1
+        fi
+        down=false
         networks=$(docker inspect "$app" --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
-        if ! python3 - "$networks" "mailstack-$app-edge" <<'PY'
+        if ! python3 - "$networks" "mailstack-$app-edge" <<'PYNETWORK'
 import json, sys
 networks = json.loads(sys.argv[1])
 sys.exit(0 if not networks or set(networks) == {sys.argv[2]} else 1)
-PY
+PYNETWORK
         then
             edge_log "step 2: $app legacy attachments; taking project down (data preserved)"
-            (cd "$dir" && docker compose down --remove-orphans) || return 1
+            down=true
         fi
-        if [ "$app" = webmail ]; then (cd "$dir" && BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build --pull webmail) || return 1; fi
-        if [ "$app" = webmail ] && [ "${EDGE_WEBMAIL_PIN_CHANGED:-false}" = true ]; then
-            (cd "$dir" && docker compose up -d mailrelay-webmail && {
-                if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
-                    docker compose --profile admin up -d --force-recreate webmail webmail-admin
-                else
-                    docker compose up -d --force-recreate webmail
-                fi
-            }) || return 1
-        else
-            (cd "$dir" && docker compose up -d) || return 1
-        fi
+        edge_archive_apply "$dir" "$down" edge_app_up "$app" || return 1
         edge_log "step 2 complete: $app project up"
     done
 }
@@ -350,18 +452,12 @@ actual = set(networks).intersection({'mailstack-webmail-edge','mailstack-snappym
 sys.exit(0 if networks and actual == set(expected) and all(networks[name].get('IPAddress') == address for name,address in expected.items()) else 1)
 PY
     then
-        (cd "$dir" && {
-            if declare -F _waf_npmplus_compose >/dev/null; then _waf_npmplus_compose up -d npmplus
-            else docker compose up -d npmplus; fi
-        }) || return 1
+        edge_archive_apply "$dir" false edge_npmplus_up up -d npmplus || return 1
         edge_log 'step 3: NPMplus edge attachments unchanged; recreation skipped'
         return 0
     fi
     edge_log 'step 3: applying NPMplus edge override (brief web interruption)'
-    (cd "$dir" && {
-        if declare -F _waf_npmplus_compose >/dev/null; then _waf_npmplus_compose up -d --force-recreate npmplus
-        else docker compose up -d --force-recreate npmplus; fi
-    }) || return 1
+    edge_archive_apply "$dir" false edge_npmplus_up up -d --force-recreate npmplus || return 1
     edge_log 'step 3 complete: NPMplus override applied'
 }
 
@@ -468,7 +564,7 @@ PY
         edge_error 'SnappyMail attached to NPMplus but managed override missing; review manually'; return 1
     fi
     if [ "$changed" = 1 ] || [ "$attached" = true ]; then
-        (cd "$npm" && docker compose up -d --force-recreate npmplus) || return 1
+        edge_archive_apply "$npm" false edge_compose_up up -d --force-recreate npmplus || return 1
     fi
     if docker network inspect mailstack-snappymail-edge >/dev/null 2>&1; then
         docker network rm mailstack-snappymail-edge || return 1

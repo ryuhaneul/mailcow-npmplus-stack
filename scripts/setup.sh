@@ -889,6 +889,7 @@ for i in $(seq 1 60); do
     sleep 5
 done
 
+edge_npmplus_real_ip || die "NPMplus real-IP trust restriction failed; previous server_http.conf restored"
 edge_apply_trust "$SCRIPT_DIR" || die "Edge step 4 failed; app/NPMplus migration completed, mailcow trust incomplete"
 
 # ============================================================

@@ -22,6 +22,7 @@ services:
       - "443:443"
       - "127.0.0.1:81:81"
     environment:
+      # TRUST_IP is intentionally unset (empty default in future fixed releases).
       TZ: Asia/Seoul
       INITIAL_ADMIN_EMAIL: "${NPM_ADMIN_EMAIL}"
       INITIAL_ADMIN_PASSWORD: "${NPM_ADMIN_PASSWORD}"

@@ -16,18 +16,16 @@ webmail_load_config "$TMP/stack.env" "$TMP/mailcow"
 [ "$WEBMAIL_ENABLE" = true ] || fail webmail-default
 [ "$WEBMAIL_HOSTNAMES" = newmail.example.test,mail.example.test ] || fail default-mail-alias
 (
-    for legacy in true false ignored-value; do
-        for enabled in true false; do
-            printf 'DOMAIN=example.test\nWEBMAIL_ENABLE=%s\nSNAPPYMAIL_ENABLE=%s\nWEBMAIL_HOSTNAMES=Custom.example.test,mail.example.test\n' "$enabled" "$legacy" > "$TMP/webmail-options.env"
-            webmail_load_config "$TMP/webmail-options.env" "$TMP/mailcow"
-            [ "$WEBMAIL_ENABLE" = "$enabled" ] || fail webmail-explicit-option
-            [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-dedup
-            webmail_options
-            [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-idempotent
-        done
+    for enabled in true false; do
+        printf 'DOMAIN=example.test\nWEBMAIL_ENABLE=%s\nWEBMAIL_HOSTNAMES=Custom.example.test,mail.example.test\n' "$enabled" > "$TMP/webmail-options.env"
+        webmail_load_config "$TMP/webmail-options.env" "$TMP/mailcow"
+        [ "$WEBMAIL_ENABLE" = "$enabled" ] || fail webmail-explicit-option
+        [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-dedup
+        webmail_options
+        [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-idempotent
     done
 )
-pass 'Webmail defaults on, always includes mail alias, deduplicates names and ignores obsolete enable values'
+pass 'Webmail defaults on, always includes mail alias, deduplicates names and preserves explicit enable values'
 log_archive_ensure_key
 ! grep -q '^LOG_ARCHIVE_KEY=' "$TMP/stack.env" || fail off-key
 pass 'old config stays disabled and creates no key'

@@ -84,7 +84,7 @@ services:
     image: operator.invalid/crowdsec:custom
 NPM
     LOG_ARCHIVE_REQUIRED_SOURCES=postfix,dovecot,rspamd,php-fpm,nginx,npmplus,webmail,webmail-admin
-    WEBMAIL_ENABLE=true WEBMAIL_ADMIN_ENABLE=true SNAPPYMAIL_ENABLE=false
+    WEBMAIL_ENABLE=true WEBMAIL_ADMIN_ENABLE=true
     ADMIN_EDGE_SUBNET=172.22.12.0/24
     WEBMAIL_MAIL_TLS_MODE=verify EDGE_WEBMAIL_PIN_CHANGED=false
     for service in "${services[@]}"; do echo false > "$TMP/state-$service"; done
@@ -309,7 +309,7 @@ assert_order backfill status replace
 ! grep -q '^docker stop ' "$TMP/calls" || fail direct-admin-stopped
 pass 'direct admin up shares preview and drain transaction'
 reset_case
-WEBMAIL_EDGE_SUBNET=172.22.10.0/24 SNAPPYMAIL_EDGE_SUBNET=172.22.11.0/24
+WEBMAIL_EDGE_SUBNET=172.22.10.0/24
 edge_reconcile_npmplus "$TMP/npm"
 assert_order 'docker stop id-npmplus' status replace
 pass 'NPMplus forced edge reconciliation is drained'
@@ -510,16 +510,6 @@ fixture=dest/'startup'
 (fixture/'scripts/lib').mkdir(parents=True)
 (fixture/'.git').mkdir()
 (fixture/'scripts/lib/waf.sh').write_text('')
-(fixture/'scripts/lib/npm_api.py').write_text("""import os, pathlib
-class NpmApi:
-    def __init__(self, api, work): pass
-    def login(self, login):
-        assert login.stat().st_mode & 0o777 == 0o600
-        with open(pathlib.Path(os.environ['TMP'])/'startup-calls', 'a') as stream: stream.write('legacy-check\\n')
-    def hosts(self):
-        if os.environ.get('STARTUP_NPM_FAILURE') == 'true': raise RuntimeError('synthetic NPM unavailable')
-        return [{'forward_host': 'snappymail'}] if os.environ.get('STARTUP_LEGACY') == 'true' else [{'forward_host': 'webmail'}]
-""")
 end=s.index('waf_options || die')
 prefix=s[:end].replace('set -euo pipefail\n', 'set -euo pipefail\necho entry >> "$TMP/startup-calls"\n', 1)
 (fixture/'scripts/update.sh').write_text(prefix+'''printf 'complete:%s:%s\\n' "$STARTUP_LIBRARY" "$*" >> "$TMP/startup-calls"
@@ -535,7 +525,7 @@ startup_case() (
     printf 'old\n' > "$TMP/startup-head"
     : > "$TMP/startup-calls"
     printf 'STARTUP_LIBRARY=old\nwebmail_options() { :; }\n' > "$TMP/startup/scripts/lib/webmail-env.sh"
-    printf 'WEBMAIL_ENABLE=%s\nTOOLKIT_ENABLE=%s\nNPM_ADMIN_EMAIL=synthetic@example.test\nNPM_ADMIN_PASSWORD=synthetic-secret\nSNAPPYMAIL_ENABLE=ignored-value\n' "$3" "$4" > "$TMP/startup/.env"
+    printf 'WEBMAIL_ENABLE=%s\nTOOLKIT_ENABLE=%s\nNPM_ADMIN_EMAIL=synthetic@example.test\nNPM_ADMIN_PASSWORD=synthetic-secret\n' "$3" "$4" > "$TMP/startup/.env"
     git() {
         case "$*" in
             *'rev-parse --abbrev-ref HEAD') echo synthetic ;;
@@ -550,7 +540,7 @@ startup_case() (
         esac
     }
     docker() {
-        [ "$*" = 'compose version' ] || { [ "${STARTUP_CONTAINER:-}" = true ] && [ "$*" = 'inspect snappymail' ]; }
+        [ "$*" = 'compose version' ]
     }
     id() { echo 0; }
     command() {
@@ -561,28 +551,11 @@ startup_case() (
     export -f git docker id command
     LOGFILE="$TMP/startup.log" bash "$TMP/startup/scripts/update.sh" -y --skip-mailcow-update > "$TMP/startup-output" 2>&1
 )
-for legacy in proxy api-failure; do
-    export STARTUP_LEGACY=false STARTUP_NPM_FAILURE=false
-    if [ "$legacy" = proxy ]; then export STARTUP_LEGACY=true; else export STARTUP_NPM_FAILURE=true; fi
-    if startup_case false true true true; then fail "legacy guard $legacy"; fi
-    ! grep -q '^pull$' "$TMP/startup-calls" || fail legacy-pull-before-preflight
-    ! grep -q '^complete:' "$TMP/startup-calls" || fail legacy-deployment
-    [ "$(stat -c %a "$TMP/startup/.env")" = 644 ] || fail legacy-env-mutation
-    grep -q 'update stopped before changes' "$TMP/startup-output" || fail legacy-guidance
-    if [ "$legacy" = proxy ]; then grep -q 'scripts/snappymail-remove.sh remove' "$TMP/startup-output" || fail migration-guidance; fi
-    pass "update $legacy stops before self pull or environment/deployment changes"
-done
-unset STARTUP_LEGACY STARTUP_NPM_FAILURE
-STARTUP_CONTAINER=true startup_case false true true true || fail legacy-container-only
-grep -q 'legacy SnappyMail containers or installation remain; preserved' "$TMP/startup-output" || fail legacy-container-warning
-[ "$(grep -c 'SNAPPYMAIL_ENABLE is ignored' "$TMP/startup-output")" = 1 ] || fail legacy-key-warning
-pass 'migrated proxies permit update with leftover container; obsolete enable value ignored with one warning'
 startup_case true true false true || fail self-reexec
 [ "$(grep -c '^entry$' "$TMP/startup-calls")" = 2 ] || fail missing-exec
 [ "$(grep -c '^pull$' "$TMP/startup-calls")" = 1 ] || fail repeated-self-pull
 [ "$(grep -c '^complete:' "$TMP/startup-calls")" = 1 ] || fail repeated-startup
 grep -qx 'complete:new:-y --skip-mailcow-update' "$TMP/startup-calls" || fail stale-library-or-args
-[ "$(grep -c 'SNAPPYMAIL_ENABLE is ignored' "$TMP/startup-output")" = 1 ] || fail repeated-legacy-key-warning
 pass 'changed self HEAD execs once, preserves flags and loads refreshed libraries'
 startup_case false true false true || fail unchanged-startup
 [ "$(grep -c '^entry$' "$TMP/startup-calls")" = 1 ] || fail unnecessary-exec

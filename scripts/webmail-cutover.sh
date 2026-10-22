@@ -1,6 +1,6 @@
 #!/bin/bash
 # Administrator-only, explicit NPM changes. Never called by setup/update.
-# Usage: webmail-cutover.sh {status [--json]|add-host [hostname]|remove-host hostname|add-admin-host|remove-admin-host|switch|revert [backup.json]}
+# Usage: webmail-cutover.sh {status [--json]|add-host [hostname]|remove-host hostname|add-admin-host|remove-admin-host}
 # Env: WEBMAIL_ENV_FILE, NPM_API, WEBMAIL_BACKUP_DIR (default /root/webmail-backup-YYYYMMDD).
 set +x
 set -euo pipefail
@@ -8,12 +8,12 @@ set -euo pipefail
 python3 -B - "$@" <<'ARGS'
 import argparse
 parser = argparse.ArgumentParser(description='Explicit Webmail proxy cutover; never edits .env')
-parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host', 'switch', 'revert'])
+parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host'])
 parser.add_argument('target', nargs='?')
 parser.add_argument('--json', action='store_true', help='status: full proxy JSON for backup')
 args = parser.parse_args()
 if args.json and args.command != 'status': parser.error('--json is only valid with status')
-if args.target and args.command in ('status', 'switch', 'add-admin-host', 'remove-admin-host'): parser.error('unexpected argument')
+if args.target and args.command in ('status', 'add-admin-host', 'remove-admin-host'): parser.error('unexpected argument')
 if args.command == 'remove-host' and not args.target: parser.error('remove-host requires a hostname')
 ARGS
 for arg in "$@"; do
@@ -38,7 +38,7 @@ export CUTOVER_WORK="$WORK" CUTOVER_SCRIPT_DIR="$SCRIPT_DIR"
 export CUTOVER_API="${NPM_API:-https://127.0.0.1:81/api}"
 export CUTOVER_BACKUP="${WEBMAIL_BACKUP_DIR:-/root/webmail-backup-$(date +%Y%m%d)}"
 export DOMAIN="${DOMAIN:?DOMAIN required}" NPM_ADMIN_EMAIL
-export SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}" WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
+export WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
 export WEBMAIL_ADMIN_ENABLE="${WEBMAIL_ADMIN_ENABLE:-false}" WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
 export ADMIN_ACCESS_LIST="${ADMIN_ACCESS_LIST:-}"
 export WEBMAIL_ACCESS_LIST="${WEBMAIL_ACCESS_LIST:-}" WEBMAIL_ATTACH_MAX_MB="${WEBMAIL_ATTACH_MAX_MB:-25}"
@@ -50,7 +50,6 @@ backup_dir = pathlib.Path(os.environ['CUTOVER_BACKUP'])
 api = os.environ['CUTOVER_API'].rstrip('/')
 domain = os.environ['DOMAIN'].lower()
 admin_hostname = os.environ['WEBMAIL_ADMIN_HOSTNAME'].strip().lower()
-fields = ('forward_host', 'forward_port', 'forward_scheme', 'advanced_config', 'http2_support', 'allow_websocket_upgrade', 'block_exploits', 'ssl_forced')
 sys.path.insert(0, str(pathlib.Path(os.environ['CUTOVER_SCRIPT_DIR']) / 'lib'))
 from npm_api import NpmApi, proxy_access_fields, select_admin_access
 client = NpmApi(api, work)
@@ -96,15 +95,6 @@ def target_patch(admin=False):
     return dict(forward_host='webmail', forward_port=8080, forward_scheme='http',
                 advanced_config=f'client_max_body_size {attachment_limit()}m;', http2_support=True,
                 allow_websocket_upgrade=False, block_exploits=False, ssl_forced=True)
-
-def validate_original(items):
-    seen = set()
-    for item in items:
-        if not isinstance(item.get('id'), int) or item['id'] < 1 or item['id'] in seen: fail('invalid or duplicate proxy ID in backup')
-        seen.add(item['id'])
-        if not all(key in item for key in fields): fail('backup lacks original proxy fields')
-        if not isinstance(item['forward_port'], int) or item['forward_port'] < 1: fail('backup lacks a valid forward port')
-        if not isinstance(item.get('domain_names'), list): fail('backup lacks domain names')
 
 def select_access(admin=False):
     if admin:
@@ -210,48 +200,14 @@ def add(names, admin=False):
         current.append(result)
         print(f'[webmail-cutover] added {name} -> {payload["forward_host"]}:8080')
 
-def switch():
-    current = hosts()
-    targets = [item for item in current if item.get('forward_host') == 'snappymail']
-    if not targets:
-        print('[webmail-cutover] no SnappyMail targets; nothing changed')
-        return
-    validate_original(targets)
-    patch = target_patch()
-    path = save_json(backup_dir / 'webmail-cutover-before.json', current)
-    print(f'[webmail-cutover] original proxy JSON saved: {path}', flush=True)
-    for item in targets:
-        request('PUT', f'/nginx/proxy-hosts/{item["id"]}', patch)
-        print(f'[webmail-cutover] switched {",".join(item["domain_names"])} -> webmail:8080')
-    print('운영자가 이제 .env에서 SNAPPYMAIL_ENABLE=false로 바꾸세요. 전환한 주소를 WEBMAIL_HOSTNAMES에 추가하고 웹메일 환경 재생성·up -d 후 검증하세요. 스크립트는 .env를 변경하지 않았습니다.')
-
-def revert(path):
-    if not path.is_file() or path.stat().st_size == 0: fail('cutover backup is missing or empty')
-    original = json.loads(path.read_text())
-    if not isinstance(original, list): fail('invalid cutover backup')
-    targets = [item for item in original if item.get('forward_host') == 'snappymail']
-    validate_original(targets)
-    current = {item['id']: item for item in hosts()}
-    # Preflight the entire set before the first update.
-    for item in targets:
-        live = current.get(item['id'])
-        if not live or live.get('domain_names') != item['domain_names'] or live.get('forward_host') not in ('webmail', 'snappymail'):
-            fail('proxy identity/target changed since backup; manual review required')
-    for item in targets:
-        patch = {field: item[field] for field in fields}
-        if any(current[item['id']].get(field) != value for field, value in patch.items()):
-            request('PUT', f'/nginx/proxy-hosts/{item["id"]}', patch)
-            print(f'[webmail-cutover] restored {",".join(item["domain_names"])}')
-    print('운영자가 .env의 WEBMAIL_HOSTNAMES를 전환 전 목록으로 원복하고 SNAPPYMAIL_ENABLE=true로 바꾼 뒤 snappymail-remove.sh start로 다시 시작하세요. .env는 변경하지 않았습니다.')
-
 def main():
     parser = argparse.ArgumentParser(description='Explicit Webmail proxy cutover; never edits .env')
-    parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host', 'switch', 'revert'])
+    parser.add_argument('command', choices=['status', 'add-host', 'remove-host', 'add-admin-host', 'remove-admin-host'])
     parser.add_argument('target', nargs='?')
     parser.add_argument('--json', action='store_true', help='status: full proxy JSON for backup')
     args = parser.parse_args()
     if args.json and args.command != 'status': fail('--json is only valid with status')
-    if args.target and args.command in ('status', 'switch', 'add-admin-host', 'remove-admin-host'): fail('unexpected argument')
+    if args.target and args.command in ('status', 'add-admin-host', 'remove-admin-host'): fail('unexpected argument')
     # Validate names before authenticating or changing anything.
     names = []
     if args.command == 'add-host':
@@ -280,8 +236,6 @@ def main():
                 print(f'{item["id"]}\t{",".join(item.get("domain_names", []))}\t{item.get("forward_host")}:{item.get("forward_port")}\taccess={item.get("access_list_id", 0)}')
     elif args.command == 'add-host': add(names)
     elif args.command == 'add-admin-host': add(names, admin=True)
-    elif args.command == 'switch': switch()
-    elif args.command == 'revert': revert(pathlib.Path(args.target) if args.target else backup_dir / 'webmail-cutover-before.json')
     else:
         selected = [item for item in hosts() if args.target in item.get('domain_names', [])]
         if not selected:

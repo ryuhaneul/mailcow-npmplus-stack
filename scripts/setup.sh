@@ -1038,7 +1038,7 @@ for item in json.load(sys.stdin):
         print(item.get("forward_host","")); break
 ' "$domain") || return 1
             if [ "$existing_target" != webmail ]; then
-                warn "  $domain: existing target is $existing_target; skipping (use webmail-cutover.sh switch for a deliberate cutover)"
+                warn "  $domain: existing target is $existing_target; skipping; review the existing proxy host"
             else
                 log "  $domain: already points to webmail, skipping"
             fi

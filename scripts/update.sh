@@ -69,42 +69,6 @@ command -v git >/dev/null 2>&1 || die "git not found"
 command -v docker >/dev/null 2>&1 || die "docker not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin not available"
 
-# Read-only legacy preflight must precede checkout refresh and deployment changes.
-update_snappymail_preflight() (
-    set +x
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    if [ "${MAILSTACK_UPDATE_REEXEC:-false}" != true ] && grep -qE '^(export[[:space:]]+)?SNAPPYMAIL_ENABLE=' "$ENV_FILE"; then
-        echo '[update] WARNING: SNAPPYMAIL_ENABLE is ignored; Webmail is the supported webmail service' >&2
-    fi
-    NPM_LOGIN_EMAIL="${NPM_ADMIN_EMAIL:-}" NPM_LOGIN_SECRET="${NPM_ADMIN_PASSWORD:-}" \
-        python3 -B - "$SCRIPT_DIR/lib" "${NPM_API:-https://127.0.0.1:81/api}" <<'PYLEGACY' || return 1
-import json, os, pathlib, sys, tempfile
-sys.path.insert(0, sys.argv[1])
-from npm_api import NpmApi
-try:
-    identity, secret = os.environ['NPM_LOGIN_EMAIL'], os.environ['NPM_LOGIN_SECRET']
-    if not identity or not secret:
-        raise RuntimeError('NPM credentials required to check legacy proxy hosts')
-    with tempfile.TemporaryDirectory() as directory:
-        work = pathlib.Path(directory)
-        login = work / 'login.json'
-        login.touch(mode=0o600)
-        login.write_text(json.dumps(dict(identity=identity, secret=secret)))
-        client = NpmApi(sys.argv[2], work)
-        client.login(login)
-        hosts = client.hosts()
-        if any(str(host.get('forward_host', '')).strip().lower() == 'snappymail' for host in hosts):
-            raise RuntimeError('NPM still forwards to SnappyMail; run scripts/snappymail-remove.sh remove before update')
-except (RuntimeError, OSError) as error:
-    sys.exit('[update] ERROR: ' + str(error) + '; update stopped before changes')
-PYLEGACY
-    if docker inspect snappymail >/dev/null 2>&1 || docker inspect mailrelay-snappymail >/dev/null 2>&1 \
-        || [ -d "${SNAPPYMAIL_DIR:-/home/snappymail}" ]; then
-        echo '[update] WARNING: legacy SnappyMail containers or installation remain; preserved. Use scripts/snappymail-remove.sh for explicit cleanup' >&2
-    fi
-)
-update_snappymail_preflight || exit 1
 chmod 600 "$ENV_FILE"
 mkdir -p "$(dirname "$LOGFILE")"
 echo "=== Update started at $(date) ===" >> "$LOGFILE"

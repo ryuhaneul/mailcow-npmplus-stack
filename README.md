@@ -1,7 +1,7 @@
 # Mailcow + NPMplus + CrowdSec Stack
 
 Mailcow 메일서버 앞단에 NPMplus(리버스 프록시) + CrowdSec(WAF)를 배치하고,
-Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
+메일스택 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 
 ## 아키텍처
 
@@ -9,7 +9,7 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 [인터넷]
     │
     ├── :80/443 ──→ [NPMplus + CrowdSec WAF]
-    │                  ├── mail.DOMAIN      → Snappymail (웹메일)
+    │                  ├── mail.DOMAIN      → Webmail (웹메일)
     │                  ├── mailcow.DOMAIN   → Mailcow Admin UI
     │                  │     └── /toolkit/  → Mailcow Toolkit
     │                  └── mail-npm.DOMAIN  → NPMplus Dashboard
@@ -26,16 +26,14 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 | SSL 인증서 | NPMplus가 Let's Encrypt 발급 → Docker 볼륨 공유로 Mailcow에 전달 |
 | acme-mailcow | 비활성화 (`sleep infinity`) — NPMplus가 인증서 담당 |
 | SMTP/IMAP | 리버스 프록시 우회, 직접 노출 |
-| Snappymail | Docker 내부 네트워크로 Dovecot/Postfix 연결 (DNS 불필요) |
-| 웹메일 | 선택 설치하는 메일스택 웹메일. `webmail:8080`, 사용자 IMAP/Sieve/SMTP 자격과 열 단위 DB 읽기 계정 사용 |
+| 웹메일 | 기본 설치하는 메일스택 웹메일. `webmail:8080`, 사용자 IMAP/Sieve/SMTP 자격과 열 단위 DB 읽기 계정 사용 |
 | 관리 화면 | 선택 설치하는 `webmail-admin:8080`. mailcow 관리자 로그인, IP 접근 목록, 변경 기록·웹메일 로고 관리 |
 
 ## 웹메일 선택값
 
 | 변수 | 기본값 | 동작 |
 |---|---|---|
-| `WEBMAIL_ENABLE` | `false` | 웹메일 설치·빌드·기동·검증 |
-| `SNAPPYMAIL_ENABLE` | `true` | SnappyMail 설치·업데이트·기동·검증 |
+| `WEBMAIL_ENABLE` | `true` | 웹메일 설치·빌드·기동·검증 |
 | `WEBMAIL_ADMIN_ENABLE` | `false` | 웹메일 관리 화면. `WEBMAIL_ENABLE=true`와 관리자 IP 접근 목록 필요 |
 | `TOOLKIT_ENABLE` | `true` | Toolkit 설치·업데이트. false로 바꿔도 기존 컨테이너는 자동 삭제하지 않음 |
 | `MAIL_SHARE_WHOLE_MAILBOX` | `false` | 받은편지함 공유를 메일함 전체로 확장. 켜기 전 기존 공유 목록 확인. 끄면 설정만 되돌리고 복사된 폴더 권한은 남음 |
@@ -44,10 +42,8 @@ Snappymail 웹메일을 통합하는 올인원 자동화 배포 스크립트.
 
 관리 주소는 `WEBMAIL_ADMIN_HOSTNAME`(기본 `mailadmin.${DOMAIN}`), 세션 기본값은 유휴 60분·최대 8시간입니다. `ADMIN_ACCESS_LIST`가 비면 관리 프록시를 만들지 않습니다. 기존 서버의 켜기·DNS·검증·끄기는 [관리 화면 안내](docs/guide.md#12-관리-화면)를 따르세요.
 
-웹메일과 SnappyMail은 함께 켤 수 있습니다. 웹메일 기본 주소는 `newmail.${DOMAIN}`입니다.
-웹메일만 켜면 `mail.${DOMAIN}`도 연결하고 로그인 허용 주소에 자동 추가합니다.
-둘 다 끄면 해당 서비스를 설치·기동하지 않으며, update는 기존 SnappyMail 컨테이너를 삭제하지 않습니다.
-**새 웹메일과 자동 삭제는 기본 꺼짐(opt-in)입니다.** 이 두 선택값이 없는 기존 `.env`에서는 해당 선택 기능의 update 실행 목록을 유지합니다. 자동 삭제는 공지 후 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 설정해 켜세요. setup·update는 선택값을 기록하거나 바꾸지 않으며, 켜진 기능에 필요한 빈 비밀값만 생성합니다. 스내피 대체 후에도 레포 기본값은 바꾸지 않고 서버별 `.env`로 전환합니다.
+웹메일은 기본 켬(`WEBMAIL_ENABLE=true`)이며 값이 없는 기존 `.env`에서도 켜집니다. 기본 주소는 `newmail.${DOMAIN}`이고 `mail.${DOMAIN}`도 새 웹메일에 연결하며 로그인 허용 주소에 자동 추가합니다. `WEBMAIL_ENABLE=false`로 명시하면 설치·기동을 생략합니다.
+자동 삭제는 기본 꺼짐입니다. 공지 후 해당 서버 `.env`에 `MAIL_AUTOEXPUNGE_ENABLE=true`를 설정해 켜세요. setup·update는 선택값을 기록하거나 바꾸지 않으며, 켜진 기능에 필요한 빈 비밀값만 생성합니다.
 
 CrowdSec 보안 필터는 기본 켬(`WAF_ENABLE=true`, 키가 없어도 켬)이며, NPMplus 요청을 AppSec CRS로 검사하고 접근 로그의 반복 공격을 로컬 IP 밴으로 차단합니다. CAPI 외부 결정은 받지 않습니다. setup·update가 설정을 적용하며 선택값을 `.env`에 쓰지 않습니다.
 
@@ -59,7 +55,7 @@ CrowdSec 보안 필터는 기본 켬(`WAF_ENABLE=true`, 키가 없어도 켬)이
 
 **운영 detect 경보에는 사용자 입력이 남을 수 있습니다.** 짧게 재현·튜닝한 뒤 block으로 복귀하고 `docker exec crowdsec cscli alerts delete --all`로 경보를 삭제하세요. 밴 해제와 요청 오탐 예외는 별도입니다. [튜닝·오탐 대응 절차](docs/guide.md#14-crowdsec-보안-필터)를 따르세요. NPMplus의 `npmplus_crowdsec_appsec=true`는 AppSec를 끈다는 뜻입니다.
 
-주소 전환은 `scripts/webmail-cutover.sh`, 관찰 정지·백업·제거·복원은 `scripts/snappymail-remove.sh`를 관리자가 직접 실행합니다. 두 도구는 `.env`를 수정하지 않습니다. 브랜드·접속 제한·TLS·전환·되돌리기는 [웹메일 운영 가이드](docs/guide.md#10-웹메일)를 참고하세요.
+`webmail-cutover.sh`는 웹메일 주소 추가·삭제·상태 확인에 사용합니다. 브랜드·접속 제한·TLS는 [웹메일 운영 가이드](docs/guide.md#10-웹메일)를 참고하세요.
 
 ### 신뢰 발신 장비
 
@@ -93,7 +89,7 @@ sudo ./scripts/setup.sh
 
 ### .env 설정
 
-외부 이미지는 NPMplus `2026-07-24-r1`, CrowdSec `v1.7.8`, SnappyMail `v2.38.2`의 태그·다이제스트로 고정합니다. 판 변경과 기존 서버 동기화는 [이미지 버전 절차](docs/guide.md#외부-이미지-버전-고정변경)를 따르세요. 다른 특정 버전을 직접 지정한 서버는 update가 그 값을 유지합니다.
+외부 이미지는 NPMplus `2026-07-24-r1`, CrowdSec `v1.7.8`의 태그·다이제스트로 고정합니다. 판 변경과 기존 서버 동기화는 [이미지 버전 절차](docs/guide.md#외부-이미지-버전-고정변경)를 따르세요. 다른 특정 버전을 직접 지정한 서버는 update가 그 값을 유지합니다.
 
 ```bash
 # === 필수 ===
@@ -120,7 +116,7 @@ TOOLKIT_SECRET_KEY=
 | 3 | DNS 레코드 표시 및 검증 (미설정 시 self-signed로 계속 진행) |
 | 4 | Mailcow 설치, 포트/바인딩 패치, API 키 설정 |
 | 5 | NPMplus + CrowdSec 배포 |
-| 6 | Snappymail 배포 + 도메인 설정 + 관리자 비밀번호 설정 |
+| 6b | 웹메일 빌드·환경 생성·기동 |
 | 7 | NPM 프록시 호스트 생성 + SSL 인증서 발급 |
 | 8 | Mailcow SSL 심볼릭 링크 생성 (NPM 인증서 → Dovecot/Postfix) |
 | 9 | 인증서 리로드 크론 설치 (매일 04:00) |
@@ -162,7 +158,7 @@ sudo ./scripts/teardown.sh
 | 서비스 | URL | 계정 |
 |--------|-----|------|
 | 웹메일 | `https://mail.DOMAIN` | Mailcow에서 생성한 메일 계정 |
-| 웹메일 관리자 | `https://mail.DOMAIN/?admin` | admin / (NPM_ADMIN_PASSWORD) |
+| 웹메일 관리자(선택) | `https://mailadmin.DOMAIN` | Mailcow 전체 관리자 |
 | Mailcow 관리 | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
 | NPM 대시보드 | `https://mail-npm.DOMAIN` | (NPM_ADMIN_EMAIL) / (NPM_ADMIN_PASSWORD) |
 
@@ -178,9 +174,7 @@ mailcow-npmplus-stack/
 │   └── guide.md                              # 상세 구성 가이드 (수동 설정 참고)
 ├── npmplus/
 │   └── docker-compose.yml                    # NPMplus + CrowdSec
-├── snappymail/
-│   ├── docker-compose.yml                    # Snappymail 웹메일
-│   └── admin_ko.json                         # 한국어 관리자 UI 번역
+├── webmail/                                  # Mailstack Webmail
 ├── mailcow-override/
 │   ├── docker-compose.override.yml           # Mailcow 오버라이드 (인증서 공유, acme 비활성화)
 │   └── docker-compose.override.toolkit.yml   # Toolkit 추가 템플릿
@@ -203,7 +197,7 @@ mailcow-npmplus-stack/
 /home/
 ├── mailcow-dockerized/    # Mailcow (git clone)
 ├── npmplus/                # NPMplus + CrowdSec
-├── snappymail/             # Snappymail
+├── webmail/                # Mailstack Webmail
 └── mailcow-toolkit/        # Toolkit (setup.sh가 toolkit/에서 복사)
 ```
 
@@ -225,12 +219,6 @@ Docker 재시작 후 iptables 규칙 누락 시 발생. `systemctl restart docke
 
 DB의 `nginx_online: false` 캐시 문제. 해당 호스트를 API로 삭제 후 재생성.
 
-### Snappymail 로그인 실패
-
-- 도메인 설정에서 `shortLogin`이 `false`인지 확인 (Dovecot은 `user@domain` 형식 필수)
-- `security_level`이 `0`인지 확인
-- 도메인 설정 파일 소유자가 `www-data`인지 확인
-
 ### 메일 발송 후 수신 서버에서 거부
 
 DNS 레코드(MX, A, PTR, DKIM, DMARC)가 미설정이면 수신 서버의 스팸 필터에서 거부됩니다.
@@ -247,7 +235,6 @@ DNS 레코드(MX, A, PTR, DKIM, DMARC)가 미설정이면 수신 서버의 스�
 | [Mailcow-dockerized](https://github.com/mailcow/mailcow-dockerized) | GNU General Public License v3.0 | `GPL-3.0-only` |
 | [NPMplus](https://github.com/ZoeyVid/NPMplus) | MIT License | `MIT` |
 | [CrowdSec](https://github.com/crowdsecurity/crowdsec) | MIT License | `MIT` |
-| [SnappyMail](https://github.com/the-djmaze/snappymail) | GNU Affero General Public License v3.0 | `AGPL-3.0-only` |
 | [Docker Engine](https://github.com/moby/moby) | Apache License 2.0 | `Apache-2.0` |
 | [Postfix](https://www.postfix.org/) | Eclipse Public License 2.0 / IBM Public License 1.0 | `EPL-2.0` OR `IPL-1.0` |
 | [Dovecot](https://www.dovecot.org/) | MIT (libs) + LGPL v2.1 | `MIT` AND `LGPL-2.1-only` |
@@ -282,7 +269,7 @@ DNS 레코드(MX, A, PTR, DKIM, DMARC)가 미설정이면 수신 서버의 스�
 # Mailcow + NPMplus + CrowdSec Stack
 
 An all-in-one automated deployment of Mailcow mail server behind NPMplus (reverse proxy)
-+ CrowdSec (WAF), with integrated Snappymail webmail.
++ CrowdSec (WAF), with integrated Mailstack Webmail.
 
 CrowdSec request filtering and local log-based IP bans are enabled by default (`WAF_ENABLE=true`, `WAF_MODE=block`). `WAF_ALLOWLIST` exempts IP ban decisions only; AppSec can still return 403. CAPI is disabled. Detect mode passes requests and records alerts that may contain user input: use briefly, return to block, then run `docker exec crowdsec cscli alerts delete --all`. See the [WAF operations guide](docs/guide.md#14-crowdsec-보안-필터).
 
@@ -292,7 +279,7 @@ CrowdSec request filtering and local log-based IP bans are enabled by default (`
 [Internet]
     │
     ├── :80/443 ──→ [NPMplus + CrowdSec WAF]
-    │                  ├── mail.DOMAIN      → Snappymail (webmail)
+    │                  ├── mail.DOMAIN      → Webmail (webmail)
     │                  ├── mailcow.DOMAIN   → Mailcow Admin UI
     │                  │     └── /toolkit/  → Mailcow Toolkit
     │                  └── mail-npm.DOMAIN  → NPMplus Dashboard
@@ -309,8 +296,9 @@ CrowdSec request filtering and local log-based IP bans are enabled by default (`
 | SSL certificates | NPMplus issues Let's Encrypt certs → shared to Mailcow via Docker volume |
 | acme-mailcow | Disabled (`sleep infinity`) — NPMplus handles certificates |
 | SMTP/IMAP | Direct exposure, bypasses reverse proxy |
-| Snappymail | Connects to Dovecot/Postfix via Docker internal network (no DNS required) |
 | Webmail administration | Optional `webmail-admin:8080`, mailcow administrator login, IP access restriction, audit history and branding |
+
+Webmail defaults to enabled (`WEBMAIL_ENABLE=true`), including when the key is absent. It serves `newmail.${DOMAIN}` and `mail.${DOMAIN}`; set `WEBMAIL_ENABLE=false` to skip deployment. `webmail-cutover.sh` manages Webmail host creation, removal and status. See the [Webmail operations guide](docs/guide.md#10-웹메일).
 
 Whole-mailbox sharing defaults to off (`MAIL_SHARE_WHOLE_MAILBOX=false`). Review existing shares before enabling: existing INBOX shares immediately expand to every folder. Disabling removes only the setting; copied folder ACLs remain. Dovecot reload disconnects active IMAP/POP connections once; mail clients reconnect.
 
@@ -367,7 +355,7 @@ TOOLKIT_SECRET_KEY=
 | 3 | DNS record display and validation (proceeds with self-signed certs if DNS is missing) |
 | 4 | Mailcow installation, port/binding patches, API key configuration |
 | 5 | NPMplus + CrowdSec deployment |
-| 6 | Snappymail deployment + domain configuration + admin password setup |
+| 6b | Webmail build, environment generation and startup |
 | 7 | NPM proxy host creation + SSL certificate issuance |
 | 8 | Mailcow SSL symlink creation (NPM certificates → Dovecot/Postfix) |
 | 9 | Certificate reload cron installation (daily at 04:00) |
@@ -405,7 +393,7 @@ Removes all containers, volumes, and installation directories. Volumes are delet
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Webmail | `https://mail.DOMAIN` | Mail account created in Mailcow |
-| Webmail Admin | `https://mail.DOMAIN/?admin` | admin / (NPM_ADMIN_PASSWORD) |
+| Webmail Admin (optional) | `https://mailadmin.DOMAIN` | Mailcow superadmin |
 | Mailcow Admin | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
 | NPM Dashboard | `https://mail-npm.DOMAIN` | (NPM_ADMIN_EMAIL) / (NPM_ADMIN_PASSWORD) |
 
@@ -421,9 +409,7 @@ mailcow-npmplus-stack/
 │   └── guide.md                              # Detailed configuration guide (manual setup reference)
 ├── npmplus/
 │   └── docker-compose.yml                    # NPMplus + CrowdSec
-├── snappymail/
-│   ├── docker-compose.yml                    # Snappymail webmail
-│   └── admin_ko.json                         # Korean admin UI translation
+├── webmail/                                  # Mailstack Webmail
 ├── mailcow-override/
 │   ├── docker-compose.override.yml           # Mailcow overrides (cert sharing, acme disabled)
 │   └── docker-compose.override.toolkit.yml   # Toolkit addon template
@@ -446,7 +432,7 @@ mailcow-npmplus-stack/
 /home/
 ├── mailcow-dockerized/    # Mailcow (git clone)
 ├── npmplus/                # NPMplus + CrowdSec
-├── snappymail/             # Snappymail
+├── webmail/                # Mailstack Webmail
 └── mailcow-toolkit/        # Toolkit (copied from toolkit/ by setup.sh)
 ```
 
@@ -468,12 +454,6 @@ Occurs when iptables rules are lost after Docker restart. Fix with `systemctl re
 
 DB cache issue with `nginx_online: false`. Delete and recreate the host via API.
 
-### Snappymail Login Failure
-
-- Verify `shortLogin` is `false` in domain config (Dovecot requires `user@domain` format)
-- Verify `security_level` is `0`
-- Verify domain config file ownership is `www-data`
-
 ### Mail Rejected by Receiving Server
 
 Missing DNS records (MX, A, PTR, DKIM, DMARC) cause spam filter rejection on receiving servers.
@@ -490,7 +470,6 @@ This stack uses the following open-source software. Each component is governed b
 | [Mailcow-dockerized](https://github.com/mailcow/mailcow-dockerized) | GNU General Public License v3.0 | `GPL-3.0-only` |
 | [NPMplus](https://github.com/ZoeyVid/NPMplus) | MIT License | `MIT` |
 | [CrowdSec](https://github.com/crowdsecurity/crowdsec) | MIT License | `MIT` |
-| [SnappyMail](https://github.com/the-djmaze/snappymail) | GNU Affero General Public License v3.0 | `AGPL-3.0-only` |
 | [Docker Engine](https://github.com/moby/moby) | Apache License 2.0 | `Apache-2.0` |
 | [Postfix](https://www.postfix.org/) | Eclipse Public License 2.0 / IBM Public License 1.0 | `EPL-2.0` OR `IPL-1.0` |
 | [Dovecot](https://www.dovecot.org/) | MIT (libs) + LGPL v2.1 | `MIT` AND `LGPL-2.1-only` |

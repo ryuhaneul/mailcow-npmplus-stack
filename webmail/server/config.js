@@ -56,6 +56,7 @@ export function loadConfig(env = process.env) {
   if (env.CONTACTS_ENABLE !== undefined && !['true', 'false'].includes(env.CONTACTS_ENABLE)) invalid('CONTACTS_ENABLE');
   const contactsEnabled = env.CONTACTS_ENABLE !== 'false';
   const attachMaxMb = integer('ATTACH_MAX_MB');
+  const bodyMaxMb = env.BODY_MAX_MB === undefined ? 5 : integer('BODY_MAX_MB');
   const sessionIdleMin = integer('SESSION_IDLE_MIN');
   const sessionMaxHours = integer('SESSION_MAX_HOURS');
   const autoexpungeRaw = value('AUTOEXPUNGE_DAYS', true);
@@ -89,7 +90,7 @@ export function loadConfig(env = process.env) {
   const logLevel = choice('LOG_LEVEL', levels);
   return Object.freeze({
     publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
-    internalDomains, contactsEnabled, attachMaxMb, sessionIdleMin, sessionMaxHours, autoexpungeDays,
+    internalDomains, contactsEnabled, attachMaxMb, bodyMaxMb, sessionIdleMin, sessionMaxHours, autoexpungeDays,
     imapHost, imapPort: 993, sieveHost, sievePort: 4190, smtpHost, smtpPort: 587,
     mailTlsServername, mailTlsMode, mailTlsPinFile, dbHost, dbName, dbUser, dbPassword,
     mailcowUiUrl, mailcowUiServername, mailcowPublicUrl, trustProxy, logoDir, logLevel,

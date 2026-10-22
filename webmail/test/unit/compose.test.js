@@ -64,7 +64,7 @@ async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, 
   await installAuth(app, { config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
   const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [directoryTables ? directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || [] : sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
   const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); } };
-  const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot, ...(images ? { images } : {}) });
+  const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot, now: () => time, ...(images ? { images } : {}) });
   await app.register(composeRoutes, { config: actualConfig, service });
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   async function login() {
@@ -306,4 +306,60 @@ for (const [method, endpoint] of [['POST', '/api/send'], ['PUT', '/api/drafts']]
   assert.match(raw, /Content-ID: <wm-inline-v1\.[A-Za-z0-9_-]{32}\.1@signature\.invalid>/);
   assert.match(raw, /Content-Disposition: inline;/);
   assert.ok(raw.includes(bytes.toString('base64')));
+});
+
+
+for (const cleanup of ['send', 'delete']) test(`session upload quota: changing composeId cannot bypass byte cap; ${cleanup} releases it`, async t => {
+  const f = await fixture(t), size = 1024 * 1024;
+  const a = await upload(f, Buffer.alloc(size), f.headers, 'a.txt', 'compose-a');
+  const b = await upload(f, Buffer.alloc(size), f.headers, 'b.txt', 'compose-b');
+  assert.equal(a.statusCode, 201, a.body); assert.equal(b.statusCode, 201, b.body);
+  failure(await upload(f, 'x', f.headers, 'over.txt', 'compose-c'), 413, 'ATTACH_TOO_LARGE');
+  assert.equal((await readdir(f.dir)).length, 2);
+  const response = cleanup === 'send'
+    ? await request(f, 'POST', '/api/send', body({ attachmentIds: [a.json().id] }))
+    : await request(f, 'DELETE', `/api/attachments/${a.json().id}`);
+  assert.equal(response.statusCode, cleanup === 'send' ? 200 : 204, response.body);
+  assert.equal((await upload(f, Buffer.alloc(size), f.headers, 'c.txt', 'compose-c')).statusCode, 201);
+});
+
+test('session upload quota: 200 zero-byte files fill the count cap across compose IDs, deletion releases it', async t => {
+  const f = await fixture(t); let attachment;
+  for (let i = 0; i < 200; i++) {
+    const response = await upload(f, '', f.headers, 'empty.txt', `compose-${i}`);
+    assert.equal(response.statusCode, 201, response.body); attachment = response.json();
+  }
+  failure(await upload(f, '', f.headers, 'over.txt', 'compose-extra'), 413, 'ATTACH_TOO_LARGE');
+  assert.equal((await readdir(f.dir)).length, 200);
+  assert.equal((await request(f, 'DELETE', `/api/attachments/${attachment.id}`)).statusCode, 204);
+  assert.equal((await upload(f, '', f.headers, 'again.txt', 'compose-extra')).statusCode, 201);
+});
+
+test('session upload quota: concurrent different compose IDs share the byte budget', async t => {
+  const f = await fixture(t);
+  const responses = await Promise.all([0, 1, 2].map(i => upload(f, Buffer.alloc(800000), f.headers, 'synthetic.txt', `compose-${i}`)));
+  assert.deepEqual(responses.map(response => response.statusCode).sort(), [201, 201, 413]);
+  assert.equal((await readdir(f.dir)).length, 2);
+});
+
+test('upload expiry: periodic session sweep removes unused uploads after 24h, draft use refreshes expiry', async t => {
+  const f = await fixture(t, { overrides: { sessionIdleMin: 3 * 24 * 60, sessionMaxHours: 72 } });
+  const a = (await upload(f, Buffer.alloc(1024 * 1024), f.headers, 'a.txt', 'compose-a')).json();
+  const b = (await upload(f, Buffer.alloc(1024 * 1024), f.headers, 'b.txt', 'compose-b')).json();
+  f.advance(23 * 60 * 60 * 1000);
+  const saved = await request(f, 'PUT', '/api/drafts', body({ attachmentIds: [a.id] }));
+  assert.equal(saved.statusCode, 200, saved.body);
+  failure(await upload(f, 'x', f.headers, 'over.txt', 'compose-c'), 413, 'ATTACH_TOO_LARGE');
+  f.advance(60 * 60 * 1000); await f.app.sessions.sweep();
+  await access(join(f.dir, a.id)); await assert.rejects(access(join(f.dir, b.id)), { code: 'ENOENT' });
+  failure(await request(f, 'DELETE', `/api/attachments/${b.id}`), 404, 'ATTACHMENT_NOT_FOUND');
+  assert.equal((await upload(f, Buffer.alloc(1024 * 1024), f.headers, 'c.txt', 'compose-c')).statusCode, 201);
+  f.advance(24 * 60 * 60 * 1000);
+  // Request-triggered cleanup also works before the next periodic sweep.
+  assert.equal((await upload(f, Buffer.alloc(1024 * 1024), f.headers, 'd.txt', 'compose-d')).statusCode, 201);
+  await assert.rejects(access(join(f.dir, a.id)), { code: 'ENOENT' });
+  assert.equal((await readdir(f.dir)).length, 1);
+  assert.equal((await request(f, 'POST', '/api/auth/logout')).statusCode, 204);
+  await assert.rejects(access(f.dir), { code: 'ENOENT' });
+  assert.equal(f.session.sweepAttachments, undefined);
 });

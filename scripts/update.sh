@@ -8,11 +8,11 @@ set -euo pipefail
 #
 # Phases:
 #   1: git pull for component repos (stack + toolkit + mailcow + stacks)
-#   2: docker compose pull for npmplus / snappymail
+#   2: docker compose pull for npmplus
 #   3: Mailcow official update (./update.sh -f)
 #   4: Re-apply Toolkit UI patches + APP_LINKS registration
 #   5: Rebuild mailcow-toolkit image + bring it up
-#   6: Bring remaining stacks up (npmplus, snappymail)
+#   6: Bring remaining stacks up (npmplus)
 #   7: verify.sh (if present)
 # ============================================================
 
@@ -22,7 +22,6 @@ MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 TOOLKIT_DIR="${TOOLKIT_DIR:-/home/mailcow-toolkit}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
 NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
-SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-update.log}"
 
 usage() { echo "Usage: $0 [--non-interactive|-y] [--skip-mailcow-update]"; }
@@ -64,16 +63,53 @@ confirm() {
 [ "$(id -u)" -eq 0 ] || die "This script must be run as root (use sudo)"
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || die ".env not found"
-chmod 600 "$ENV_FILE"
-mkdir -p "$(dirname "$LOGFILE")"
-echo "=== Update started at $(date) ===" >> "$LOGFILE"
 
 # Check tooling
 command -v git >/dev/null 2>&1 || die "git not found"
 command -v docker >/dev/null 2>&1 || die "docker not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin not available"
 
-# Refresh this checkout before loading any environment or shared libraries.
+# Read-only legacy preflight must precede checkout refresh and deployment changes.
+update_snappymail_preflight() (
+    set +x
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    if [ "${MAILSTACK_UPDATE_REEXEC:-false}" != true ] && grep -qE '^(export[[:space:]]+)?SNAPPYMAIL_ENABLE=' "$ENV_FILE"; then
+        echo '[update] WARNING: SNAPPYMAIL_ENABLE is ignored; Webmail is the supported webmail service' >&2
+    fi
+    NPM_LOGIN_EMAIL="${NPM_ADMIN_EMAIL:-}" NPM_LOGIN_SECRET="${NPM_ADMIN_PASSWORD:-}" \
+        python3 -B - "$SCRIPT_DIR/lib" "${NPM_API:-https://127.0.0.1:81/api}" <<'PYLEGACY' || return 1
+import json, os, pathlib, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+from npm_api import NpmApi
+try:
+    identity, secret = os.environ['NPM_LOGIN_EMAIL'], os.environ['NPM_LOGIN_SECRET']
+    if not identity or not secret:
+        raise RuntimeError('NPM credentials required to check legacy proxy hosts')
+    with tempfile.TemporaryDirectory() as directory:
+        work = pathlib.Path(directory)
+        login = work / 'login.json'
+        login.touch(mode=0o600)
+        login.write_text(json.dumps(dict(identity=identity, secret=secret)))
+        client = NpmApi(sys.argv[2], work)
+        client.login(login)
+        hosts = client.hosts()
+        if any(str(host.get('forward_host', '')).strip().lower() == 'snappymail' for host in hosts):
+            raise RuntimeError('NPM still forwards to SnappyMail; run scripts/snappymail-remove.sh remove before update')
+except (RuntimeError, OSError) as error:
+    sys.exit('[update] ERROR: ' + str(error) + '; update stopped before changes')
+PYLEGACY
+    if docker inspect snappymail >/dev/null 2>&1 || docker inspect mailrelay-snappymail >/dev/null 2>&1 \
+        || [ -d "${SNAPPYMAIL_DIR:-/home/snappymail}" ]; then
+        echo '[update] WARNING: legacy SnappyMail containers or installation remain; preserved. Use scripts/snappymail-remove.sh for explicit cleanup' >&2
+    fi
+)
+update_snappymail_preflight || exit 1
+chmod 600 "$ENV_FILE"
+mkdir -p "$(dirname "$LOGFILE")"
+echo "=== Update started at $(date) ===" >> "$LOGFILE"
+
+# Refresh this checkout before loading feature selection and deployment libraries.
 git_pull_if_repo() {
     local dir="$1" label="$2"
     if [ ! -d "$dir" ]; then
@@ -104,8 +140,7 @@ if [ "${MAILSTACK_UPDATE_REEXEC:-false}" != true ]; then
 fi
 
 # Read feature selection before pulling or starting optional stacks.
-WEBMAIL_ENABLE=false
-SNAPPYMAIL_ENABLE=true
+WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
@@ -121,7 +156,7 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 # shellcheck source=lib/waf.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/waf.sh"
-webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+webmail_options || die "Invalid Webmail/retention options"
 case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 # Both app deployment and Toolkit source synchronization require rsync.
 if [ "$WEBMAIL_ENABLE" = true ] || [ "$TOOLKIT_ENABLE" = true ]; then
@@ -152,14 +187,13 @@ header "Phase 1: git pull component repos"
 
 if [ "$TOOLKIT_ENABLE" = true ]; then git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"; fi
 # mailcow-dockerized is managed by its own update.sh; pulling here races with Phase 3.
-# npmplus / snappymail dirs are typically not git repos (compose files copied from stack).
+# npmplus dirs are typically not git repos (compose files copied from stack).
 git_pull_if_repo "$NPMPLUS_DIR" "npmplus (runtime)"
-[ "$SNAPPYMAIL_ENABLE" != true ] || git_pull_if_repo "$SNAPPYMAIL_DIR" "snappymail (runtime)"
 
 # ============================================================
 # Phase 2: docker compose pull for external stacks
 # ============================================================
-header "Phase 2: docker compose pull (npmplus / snappymail)"
+header "Phase 2: docker compose pull (npmplus)"
 
 pin_runtime_images() {
     local dir="$1" component="$2"
@@ -168,7 +202,7 @@ pin_runtime_images() {
 import datetime, os, pathlib, re, shutil, sys, tempfile
 
 source, target = map(pathlib.Path, sys.argv[1:])
-repositories = {'npmplus': 'zoeyvid/npmplus', 'crowdsec': 'crowdsecurity/crowdsec', 'snappymail': 'djmaze/snappymail'}
+repositories = {'npmplus': 'zoeyvid/npmplus', 'crowdsec': 'crowdsecurity/crowdsec'}
 image_line = re.compile(r'''^(?P<prefix> *image[ \t]*:[ \t]*)(?P<quote>['"]?)(?P<image>[^\s'"#]+)(?P=quote)(?P<suffix>[ \t]*(?:#[^\r\n]*)?)(?P<end>\r?\n|\r|)$''')
 
 def images(lines):
@@ -253,7 +287,6 @@ compose_pull() {
 }
 
 compose_pull "$NPMPLUS_DIR" "npmplus"
-[ "$SNAPPYMAIL_ENABLE" != true ] || compose_pull "$SNAPPYMAIL_DIR" "snappymail"
 
 # Install logging limits before the upstream updater can recreate containers.
 # Runtime compose/override settings outside logging stay operator-managed.
@@ -502,14 +535,14 @@ if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
 fi
 
 # ============================================================
-# Phase 5b: Webmail/SnappyMail edge migration
+# Phase 5b: Webmail edge migration
 # ============================================================
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
-edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
-edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
+edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
+edge_up_apps "$WEBMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then

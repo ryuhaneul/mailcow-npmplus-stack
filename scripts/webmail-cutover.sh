@@ -81,8 +81,6 @@ def valid_name(value, allow_mail=False):
         fail('invalid hostname')
     if value in (f'mailcow.{domain}', f'mail-npm.{domain}'):
         fail('hostname conflicts with a stack service')
-    if value == f'mail.{domain}' and not allow_mail and os.environ['SNAPPYMAIL_ENABLE'] != 'false':
-        fail('hostname conflicts with SnappyMail')
     return value
 
 def attachment_limit():
@@ -258,7 +256,7 @@ def main():
     names = []
     if args.command == 'add-host':
         names = [args.target] if args.target else os.environ['WEBMAIL_HOSTNAMES'].split(',')
-        if not args.target and os.environ['SNAPPYMAIL_ENABLE'] == 'false': names.append(f'mail.{domain}')
+        if not args.target: names.append(f'mail.{domain}')
         names = [valid_name(name) for name in names]
         if admin_hostname in names: fail('admin hostname requires add-admin-host')
     if args.command in ('add-admin-host', 'remove-admin-host'):

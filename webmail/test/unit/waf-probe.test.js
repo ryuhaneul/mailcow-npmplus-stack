@@ -17,19 +17,19 @@ for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
     const render = enabled => execFileSync('bash', ['-c', 'source scripts/lib/webmail-env.sh; source scripts/lib/waf.sh; waf_render_appsec_config'], {
       cwd: root,
       encoding: 'utf8',
-      env: { ...process.env, DOMAIN: 'example.com', WEBMAIL_ENABLE: enabled, WEBMAIL_HOSTNAMES: 'newmail.example.com,other.example.com', SNAPPYMAIL_ENABLE: 'true', WEBMAIL_ADMIN_ENABLE: enabled, WEBMAIL_ADMIN_HOSTNAME: 'admin.example.com', WAF_MODE: mode, WAF_ALLOWLIST: '' },
+      env: { ...process.env, DOMAIN: 'example.com', WEBMAIL_ENABLE: enabled, WEBMAIL_HOSTNAMES: 'newmail.example.com,other.example.com', WEBMAIL_ADMIN_ENABLE: enabled, WEBMAIL_ADMIN_HOSTNAME: 'admin.example.com', WAF_MODE: mode, WAF_ALLOWLIST: '' },
     });
     const yaml = render('true');
     const blocks = yaml.split(/(?=^  - filter:)/m);
     const xmlBlocks = blocks.filter(block => block.includes('/api/rules/import/xml'));
-    assert.equal(xmlBlocks.length, 2);
-    for (const [index, host] of ['newmail.example.com', 'other.example.com'].entries()) {
+    assert.equal(xmlBlocks.length, 3);
+    for (const [index, host] of ['newmail.example.com', 'other.example.com', 'mail.example.com'].entries()) {
       assert.equal(xmlBlocks[index], `  - filter: Is${band}Band == true && req.Host == "${host}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]\n    apply:\n      - Remove${band}BandRuleByID(941100)\n      - Remove${band}BandRuleByID(941130)\n      - Remove${band}BandRuleByID(941310)\n`);
     }
     assert.ok(blocks.filter(block => !xmlBlocks.includes(block)).every(block => !/RuleByID\(941(?:100|130|310)\)/.test(block)));
     const signatureBlocks = blocks.filter(block => block.includes('/api/signatures'));
-    assert.equal(signatureBlocks.length, 2);
-    for (const [index, host] of ['newmail.example.com', 'other.example.com'].entries()) {
+    assert.equal(signatureBlocks.length, 3);
+    for (const [index, host] of ['newmail.example.com', 'other.example.com', 'mail.example.com'].entries()) {
       assert.equal(signatureBlocks[index].split('\n')[0], `  - filter: Is${band}Band == true && req.Host == "${host}" && ((req.Method == "PUT" && req.URL.Path in ["/api/prefs", "/api/rules", "/api/signatures"]) || (req.Method == "POST" && req.URL.Path in ["/api/rules/preview", "/api/rules/apply-existing", "/api/signatures/normalize"]))`);
       assert.ok(signatureBlocks[index].includes(`Remove${band}BandRuleByTag("attack-xss")`));
     }

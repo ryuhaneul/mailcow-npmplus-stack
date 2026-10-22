@@ -20,18 +20,18 @@ for name, start, end in (
     ('toolkit-update', '# Update toolkit config with real API key', '# Install nginx custom config'),
     ('guard', '# Reject the old example', '# --- Start log ---'),
     ('mailcow', '# --- Change Mailcow admin password ---', '# --- Add domain'),
-    ('snappy', '# Change Snappymail admin password', '\nelse\n    log "Phase 6:'),
     ('warning', 'if [ -z "${ADMIN_ACCESS_LIST:-}" ]; then', '\necho "  Services:"'),
 ):
     begin = s.index(start)
     (dest / (name + '.sh')).write_text(s[begin:s.index(end, begin)])
 update = Path(sys.argv[1]).with_name('update.sh').read_text()
 begin = update.index('ENV_FILE="${PROJECT_DIR}/.env"')
-(dest / 'update-load.sh').write_text(update[begin:update.index('mkdir -p', begin)])
+harden = update.index('chmod 600 "$ENV_FILE"', begin)
+(dest / 'update-load.sh').write_text(update[begin:update.index('# Check tooling', begin)] + update[harden:update.index('mkdir -p', harden)])
 assert 'DKIM_PRIV_KEYS:' not in s
 
 assert s.index('# Reject the old example') < s.index('# --- Start log ---') < s.index('header "Phase 0:')
-assert s.index('# --- Change Mailcow admin password ---') < s.index('# Change Snappymail admin password') < s.index('header "Phase 7:') < s.index('admin_access')
+assert s.index('# --- Change Mailcow admin password ---') < s.index('header "Phase 7:') < s.index('admin_access')
 (dest / 'password').write_text('a"b\'c\\d$e f!g')
 PY
 pass 'example rejection precedes mutations; password gates precede proxy/admin access setup'
@@ -52,29 +52,7 @@ curl() {
     cat > "$TMP/request.json"
     printf '%s' "$RESPONSE"
 }
-docker() {
-    local arg
-    for arg in "$@"; do [[ "$arg" != *"$NPM_ADMIN_PASSWORD"* ]] || exit 91; done
-    if [[ "$*" == 'exec snappymail sed -i '* ]]; then
-        # Run the real sed replacement against a disposable ini only.
-        sed -i "$5" "$TMP/application.ini"
-        return
-    fi
-    [ "$1 $2 $3 $4 $5" = 'exec -i snappymail php -r' ] || exit 92
-    cat > "$TMP/stdin"
-    cmp -s "$TMP/password" "$TMP/stdin" || exit 93
-    printf '%s' "$6" > "$TMP/php-code"
-    if [[ "$6" == *password_hash* ]]; then
-        [ "${SNAPPY_MODE:-}" != hash-fail ] || return 1
-        [ "${SNAPPY_MODE:-}" != empty-hash ] || return 0
-        printf '%s' "$TEST_HASH"
-    elif [[ "$6" == *password_verify* ]]; then
-        if [ "${SNAPPY_MODE:-}" = already ]; then printf yes
-        elif [ "${SNAPPY_MODE:-}" = verify-fail ]; then printf no
-        elif grep -Fq "$TEST_HASH" "$TMP/application.ini"; then printf yes
-        else printf no; fi
-    else exit 94; fi
-}
+
 MOCK
 cat > "$TMP/run.sh" <<'RUN'
 #!/bin/bash
@@ -108,27 +86,6 @@ done
 pass 'five failed/invalid Mailcow responses abort without exposing response body'
 if bash -c 'source "$TMP/common.sh"; MAILCOW_API_KEY=; source "$TMP/mailcow.sh"' > "$TMP/out" 2>&1; then fail missing-key; fi
 pass 'missing Mailcow API key aborts'
-export TEST_HASH='$2y$10$./01234567890123456789012345678901234567890123456789012'
-printf 'admin_password = "old"\n' > "$TMP/application.ini"
-bash "$TMP/run.sh" snappy
-cmp -s "$TMP/password" "$TMP/stdin" || fail stdin
-grep -Fq "admin_password = \"$TEST_HASH\"" "$TMP/application.ini" || fail sed
-pass 'SnappyMail stdin is byte-identical; bcrypt $ . / survive real sed; applied password rechecked'
-for SNAPPY_MODE in hash-fail empty-hash verify-fail; do
-    export SNAPPY_MODE
-    printf 'admin_password = "old"\n' > "$TMP/application.ini"
-    if bash "$TMP/run.sh" snappy > "$TMP/out" 2>&1; then fail "$SNAPPY_MODE"; fi
-done
-unset SNAPPY_MODE
-pass 'SnappyMail hash command failure, empty hash and verification failure abort'
-SNAPPY_MODE=already bash "$TMP/run.sh" snappy
-pass 'already-correct SnappyMail password accepted'
-if command -v php >/dev/null 2>&1; then
-    printf '%s' "$(cat "$TMP/password")" | php -r '$p = stream_get_contents(STDIN); $h = password_hash($p, PASSWORD_BCRYPT); if (!password_verify($p, $h)) exit(1);'
-    pass 'local PHP hashes and verifies special-character stdin'
-else
-    echo '# SKIP local PHP hash/verify: php unavailable; production Docker stdin path checked by spy'
-fi
 ADMIN_ACCESS_LIST= bash "$TMP/run.sh" warning > "$TMP/out"
 grep -q 'ADMIN_ACCESS_LIST 설정 권장' "$TMP/out" || fail warning
 pass 'empty admin IP list emits summary warning'

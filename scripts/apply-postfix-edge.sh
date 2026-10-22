@@ -45,12 +45,12 @@ if [ -f "$EXTRA_CONF" ]; then
 else
     : > "$WORK/original"
 fi
-python3 - "$WORK/original" "$WORK/next" "$MODE" "${WEBMAIL_RELAY_IPV4:-}" "${SNAPPYMAIL_RELAY_IPV4:-}" \
-    "${WEBMAIL_RELAY_IPV6:-}" "${SNAPPYMAIL_RELAY_IPV6:-}" "${EDGE_IPV6_NETWORK:-}" \
+python3 - "$WORK/original" "$WORK/next" "$MODE" "${WEBMAIL_RELAY_IPV4:-}" \
+    "${WEBMAIL_RELAY_IPV6:-}" "${EDGE_IPV6_NETWORK:-}" \
     "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" <<'PY' || die "cannot edit managed exclusions; nothing changed"
 from pathlib import Path
 import ipaddress, re, sys
-source, dest, mode, web4, snappy4, web6, snappy6, network6, network4, mailcow6 = sys.argv[1:]
+source, dest, mode, web4, web6, network6, network4, mailcow6 = sys.argv[1:]
 data = Path(source).read_bytes()
 def reject_backslashes(value):
     numbers = [str(i) for i, line in enumerate(value.split(b'\n'), 1) if b'\\' in line]
@@ -135,9 +135,9 @@ while i < len(lines):
     i += 1
 data = b''.join(clean)
 if mode != 'revert':
-    exclusions = [f'!{web4}', f'!{snappy4}']
+    exclusions = [f'!{web4}']
     if web6:
-        exclusions += [f'![{web6}]', f'![{snappy6}]']
+        exclusions += [f'![{web6}]']
     prefix = (', '.join(exclusions) + ', ').encode()
     matches = [i for i, line in enumerate(clean) if re.match(rb'mynetworks[ \t]*=', line)]
     if len(matches) > 1:

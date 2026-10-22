@@ -1,4 +1,5 @@
 #!/bin/bash
+set +x
 set -euo pipefail
 
 # ============================================================
@@ -9,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-MAILCOW_DIR="/home/mailcow-dockerized"
+MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || { echo "[x] .env not found at $ENV_FILE"; exit 1; }
@@ -27,22 +28,34 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# --- Extract DKIM key from Mailcow (Redis) ---
-DKIM_RECORD=""
-DKIM_SELECTOR="dkim"
-
-REDIS_CONTAINER=$(docker ps --format '{{.Names}}' 2>/dev/null | grep redis-mailcow | head -1)
-if [ -n "$REDIS_CONTAINER" ] && [ -f "$MAILCOW_DIR/mailcow.conf" ]; then
-    REDISPASS=$(grep "^REDISPASS=" "$MAILCOW_DIR/mailcow.conf" | cut -d= -f2)
-    DKIM_PRIVKEY=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_PRIV_KEYS:${DOMAIN}" 2>/dev/null | grep -v "^Warning")
-    DKIM_SEL=$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDISPASS" GET "DKIM_SELECTORS:${DOMAIN}" 2>/dev/null | grep -v "^Warning" | tr -d '[:space:]')
-
-    if [ -n "$DKIM_PRIVKEY" ] && echo "$DKIM_PRIVKEY" | grep -q "PRIVATE KEY"; then
-        # Derive public key from private key
-        DKIM_RECORD=$(echo "$DKIM_PRIVKEY" | openssl rsa -pubout 2>/dev/null | grep -v "^-" | tr -d '\n')
-        [ -n "$DKIM_SEL" ] && DKIM_SELECTOR="$DKIM_SEL"
-    fi
+# --- Read the public DKIM key and selector from Mailcow's API ---
+if [ -z "${MAILCOW_API_KEY:-}" ] && [ -f "$MAILCOW_DIR/mailcow.conf" ]; then
+    MAILCOW_API_KEY=$(grep '^API_KEY=' "$MAILCOW_DIR/mailcow.conf" | head -1 | cut -d= -f2- || true)
 fi
+if [ -z "${MAILCOW_API_KEY:-}" ]; then
+    echo "[x] Mailcow API key not found. Set MAILCOW_API_KEY in .env or API_KEY in mailcow.conf." >&2
+    exit 1
+fi
+if ! DKIM_DATA=$(printf 'X-API-Key: %s\n' "$MAILCOW_API_KEY" | curl -fsk -H @- \
+    "https://127.0.0.1:8443/api/v1/get/dkim/${DOMAIN}" | python3 -c '
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+    key, selector = data["pubkey"], data["dkim_selector"]
+    if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", key):
+        raise ValueError()
+    if not isinstance(selector, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", selector):
+        raise ValueError()
+    print(key)
+    print(selector)
+except (ValueError, TypeError, KeyError):
+    sys.exit(1)
+'); then
+    echo "[x] Could not read DKIM from Mailcow API. Check API access, domain existence and DKIM generation in Mailcow Admin." >&2
+    exit 1
+fi
+DKIM_RECORD=${DKIM_DATA%%$'\n'*}
+DKIM_SELECTOR=${DKIM_DATA#*$'\n'}
 
 # --- Check current DNS status ---
 check_dns() {

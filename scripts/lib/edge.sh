@@ -40,8 +40,9 @@ edge_load_config() {
     SNAPPYMAIL_RELAY_IPV4=${SNAPPYMAIL_RELAY_IPV4:-$network.239}
     WEBMAIL_EDGE_SUBNET=${WEBMAIL_EDGE_SUBNET:-172.22.10.0/24}
     SNAPPYMAIL_EDGE_SUBNET=${SNAPPYMAIL_EDGE_SUBNET:-172.22.11.0/24}
+    ADMIN_EDGE_SUBNET=${ADMIN_EDGE_SUBNET:-172.22.12.0/24}
     python3 - "$network" "$WEBMAIL_RELAY_IPV4" "$SNAPPYMAIL_RELAY_IPV4" \
-        "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" <<'PY' || return 1
+        "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" "$ADMIN_EDGE_SUBNET" <<'PY' || return 1
 import ipaddress, sys
 try:
     network = ipaddress.IPv4Network(sys.argv[1] + '.0/24')
@@ -82,7 +83,7 @@ edge_check_docker_version() {
         || { edge_error 'Docker server 28+ is required for isolated bridge networks'; return 1; }
 }
 
-# Read-only preflight. Ignore our two bridges and their host routes, not other
+# Read-only preflight. Ignore our bridges and their host routes, not other
 # bridges whose CIDRs happen to match. Include non-default routes from all tables.
 edge_check_overlap() (
     local work ids
@@ -97,16 +98,18 @@ edge_check_overlap() (
         printf '[]\n' > "$work/networks.json"
     fi
     ip -4 -j route show table all > "$work/routes.json" || { edge_error 'cannot read IPv4 host routes'; return 1; }
-    python3 - "$work" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" \
-        "${WEBMAIL_ENABLE:-false}" "${SNAPPYMAIL_ENABLE:-true}" <<'PY'
+    python3 - "$work" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" "${ADMIN_EDGE_SUBNET:-172.22.12.0/24}" \
+        "${WEBMAIL_ENABLE:-false}" "${SNAPPYMAIL_ENABLE:-true}" "${WEBMAIL_ADMIN_ENABLE:-false}" <<'PY'
 import ipaddress, json, sys
 from pathlib import Path
 work = Path(sys.argv[1])
-names = ('mailstack-webmail-edge', 'mailstack-snappymail-edge')
-candidates = [(name, ipaddress.IPv4Network(value)) for name, value, enabled in zip(names, sys.argv[2:4], sys.argv[4:6]) if enabled == 'true']
+names = ('mailstack-webmail-edge', 'mailstack-snappymail-edge', 'mailstack-admin-edge')
+candidates = [(name, ipaddress.IPv4Network(value)) for name, value, enabled in zip(names, sys.argv[2:5], sys.argv[5:8]) if enabled == 'true']
 try:
-    if len(candidates) == 2 and candidates[0][1].overlaps(candidates[1][1]):
-        raise ValueError('webmail and SnappyMail edge subnets overlap')
+    for index, (name, subnet) in enumerate(candidates):
+        for other, candidate in candidates[index+1:]:
+            if subnet.overlaps(candidate):
+                raise ValueError(f'{name} and {other} edge subnets overlap')
     devices = set()
     networks = json.loads((work/'networks.json').read_text())
     for network in networks:
@@ -211,9 +214,10 @@ edge_generate_npmplus_override() (
     local dest="$1" app subnet address enabled
     {
         printf 'services:\n  npmplus:\n    networks:\n      npmplus-net: {}\n      mailcow-network: {}\n'
-        for app in webmail snappymail; do
+        for app in webmail snappymail admin; do
             if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-false}"; subnet="$WEBMAIL_EDGE_SUBNET"
-            else enabled="${SNAPPYMAIL_ENABLE:-true}"; subnet="$SNAPPYMAIL_EDGE_SUBNET"; fi
+            elif [ "$app" = snappymail ]; then enabled="${SNAPPYMAIL_ENABLE:-true}"; subnet="$SNAPPYMAIL_EDGE_SUBNET"
+            else enabled="${WEBMAIL_ADMIN_ENABLE:-false}"; subnet="${ADMIN_EDGE_SUBNET:-172.22.12.0/24}"; fi
             if [ "$enabled" = true ]; then
                 address=$(edge_address "$subnet" 2) || return 1
                 printf '      mailstack-%s-edge:\n        ipv4_address: %s\n' "$app" "$address"
@@ -221,8 +225,10 @@ edge_generate_npmplus_override() (
         done
         if [ "${WEBMAIL_ENABLE:-false}" = true ] || [ "${SNAPPYMAIL_ENABLE:-true}" = true ]; then
             printf 'networks:\n'
-            for app in webmail snappymail; do
-                if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-false}"; else enabled="${SNAPPYMAIL_ENABLE:-true}"; fi
+            for app in webmail snappymail admin; do
+                if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-false}"
+                elif [ "$app" = snappymail ]; then enabled="${SNAPPYMAIL_ENABLE:-true}"
+                else enabled="${WEBMAIL_ADMIN_ENABLE:-false}"; fi
                 if [ "$enabled" = true ]; then printf '  mailstack-%s-edge:\n    external: true\n    name: mailstack-%s-edge\n' "$app" "$app"; fi
             done
         fi
@@ -285,6 +291,7 @@ edge_prepare_apps() {
         edge_log 'step 1: checking Docker/subnets and preparing app files'
         edge_check_docker_version && edge_check_overlap || return 1
     fi
+    edge_ensure_admin_network || return 1
     if [ "$WEBMAIL_ENABLE" = true ]; then
         mkdir -p "$webdir" || return 1
         rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
@@ -438,17 +445,56 @@ PYNETWORK
 }
 
 # Stage 3: force recreation only for a changed override or runtime attachments.
+edge_ensure_admin_network() {
+    [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] || return 0
+    edge_check_overlap || return 1
+    local network range
+    if ! network=$(docker network inspect mailstack-admin-edge 2>/dev/null); then
+        range=$(python3 - "$ADMIN_EDGE_SUBNET" <<'PY'
+import ipaddress, sys
+print(list(ipaddress.IPv4Network(sys.argv[1]).subnets(prefixlen_diff=1))[1])
+PY
+        ) || return 1
+        docker network create --driver bridge --internal --ipv6=false \
+            --subnet "$ADMIN_EDGE_SUBNET" --ip-range "$range" \
+            --opt com.docker.network.bridge.gateway_mode_ipv4=isolated \
+            mailstack-admin-edge >/dev/null || return 1
+        network=$(docker network inspect mailstack-admin-edge) || return 1
+    fi
+    python3 - "$network" "$ADMIN_EDGE_SUBNET" <<'PY'
+import ipaddress, json, sys
+try:
+    network, = json.loads(sys.argv[1])
+    subnet = ipaddress.IPv4Network(sys.argv[2])
+    expected_range = str(list(subnet.subnets(prefixlen_diff=1))[1])
+    configs = network.get('IPAM', {}).get('Config', [])
+    if (network.get('Driver') != 'bridge' or network.get('Internal') is not True
+            or network.get('EnableIPv6') is not False
+            or network.get('Options', {}).get('com.docker.network.bridge.gateway_mode_ipv4') != 'isolated'
+            or len(configs) != 1 or configs[0].get('Subnet') != str(subnet)
+            or configs[0].get('IPRange') != expected_range):
+        raise ValueError('existing network settings differ')
+    for container in (network.get('Containers') or {}).values():
+        offset = {'npmplus': 2, 'webmail-admin': 3}.get(container.get('Name'))
+        if offset is None or container.get('IPv4Address', '').split('/')[0] != str(subnet.network_address + offset):
+            raise ValueError('unexpected container or address attached')
+except (ValueError, KeyError, TypeError) as error:
+    sys.exit('[edge] ERROR: mailstack-admin-edge: ' + str(error) + '; refusing to modify existing network')
+PY
+}
+
 edge_reconcile_npmplus() {
     local dir="$1" before="" after networks
+    edge_ensure_admin_network || return 1
     [ ! -f "$dir/docker-compose.override.yml" ] || before=$(sha256sum "$dir/docker-compose.override.yml")
     edge_generate_npmplus_override "$dir" || return 1
     after=$(sha256sum "$dir/docker-compose.override.yml") || return 1
     networks=$(docker inspect npmplus --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
-    if [ "$before" = "$after" ] && python3 - "$networks" "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" <<'PY'
+    if [ "$before" = "$after" ] && python3 - "$networks" "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "${WEBMAIL_ADMIN_ENABLE:-false}" "$WEBMAIL_EDGE_SUBNET" "$SNAPPYMAIL_EDGE_SUBNET" "${ADMIN_EDGE_SUBNET:-172.22.12.0/24}" <<'PY'
 import ipaddress, json, sys
 networks = json.loads(sys.argv[1])
-expected = {f'mailstack-{app}-edge': str(ipaddress.ip_network(subnet).network_address + 2) for app, enabled, subnet in zip(('webmail','snappymail'), sys.argv[2:4], sys.argv[4:6]) if enabled == 'true'}
-actual = set(networks).intersection({'mailstack-webmail-edge','mailstack-snappymail-edge'})
+expected = {f'mailstack-{app}-edge': str(ipaddress.ip_network(subnet).network_address + 2) for app, enabled, subnet in zip(('webmail','snappymail','admin'), sys.argv[2:5], sys.argv[5:8]) if enabled == 'true'}
+actual = set(networks).intersection({'mailstack-webmail-edge','mailstack-snappymail-edge','mailstack-admin-edge'})
 sys.exit(0 if networks and actual == set(expected) and all(networks[name].get('IPAddress') == address for name,address in expected.items()) else 1)
 PY
     then

@@ -67,6 +67,22 @@ test('admin health: no authentication and exact security headers', async t => {
   assert.equal(response.headers['strict-transport-security'], 'max-age=31536000');
 });
 
+test('admin proxy: mailcow and user-edge peers cannot spoof client IP; only admin-edge NPM is trusted', async t => {
+  const app = await fixture(t, { config: loadAdminConfig({ ...env, TRUST_PROXY: '172.22.12.2/32' }) });
+  app.get('/test-client-ip', request => ({ ip: request.ip }));
+  for (const remoteAddress of ['172.22.1.45', '172.22.10.2', '172.22.12.3']) {
+    const response = await app.inject({ url: '/test-client-ip', remoteAddress, headers: { 'x-forwarded-for': '192.0.2.123' } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().ip, remoteAddress);
+  }
+  for (const remoteAddress of ['172.22.12.2', '::ffff:172.22.12.2']) {
+    const response = await app.inject({ url: '/test-client-ip', remoteAddress, headers: { 'x-forwarded-for': '192.0.2.123' } });
+    assert.equal(response.json().ip, '192.0.2.123');
+  }
+  const chained = await app.inject({ url: '/test-client-ip', remoteAddress: '172.22.12.2', headers: { 'x-forwarded-for': '192.0.2.123, 172.22.1.45' } });
+  assert.equal(chained.json().ip, '172.22.1.45');
+});
+
 test('admin errors: thrown and directly sent auth failures become forbidden without challenge', async t => {
   const app = await fixture(t);
   app.get('/test-thrown', () => { throw new AppError(401, 'AUTH_FAILED', '접근할 수 없어요.'); });

@@ -26,7 +26,7 @@ start=s.index('# Install logging limits before')
 end=s.index('# ============================================================',start)
 (dest/'logging-policy.sh').write_text(s[start:end])
 # These direct paths must use the same transaction wrapper as edge deployment.
-assert 'edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d webmail-admin' in s
+assert 'edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --wait --wait-timeout 180 webmail-admin' in s
 assert 'edge_archive_apply "$dir" false edge_npmplus_up up -d' in s
 PY
 cat > "$TMP/scripts/lib/mailcow-health.sh" <<'MOCK'
@@ -85,6 +85,7 @@ services:
 NPM
     LOG_ARCHIVE_REQUIRED_SOURCES=postfix,dovecot,rspamd,php-fpm,nginx,npmplus,webmail,webmail-admin
     WEBMAIL_ENABLE=true WEBMAIL_ADMIN_ENABLE=true SNAPPYMAIL_ENABLE=false
+    ADMIN_EDGE_SUBNET=172.22.12.0/24
     WEBMAIL_MAIL_TLS_MODE=verify EDGE_WEBMAIL_PIN_CHANGED=false
     for service in "${services[@]}"; do echo false > "$TMP/state-$service"; done
     for service in webmail npmplus postfix-mailcow dovecot-mailcow; do echo true > "$TMP/state-$service"; done
@@ -176,7 +177,7 @@ RENDER
             *'{{range .Mounts}}'*) echo "$TMP/logs" ;;
             *'{{json .NetworkSettings.Networks}}'*)
                 if [ -f "$TMP/legacy" ]; then echo '{"mailcow-network":{}}'
-                elif [ "$2" = npmplus ]; then echo '{"mailstack-webmail-edge":{"IPAddress":"172.22.10.2"}}'
+                elif [ "$2" = npmplus ]; then echo '{"mailstack-webmail-edge":{"IPAddress":"172.22.10.2"},"mailstack-admin-edge":{"IPAddress":"172.22.12.2"}}'
                 else echo '{"mailstack-webmail-edge":{}}'; fi ;;
             *) fail "unexpected inspect $*" ;;
         esac
@@ -184,12 +185,16 @@ RENDER
         echo false > "$TMP/state-${2#id-}"
         if [ -f "$TMP/signal-stop" ]; then kill -TERM "$BASHPID"; fi
     elif [ "$1" = network ] && [ "$2" = inspect ]; then
-        return 1
+        [ "$3" = mailstack-admin-edge ] || return 1
+        echo '[{"Name":"mailstack-admin-edge","Id":"synthetic-admin","Driver":"bridge","Internal":true,"EnableIPv6":false,"Options":{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"},"IPAM":{"Config":[{"Subnet":"172.22.12.0/24","IPRange":"172.22.12.128/25"}]},"Containers":{}}]'
+    elif [ "$1" = network ] && [ "$2" = ls ]; then
+        :
     elif [ "$1" = start ]; then
         [ ! -f "$TMP/deleted-ids" ] || return 1
         echo true > "$TMP/state-${2#id-}"
     else fail "unexpected Docker command $*"; fi
 }
+ip() { echo '[]'; }
 timeout() { shift; "$@"; }
 sleep() { SECONDS=$((SECONDS + 31)); }
 log_archive_wait_backfill() {

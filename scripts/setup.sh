@@ -1058,7 +1058,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         fi
         COMPOSE_PROFILES=admin setup_compose_start "$WEBMAIL_DIR" webmail-admin || die "Webmail admin startup failed"
     else
-        (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d webmail-admin) || die "Webmail admin startup failed"
+        (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d --wait --wait-timeout 180 webmail-admin) || die "Webmail admin startup failed"
     fi
 fi
 
@@ -1406,7 +1406,7 @@ fi
 
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     if [ -n "$ADMIN_ACCESS_ID" ] && [ "$ADMIN_ACCESS_ID" != 0 ]; then
-        create_proxy_host "$WEBMAIL_ADMIN_HOSTNAME" webmail-admin 8080 http "client_max_body_size 4m;" "$ADMIN_ACCESS_ID" >/dev/null
+        create_proxy_host "$WEBMAIL_ADMIN_HOSTNAME" webmail-admin-edge 8080 http "client_max_body_size 4m;" "$ADMIN_ACCESS_ID" >/dev/null
     else
         warn "Webmail admin: ADMIN_ACCESS_LIST is empty; proxy creation skipped"
     fi

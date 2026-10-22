@@ -33,15 +33,14 @@ webmail_options() {
     LOG_ARCHIVE_KEY="${LOG_ARCHIVE_KEY:-}"
     if [ -z "${LOG_ARCHIVE_REQUIRED_SOURCES:-}" ]; then
         LOG_ARCHIVE_REQUIRED_SOURCES=postfix,dovecot,rspamd,php-fpm,nginx,npmplus
-        if [ "${WEBMAIL_ENABLE:-false}" = true ]; then
+        if [ "${WEBMAIL_ENABLE:-true}" = true ]; then
             LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail
         fi
         if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
             LOG_ARCHIVE_REQUIRED_SOURCES+=,webmail-admin
         fi
     fi
-    WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-false}"
-    SNAPPYMAIL_ENABLE="${SNAPPYMAIL_ENABLE:-true}"
+    WEBMAIL_ENABLE="${WEBMAIL_ENABLE:-true}"
     MAIL_SHARE_WHOLE_MAILBOX="${MAIL_SHARE_WHOLE_MAILBOX:-false}"
     MAIL_TRUSTED_SENDER_ENABLE="${MAIL_TRUSTED_SENDER_ENABLE:-false}"
     MAIL_AUTOEXPUNGE_ENABLE="${MAIL_AUTOEXPUNGE_ENABLE:-false}"
@@ -50,7 +49,7 @@ webmail_options() {
     log_archive_validate_sources || return 1
     local flag host joined="" label time
     local -a hosts labels
-    for flag in "$LOG_ARCHIVE_ENABLE" "$MAIL_FTS_NIGHTLY_ENABLE" "$WEBMAIL_ENABLE" "$SNAPPYMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
+    for flag in "$LOG_ARCHIVE_ENABLE" "$MAIL_FTS_NIGHTLY_ENABLE" "$WEBMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
     done
     for time in "$MAIL_FTS_NIGHTLY_START" "$MAIL_FTS_NIGHTLY_END"; do
@@ -59,7 +58,7 @@ webmail_options() {
     [[ "$MAIL_FTS_NIGHTLY_START" != "$MAIL_FTS_NIGHTLY_END" ]] || { webmail_error "nightly FTS start and end must differ"; return 1; }
     WEBMAIL_HOSTNAMES="${WEBMAIL_HOSTNAMES:-newmail.${DOMAIN}}"
     IFS=, read -r -a hosts <<< "$WEBMAIL_HOSTNAMES"
-    if [ "$WEBMAIL_ENABLE" = true ] && [ "$SNAPPYMAIL_ENABLE" = false ]; then hosts+=("mail.${DOMAIN}"); fi
+    hosts+=("mail.${DOMAIN}")
     for host in "${hosts[@]}"; do
         host="${host#"${host%%[![:space:]]*}"}"
         host="${host%"${host##*[![:space:]]}"}"
@@ -73,7 +72,6 @@ webmail_options() {
         if [ "$WEBMAIL_ENABLE" = true ]; then
             case "$host" in
                 "mailcow.${DOMAIN}"|"mail-npm.${DOMAIN}") webmail_error "webmail hostname conflicts with a stack service: $host"; return 1 ;;
-                "mail.${DOMAIN}") [ "$SNAPPYMAIL_ENABLE" = false ] || { webmail_error "webmail hostname conflicts with SnappyMail: $host"; return 1; } ;;
             esac
         fi
         case ",$joined," in *",$host,"*) ;; *) joined+="${joined:+,}$host" ;; esac
@@ -121,8 +119,7 @@ webmail_load_config() {
     LOG_ARCHIVE_ENABLE=false
     LOG_ARCHIVE_KEY=
     LOG_ARCHIVE_REQUIRED_SOURCES=
-    WEBMAIL_ENABLE=false
-    SNAPPYMAIL_ENABLE=true
+    WEBMAIL_ENABLE=true
     WEBMAIL_ADMIN_ENABLE=false
     WEBMAIL_ADMIN_DOVEADM_ENABLE=false
     WEBMAIL_ADMIN_RELAY_ENABLE=false

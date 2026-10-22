@@ -13,7 +13,6 @@ set -euo pipefail
 #   Phase 3: DNS record display + check
 #   Phase 4: Mailcow install + patch
 #   Phase 5: NPMplus + CrowdSec
-#   Phase 6: Snappymail
 #   Phase 7: NPM proxy hosts + SSL certificates
 #   Phase 8: Mailcow SSL symlinks
 #   Phase 9: Cert reload cron
@@ -27,7 +26,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 NPMPLUS_DIR="${NPMPLUS_DIR:-/home/npmplus}"
-SNAPPYMAIL_DIR="${SNAPPYMAIL_DIR:-/home/snappymail}"
 LOGFILE="${LOGFILE:-/var/log/mailcow-stack-setup.log}"
 
 # Argument parsing (flags may appear in any order)
@@ -116,8 +114,7 @@ check_disk_space() {
 # --- Load .env ---
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || die ".env file not found. Copy .env.example to .env and fill in values."
-WEBMAIL_ENABLE=false
-SNAPPYMAIL_ENABLE=true
+WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
@@ -142,7 +139,7 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 # shellcheck source=lib/waf.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/waf.sh"
-webmail_options || die "Invalid Webmail/SnappyMail/retention options"
+webmail_options || die "Invalid Webmail/retention options"
 case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 
 
@@ -853,8 +850,8 @@ setup_archive_sync || die "Log archive readiness failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
-edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
-edge_up_apps "$WEBMAIL_DIR" "$SNAPPYMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
+edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
+edge_up_apps "$WEBMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 
 # ============================================================
 # Phase 5: NPMplus + CrowdSec
@@ -890,165 +887,6 @@ for i in $(seq 1 60); do
 done
 
 edge_apply_trust "$SCRIPT_DIR" || die "Edge step 4 failed; app/NPMplus migration completed, mailcow trust incomplete"
-
-# ============================================================
-# Phase 6: Snappymail
-# ============================================================
-if [ "$SNAPPYMAIL_ENABLE" = true ]; then
-header "Phase 6: Snappymail"
-
-cd "$SNAPPYMAIL_DIR"
-log "Snappymail: deployed"
-
-# Wait for Snappymail data directory to be ready
-for i in $(seq 1 10); do
-    if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
-        break
-    fi
-    sleep 2
-done
-
-# --- Install Korean admin localization (skip if already present) ---
-if [ -f "$PROJECT_DIR/snappymail/admin_ko.json" ]; then
-    KO_INSTALLED=$(docker exec snappymail test -f /var/lib/snappymail/admin_ko.json 2>/dev/null && echo "yes" || echo "no")
-    if [ "$KO_INSTALLED" = "no" ]; then
-        docker cp "$PROJECT_DIR/snappymail/admin_ko.json" snappymail:/var/lib/snappymail/admin_ko.json
-        docker restart snappymail 2>&1 | tail -1
-        log "Snappymail: Korean admin localization installed"
-        for i in $(seq 1 10); do
-            if docker exec snappymail test -d /var/lib/snappymail/_data_/_default_/domains 2>/dev/null; then
-                break
-            fi
-            sleep 2
-        done
-    else
-        log "Snappymail: Korean localization already installed"
-    fi
-fi
-
-# --- Configure Snappymail domain (skip if already configured) ---
-SNAPPY_DOMAIN_EXISTS=$(docker exec snappymail test -f "/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json" 2>/dev/null && echo "yes" || echo "no")
-if [ "$SNAPPY_DOMAIN_EXISTS" = "yes" ]; then
-    log "Snappymail: domain ${DOMAIN} already configured"
-else
-    log "Configuring Snappymail domain..."
-
-# Create domain config pointing to Mailcow's dovecot/postfix
-DOMAIN_CONFIG=$(cat <<'DOMAINJSON'
-{
-    "IMAP": {
-        "host": "dovecot-mailcow",
-        "port": 993,
-        "type": 1,
-        "timeout": 300,
-        "shortLogin": false,
-        "lowerLogin": true,
-        "sasl": ["PLAIN", "LOGIN"],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": true,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 0
-        },
-        "disabled_capabilities": [],
-        "use_expunge_all_on_delete": false,
-        "fast_simple_search": true,
-        "force_select": false,
-        "message_all_headers": false,
-        "message_list_limit": 10000,
-        "search_filter": ""
-    },
-    "SMTP": {
-        "host": "postfix-mailcow",
-        "port": 465,
-        "type": 1,
-        "timeout": 60,
-        "shortLogin": false,
-        "lowerLogin": true,
-        "sasl": ["PLAIN", "LOGIN"],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": true,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 0
-        },
-        "useAuth": true,
-        "setSender": false,
-        "usePhpMail": false
-    },
-    "Sieve": {
-        "host": "dovecot-mailcow",
-        "port": 4190,
-        "type": 2,
-        "timeout": 10,
-        "shortLogin": false,
-        "lowerLogin": true,
-        "sasl": ["PLAIN", "LOGIN"],
-        "ssl": {
-            "verify_peer": false,
-            "verify_peer_name": false,
-            "allow_self_signed": true,
-            "SNI_enabled": true,
-            "disable_compression": true,
-            "security_level": 0
-        },
-        "enabled": true
-    },
-    "whiteList": ""
-}
-DOMAINJSON
-)
-
-# Write domain config via temp file + docker cp (avoids shell escaping issues)
-DOMAIN_TMP=$(mktemp)
-echo "$DOMAIN_CONFIG" > "$DOMAIN_TMP"
-docker cp "$DOMAIN_TMP" "snappymail:/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
-rm -f "$DOMAIN_TMP"
-docker exec snappymail chown www-data:www-data "/var/lib/snappymail/_data_/_default_/domains/${DOMAIN}.json"
-
-# Remove default localhost domain config
-docker exec snappymail sh -c "rm -f /var/lib/snappymail/_data_/_default_/domains/default.json"
-
-    log "Snappymail: domain ${DOMAIN} configured (IMAP/SMTP → Mailcow)"
-fi
-
-# Set default_domain in Snappymail application.ini
-docker exec snappymail sed -i "s|^default_domain = .*|default_domain = \"${DOMAIN}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini 2>/dev/null
-log "Snappymail: default_domain set to ${DOMAIN}"
-
-# Change Snappymail admin password to NPM_ADMIN_PASSWORD
-# Always set it — Snappymail's default password varies by version (not always '12345')
-log "Setting Snappymail admin password..."
-SNAPPY_HASH=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r 'echo password_hash(stream_get_contents(STDIN), PASSWORD_BCRYPT);' 2>/dev/null) || die "Could not generate Snappymail admin password hash"
-if [ -n "$SNAPPY_HASH" ]; then
-    # Check if password is already correct
-    SNAPPY_ALREADY=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r '
-$ini = parse_ini_file("/var/lib/snappymail/_data_/_default_/configs/application.ini");
-echo password_verify(stream_get_contents(STDIN), $ini["admin_password"] ?? "") ? "yes" : "no";
-' 2>/dev/null || echo "no")
-    if [ "$SNAPPY_ALREADY" = "yes" ]; then
-        log "Snappymail admin password: already set"
-    else
-        # Bcrypt uses $ . / and alphanumerics: safe with | and no inner shell.
-        docker exec snappymail sed -i "s|^admin_password = .*|admin_password = \"${SNAPPY_HASH}\"|" /var/lib/snappymail/_data_/_default_/configs/application.ini || die "Could not apply Snappymail admin password hash"
-        SNAPPY_VERIFIED=$(printf '%s' "$NPM_ADMIN_PASSWORD" | docker exec -i snappymail php -r '
-$ini = parse_ini_file("/var/lib/snappymail/_data_/_default_/configs/application.ini");
-echo password_verify(stream_get_contents(STDIN), $ini["admin_password"] ?? "") ? "yes" : "no";
-' 2>/dev/null || echo "no")
-        [ "$SNAPPY_VERIFIED" = "yes" ] || die "Snappymail admin password verification failed"
-        log "Snappymail admin password set"
-    fi
-else
-    die "Could not generate Snappymail admin password hash"
-fi
-
-else
-    log "Phase 6: Snappymail disabled — skipping"
-fi
 
 # ============================================================
 # Phase 6b: Webmail
@@ -1391,11 +1229,9 @@ if [ "$WEBMAIL_PROXY_ALLOWED" = true ] && [ "$WEBMAIL_ACCESS_ID" != 0 ]; then
     curl -fsk -b "$COOKIE_JAR" "${NPM_API}/nginx/proxy-hosts" | python3 "$SCRIPT_DIR/lib/npm_api.py" fields "$WEBMAIL_ACCESS_ID" >/dev/null || die "NPM API 형식을 판별할 수 없음"
 fi
 
-# 1. mail.DOMAIN follows the selected webmail service. Both disabled: no proxy.
+# 1. mail.DOMAIN is the default Webmail alias. Disabled: no proxy.
 MAIL_CERT_ID=0
-if [ "$SNAPPYMAIL_ENABLE" = true ]; then
-    MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "snappymail" 8888 "http" "" || true)
-elif [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
+if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
     MAIL_CERT_ID=$(create_proxy_host "mail.${DOMAIN}" "webmail" 8080 "http" \
         "client_max_body_size $((WEBMAIL_ATTACH_MAX_MB + 5))m;" "$WEBMAIL_ACCESS_ID" || true)
 fi
@@ -1404,7 +1240,7 @@ if [ "$WEBMAIL_ENABLE" = true ] && [ "$WEBMAIL_PROXY_ALLOWED" = true ]; then
     IFS=, read -r -a WEBMAIL_PROXY_HOSTS <<< "$WEBMAIL_HOSTNAMES"
     for webmail_host in "${WEBMAIL_PROXY_HOSTS[@]}"; do
         # The implicit mail alias above already has its own certificate ID.
-        if [ "$SNAPPYMAIL_ENABLE" = false ] && [ "$webmail_host" = "mail.${DOMAIN}" ]; then continue; fi
+        if [ "$webmail_host" = "mail.${DOMAIN}" ]; then continue; fi
         create_proxy_host "$webmail_host" webmail 8080 http \
             "client_max_body_size $((WEBMAIL_ATTACH_MAX_MB + 5))m;" "$WEBMAIL_ACCESS_ID" >/dev/null
     done
@@ -1586,7 +1422,7 @@ if [ -z "${ADMIN_ACCESS_LIST:-}" ]; then
 fi
 
 echo "  Services:"
-if [ "$SNAPPYMAIL_ENABLE" = true ] || [ "$WEBMAIL_ENABLE" = true ]; then
+if [ "$WEBMAIL_ENABLE" = true ]; then
     echo "    Mail:          https://mail.${DOMAIN}"
 fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
@@ -1595,14 +1431,12 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
 fi
 echo "    Mailcow Admin: https://mailcow.${DOMAIN}"
 echo "    NPM Dashboard: https://mail-npm.${DOMAIN}"
-[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    Snappymail:    https://mail.${DOMAIN}/?admin"
 echo ""
 echo "  Admin Password (shared):"
 echo "    Password:    ${NPM_ADMIN_PASSWORD}"
 echo ""
 echo "    NPM:         ${NPM_ADMIN_EMAIL} / (above)"
 echo "    Mailcow:     admin / (above)"
-[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    Snappymail:  admin / (above)"
 echo ""
 echo "  Log file:      ${LOGFILE}"
 echo ""
@@ -1615,7 +1449,6 @@ echo "    sudo reboot"
 echo ""
 echo "  After reboot:"
 echo "    1. sudo ./scripts/verify.sh"
-[ "$SNAPPYMAIL_ENABLE" != true ] || echo "    2. Snappymail admin: https://mail.${DOMAIN}/?admin"
 echo ""
 if [ "${DNS_OK:-true}" = false ]; then
     echo -e "  ${YELLOW}Self-signed certs in use (DNS not configured)${NC}"

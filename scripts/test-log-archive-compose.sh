@@ -13,16 +13,42 @@ root=pathlib.Path(sys.argv[1])
 # Operational service inventory supplied by main (mailcow d75b7d39).
 expected={name+'-mailcow' for name in 'acme clamd dockerapi dovecot memcached mysql netfilter nginx ofelia olefy php-fpm postfix postfix-tlspol redis rspamd sogo toolkit unbound watchdog'.split()}
 policy={'driver':'json-file','options':{'max-size':'20m','max-file':'5','compress':'false'}}
-for file,services in [('mailcow-override/docker-compose.override.yml',expected),('webmail/docker-compose.yml',{'webmail','webmail-admin','mailrelay-webmail'}),('npmplus/docker-compose.yml',{'npmplus','crowdsec'}),('snappymail/docker-compose.yml',{'snappymail','mailrelay-snappymail'})]:
+for file,services in [('mailcow-override/docker-compose.override.yml',expected),('webmail/docker-compose.yml',{'webmail','webmail-admin','mailrelay-webmail'}),('npmplus/docker-compose.yml',{'npmplus','crowdsec'})]:
  data=yaml.safe_load((root/file).read_text())
  assert set(data['services'])==services,file
  assert all(service.get('logging')==policy for service in data['services'].values()),file
 npm=yaml.safe_load((root/'npmplus/docker-compose.yml').read_text())
 assert npm['services']['npmplus']['environment']['LOGROTATE']=='true'
-for app in ('webmail','snappymail'):
+for app in ('webmail',):
  assert 'log-archive-internal' not in (root/app/'docker-compose.yml').read_text()
 PY
 pass 'YAML parsed: every operational and local service has exact 20m x 5 uncompressed json-file policy'
+# Run the installer's real proxy-selection block with a recording API stub.
+python3 - "$ROOT/scripts/setup.sh" "$TMP/proxies.sh" <<'PYPROXY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+start = source.index('# 1. mail.DOMAIN')
+end = source.index('if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then', start)
+Path(sys.argv[2]).write_text(source[start:end])
+PYPROXY
+(
+    DOMAIN=example.test WEBMAIL_ENABLE=true WEBMAIL_PROXY_ALLOWED=true
+    WEBMAIL_ACCESS_ID=17 WEBMAIL_ATTACH_MAX_MB=25
+    WEBMAIL_HOSTNAMES=newmail.example.test,mail.example.test
+    create_proxy_host() { printf '%s|%s|%s|%s|%s|%s\n' "$@" >> "$TMP/proxy-calls"; echo 123; }
+    source "$TMP/proxies.sh"
+    [ "$MAIL_CERT_ID" = 123 ] || fail mail-cert
+    [ "$(wc -l < "$TMP/proxy-calls")" = 2 ] || fail duplicate-mail-proxy
+    grep -qx 'mail.example.test|webmail|8080|http|client_max_body_size 30m;|17' "$TMP/proxy-calls" || fail mail-upstream
+    grep -qx 'newmail.example.test|webmail|8080|http|client_max_body_size 30m;|17' "$TMP/proxy-calls" || fail newmail-parity
+    : > "$TMP/proxy-calls"
+    WEBMAIL_ENABLE=false source "$TMP/proxies.sh"
+    [ ! -s "$TMP/proxy-calls" ] || fail disabled-webmail-proxy
+    WEBMAIL_PROXY_ALLOWED=false source "$TMP/proxies.sh"
+    [ ! -s "$TMP/proxy-calls" ] || fail forbidden-webmail-proxy
+)
+pass 'fresh install routes mail and newmail to Webmail with matching body limit/ACL and honors disabled or denied proxies'
 source "$ROOT/scripts/lib/log-archive.sh"
 # Extract only the public setup helpers, without running the installer.
 sed -n '/^# Setup log-archive helpers/,/^# End setup log-archive helpers/p' "$ROOT/scripts/setup.sh" > "$TMP/helpers.sh"

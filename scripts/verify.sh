@@ -12,8 +12,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || { echo "[x] .env not found"; exit 1; }
-WEBMAIL_ENABLE=false
-SNAPPYMAIL_ENABLE=true
+WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
@@ -120,9 +119,6 @@ echo "[Containers]"
 check "npmplus running"       docker inspect npmplus --format '{{.State.Running}}' 2>/dev/null
 check_container_healthy npmplus
 check "crowdsec running"      docker inspect crowdsec --format '{{.State.Running}}' 2>/dev/null
-if [ "$SNAPPYMAIL_ENABLE" = true ]; then
-    check "snappymail running" docker inspect snappymail --format '{{.State.Running}}' 2>/dev/null
-fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
     check "webmail running" webmail_container_running
     check_container_healthy webmail
@@ -145,9 +141,6 @@ echo ""
 
 # --- Web services ---
 echo "[Web Services]"
-if [ "$SNAPPYMAIL_ENABLE" = true ]; then
-    check "mail.${DOMAIN} HTTPS 200" check_http "https://mail.${DOMAIN}" "200"
-fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
     IFS=, read -r -a WEBMAIL_CHECK_HOSTS <<< "$WEBMAIL_HOSTNAMES"
     for webmail_host in "${WEBMAIL_CHECK_HOSTS[@]}"; do
@@ -186,13 +179,12 @@ if [ "$ADMIN_ACCESS_STATUS" -ne 0 ] && [ -n "${ADMIN_ACCESS_LIST:-}" ] && [ "$AD
     echo "  FAIL admin access check: helper failed (exit $ADMIN_ACCESS_STATUS)"
     FAIL=$((FAIL + 1))
 fi
-[ "$SNAPPYMAIL_ENABLE" != true ] || check "HTTP->HTTPS redirect (mail)"    sh -c '[ "$(curl -sk -o /dev/null -w "%{http_code}" "http://mail.${DOMAIN}")" = "301" ]'
 
 echo ""
 
 # --- SSL certificates ---
 echo "[SSL Certificates]"
-if [ "$SNAPPYMAIL_ENABLE" = true ] || [ "$WEBMAIL_ENABLE" = true ]; then
+if [ "$WEBMAIL_ENABLE" = true ]; then
     check "mail.${DOMAIN}:443 valid cert"      check_ssl "mail.${DOMAIN}" 443
 fi
 check "mailcow.${DOMAIN}:443 valid cert"   check_ssl "mailcow.${DOMAIN}" 443
@@ -234,19 +226,13 @@ fi
 echo ""
 
 # --- Edge network isolation ---
-if [ "$WEBMAIL_ENABLE" = true ] || [ "$SNAPPYMAIL_ENABLE" = true ]; then
+if [ "$WEBMAIL_ENABLE" = true ]; then
     echo "[Webmail edge isolation]"
     if webmail_load_config "$ENV_FILE" "$MAILCOW_DIR"; then
-        for edge_app in webmail snappymail; do
-            if [ "$edge_app" = webmail ]; then
-                edge_enabled="$WEBMAIL_ENABLE"
-                edge_open=(dovecot-mailcow:993 dovecot-mailcow:4190 postfix-mailcow:587 mysql-mailcow:3306 nginx-mailcow:8443)
-                edge_closed=(dockerapi:443 redis-mailcow:6379 dovecot-mailcow:24 1.1.1.1:443)
-            else
-                edge_enabled="$SNAPPYMAIL_ENABLE"
-                edge_open=(dovecot-mailcow:993 dovecot-mailcow:4190 postfix-mailcow:465)
-                edge_closed=(postfix-mailcow:587 mysql-mailcow:3306 nginx-mailcow:8443 dockerapi:443 redis-mailcow:6379 dovecot-mailcow:24 1.1.1.1:443)
-            fi
+        for edge_app in webmail; do
+            edge_enabled="$WEBMAIL_ENABLE"
+            edge_open=(dovecot-mailcow:993 dovecot-mailcow:4190 postfix-mailcow:587 mysql-mailcow:3306 nginx-mailcow:8443)
+            edge_closed=(dockerapi:443 redis-mailcow:6379 dovecot-mailcow:24 1.1.1.1:443)
             [ "$edge_enabled" = true ] || continue
             for edge_target in "${edge_open[@]}"; do
                 check "$edge_app open $edge_target" edge_probe_tcp "$edge_app" "${edge_target%:*}" "${edge_target##*:}" open
@@ -449,8 +435,6 @@ PYWAFALERT
         WAF_PROBE_HOST=
         if [ "$WEBMAIL_ENABLE" = true ]; then
             WAF_PROBE_HOST=${WEBMAIL_HOSTNAMES%%,*}
-        elif [ "$SNAPPYMAIL_ENABLE" = true ]; then
-            WAF_PROBE_HOST="mail.${DOMAIN}"
         fi
         if [ -z "$WAF_PROBE_HOST" ]; then
             echo "  SKIP  WAF request probe: no non-admin webmail host enabled"

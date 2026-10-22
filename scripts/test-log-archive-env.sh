@@ -13,6 +13,21 @@ printf 'DBNAME=mailcow\nIPV4_NETWORK=172.22.1\nMAILCOW_HOSTNAME=mail.example.tes
 printf 'DOMAIN=example.test\n' > "$TMP/stack.env"
 webmail_load_config "$TMP/stack.env" "$TMP/mailcow"
 [ "$LOG_ARCHIVE_ENABLE" = false ] && [ -z "$LOG_ARCHIVE_KEY" ] || fail defaults
+[ "$WEBMAIL_ENABLE" = true ] || fail webmail-default
+[ "$WEBMAIL_HOSTNAMES" = newmail.example.test,mail.example.test ] || fail default-mail-alias
+(
+    for legacy in true false ignored-value; do
+        for enabled in true false; do
+            printf 'DOMAIN=example.test\nWEBMAIL_ENABLE=%s\nSNAPPYMAIL_ENABLE=%s\nWEBMAIL_HOSTNAMES=Custom.example.test,mail.example.test\n' "$enabled" "$legacy" > "$TMP/webmail-options.env"
+            webmail_load_config "$TMP/webmail-options.env" "$TMP/mailcow"
+            [ "$WEBMAIL_ENABLE" = "$enabled" ] || fail webmail-explicit-option
+            [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-dedup
+            webmail_options
+            [ "$WEBMAIL_HOSTNAMES" = custom.example.test,mail.example.test ] || fail webmail-alias-idempotent
+        done
+    done
+)
+pass 'Webmail defaults on, always includes mail alias, deduplicates names and ignores obsolete enable values'
 log_archive_ensure_key
 ! grep -q '^LOG_ARCHIVE_KEY=' "$TMP/stack.env" || fail off-key
 pass 'old config stays disabled and creates no key'
@@ -316,9 +331,9 @@ PY
     pass "SnappyMail removal child loads archive=$enabled and preserves volume without secret output"
 done
 (
-    WEBMAIL_ADMIN_ENABLE=true WEBMAIL_ENABLE=true SNAPPYMAIL_ENABLE=true
+    WEBMAIL_ADMIN_ENABLE=true WEBMAIL_ENABLE=true
     ADMIN_EDGE_SUBNET=172.22.12.0/24
-    WEBMAIL_EDGE_SUBNET=172.22.10.0/24 SNAPPYMAIL_EDGE_SUBNET=172.22.11.0/24
+    WEBMAIL_EDGE_SUBNET=172.22.10.0/24
     python3 - "$TMP/admin-network.json" <<'PY'
 import json, sys
 network = dict(Name='mailstack-admin-edge', Id='synthetic-admin', Driver='bridge', Internal=True, EnableIPv6=False,
@@ -358,7 +373,6 @@ PY
     done
     cp "$TMP/admin-network.json" "$TMP/admin-current.json"
     if ADMIN_EDGE_SUBNET=$WEBMAIL_EDGE_SUBNET edge_ensure_admin_network 2>/dev/null; then fail admin-webmail-overlap; fi
-    if ADMIN_EDGE_SUBNET=$SNAPPYMAIL_EDGE_SUBNET edge_ensure_admin_network 2>/dev/null; then fail admin-snappy-overlap; fi
     if ADMIN_TEST_ROUTES='[{"dst":"172.22.12.0/24","dev":"synthetic-foreign"}]' edge_ensure_admin_network 2>/dev/null; then fail admin-route-overlap; fi
     WEBMAIL_ADMIN_ENABLE=false edge_ensure_admin_network
     [ "$(wc -l < "$TMP/admin-network-calls")" = 1 ] || fail disabled-admin-network-create

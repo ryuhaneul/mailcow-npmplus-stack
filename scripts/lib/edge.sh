@@ -59,7 +59,7 @@ block="$begin
 # Pinned NPMplus lacks upstream ed20773; remove after upgrading to that fix.
 # Server scope replaces the inherited private/LAN trust list.
 set_real_ip_from unix:;
-set_real_ip_from 127.0.0.1/8;
+set_real_ip_from 127.0.0.0/8;
 set_real_ip_from ::1;
 $end"
 awk -v begin="$begin" -v end="$end" -v block="$block" '

@@ -323,7 +323,7 @@ docker() {
 trust_file="$TMP/real-ip/custom_nginx/server_http.conf"
 edge_npmplus_real_ip
 grep -qx 'set_real_ip_from unix:;' "$trust_file" || fail unix-trust
-grep -qx 'set_real_ip_from 127.0.0.1/8;' "$trust_file" || fail ipv4-trust
+grep -qx 'set_real_ip_from 127.0.0.0/8;' "$trust_file" || fail ipv4-trust
 grep -qx 'set_real_ip_from ::1;' "$trust_file" || fail ipv6-trust
 [ "$(grep -c '^set_real_ip_from ' "$trust_file")" = 3 ] || fail extra-trust
 ! grep -q '^real_ip_' "$trust_file" || fail inherited-real-ip-options

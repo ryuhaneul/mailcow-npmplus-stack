@@ -803,12 +803,19 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 | `SNAPPYMAIL_RELAY_IPV4` | 빈 값이면 `<IPV4_NETWORK>.239`. SnappyMail 중계의 고정 출발 주소 |
 | `WEBMAIL_EDGE_SUBNET` | `172.22.10.0/24`. 웹메일 전용 RFC1918 서브넷, /24~/29 |
 | `SNAPPYMAIL_EDGE_SUBNET` | `172.22.11.0/24`. SnappyMail 전용 RFC1918 서브넷, /24~/29 |
+| `ADMIN_EDGE_SUBNET` | `172.22.12.0/24`. 관리 화면 전용 RFC1918 서브넷, /24~/29. NPMplus `.2`, webmail-admin `.3`만 연결 |
 | `WEBMAIL_IPV4` | 폐기. `.env`에 남아 있으면 경고만 하며 값을 바꾸지 않음 |
 | `WEBMAIL_TRUSTED_PROXIES` | 추가 신뢰 프록시 IP/CIDR 쉼표 목록. 기본 신뢰는 NPMplus의 웹메일 전용 망 주소 하나(`/32`) |
 | `WEBMAIL_MAIL_TLS_MODE` | `verify` 또는 `pin`. 검증을 끄는 모드는 없음 |
 | `WEBMAIL_DB_PASSWORD` | 비면 32자 무작위 생성 후 스택 `.env`에 저장. 출력·로그 금지 |
 
 웹메일만 켜면 `mail.${DOMAIN}`을 생성 환경의 로그인 허용 주소에도 자동 추가하고 중복을 제거합니다. SnappyMail이 켜져 있을 때 `mail.${DOMAIN}`, 그리고 항상 `mailcow.${DOMAIN}`·`mail-npm.${DOMAIN}`은 명시 웹메일 주소로 사용할 수 없습니다. `DOMAIN` 자체는 사용할 수 있습니다. 기존 프록시 호스트는 덮어쓰지 않으며 다른 대상으로 연결돼 있으면 경고 후 건너뜁니다. 변경은 별도 주소 전환 절차로 진행합니다.
+
+관리 화면은 `mailstack-admin-edge`의 NPMplus 주소 `/32` 하나만 신뢰합니다. `WEBMAIL_TRUSTED_PROXIES`는 사용자 웹메일에만 적용됩니다. 관리 컨테이너의 mailcow·로그 보관망 연결은 유지하며, 사용자 웹메일은 관리 전용 망에 연결하지 않습니다. NPM 관리 upstream은 이 망에만 있는 `webmail-admin-edge:8080`입니다.
+
+기존 관리 화면 설치에서 setup/update는 겹침 검사 후 관리 전용 외부망을 먼저 만들고, NPMplus에 `.2`를 붙여 재생성한 뒤 기존 관리 시작 단계에서 webmail-admin을 `.3`로 재생성합니다. 관리 컨테이너의 healthy 상태와 edge 주소·alias를 확인한 뒤 기존 `webmail-admin:8080` upstream만 자동 이관합니다. 설정이 다른 기존 망이나 다른 컨테이너가 붙은 망은 수정하지 않고 중단합니다. 이미 같은 설정이면 망을 다시 만들지 않습니다. 관리 기능이 꺼져 있으면 망을 만들거나 override에 추가하지 않습니다. 로그 보관이 켜져 있으면 기존 배수 경로로 재생성합니다. NPMplus 재생성 중 웹 서비스가 수 초 끊기고, 관리 컨테이너 재생성과 upstream 이관 사이에는 관리 화면이 일시적으로 응답하지 않을 수 있습니다. healthy 대기 한도는 180초입니다. 망 선언 추가만으로 사용자 웹메일 서비스 설정은 바뀌지 않습니다.
+
+중간 실패 시 오류 원인을 해결한 뒤 같은 update를 재실행할 수 있습니다. upstream 변경 전 원본은 출력된 `/root/mailcow-admin-access-backup-*/hosts-before.json`에 저장합니다. 전체 롤백이 필요하면 배포 전에 보관한 이전 compose·override·환경 파일·이미지를 복원하고, NPM의 관리 upstream을 백업의 기존 대상으로 되돌린 뒤 NPMplus와 관리 컨테이너를 재생성합니다. 기존 mailcow `/24` 신뢰 설정까지 복원하면 IP 위조 위험도 돌아옵니다. 관리망은 두 컨테이너가 분리된 뒤 제거하며 데이터 볼륨은 유지합니다.
 
 ### 설치·업데이트·TLS
 

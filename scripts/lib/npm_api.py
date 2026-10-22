@@ -143,7 +143,7 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
         print(identity)
         return 0
     selected = []
-    changes = []
+    changes = {}
     failed = False
     hostnames = [f'mailcow.{domain}', f'mail-npm.{domain}']
     if admin_hostname:
@@ -158,11 +158,16 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
             failed = failed or level == 'FAIL'
             continue
         host = matches[0]
-        if hostname == admin_hostname and (host.get('forward_host'), host.get('forward_port'), host.get('forward_scheme')) != ('webmail-admin', 8080, 'http'):
-            level = 'FAIL' if mode == 'verify' else 'WARN'
-            print(f'{level} {hostname}: existing target differs from webmail-admin:8080; skipped')
-            failed = failed or mode == 'verify'
-            continue
+        if hostname == admin_hostname:
+            target = (host.get('forward_host'), host.get('forward_port'), host.get('forward_scheme'))
+            desired = ('webmail-admin-edge', 8080, 'http')
+            if target == ('webmail-admin', 8080, 'http') and mode == 'apply':
+                changes[host['id']] = (host, {'forward_host': desired[0]})
+            elif target != desired:
+                level = 'FAIL' if mode == 'verify' else 'WARN'
+                print(f'{level} {hostname}: existing target differs from webmail-admin-edge:8080; skipped')
+                failed = failed or mode == 'verify'
+                continue
         selected.append(host)
         own_locations = [location.get('path', '(unknown)') for location in host.get('locations', [])
                          if location.get('npmplus_enabled') is not False
@@ -185,12 +190,14 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
                 failed = failed or level == 'FAIL'
             elif state == 'public':
                 print(f'WARN 관리 화면 공개: {hostname} — ADMIN_ACCESS_LIST 로 제한 가능')
+        elif not name:
+            continue
         elif state == 'same':
             print(f'INFO {hostname}: 이미 적용')
         elif state == 'other':
             print(f'WARN {hostname}: 다른 접근 제한 보존; 변경하지 않음')
         else:
-            changes.append(host)
+            changes.setdefault(host['id'], (host, {}))[1].update(patch)
     if changes:
         root = pathlib.Path('/root/mailcow-admin-access-backup-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex)
         root.mkdir(mode=0o700, parents=True)
@@ -199,8 +206,8 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
             json.dump(selected, stream, ensure_ascii=False, indent=2)
             stream.write('\n')
         print(f'INFO admin access backup: {backup}')
-        for host in changes:
-            client.request('PUT', f'/nginx/proxy-hosts/{host["id"]}', patch)
+        for host, payload in changes.values():
+            client.request('PUT', f'/nginx/proxy-hosts/{host["id"]}', payload)
             print(f'INFO {",".join(host["domain_names"])}: 적용')
     return 1 if failed else 0
 

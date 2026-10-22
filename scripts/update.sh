@@ -514,7 +514,7 @@ edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects a
 
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
-    edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d webmail-admin || die "Webmail admin startup failed"
+    edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --wait --wait-timeout 180 webmail-admin || die "Webmail admin startup failed"
     WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
 elif docker inspect webmail-admin >/dev/null 2>&1; then
     warn "Webmail admin disabled; existing container preserved — 끄려면 docs/guide.md 관리 화면 끄기(계획 7-6) 절차를 따르세요"

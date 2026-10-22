@@ -87,7 +87,7 @@ LOG_ARCHIVE_ENABLE=true webmail_generate_override "$TMP/app"
 python3 - "$TMP/app/docker-compose.override.yml" "$ROOT/log-archiver/compose.yml" <<'PYAML'
 import sys,pathlib
 admin=pathlib.Path(sys.argv[1]).read_text()
-assert '  webmail-admin:\n    networks:\n      log-archive-internal: {}\n' in admin
+assert '      log-archive-internal: {}\n' in admin.split('  webmail-admin:\n',1)[1].split('\nnetworks:',1)[0]
 assert '  log-archive-internal:\n    external: true\n    name: log-archive-internal\n' in admin
 public=admin.split('  webmail:\n',1)[1].split('  webmail-admin:',1)[0]
 assert 'log-archive-internal' not in public
@@ -315,4 +315,119 @@ PY
     ! grep -q 'synthetic-remove-key-canary' "$TMP/remove/output" "$TMP/remove/calls" || fail remove-secret-output
     pass "SnappyMail removal child loads archive=$enabled and preserves volume without secret output"
 done
+(
+    WEBMAIL_ADMIN_ENABLE=true WEBMAIL_ENABLE=true SNAPPYMAIL_ENABLE=true
+    ADMIN_EDGE_SUBNET=172.22.12.0/24
+    WEBMAIL_EDGE_SUBNET=172.22.10.0/24 SNAPPYMAIL_EDGE_SUBNET=172.22.11.0/24
+    python3 - "$TMP/admin-network.json" <<'PY'
+import json, sys
+network = dict(Name='mailstack-admin-edge', Id='synthetic-admin', Driver='bridge', Internal=True, EnableIPv6=False,
+               Options={'com.docker.network.bridge.gateway_mode_ipv4':'isolated'},
+               IPAM={'Config':[{'Subnet':'172.22.12.0/24','IPRange':'172.22.12.128/25'}]},
+               Containers={'npm':{'Name':'npmplus','IPv4Address':'172.22.12.2/24'},
+                           'admin':{'Name':'webmail-admin','IPv4Address':'172.22.12.3/24'}})
+with open(sys.argv[1], 'w') as stream: json.dump([network], stream)
+PY
+    docker() {
+        case "$1 $2" in
+            'network ls') : ;;
+            'network inspect') [ -f "$TMP/admin-present" ] || return 1; cat "$TMP/admin-current.json" ;;
+            'network create')
+                [[ " $* " == *' --internal --ipv6=false --subnet 172.22.12.0/24 --ip-range 172.22.12.128/25 '* ]] || fail admin-network-flags
+                [[ " $* " == *' --opt com.docker.network.bridge.gateway_mode_ipv4=isolated mailstack-admin-edge '* ]] || fail admin-network-isolation
+                touch "$TMP/admin-present"; echo create >> "$TMP/admin-network-calls" ;;
+            *) fail "unexpected admin network Docker command $*" ;;
+        esac
+    }
+    ip() { printf '%s\n' "${ADMIN_TEST_ROUTES:-[]}"; }
+    cp "$TMP/admin-network.json" "$TMP/admin-current.json"
+    edge_ensure_admin_network
+    edge_ensure_admin_network
+    [ "$(wc -l < "$TMP/admin-network-calls")" = 1 ] || fail admin-network-not-idempotent
+    for field in Subnet Internal Containers; do
+        python3 - "$TMP/admin-network.json" "$TMP/admin-current.json" "$field" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1])); network = data[0]
+if sys.argv[3] == 'Subnet': network['IPAM']['Config'][0]['Subnet'] = '172.22.13.0/24'
+elif sys.argv[3] == 'Internal': network['Internal'] = False
+else: network['Containers']['other'] = {'Name':'webmail','IPv4Address':'172.22.12.4/24'}
+with open(sys.argv[2], 'w') as stream: json.dump(data, stream)
+PY
+        if edge_ensure_admin_network 2> "$TMP/admin-error"; then fail "admin accepts mismatched $field"; fi
+        grep -q 'refusing to modify existing network' "$TMP/admin-error" || fail admin-network-diagnostic
+    done
+    cp "$TMP/admin-network.json" "$TMP/admin-current.json"
+    if ADMIN_EDGE_SUBNET=$WEBMAIL_EDGE_SUBNET edge_ensure_admin_network 2>/dev/null; then fail admin-webmail-overlap; fi
+    if ADMIN_EDGE_SUBNET=$SNAPPYMAIL_EDGE_SUBNET edge_ensure_admin_network 2>/dev/null; then fail admin-snappy-overlap; fi
+    if ADMIN_TEST_ROUTES='[{"dst":"172.22.12.0/24","dev":"synthetic-foreign"}]' edge_ensure_admin_network 2>/dev/null; then fail admin-route-overlap; fi
+    WEBMAIL_ADMIN_ENABLE=false edge_ensure_admin_network
+    [ "$(wc -l < "$TMP/admin-network-calls")" = 1 ] || fail disabled-admin-network-create
+    edge_generate_npmplus_override "$TMP/admin-npm"
+    grep -A2 '^      mailstack-admin-edge:' "$TMP/admin-npm/docker-compose.override.yml" | grep -q 'ipv4_address: 172.22.12.2' || fail npm-admin-ip
+    WEBMAIL_ADMIN_ENABLE=false edge_generate_npmplus_override "$TMP/admin-npm"
+    ! grep -q mailstack-admin-edge "$TMP/admin-npm/docker-compose.override.yml" || fail disabled-npm-admin-network
+)
+pass 'dedicated admin network is isolated, idempotent, rejects mismatches/overlaps, and is absent when disabled'
+
+(
+    source "$ROOT/scripts/lib/admin-access.sh"
+    WEBMAIL_ADMIN_ENABLE=true WEBMAIL_ADMIN_HOSTNAME=mailadmin.example.test DOMAIN=example.test
+    ADMIN_EDGE_SUBNET=172.22.12.0/24 ADMIN_ACCESS_LIST=
+    NPM_ADMIN_EMAIL=synthetic@example.test NPM_ADMIN_PASSWORD=synthetic-password
+    SCRIPT_DIR=$ROOT/scripts
+    docker() {
+        [ "$*" = 'inspect webmail-admin --format {"health":{{json .State.Health.Status}},"networks":{{json .NetworkSettings.Networks}}}' ] || fail admin-health-command
+        printf '{"health":"%s","networks":{"mailstack-admin-edge":{"IPAddress":"%s","Aliases":["webmail-admin-edge"]}}}\n' "${ADMIN_TEST_HEALTH:-healthy}" "${ADMIN_TEST_IP:-172.22.12.3}"
+    }
+    python3() {
+        if [ "${2:-}" = "$ROOT/scripts/lib/npm_api.py" ]; then echo api >> "$TMP/admin-health-calls"
+        else command python3 "$@"; fi
+    }
+    admin_access apply
+    [ "$(wc -l < "$TMP/admin-health-calls")" = 1 ] || fail admin-no-acl-upstream-skipped
+    if ADMIN_TEST_HEALTH=starting admin_access apply 2>/dev/null; then fail admin-unhealthy-migration; fi
+    if ADMIN_TEST_IP=172.22.1.45 admin_access apply 2>/dev/null; then fail admin-wrong-network-migration; fi
+    [ "$(wc -l < "$TMP/admin-health-calls")" = 1 ] || fail admin-health-api-before-ready
+)
+pass 'admin upstream API is gated on healthy dedicated-edge attachment, including installs without an ACL'
+
+python3 - "$ROOT" "$TMP" <<'PY'
+import contextlib, copy, importlib.util, io, pathlib, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('npm_api', pathlib.Path(sys.argv[1])/'scripts/lib/npm_api.py')
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+work = pathlib.Path(sys.argv[2])
+base = dict(id=17, domain_names=['mailadmin.example.test'], forward_host='webmail-admin', forward_port=8080,
+            forward_scheme='http', access_list_id=7, advanced_config='synthetic operator config', locations=[])
+cases = [
+    ({}, 'admins', 'apply', 0, {'forward_host':'webmail-admin-edge'}),
+    ({'access_list_id':9}, 'admins', 'apply', 0, {'forward_host':'webmail-admin-edge'}),
+    ({'access_list_id':0}, '', 'apply', 0, {'forward_host':'webmail-admin-edge'}),
+    ({'locations':[{'path':'/synthetic','npmplus_access_list_type':'custom'}]}, 'admins', 'apply', 0, {'forward_host':'webmail-admin-edge'}),
+    ({'forward_host':'webmail-admin-edge'}, 'admins', 'apply', 0, None),
+    ({'forward_host':'operator.example.test'}, 'admins', 'apply', 0, None),
+    ({'forward_host':'operator.example.test'}, 'admins', 'verify', 1, None),
+    ({}, 'admins', 'verify', 1, None),
+    ({'forward_host':'webmail-admin-edge'}, 'admins', 'verify', 0, None),
+]
+for index, (changes, name, mode, expected, payload) in enumerate(cases):
+    host = {**copy.deepcopy(base), **changes}; calls = []
+    class Client:
+        def __init__(self, *_): pass
+        def login(self, *_, **kwargs): pass
+        def hosts(self): return [dict(id=1, domain_names=['mailcow.example.test'], access_list_id=7),
+                                dict(id=2, domain_names=['mail-npm.example.test'], access_list_id=7), copy.deepcopy(host)]
+        def request(self, *args): calls.append(args)
+    backup_root = work/f'admin-backup-{index}'
+    with patch.object(module, 'NpmApi', Client), patch.object(module, 'select_admin_access', return_value=7), \
+            patch.object(module.pathlib, 'Path', return_value=backup_root), contextlib.redirect_stdout(io.StringIO()):
+        assert module.admin_main(mode, work, 'https://synthetic.invalid', name, 'example.test', 'mailadmin.example.test') == expected, index
+    assert calls == ([('PUT','/nginx/proxy-hosts/17',payload)] if payload else []), calls
+    if payload:
+        import json
+        saved = json.loads((backup_root/'hosts-before.json').read_text())
+        assert len(saved) == 3 and saved[-1] == host
+    assert host['advanced_config'] == base['advanced_config']
+PY
+pass 'NPM admin upstream migrates only the legacy target, preserves ACL/config, backs up and verifies the new target'
 echo "$n synthetic tests passed"

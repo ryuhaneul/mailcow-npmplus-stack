@@ -23,6 +23,7 @@ async function fixture(t) {
         webmail_load_config "$2" "$3"
         webmail_generate_env "$3"
         webmail_generate_admin_env "$3"
+        webmail_generate_override "$3"
       `, 'fixture', library, stack, dir], {
         encoding: 'utf8', timeout: 15000,
         env: { PATH: process.env.PATH, HOME: dir, LC_ALL: 'C' }, cwd: dir,
@@ -32,6 +33,23 @@ async function fixture(t) {
     public() { return readFile(join(dir, 'webmail.env'), 'utf8'); },
   };
 }
+
+test('admin proxy env: only the dedicated NPM /32 is trusted; generated networks exclude user webmail', async t => {
+  const f = await fixture(t);
+  await f.configure();
+  await writeFile(join(f.dir, 'stack.env'), 'DOMAIN=example.test\nWEBMAIL_ENABLE=true\nWEBMAIL_ADMIN_ENABLE=true\nWEBMAIL_DB_PASSWORD=synthetic-db-only\nADMIN_EDGE_SUBNET=172.23.12.128/25\nWEBMAIL_TRUSTED_PROXIES=172.22.1.0/24,192.0.2.0/24\n');
+  const result = f.generate();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(await f.admin(), /^TRUST_PROXY="172\.23\.12\.130\/32"$/m);
+  assert.match(await f.public(), /^TRUST_PROXY="172\.22\.10\.2\/32,172\.22\.1\.0\/24,192\.0\.2\.0\/24"$/m);
+  const override = await readFile(join(f.dir, 'docker-compose.override.yml'), 'utf8');
+  assert.match(override, /webmail-admin:\n    networks:\n      mailstack-admin-edge:\n        ipv4_address: 172\.23\.12\.131\n        aliases: \[webmail-admin-edge\]/);
+  assert.match(override, /\n  mailstack-admin-edge:\n    external: true\n    name: mailstack-admin-edge/);
+  assert.ok(!override.split('  webmail-admin:')[0].includes('mailstack-admin-edge'));
+  await writeFile(join(f.dir, 'stack.env'), 'DOMAIN=example.test\nWEBMAIL_ENABLE=true\nWEBMAIL_ADMIN_ENABLE=false\nWEBMAIL_DB_PASSWORD=synthetic-db-only\n');
+  assert.equal(f.generate().status, 0);
+  assert.ok(!(await readFile(join(f.dir, 'docker-compose.override.yml'), 'utf8')).includes('mailstack-admin-edge'));
+});
 function assertQuiet(result, secret) {
   assert.ok(!result.stdout.includes(secret));
   assert.ok(!result.stderr.includes(secret));

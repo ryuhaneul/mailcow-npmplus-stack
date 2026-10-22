@@ -62,6 +62,9 @@ confirm() {
 }
 
 [ "$(id -u)" -eq 0 ] || die "This script must be run as root (use sudo)"
+ENV_FILE="${PROJECT_DIR}/.env"
+[ -f "$ENV_FILE" ] || die ".env not found"
+chmod 600 "$ENV_FILE"
 mkdir -p "$(dirname "$LOGFILE")"
 echo "=== Update started at $(date) ===" >> "$LOGFILE"
 
@@ -71,8 +74,6 @@ command -v docker >/dev/null 2>&1 || die "docker not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin not available"
 
 # Read feature selection before pulling or starting optional stacks.
-ENV_FILE="${PROJECT_DIR}/.env"
-[ -f "$ENV_FILE" ] || die ".env not found"
 WEBMAIL_ENABLE=false
 SNAPPYMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=

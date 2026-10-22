@@ -615,4 +615,34 @@ for webmail in true false; do
     done
 done
 pass 'setup installs rsync for the same Webmail or Toolkit feature combinations'
+sed -n '/^# Wait for NPMplus before changing/,/^edge_npmplus_real_ip /p' "$ROOT/scripts/update.sh" > "$TMP/real-ip-ready.sh"
+real_ip_ready_case() (
+    ready_after=$1
+    : > "$TMP/ready-calls"
+    echo 0 > "$TMP/ready-polls"
+    log() { :; }
+    die() { echo "$*" > "$TMP/ready-error"; exit 1; }
+    sleep() { [ "$1" = 5 ] || fail real-ip-sleep; echo sleep >> "$TMP/ready-calls"; }
+    docker() {
+        [ "$*" = 'inspect npmplus --format {{.State.Health.Status}}' ] || fail real-ip-inspect
+        poll=$(cat "$TMP/ready-polls")
+        poll=$((poll+1))
+        echo "$poll" > "$TMP/ready-polls"
+        if [ "$poll" -ge "$ready_after" ]; then echo healthy; else echo starting; fi
+    }
+    edge_npmplus_real_ip() { echo apply >> "$TMP/ready-calls"; }
+    source "$TMP/real-ip-ready.sh"
+)
+real_ip_ready_case 1 || fail healthy-real-ip
+[ "$(cat "$TMP/ready-calls")" = apply ] || fail healthy-real-ip-delay
+pass 'already healthy NPMplus applies trust immediately'
+real_ip_ready_case 3 || fail delayed-real-ip
+[ "$(cat "$TMP/ready-calls")" = $'sleep\nsleep\napply' ] || fail real-ip-before-ready
+pass 'starting NPMplus waits five seconds between polls before trust application'
+if real_ip_ready_case 61; then fail unhealthy-real-ip; fi
+[ "$(cat "$TMP/ready-polls")" = 60 ] || fail real-ip-poll-limit
+[ "$(grep -c '^sleep$' "$TMP/ready-calls")" = 59 ] || fail real-ip-wait-limit
+! grep -q '^apply$' "$TMP/ready-calls" || fail real-ip-after-timeout
+grep -q 'real-IP configuration not changed. Check: docker logs npmplus' "$TMP/ready-error" || fail real-ip-timeout-guidance
+pass 'NPMplus health timeout stops update without applying trust and reports log command'
 echo "$n synthetic tests passed"

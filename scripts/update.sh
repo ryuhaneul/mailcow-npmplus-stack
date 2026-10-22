@@ -541,6 +541,17 @@ compose_up() {
 }
 
 compose_up "$NPMPLUS_DIR" "npmplus"
+# Wait for NPMplus before changing and reloading its real-IP trust configuration.
+log "Waiting for NPMplus health check before real-IP restriction..."
+for i in $(seq 1 60); do
+    STATUS=$(docker inspect npmplus --format '{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+    if [ "$STATUS" = healthy ]; then break; fi
+    if [ "$i" -eq 60 ]; then
+        die "NPMplus not healthy after 5 min (status: $STATUS); real-IP configuration not changed. Check: docker logs npmplus"
+    fi
+    sleep 5
+done
+edge_npmplus_real_ip || die "NPMplus real-IP trust restriction failed; previous server_http.conf restored"
 edge_apply_trust "$SCRIPT_DIR" || die "Edge step 4 failed; app/NPMplus migration completed, mailcow trust incomplete"
 
 # Reconcile before the existing DNS restart; WAF never adds a second restart.

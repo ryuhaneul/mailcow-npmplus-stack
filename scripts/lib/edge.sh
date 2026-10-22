@@ -4,6 +4,89 @@
 # Shared N1 configuration. Source webmail-env.sh for mailcow.conf value reading.
 edge_error() { echo "[edge] ERROR: $*" >&2; return 1; }
 
+# The pinned image predates upstream ed20773 (localhost-only trust defaults).
+# Remove this managed block once a pinned release includes that change.
+# server_http.conf is included by proxy/redirect/dead hosts, not default/81 servers.
+edge_npmplus_real_ip() {
+    docker exec -i npmplus sh -s <<'SH'
+set -eu
+file=/data/custom_nginx/server_http.conf
+begin='# BEGIN mailstack localhost real-ip trust'
+end='# END mailstack localhost real-ip trust'
+mkdir -p /data/custom_nginx
+[ ! -L "$file" ] || { echo '[edge] refusing symlink server_http.conf' >&2; exit 1; }
+# Other custom includes and per-host advanced settings remain operator-owned.
+grep -R -n 'set_real_ip_from' /data/nginx/proxy_host /data/custom_nginx 2>/dev/null |
+while IFS= read -r line; do
+    case "$line" in
+        "$file":*) ;;
+        *) echo "[edge] WARNING: review additional real-IP trust (not changed): $line" >&2 ;;
+    esac
+done
+work=$(mktemp -d /data/custom_nginx/.real-ip.XXXXXX)
+existed=false
+applied=false
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$applied" = true ]; then
+        if [ "$existed" = true ]; then
+            mv "$work/original" "$file" || status=1
+        else
+            rm -f "$file" || status=1
+        fi
+        if ! nginx -t || ! nginx -s reload; then
+            echo '[edge] restored server_http.conf; nginx recovery failed' >&2
+            status=1
+        fi
+    fi
+    rm -rf "$work"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+if [ -e "$file" ]; then
+    [ -f "$file" ] || exit 1
+    cp -p "$file" "$work/original"
+    cp -p "$file" "$work/candidate"
+    existed=true
+else
+    : > "$work/original"
+    : > "$work/candidate"
+    chmod 644 "$work/candidate"
+fi
+block="$begin
+# Pinned NPMplus lacks upstream ed20773; remove after upgrading to that fix.
+# Server scope replaces the inherited private/LAN trust list.
+set_real_ip_from unix:;
+set_real_ip_from 127.0.0.1/8;
+set_real_ip_from ::1;
+$end"
+awk -v begin="$begin" -v end="$end" -v block="$block" '
+    $0 == begin { if (seen++ || inside) exit 2; inside=1; print block; next }
+    $0 == end { if (!inside) exit 2; inside=0; closed=1; next }
+    !inside {
+        code=$0; sub(/#.*/, "", code)
+        if (code ~ /(^|[;{}[:space:]])set_real_ip_from([[:space:]]|$)/) {
+            print "[edge] server_http.conf:" FNR ": operator set_real_ip_from conflicts; remove it manually or move it to a reviewed host-specific config before retrying" > "/dev/stderr"
+            exit 2
+        }
+        print
+    }
+    END { if (inside || seen != closed) exit 2; if (!seen) print block }
+' "$work/original" > "$work/candidate" || {
+    echo '[edge] invalid/conflicting real-IP managed block; server_http.conf unchanged' >&2
+    exit 1
+}
+if [ "$existed" = true ] && cmp -s "$work/candidate" "$file"; then exit 0; fi
+applied=true
+mv "$work/candidate" "$file"
+nginx -t
+nginx -s reload
+applied=false
+SH
+}
+
 edge_mailcow_ipv6() {
     local enabled network
     enabled=$(webmail_mailcow_value ENABLE_IPV6)

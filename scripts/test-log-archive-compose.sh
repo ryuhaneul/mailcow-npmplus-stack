@@ -271,6 +271,87 @@ grep -qx 'compose up -d' "$TMP/calls" || fail disabled-up
 ! grep -q '^drain:' "$TMP/calls" || fail disabled-drain
 pass 'feature OFF preserves compose up path with bounded logging in compose'
 bash -n "$ROOT/scripts/setup.sh"
+source "$ROOT/scripts/lib/edge.sh"
+mkdir -p "$TMP/real-ip/bin" "$TMP/real-ip/custom_nginx"
+cat > "$TMP/real-ip/bin/nginx" <<'NGINX'
+#!/bin/sh
+echo "$*" >> "$TMP/real-ip/nginx.calls"
+if [ -f "$TMP/real-ip/fail-test" ] && [ "$1" = -t ]; then
+    rm "$TMP/real-ip/fail-test"; exit 1
+fi
+if [ -f "$TMP/real-ip/fail-reload" ] && [ "$1" = -s ]; then
+    rm "$TMP/real-ip/fail-reload"; exit 1
+fi
+NGINX
+chmod +x "$TMP/real-ip/bin/nginx"
+export TMP
+export PATH="$TMP/real-ip/bin:$PATH"
+# Run the actual container-side transaction on synthetic local files.
+docker() {
+    [ "$*" = 'exec -i npmplus sh -s' ] || fail "unexpected real-ip docker call $*"
+    local script
+    script=$(cat)
+    script=${script//\/data\/custom_nginx/$TMP/real-ip/custom_nginx}
+    sh -c "$script"
+}
+trust_file="$TMP/real-ip/custom_nginx/server_http.conf"
+edge_npmplus_real_ip
+grep -qx 'set_real_ip_from unix:;' "$trust_file" || fail unix-trust
+grep -qx 'set_real_ip_from 127.0.0.1/8;' "$trust_file" || fail ipv4-trust
+grep -qx 'set_real_ip_from ::1;' "$trust_file" || fail ipv6-trust
+[ "$(grep -c '^set_real_ip_from ' "$trust_file")" = 3 ] || fail extra-trust
+! grep -q '^real_ip_' "$trust_file" || fail inherited-real-ip-options
+[ "$(cat "$TMP/real-ip/nginx.calls")" = $'-t\n-s reload' ] || fail real-ip-validation-order
+pass 'real-IP block trusts only localhost and unix, validates then reloads'
+cp "$trust_file" "$TMP/real-ip/expected"
+edge_npmplus_real_ip
+[ "$(wc -l < "$TMP/real-ip/nginx.calls")" = 2 ] || fail real-ip-idempotence
+pass 'unchanged real-IP block is idempotent without another reload'
+{ echo '# operator before'; cat "$trust_file"; echo '# operator after'; } > "$TMP/real-ip/input"
+cp "$TMP/real-ip/input" "$trust_file"
+sed -i 's/set_real_ip_from ::1;/set_real_ip_from 10.0.0.0\/8;/' "$trust_file"
+edge_npmplus_real_ip
+cmp "$trust_file" "$TMP/real-ip/input" || fail operator-content
+pass 'managed block refresh preserves operator content before and after it'
+for failure in test reload; do
+    printf '# operator content\nadd_header X-Operator keep;\n' > "$trust_file"
+    chmod 640 "$trust_file"
+    cp -p "$trust_file" "$TMP/real-ip/prior"
+    touch "$TMP/real-ip/fail-$failure"
+    if edge_npmplus_real_ip; then fail "real-ip $failure accepted"; fi
+    cmp "$trust_file" "$TMP/real-ip/prior" || fail "real-ip $failure restore"
+    [ "$(stat -c %a "$trust_file")" = 640 ] || fail real-ip-mode-restore
+    pass "nginx $failure failure restores original user file and permissions"
+done
+rm "$trust_file"
+touch "$TMP/real-ip/fail-test"
+if edge_npmplus_real_ip; then fail absent-real-ip-test; fi
+[ ! -e "$trust_file" ] || fail absent-real-ip-restore
+pass 'failed first real-IP installation restores absent file'
+for malformed in missing-end duplicate-block; do
+    cp "$TMP/real-ip/expected" "$trust_file"
+    if [ "$malformed" = missing-end ]; then
+        sed -i '/^# END mailstack localhost real-ip trust$/d' "$trust_file"
+    else
+        cat "$TMP/real-ip/expected" >> "$trust_file"
+    fi
+    cp "$trust_file" "$TMP/real-ip/prior"
+    if edge_npmplus_real_ip; then fail "accepted $malformed"; fi
+    cmp "$trust_file" "$TMP/real-ip/prior" || fail "changed $malformed"
+    pass "malformed real-IP $malformed fails without modifying user file"
+done
+printf '# operator directive\nset_real_ip_from 10.0.0.0/8;\n' > "$trust_file"
+cp "$trust_file" "$TMP/real-ip/prior"
+if edge_npmplus_real_ip 2> "$TMP/real-ip/error"; then fail conflicting-real-ip; fi
+cmp "$trust_file" "$TMP/real-ip/prior" || fail conflicting-real-ip-mutation
+grep -q 'server_http.conf:2:.*remove it manually' "$TMP/real-ip/error" || fail conflicting-real-ip-guidance
+pass 'operator trust directive fails with line and remediation, preserving file'
+cp "$TMP/real-ip/expected" "$trust_file"
+printf 'set_real_ip_from 192.168.0.0/16;\n' > "$TMP/real-ip/custom_nginx/server_proxy.conf"
+edge_npmplus_real_ip 2> "$TMP/real-ip/warnings"
+grep -q 'WARNING:.*server_proxy.conf:1:.*192.168.0.0/16' "$TMP/real-ip/warnings" || fail extra-real-ip-warning
+grep -qx 'set_real_ip_from 192.168.0.0/16;' "$TMP/real-ip/custom_nginx/server_proxy.conf" || fail extra-real-ip-mutation
+pass 'additional custom include trust warns without modifying operator settings'
 echo "$n synthetic tests passed"
 # This D1-owned correction is intentionally left as a visible acceptance gate.
 python3 - "$ROOT/log-archiver/compose.yml" <<'PY'

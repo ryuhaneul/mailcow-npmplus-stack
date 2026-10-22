@@ -40,7 +40,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await installAuth(app, { ...auth, config });
   await installDirectory(app, { config });
   const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
-  await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot }) });
+  await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now }) });
   const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
@@ -48,7 +48,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   const listService = createListService({ ...messages, imap: app.imap });
   await app.register(folderRoutes, { service: folderService, listService });
   await app.register(storageRoutes, { service: folderService });
-  await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap }) });
+  await app.register(messageRoutes, { service: listService, reader: createReadService({ imap: app.imap, config }) });
   await app.register(eventRoutes, { listService });
   const normalizeHtml = createSignatureNormalizer({ config, images });
   const signatures = createSignaturesService({ imap: app.imap, normalizeHtml, getIdentities: async session => {

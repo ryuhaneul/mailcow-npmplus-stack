@@ -58,7 +58,8 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
     return session;
   }
   async function sweep() {
-    await Promise.all([...sessions.values()].filter(expired).map(session => destroy(session, 'SESSION_EXPIRED')));
+    await Promise.all([...sessions.values()].map(session => expired(session)
+      ? destroy(session, 'SESSION_EXPIRED') : session.sweepAttachments?.()));
   }
   async function destroyAllFor(email) {
     await Promise.all([...sessions.values()].filter(session => session.email === email).map(session => destroy(session, 'SESSIONS_REVOKED')));

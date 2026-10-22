@@ -84,15 +84,15 @@ class ReadImap extends EventEmitter {
   async download(uid, part, options) { this.downloads.push({ uid, part, options }); if (this.stream) return { meta: {}, content: this.stream }; return { meta: { charset: 'utf-8' }, content: Readable.from([part === '1.2' ? '<p>안녕하세요</p><img src="https://images.example.com/a"><img src="cid:logo@example.com">' : part === '1.1' ? '안녕하세요' : 'synthetic-part']) }; }
   async messageFlagsAdd(uid, flags, options) { this.flags.push({uid,flags,options}); }
 }
-function fixture() {
+function fixture(config) {
   const client = new ReadImap(); const session = {};
   const imap = { async withRef(_session, token, operation) { const ref = decodeRef(token); const lock = await client.getMailboxLock(ref.path); try { assertUidValidity(client, ref); return await operation(client, ref); } finally { lock.release(); } } };
-  return { client, session, service: createReadService({ imap }) };
+  return { client, session, service: createReadService({ imap, config }) };
 }
 test('read: only HTML part fetched, decoded envelope, references, CID, attachments and seen marking', async () => {
   const f = fixture(); const result = await f.service.read(f.session, token);
   assert.equal(result.subject, '한글'); assert.equal(result.from[0].name, '한글'); assert.ok(result.html.includes('안녕하세요')); assert.equal(result.blockedImages, 1); assert.equal(result.attachments.length, 3); assert.equal(result.references, '<parent@example.com>'); assert.equal(result.inReplyTo, '<parent@example.com>'); assert.equal(result.seen, true);
-  assert.deepEqual(f.client.downloads, [{uid:9,part:'1.2',options:{uid:true,binary:true}}]); assert.deepEqual(f.client.flags, [{uid:9,flags:['\\Seen'],options:{uid:true}}]);
+  assert.deepEqual(f.client.downloads, [{uid:9,part:'1.2',options:{uid:true,binary:true,maxBytes:5*1024*1024+1}}]); assert.deepEqual(f.client.flags, [{uid:9,flags:['\\Seen'],options:{uid:true}}]);
   assert.ok(f.client.fetches.every(call => call.query.source === undefined && call.query.bodyParts === undefined)); assert.ok(f.client.released);
 });
 test('read: surrounding whitespace and folded Content-ID connect inline images without changing attachments', async () => {
@@ -159,4 +159,37 @@ test('parts: stream failure releases mailbox lock and reaches consumer', async (
   f.client.stream = Readable.from((async function* () { yield Buffer.from('partial'); throw new Error('synthetic stream failure'); })());
   await assert.rejects(f.service.part(f.session, token, '2', {}, async stream => { for await (const _chunk of stream) { /* consume without accumulating attachment */ } }), /synthetic stream failure/);
   assert.equal(f.client.released,true);
+});
+
+
+test('read body limit: oversized BODYSTRUCTURE skips download and returns display notice', async () => {
+  const f = fixture();
+  f.client.structure = { type: 'text/html', size: 5 * 1024 * 1024 + 1 };
+  const result = await f.service.read(f.session, token);
+  assert.equal(result.text, '본문이 너무 커서 표시하지 않았어요');
+  assert.equal(result.html, undefined); assert.deepEqual(f.client.downloads, []);
+  assert.equal(result.seen, true); assert.ok(f.client.released);
+});
+
+test('read body limit: missing or inaccurate size stops streaming before buffering/sanitizing oversized HTML', async () => {
+  for (const size of [undefined, 1]) {
+    const f = fixture({ bodyMaxMb: 1 }); let produced = 0;
+    f.client.structure = { type: 'text/html', size };
+    f.client.stream = Readable.from((async function* () {
+      for (let i = 0; i < 20; i++) { produced++; yield Buffer.alloc(256 * 1024, 65); }
+    })(), { highWaterMark: 1 });
+    const result = await f.service.read(f.session, token);
+    assert.equal(result.text, '본문이 너무 커서 표시하지 않았어요');
+    assert.equal(result.html, undefined); assert.ok(f.client.stream.destroyed); assert.ok(produced < 20);
+    assert.equal(f.client.downloads[0].options.maxBytes, 1024 * 1024 + 1);
+  }
+});
+
+test('read body limit: exact cap remains intact and smaller HTML follows the existing sanitizer', async () => {
+  const f = fixture({ bodyMaxMb: 1 });
+  f.client.structure = { type: 'text/plain', size: 1024 * 1024 };
+  const bytes = Buffer.alloc(1024 * 1024, 65); f.client.stream = Readable.from([bytes]);
+  assert.equal((await f.service.read(f.session, token)).text, bytes.toString());
+  const html = fixture({ bodyMaxMb: 1 });
+  assert.match((await html.service.read(html.session, token)).html, /안녕하세요/);
 });

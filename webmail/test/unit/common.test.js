@@ -46,6 +46,8 @@ test('config: all container keys required, including explicitly empty keys', () 
 test('config: defaults supplied by stack retain types and fixed mail ports', () => {
   const config = loadConfig(env);
   assert.equal(config.attachMaxMb, 25);
+  assert.equal(config.bodyMaxMb, 5);
+  assert.equal(loadConfig({ ...env, BODY_MAX_MB: '2' }).bodyMaxMb, 2);
   assert.equal(config.sessionIdleMin, 480);
   assert.equal(config.sessionMaxHours, 24);
   assert.deepEqual([config.imapPort, config.sievePort, config.smtpPort], [993, 4190, 587]);
@@ -55,7 +57,7 @@ test('config: defaults supplied by stack retain types and fixed mail ports', () 
 });
 
 test('config: invalid numbers rejected without printing supplied values', () => {
-  for (const key of ['ATTACH_MAX_MB', 'SESSION_IDLE_MIN', 'SESSION_MAX_HOURS']) {
+  for (const key of ['ATTACH_MAX_MB', 'BODY_MAX_MB', 'SESSION_IDLE_MIN', 'SESSION_MAX_HOURS']) {
     for (const value of ['0', '-1', '1.5', 'NaN', '1e3', '9007199254740992']) {
       assert.throws(() => loadConfig({ ...env, [key]: value }), new RegExp(key));
     }

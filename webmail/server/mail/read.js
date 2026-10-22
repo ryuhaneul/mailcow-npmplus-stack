@@ -71,7 +71,9 @@ export function attachmentHeaders(part, inline) {
   const disposition = inline && inlineTypes.has(contentType) ? 'inline' : 'attachment';
   return { 'content-type': /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType) ? contentType : 'application/octet-stream', 'content-disposition': `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`, 'x-content-type-options': 'nosniff', ...(disposition === 'inline' && contentType === 'application/pdf' ? { 'content-security-policy': 'sandbox' } : {}) };
 }
-export function createReadService({ imap }) {
+export function createReadService({ imap, config = {} }) {
+  const maxBodyBytes = (config.bodyMaxMb ?? 5) * 1024 * 1024;
+  const oversizedBody = '본문이 너무 커서 표시하지 않았어요';
   async function read(session, token, query = {}) {
     const images = toggle(query.images);
     return imap.withRef(session, token, async (client, ref) => {
@@ -85,14 +87,23 @@ export function createReadService({ imap }) {
       const attachments = parts.filter(part => part !== body && (part.attachment || !['text/html', 'text/plain'].includes(part.type))).map(part => ({ partId: part.part, filename: decodeWords(part.dispositionParameters?.filename || part.parameters?.name || `attachment-${part.part}`), size: part.size || 0, contentType: part.type, inline: part.disposition === 'inline' && inlineTypes.has(part.type) }));
       const headers = libmime.decodeHeaders(row.headers?.toString('latin1') || '');
       const result = { ref: token, folder: ref.path, subject: decodeWords(envelope.subject), from: addresses(envelope.from), to: addresses(envelope.to), cc: addresses(envelope.cc), replyTo: addresses(envelope.replyTo), date: envelope.date ? new Date(envelope.date).toISOString() : null, messageId: envelope.messageId || null, inReplyTo: envelope.inReplyTo || headers['in-reply-to']?.[0] || null, references: headers.references?.join(' ') || '', attachments, blockedImages: 0, senderAlwaysShow, seen: row.flags?.has('\\Seen') || false, flagged: row.flags?.has('\\Flagged') || false, spam: ref.path === 'Junk' };
-      if (body) {
-        // download removes transfer encoding and reports UTF-8 after its charset conversion.
-        const download = await client.download(ref.uid, body.part, { uid: true, binary: true });
+      if (body && body.size > maxBodyBytes) result.text = oversizedBody;
+      else if (body) {
+        // Bound the decoder too: some charset/flowed decoders buffer before emitting.
+        const download = await client.download(ref.uid, body.part, { uid: true, binary: true, maxBytes: maxBodyBytes + 1 });
         if (!download.content) throw missing();
-        const chunks = []; for await (const chunk of download.content) chunks.push(Buffer.from(chunk));
-        const text = decodeCharset(Buffer.concat(chunks), download.meta?.charset || body.parameters?.charset || 'utf-8');
-        if (body.type === 'text/html') Object.assign(result, sanitizeHtml(text, { ref: token, cidParts, images: images || senderAlwaysShow }));
-        else result.text = text;
+        const chunks = []; let bytes = 0, oversized = false;
+        for await (const chunk of download.content) {
+          bytes += Buffer.byteLength(chunk);
+          if (bytes > maxBodyBytes) { oversized = true; download.content.destroy(); break; }
+          chunks.push(Buffer.from(chunk));
+        }
+        if (oversized) result.text = oversizedBody;
+        else {
+          const text = decodeCharset(Buffer.concat(chunks), download.meta?.charset || body.parameters?.charset || 'utf-8');
+          if (body.type === 'text/html') Object.assign(result, sanitizeHtml(text, { ref: token, cidParts, images: images || senderAlwaysShow }));
+          else result.text = text;
+        }
       } else result.text = '';
       if (!result.seen && (await mailboxRights(client, ref.path)).seen) {
         await client.messageFlagsAdd(ref.uid, ['\\Seen'], { uid: true }); result.seen = true;

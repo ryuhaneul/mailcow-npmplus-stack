@@ -46,12 +46,27 @@ function validate(body, sending) {
   return { ...result, subject: body.subject ?? '', html: body.html ?? '', inReplyTo: body.inReplyTo, references: body.references };
 }
 
-export function createComposeService({ config, imap, directory, smtp, logger, images = createSignatureImagesService({ imap }), tempRoot = '/tmp/webmail' }) {
+export function createComposeService({ config, imap, directory, smtp, logger, images = createSignatureImagesService({ imap }), tempRoot = '/tmp/webmail', now = Date.now }) {
   const states = new WeakMap();
   const maxBytes = config.attachMaxMb * 1024 * 1024;
+  const sessionMaxBytes = maxBytes * 2, sessionMaxFiles = 200;
+  const uploadTtl = 24 * 60 * 60 * 1000;
+  async function prune(session, state) {
+    for (const [attachmentId, file] of state.attachments) {
+      if (now() - file.lastUsedAt < uploadTtl) continue;
+      await rm(join(sessionDir(session), attachmentId), { force: true });
+      state.attachments.delete(attachmentId);
+    }
+  }
   function stateFor(session) {
     let state = states.get(session);
-    if (!state) { state = { attachments: new Map(), tail: Promise.resolve() }; states.set(session, state); }
+    if (!state) {
+      state = { attachments: new Map(), tail: Promise.resolve() }; states.set(session, state);
+      session.sweepAttachments = () => serial(session, () => {});
+      session.scanAbort?.signal.addEventListener('abort', () => {
+        state.attachments.clear(); states.delete(session); delete session.sweepAttachments;
+      }, { once: true });
+    }
     return state;
   }
   function active(session) {
@@ -59,7 +74,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
   }
   function serial(session, operation) {
     const state = stateFor(session);
-    const task = state.tail.then(() => { active(session); return operation(state); });
+    const task = state.tail.then(async () => { active(session); await prune(session, state); return operation(state); });
     state.tail = task.catch(() => {});
     return task;
   }
@@ -81,6 +96,8 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       let file, path, composeId;
       try {
         const dir = await directoryFor(session);
+        const sessionBytes = [...state.attachments.values()].reduce((sum, item) => sum + item.size, 0);
+        if (state.attachments.size >= sessionMaxFiles) throw new AppError(413, 'ATTACH_TOO_LARGE', '임시 첨부 파일은 로그인 세션당 200개까지 올릴 수 있어요.');
         for await (const part of parts) {
           if (part.type === 'field') {
             if (part.fieldname !== 'composeId' || composeId !== undefined || part.valueTruncated || typeof part.value !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(part.value)) throw invalid();
@@ -90,14 +107,14 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           if (file || part.type !== 'file' || part.fieldname !== 'file') throw invalid();
           file = { id: id(), filename: String(part.filename || 'attachment').replace(/[\x00-\x1f\x7f\\/]/g, '_'), size: 0, contentType: part.mimetype || 'application/octet-stream' };
           path = join(dir, file.id);
-          await pipeline(part.file, limiter(bytes => { file.size += bytes; if (file.size > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
+          await pipeline(part.file, limiter(bytes => { file.size += bytes; if (file.size > maxBytes || sessionBytes + file.size > sessionMaxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           if (part.file.truncated) throw tooLarge();
         }
         if (!file) throw invalid();
         const existing = [...state.attachments.values()].filter(item => composeId === undefined || item.composeId === composeId).reduce((sum, item) => sum + item.size, 0);
         if (existing + file.size > maxBytes) throw tooLarge();
         active(session);
-        state.attachments.set(file.id, { ...file, composeId });
+        state.attachments.set(file.id, { ...file, composeId, lastUsedAt: now() });
         return file;
       } catch (error) {
         if (path) await rm(path, { force: true });
@@ -197,6 +214,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       if (body.draftRef) await checkMessage(session, body.draftRef, draftsPath);
       if (sending && body.replyToRef) await checkMessage(session, body.replyToRef);
       const raw = await build(session, state, body, mail);
+      for (const attachmentId of new Set(body.attachmentIds || [])) state.attachments.get(attachmentId).lastUsedAt = now();
       async function cleanup() {
         for (const attachmentId of new Set(body.attachmentIds || [])) {
           try {

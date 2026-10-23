@@ -113,7 +113,7 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
       assert.ok(root.querySelector('#compose-to'), 'recipient entry remains available');
       assert.ok(root.querySelector('#compose-subject'), 'subject entry remains available');
       assert.equal(root.querySelector('#compose-to').disabled, false);
-      assert.equal(root.querySelector('#compose-to').placeholder, '이름이나 주소');
+      assert.equal(root.querySelector('#compose-to').placeholder, '이름이나 주소 · @example.com');
       assert.equal(root.querySelector('.compose-alert'), null);
     } else {
       assert.equal(root.querySelector('[role=alert]').textContent.includes(message), true, name);
@@ -121,7 +121,7 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
       assert.equal(root.querySelector('form'), null);
     }
   }
-  assert.equal(requests.filter(path => path === '/api/rules').length, 3);
+  assert.equal(requests.filter(path => path === '/api/rules').length, 2);
   assert.equal(requests.some(path => path.includes('/auth/')), false);
   await t.test('Shell suppresses the disabled-Sieve toast and clears the vacation badge', async () => {
     prefs.value = { ...prefs.value, theme: 'ink', folderColors: {} };
@@ -132,6 +132,6 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
     assert.equal(vacation.value, null);
     assert.equal(toast.value, null);
     assert.equal(root.querySelector('.toast'), null);
-    assert.equal(requests.filter(path => path === '/api/rules').length, 4);
+    assert.equal(requests.filter(path => path === '/api/rules').length, 3);
   });
 });

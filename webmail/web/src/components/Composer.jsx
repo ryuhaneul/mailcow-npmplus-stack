@@ -6,12 +6,14 @@ import { composeSeed, pendingSend, detachedSendAttempts, detachSendAttempt, send
 import { folders } from '../state/folders.js';
 import { prefs, updatePrefs } from '../state/prefs.js';
 import { session } from '../state/session.js';
+import { composeIdentities, getComposeResources, prepareComposeSignature, composeImageContent, senderDomain } from '../state/compose-resources.js';
+import { signatures as cachedSignatures, signatureImages as cachedImages } from '../state/signatures.js';
 import { config } from '../state/config.js';
 import { listLocation } from '../state/list.js';
 import { toast } from '../state/toast.js';
 import { initialComposition, composePayload, selectCompositionSignature, changeCompositionFrom, updateCompositionHtml, defaultCompositionSignature, attachmentLimitMessage, sendWarnings } from '../compose.js';
-import { getSignatures, normalizeSignature, signatureError } from '../signatures.js';
-import { getSignatureImages, createSignatureImageMap } from '../signature-images.js';
+import { signatureError } from '../signatures.js';
+import { createSignatureImageMap } from '../signature-images.js';
 import { formatBytes } from '../format.js';
 import SignatureDialog from './SignatureDialog.jsx';
 import Icon from './Icon.jsx';
@@ -48,10 +50,17 @@ export default function Composer() {
     savePromise.current=pending;
     try{await pending;}catch(value){throw {...value,message:value.message,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
   }
+  const refreshedIdentity=composeIdentities.value, refreshedSignatures=cachedSignatures.value, refreshedImages=cachedImages.value;
+  useEffect(()=>{
+    if(!current.current||!active())return;
+    if(refreshedIdentity)setIdentity(refreshedIdentity);
+    if(refreshedSignatures)signatureSnapshot.current=refreshedSignatures;
+    if(refreshedImages)imageSnapshot.current=refreshedImages;
+  },[refreshedIdentity,refreshedSignatures,refreshedImages]);
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
   function releaseDraftImages(){for(const url of draftUrls.current.values())URL.revokeObjectURL(url);draftUrls.current.clear();}
   function reset(){if(sendResultNotice.value?.composeId===current.current?.composeId)sendResultNotice.value=null;releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;recovering.current=false;delivery.current='idle';restoredAttempt.current=false;}
-  useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap();return()=>{live.current=false;if(['checking','unknown'].includes(delivery.current))toast.value={kind:'send-unknown',message:'발송 여부를 확인할 수 없어요. 보낸편지함·임시보관함을 확인해 주세요.',ownerEmail:owner.current?.user?.email};pendingSend.value=null;detachedSendAttempts.value=[];sendResultNotice.value=null;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
+  useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap({loadContent:composeImageContent});return()=>{live.current=false;if(['checking','unknown'].includes(delivery.current))toast.value={kind:'send-unknown',message:'발송 여부를 확인할 수 없어요. 보낸편지함·임시보관함을 확인해 주세요.',ownerEmail:owner.current?.user?.email};pendingSend.value=null;detachedSendAttempts.value=[];sendResultNotice.value=null;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
   useEffect(()=>{if(restoration!==undefined)return;let cancelled=false;restoreSendAttempt(owner.current.user.email).then(value=>{if(!cancelled){setRestoration(value);if(value)navigate('compose');}});return()=>{cancelled=true;};},[]);
   useEffect(()=>{
     if(restoration===undefined)return;
@@ -68,8 +77,8 @@ export default function Composer() {
     (async()=>{
       try{
         if(current.current){await saveDraft();if(cancelled||!active())return;await releaseAttachments();}
-        const [identities,rules,assets,draft]=await Promise.all([api('/api/compose/identities'),api('/api/rules').catch(error=>{if(error.code==='SIEVE_DISABLED')return {};throw error;}),Promise.all([getSignatures(),getSignatureImages()]).then(([signatures,images])=>({signatures,images})).catch(error=>({error})),seed?.kind==='draft'?api(`/api/drafts/${encodeURIComponent(seed.message.ref)}`):null]);if(cancelled||!active())return;
-        reset();setIdentity(identities);setDomain(rules.internalDomains?.[0]||'');
+        const [{identities,assets},draft]=await Promise.all([getComposeResources(),seed?.kind==='draft'?api(`/api/drafts/${encodeURIComponent(seed.message.ref)}`):null]);if(cancelled||!active())return;
+        reset();setIdentity(identities);setDomain(senderDomain(owner.current.user.email));
         const signatures=assets.signatures||{items:[],defaults:{}},images=assets.images||{images:[]};
         signatureSnapshot.current=signatures;imageSnapshot.current=images;
         if(assets.error)setError({code:'SIGNATURE_LOAD_FAILED',message:'서명을 불러오지 못했어요. 서명 없이 작성할 수 있어요.'});
@@ -237,12 +246,7 @@ export default function Composer() {
   async function removeFile(file){
     try{if(file.id){await api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'});patch({attachments:current.current.attachments.filter(item=>item.id!==file.id)});}else patch({forwardFiles:current.current.forwardFiles.filter(item=>!(item.ref===file.ref&&item.partId===file.partId))});}catch(value){fail(value);}
   }
-  async function normalizedSignatures(id){
-    const document=signatureSnapshot.current,item=document.items.find(item=>item.id===id);
-    if(!item)return document;
-    const {html}=await normalizeSignature(item.html);
-    return {...document,items:document.items.map(value=>value.id===id?{...value,html}:value)};
-  }
+  function normalizedSignatures(id){ return prepareComposeSignature(signatureSnapshot.current,id); }
   async function changeSignature(action,confirm=false){
     if(!current.current||disabled||sending.current||closing.current)return;
     const change=++signatureChange.current,composeId=current.current.composeId;
@@ -348,8 +352,8 @@ export default function Composer() {
   useEffect(()=>{if(!open||result?.status!=='sent'||result.sentCopySavedTo)return;const key=event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();void close();}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key);},[open,result]);
   useEffect(()=>open?registerShortcuts('compose',{'Ctrl+Enter':()=>void send(),'Ctrl+Shift+H':()=>setRaw(value=>!value)}):undefined,[open]);
   if(!open&&!model)return null;
-  const title=({reply:'답장',replyall:'전체 답장',forward:'전달',draft:'임시 메일 이어 쓰기'})[model?.kind]||'새 메일',signature=signatureSnapshot.current?.items.find(item=>item.id===model?.selectedSignatureId),layout=document.documentElement.dataset.compose;
-  const signatureItems=[{id:null,name:'없음'},...(signatureSnapshot.current?.items||[])],totalBytes=model?[...model.attachments,...model.forwardFiles].reduce((sum,file)=>sum+file.size,model.signatureImageBytes):0;
+  const title=({reply:'답장',replyall:'전체 답장',forward:'전달',draft:'임시 메일 이어 쓰기'})[model?.kind]||'새 메일',signature=(refreshedSignatures||signatureSnapshot.current)?.items.find(item=>item.id===model?.selectedSignatureId),layout=document.documentElement.dataset.compose;
+  const signatureItems=[{id:null,name:'없음'},...((refreshedSignatures||signatureSnapshot.current)?.items||[])],totalBytes=model?[...model.attachments,...model.forwardFiles].reduce((sum,file)=>sum+file.size,model.signatureImageBytes):0;
   const nextId=replacement?.type==='from'?defaultCompositionSignature(signatureSnapshot.current,replacement.from,model.kind):replacement?.id;
   return <><div class="compose-dim" onClick={()=>void close()} aria-hidden="true"/><section class={`composer ${raw?'html':''}`} aria-label={title} aria-busy={Boolean(busy)}>
     <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy||result?.status==='checking')} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>

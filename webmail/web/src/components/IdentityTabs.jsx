@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
+import { refreshComposeIdentities } from '../state/compose-resources.js';
 import { api } from '../api.js';
 import { applyServerPrefs } from '../state/prefs.js';
 import SignatureTab from './SignatureTab.jsx';
@@ -19,7 +20,7 @@ export default function IdentityTabs({ tab }) {
   async function save(doc) {
     if(busy)return;
     setBusy(true);setError(null);setSaved(false);
-    try {await api('/api/prefs',{method:'PUT',body:doc});const saved=await api('/api/prefs');setPreferences(saved);applyServerPrefs(saved);setIdentities(await api('/api/compose/identities'));setSaved(true);return saved;}
+    try {await api('/api/prefs',{method:'PUT',body:doc});const saved=await api('/api/prefs');setPreferences(saved);applyServerPrefs(saved);setIdentities(await refreshComposeIdentities());setSaved(true);return saved;}
     catch(e){setError(e);}
     finally{setBusy(false);}
   }

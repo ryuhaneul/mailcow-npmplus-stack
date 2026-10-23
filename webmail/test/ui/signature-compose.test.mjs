@@ -80,7 +80,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
   for(const width of [1280,390])await t.test(`initial image projection waits without broken frames or console errors at ${width}`,async()=>{
     let release;const imageGate=new Promise(resolve=>release=resolve),c=await open({width,imageGate,waitReady:false});
     try{
-      await expect.poll(()=>c.contents.length).toBe(1);
+      await expect.poll(()=>c.contents.filter(url=>url.includes(assetA)).length).toBe(1);
       await expect(c.page.locator('iframe.compose-editor')).toHaveCount(0);
       await expect(c.page.getByRole('status').filter({hasText:'보낼 주소를 불러오는 중…'})).toBeVisible();
       assert.deepEqual(c.consoleErrors,[]);assert.deepEqual(c.errors,[]);
@@ -171,7 +171,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     const c=await open();try{
       await expect(c.button).toHaveText('서명: 외부 연락용');await expect(c.body.locator('img').first()).toHaveAttribute('src',/^blob:/);
       await expect(c.page.locator('.compose-grants[role=status]')).toContainText(`${bytes.length}B`);
-      assert.equal(c.contents.length,1);
+      assert.equal(c.contents.filter(url=>url.includes(assetA)).length,1);
       await c.body.evaluate(body=>{const p=body.ownerDocument.createElement('p');p.textContent='내 본문';body.prepend(p);body.dispatchEvent(new Event('input',{bubbles:true}));});
       const html=await c.html();assert.match(html,/<p>내 본문<\/p>/);assert.equal(html.includes('blob:'),false);assert.match(html,/cid:wm-compose-v1\./);
       await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();

@@ -179,3 +179,16 @@ test('current JSON session expiry clears canonical snapshots and preserves statu
   await assert.rejects(loadSignatures(), { code: 'NO_SESSION', status: 403 });
   assert.equal(session.value, null); assert.equal(signatures.value, null); assert.equal(signatureImages.value, null);
 });
+
+
+test('background refresh retains the editing draft revision and 409 preserves unsaved input',async t=>{
+  const sent=[];
+  setup(t,async(_path,options)=>{sent.push(options.headers.get('If-Match'));return Response.json({error:{code:'SIGNATURE_CONFLICT',message:'synthetic'}},{status:409});});
+  signatures.value=doc('refreshed-revision');selectedSignatureId.value='client-one';
+  const draft=doc('editing-revision'),before=structuredClone(draft);
+  await assert.rejects(saveSignatures(draft),{code:'SIGNATURE_CONFLICT',reloadRequired:true});
+  assert.deepEqual(draft,before);assert.equal(signatures.value.revision,'refreshed-revision');assert.equal(selectedSignatureId.value,'client-one');
+  delete draft.revision;
+  await assert.rejects(saveSignatures(draft),{code:'SIGNATURE_CONFLICT'});
+  assert.deepEqual(sent,['editing-revision','refreshed-revision']);
+});

@@ -354,3 +354,33 @@ test('prefs fromNames: 64 Unicode characters accepted; directory outage leaves p
   status(await f.request('PUT', { ...defaults(), fromNames: { 'user@example.com': '새 이름' } }), 503);
   assert.equal(f.client.value, before); assert.strictEqual(f.session.prefs, cached);
 });
+
+
+test('prefs partial sender updates merge into latest stored document and preserve other address names', async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { ...defaults(), mode: 'dark', fromNames: { 'alias@example.com': 'Existing Alias' } }), 204);
+  f.session.prefs = defaults(); // Stale session data must never be the merge base.
+  status(await f.request('PUT', { fromNames: { 'user@example.com': 'New Self' } }), 204);
+  assert.equal(JSON.parse(f.client.value).mode, 'dark');
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, { 'alias@example.com': 'Existing Alias', 'user@example.com': 'New Self' });
+  status(await f.request('PUT', { defaultFrom: 'alias@example.com' }), 204);
+  assert.equal(JSON.parse(f.client.value).mode, 'dark');
+  assert.equal(JSON.parse(f.client.value).defaultFrom, 'alias@example.com');
+  status(await f.request('PUT', { fromNames: { 'user@example.com': '', 'other@example.com': 'Forbidden' } }), 204);
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, { 'alias@example.com': 'Existing Alias' });
+  for (const patch of [{}, { mode: 'light' }, { fromNames: {}, mode: 'light' }, { defaultFrom: 'alias@example.com', extra: true }, { fromNames: { 'user@example.com': 'bad\r\nBcc: hidden@example.com' } }]) status(await f.request('PUT', patch), 422);
+});
+
+
+test('prefs fromNames rejects encoded-word markers with guidance and exposes legacy values for correction', async t => {
+  const f = await fixture(t), name = '=?UTF-8?B?SGVsbG8=?=';
+  f.client.value = JSON.stringify({ ...defaults(), fromNames: { 'user@example.com': name } });
+  const before = f.client.value;
+  for (const payload of [{ fromNames: { 'user@example.com': name } }, { ...defaults(), fromNames: { 'user@example.com': name } }]) {
+    const response = await f.request('PUT', payload);
+    status(response, 422); assert.equal(response.json().error.message, '이름에 =? 문자 조합은 쓸 수 없어요');
+  }
+  assert.equal(f.client.value, before);
+  const loaded = await f.request('GET'); status(loaded, 200);
+  assert.equal(loaded.json().fromNames['user@example.com'], name);
+});

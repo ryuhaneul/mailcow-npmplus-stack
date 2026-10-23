@@ -15,8 +15,61 @@ await test('sender names settings and composer use synthetic mail only', async t
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   const captures = process.env.FROM_NAME_CAPTURE_DIR || '/tmp/webmail-from-name-captures';
   await mkdir(captures, { recursive: true });
+  await t.test('row and default saves preserve newer dark mode and other unsaved input', async () => {
+    fake.state.prefs.mode = 'system'; fake.state.prefs.defaultFrom = null; fake.state.prefs.fromNames = {};
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    try {
+      await page.goto(origin + '/#filters/from');
+      const own = page.locator('[id="from-name-user@example.com"]'), alias = page.locator('[id="from-name-sales@example.com"]');
+      await expect(own).toBeVisible();
+      await page.getByRole('button', { name: '다크 모드로 전환', exact: true }).click();
+      await expect.poll(() => fake.state.prefs.mode).toBe('dark');
+      await alias.fill('아직 저장하지 않은 별칭');
+      const literal = '새 발송 이름';
+      await own.fill(literal);
+      await page.getByRole('button', { name: 'user@example.com 이름 저장', exact: true }).click();
+      await expect(page.locator('.from-addresses .say').filter({ hasText: 'user@example.com' })).toContainText(literal);
+      assert.equal(fake.state.prefs.mode, 'dark');
+      await expect(alias).toHaveValue('아직 저장하지 않은 별칭');
+      const nameRequest = fake.state.requests.filter(item => item.path === '/api/prefs' && item.method === 'PUT').at(-1);
+      assert.deepEqual(nameRequest.body, { fromNames: { 'user@example.com': literal } });
+      await page.getByRole('button', { name: '라이트 모드로 전환', exact: true }).click();
+      await expect.poll(() => fake.state.prefs.mode).toBe('light');
+      await page.getByRole('button', { name: '다크 모드로 전환', exact: true }).click();
+      await expect.poll(() => fake.state.prefs.mode).toBe('dark');
+      await page.getByRole('button', { name: 'sales@example.com 기본으로', exact: true }).click();
+      await expect.poll(() => fake.state.prefs.defaultFrom).toBe('sales@example.com');
+      assert.equal(fake.state.prefs.mode, 'dark');
+      await expect(alias).toHaveValue('아직 저장하지 않은 별칭');
+      const defaultRequest = fake.state.requests.filter(item => item.path === '/api/prefs' && item.method === 'PUT').at(-1);
+      assert.deepEqual(defaultRequest.body, { defaultFrom: 'sales@example.com' });
+      await page.goto(origin + '/#compose');
+      await page.getByRole('button', { name: '보낸 사람 선택' }).click();
+      await expect(page.getByRole('option').filter({ hasText: 'user@example.com' })).toContainText(literal);
+    } finally { await page.close(); }
+  });
+  await t.test('legacy encoded-word name is flagged and rejected until corrected', async () => {
+    fake.state.authenticated = true;
+    const literal = '=?UTF-8?B?SGVsbG8=?=';
+    fake.state.prefs.fromNames = { 'user@example.com': literal };
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    try {
+      await page.goto(origin + '/#filters/from');
+      const own = page.locator('[id="from-name-user@example.com"]');
+      await expect(own).toHaveValue(literal);
+      await expect(page.locator('.from-name-edit').first()).toContainText('이름에 =? 문자 조합은 쓸 수 없어요');
+      await own.fill('Team =?UTF-8?B?SGVsbG8=?=');
+      await page.getByRole('button', { name: 'user@example.com 이름 저장', exact: true }).click();
+      await expect(page.getByRole('alert')).toContainText('이름에 =? 문자 조합은 쓸 수 없어요');
+      assert.equal(fake.state.prefs.fromNames['user@example.com'], literal);
+      await own.fill('고친 이름');
+      await page.getByRole('button', { name: 'user@example.com 이름 저장', exact: true }).click();
+      await expect(page.locator('.from-addresses .say').first()).toContainText('고친 이름');
+      await expect(page.locator('.from-name-edit').first()).not.toContainText('고쳐 주세요');
+    } finally { await page.close(); }
+  });
   for (const width of [1280, 768, 375]) await t.test(`names save, clear, failure and composer at ${width}`, async () => {
-    fake.state.prefs.fromNames = {};
+    fake.state.authenticated = true; fake.state.prefs.defaultFrom = null; fake.state.prefs.fromNames = {};
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     page.setDefaultTimeout(7000);
     const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -52,7 +105,7 @@ await test('sender names settings and composer use synthetic mail only', async t
       await own.fill('실패한 이름');
       await page.getByRole('button', { name: 'user@example.com 이름 저장', exact: true }).click();
       await expect(page.getByRole('alert')).toContainText('주소 정보를 조회할 수 없어요.');
-      assert.equal(fake.state.prefs.fromNames['user@example.com'], '');
+      assert.equal(fake.state.prefs.fromNames['user@example.com'], undefined);
       assert.deepEqual(errors, []);
     } finally { fake.state.prefsError = null; await page.close(); }
   });

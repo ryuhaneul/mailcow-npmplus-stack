@@ -858,3 +858,19 @@ test('draft resume preserves stored From name and uses current setting on next s
   const append = f.calls.find(call => call.action === 'append');
   assert.match(append.raw.toString(), /From: Current Name <user@example.com>/);
 });
+
+
+for (const name of ['=?UTF-8?B?SGVsbG8=?=', 'Team =?UTF-8?Q?Other_Name?=']) test(`From legacy encoded-word name falls back: ${name}`, async t => {
+  const f = await fixture(t);
+  f.session.prefs = { fromNames: { 'user@example.com': name } };
+  const content = body();
+  assert.equal((await request(f, 'PUT', '/api/drafts', content)).statusCode, 200);
+  assert.equal((await request(f, 'POST', '/api/send', content)).statusCode, 200);
+  for (const raw of [...f.calls.filter(call => call.action === 'append').map(call => call.raw), f.attempts[0][1]]) {
+    const headers = libmime.decodeHeaders(raw.toString().split('\r\n\r\n')[0]);
+    const parsed = addressparser(headers.from[0])[0];
+    assert.equal(libmime.decodeWords(parsed.name), '서버 표시 이름');
+    assert.equal(parsed.address, 'user@example.com');
+    assert.equal(headers.bcc, undefined);
+  }
+});

@@ -13,7 +13,7 @@ function senderName(value) {
   return senderAddress(name) ? '' : name;
 }
 function customSenderName(value) {
-  return typeof value === 'string' && value.isWellFormed() && [...value].length <= 64 && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ? value.trim() : '';
+  return typeof value === 'string' && value.isWellFormed() && !value.includes('=?') && [...value].length <= 64 && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ? value.trim() : '';
 }
 function enabledDomain(data, domain) {
   return data.domain.some(row => sqlValue(row.domain) === domain && one(row.active))

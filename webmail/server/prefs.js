@@ -126,11 +126,20 @@ export function createPrefsService({ config, imap, logger, signatures, directory
     },
     async put(session, body) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
-      const input = normalize(body, config);
+      // Only sender fields opt into partial updates. Any other field retains the
+      // existing full-document PUT contract used by the other settings screens.
+      const partial = object(body) && Object.keys(body).length > 0 && Object.keys(body).every(key => ['fromNames', 'defaultFrom'].includes(key));
+      const input = partial ? Object.fromEntries(Object.entries(body).map(([key, value]) => [key, fields[key](value, config)])) : normalize(body, config);
+      if (Object.values(input.fromNames ?? {}).some(name => name.includes('=?'))) throw new AppError(422, 'PREFS_FROM_NAME_INVALID', '이름에 =? 문자 조합은 쓸 수 없어요');
       await withSignatureStoreLock(session.email, () => mailCall(session, async client => {
+        let doc = input;
+        if (partial) {
+          const stored = readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger);
+          doc = { ...stored, ...input, fromNames: { ...stored.fromNames, ...input.fromNames } };
+        }
         // Older clients omit this field; preserve the stored names under the same lock.
-        const names = Object.hasOwn(input, 'fromNames') ? input.fromNames : readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger).fromNames;
-        let doc = { ...input, fromNames: await allowedNames(session, names) };
+        const names = Object.hasOwn(doc, 'fromNames') ? doc.fromNames : readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger).fromNames;
+        doc = { ...doc, fromNames: await allowedNames(session, names) };
         if (signatures) {
           const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
           const prepared = await signatures.preparePrefs({ session, client, prefs: doc });

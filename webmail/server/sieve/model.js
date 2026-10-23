@@ -1,3 +1,4 @@
+import { MAX_RULES } from './limits.js';
 import { AppError } from '../errors.js';
 import { validateConditionTree } from './condition-tree.js';
 import { patternProblem } from './glob.js';
@@ -69,7 +70,7 @@ export function validateDocument(doc, { folders = [], maxRedirects = 100, checkP
   object(doc, '$', ['v', 'rev', 'rules', 'blocked', 'vacation', 'importedFrom'], ['v', 'rev', 'rules', 'blocked', 'vacation']);
   if (![1, 2].includes(doc.v)) invalid('$.v', 'version');
   if (!Number.isSafeInteger(doc.rev) || doc.rev < 0) invalid('$.rev', 'revision');
-  list(doc.rules, '$.rules', 0, 100);
+  list(doc.rules, '$.rules', 0, MAX_RULES);
   const ids = new Set();
   const forwards = new Set();
   for (const [i, rule] of doc.rules.entries()) {

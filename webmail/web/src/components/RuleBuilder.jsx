@@ -1,3 +1,4 @@
+import { MAX_RULES } from '../../../server/sieve/limits.js';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api.js';
 import { navigate } from '../router.js';
@@ -145,7 +146,7 @@ export default function RuleBuilder({ id, query }) {
   return <section class="view rule-builder-view" aria-labelledby="rule-title" aria-busy={busy}>
     <div class="set-head"><div class="crumb"><a href="#filters">필터와 규칙</a><Icon name="right" size="xs"/>{id ? '규칙 수정' : '새 규칙'}</div><h1 id="rule-title">{id ? '규칙 수정' : '규칙 만들기'}</h1><SettingsTabs/></div>
     <div class="scroll"><div class="set-body">
-      {error && <div class="banner rule-error" role="alert"><div>{error.code === 'RULES_CONFLICT' ? '필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.' : error.code === 'RULES_INVALID' ? `규칙을 확인해 주세요. ${error.path ?? ''} ${error.reason ?? ''}` : error.message}</div><button class="btn" type="button" disabled={busy} onClick={load}>다시 불러오기</button><a class="btn" href="#filters">필터 목록</a></div>}
+      {error && <div class="banner rule-error" role="alert"><div>{error.code === 'RULES_CONFLICT' ? '필터가 바뀌었어요. 다시 불러온 뒤 저장해 주세요.' : error.code === 'RULES_INVALID' && error.reason === 'script_too_large' ? error.message : error.code === 'RULES_INVALID' ? `규칙을 확인해 주세요. ${error.path ?? ''} ${error.reason ?? ''}` : error.message}</div><button class="btn" type="button" disabled={busy} onClick={load}>다시 불러오기</button><a class="btn" href="#filters">필터 목록</a></div>}
       {!draft && !error && <p role="status">규칙을 불러오는 중이에요.</p>}
       {rule && error?.code !== 'SIEVE_DISABLED' && <div class="builder"><form onSubmit={save}>
         <div class="summary"><small>이렇게 동작합니다</small><RuleSummary rule={rule}/></div>
@@ -178,9 +179,9 @@ export default function RuleBuilder({ id, query }) {
           </div></div>
           <div class="step rule-stop"><label><input type="checkbox" checked={rule.stop} onChange={e => setDraft({...draft,stop:e.currentTarget.checked})}/>이후 규칙 멈춤</label><p class="rule-note">이 규칙에 맞으면 뒤에 있는 규칙은 적용하지 않아요.</p></div>
           {problem && <p class="rule-note" role="status">{problem}</p>}
-          <div class="save-row"><label><input type="checkbox" disabled={pending || !preview || preview.partial} checked={applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>이미 받은 메일 <b class="num">{pending || !preview ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= 100)}>규칙 저장</button></div></div>
+          <div class="save-row"><label><input type="checkbox" disabled={pending || !preview || preview.partial} checked={applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>이미 받은 메일 <b class="num">{pending || !preview ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= MAX_RULES)}>규칙 저장</button></div></div>
           {preview?.partial && <p class="rule-note" role="status">받은 메일 확인이 끝나면 이미 받은 메일에도 적용할 수 있어요.</p>}
-          {!id && data.doc.rules.length >= 100 && <p class="rule-note">규칙은 최대 100개까지 저장할 수 있어요.</p>}
+          {!id && data.doc.rules.length >= MAX_RULES && <p class="rule-note">규칙은 최대 {MAX_RULES}개까지 저장할 수 있어요.</p>}
         </fieldset>
       </form><RulePreview data={preview} pending={pending} error={previewError} problem={problem}/></div>}
     </div></div>

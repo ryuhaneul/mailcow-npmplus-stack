@@ -276,14 +276,14 @@ test('rule schema rejects missing, unknown and invalid fields', () => {
   for (const change of changes) { const doc = document(); change(doc); expectInvalid(doc); }
 });
 
-test('document limits: 100 rules, 10 conditions, 200 characters, 500 blocked and 4000 body', () => {
+test('document limits: 500 rules, 10 conditions, 200 characters, 500 blocked and 4000 body', () => {
   const doc = document();
-  doc.rules = Array.from({ length: 100 }, (_, i) => rule(i));
+  doc.rules = Array.from({ length: 500 }, (_, i) => rule(i));
   doc.rules[0].conditions = Array.from({ length: 10 }, () => ({ field: 'subject', op: 'eq', value: '😀'.repeat(200) }));
   doc.blocked = Array.from({ length: 500 }, (_, i) => `block${i}@example.com`);
   doc.vacation.body = '가'.repeat(4000);
   assert.equal(validateDocument(doc, context), doc);
-  doc.rules.push(rule(100)); expectInvalid(doc); doc.rules.pop();
+  doc.rules.push(rule(500)); expectInvalid(doc); doc.rules.pop();
   doc.rules[0].conditions.push({ field: 'from', op: 'has', value: 'a' }); expectInvalid(doc); doc.rules[0].conditions.pop();
   doc.rules[0].conditions[0].value += 'a'; expectInvalid(doc); doc.rules[0].conditions[0].value = 'valid';
   doc.blocked.push('overflow@example.com'); expectInvalid(doc);

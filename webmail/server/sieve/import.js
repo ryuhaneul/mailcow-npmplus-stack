@@ -1,3 +1,4 @@
+import { MAX_RULES } from './limits.js';
 import { randomBytes } from 'node:crypto';
 import { AppError } from '../errors.js';
 import { validateAddress, validateDocument, validateText, MAX_SCRIPT_BYTES, minimumDocumentVersion } from './model.js';
@@ -84,7 +85,7 @@ export function importScript(source, { name = '', policy } = {}) {
         generateScript(rulesDocument([...rules, entry.rule]), context);
         rules.push(entry.rule); continue;
       } catch (error) {
-        limitReason = rules.length >= 100 ? '규칙 100개 한도' : error.reason === 'script_too_large' ? '생성 스크립트 1MB 한도' : error.code === 'TOO_MANY_FORWARDS' ? '전달 주소 수 한도' : '전체 규칙 제한을 넘었어요.';
+        limitReason = rules.length >= MAX_RULES ? `규칙 ${MAX_RULES}개 한도` : error.reason === 'script_too_large' ? '생성 스크립트 1MB 한도' : error.code === 'TOO_MANY_FORWARDS' ? '전달 주소 수 한도' : '전체 규칙 제한을 넘었어요.';
       }
     }
     entry.item.status = 'unconvertible'; entry.item.reason = limitReason;

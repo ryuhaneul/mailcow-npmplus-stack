@@ -188,21 +188,21 @@ test('policy permissions are explicit and cannot be inferred or overridden by ex
   for (const bad of [undefined, {}, { internalDomains: 'example.com' }, { internalDomains: ['bad domain'] }, { internalDomains: [], checkPolicy: false }, { internalDomains: [], folders: ['Archive'] }, { internalDomains: [], addresses: 'user@example.com' }]) assert.throws(() => importPolicy(bad));
 });
 
-test('unsafe imported values fail W10 validation and aggregate rule limits keep the first 100', async () => {
+test('unsafe imported values fail W10 validation and aggregate rule limits keep the first 500', async () => {
   const source = await read('gmail-basic.sieve');
   const unsafe = source.replace('"sender@example.com"', '"${wm_stop}"');
   const report = importScript(unsafe, { policy });
   assert.equal(report.items[0].status, 'unconvertible');
   const single = /(# \[1\][\s\S]*?)(?=\n# \[2\])/.exec(source)[1];
   const many = source.slice(0, source.indexOf('# [1]'))
-    + Array.from({ length: 101 }, (_, i) => single.replace('# [1]', `# [${i + 1}]`)).join('\n')
+    + Array.from({ length: 501 }, (_, i) => single.replace('# [1]', `# [${i + 1}]`)).join('\n')
     + source.slice(source.indexOf('# 받은편지함 처리'));
   const tooMany = importScript(many, { policy });
-  assert.equal(tooMany.items.length, 101);
-  assert.equal(tooMany.rules.length, 100);
-  assert.ok(tooMany.items.slice(0, 100).every(item => item.status === 'same'));
-  assert.equal(tooMany.items[100].status, 'unconvertible');
-  assert.equal(tooMany.items[100].reason, '규칙 100개 한도');
+  assert.equal(tooMany.items.length, 501);
+  assert.equal(tooMany.rules.length, 500);
+  assert.ok(tooMany.items.slice(0, 500).every(item => item.status === 'same'));
+  assert.equal(tooMany.items[500].status, 'unconvertible');
+  assert.equal(tooMany.items[500].reason, '규칙 500개 한도');
 });
 
 test('CLI import and gen both exit zero, preserve the source and emit usable outputs', async () => {

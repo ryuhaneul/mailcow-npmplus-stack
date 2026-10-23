@@ -76,7 +76,7 @@ lines = data.splitlines(keepends=True)
 clean = []
 i = 0
 managed = False
-move_to_end = False
+existing_block = b''
 relay_extras = []
 fixed = [ipaddress.ip_network(value, strict=False) for value in
          ['127.0.0.0/8', '::ffff:127.0.0.0/104', '::1/128', 'fe80::/10', network4 + '.0/24', *([network6 or mailcow6] if network6 or mailcow6 else [])]]
@@ -112,7 +112,7 @@ while i < len(lines):
         if end_index == len(lines): sys.exit('unterminated mailstack-edge block')
         entries, relay_extras = block_entries(b''.join(lines[i+1:end_index]))
         managed = True
-        move_to_end = mode != 'revert' and end_index + 1 < len(lines)
+        existing_block = b''.join(lines[i:end_index+1])
         if mode == 'revert' and relay_extras:
             # Keep the effective base and admin relay list outside our removed markers.
             clean.append(b'mynetworks = ' + b', '.join(entries) + b'\n')
@@ -154,11 +154,13 @@ if mode != 'revert':
         if web6:
             address, length = network6.split('/')
             defaults += f', [{address}]/{length}'
-        data = data + begin + b'mynetworks = ' + prefix + defaults.encode() + (b', ' + b', '.join(relay_extras) if relay_extras else b'') + b'\n' + end
+        block = begin + b'mynetworks = ' + prefix + defaults.encode() + (b', ' + b', '.join(relay_extras) if relay_extras else b'') + b'\n' + end
+        # Other managed blocks may follow ours. Location alone is not a change.
+        data = original if existing_block == block else data + block
 if mode == 'revert' and relay_extras and sum(bool(re.match(rb'mynetworks[ \t]*=', line)) for line in data.splitlines()) != 1:
     sys.exit('multiple mynetworks settings with admin relay items; manual merge required')
 reject_backslashes(data)
-if not move_to_end and comparable(original) == comparable(data):
+if comparable(original) == comparable(data):
     data = original
 Path(dest).write_bytes(data)
 PY

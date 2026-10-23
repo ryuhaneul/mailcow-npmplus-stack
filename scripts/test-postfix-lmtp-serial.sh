@@ -16,6 +16,7 @@ import os
 import sys
 p=Path(os.environ['LMTP_TEST_TMP']); args=sys.argv[1:]
 with (p/'calls').open('a') as f: f.write(' '.join(args)+'\n')
+if args==['compose','restart','postfix-mailcow']: sys.exit(0)
 assert args[:4]==['compose','exec','-T','postfix-mailcow'], args
 args=args[4:]
 keys=('lmtp_destination_concurrency_limit','lmtp_destination_recipient_limit')
@@ -249,4 +250,81 @@ for name in ('setup','update'):
     assert 'warn "apply-postfix-lmtp-serial.sh failed' in block
 PY
 pass 'setup/update invoke serialization immediately after dedupe and warn on failure'
+# Bootstrap each block layout once; only actual edge configuration creation may
+# restart. Once both blocks exist, every subsequent order must preserve bytes.
+printf 'IPV4_NETWORK=172.22.1\nIPV6_NETWORK=fd4d:6169:6c63:6f77::/64\n' > "$MAILCOW_DIR/mailcow.conf"
+edge() { bash "$ROOT/scripts/apply-postfix-edge.sh" "$@" > "$TMP/edge.result" 2>&1; }
+for layout in edge-first serial-first; do
+    reset_case
+    if [ "$layout" = edge-first ]; then
+        edge apply -y || { cat "$TMP/edge.result"; fail 'initial edge'; }
+        run -y || fail 'initial serial after edge'
+    else
+        run -y || fail 'initial serial'
+        edge apply -y || { cat "$TMP/edge.result"; fail 'initial edge after serial'; }
+    fi
+    cp "$CONF/extra.cf" "$TMP/order.original"
+    : > "$TMP/calls"
+    for order in 'edge serial' 'serial edge' 'edge edge serial serial' 'serial serial edge edge'; do
+        for _ in 1 2 3; do
+            for operation in $order; do
+                if [ "$operation" = edge ]; then edge apply -y || fail 'ordered edge apply';
+                else run -y || fail 'ordered serial apply'; fi
+                cmp -s "$CONF/extra.cf" "$TMP/order.original" || fail "changed bytes: $layout / $order"
+            done
+        done
+    done
+    edge --check || fail 'ordered edge check'
+    run --check || fail 'ordered serial check'
+    ! grep -Eq 'restart|recreate|postfix reload' "$TMP/calls" || fail "unnecessary restart/reload: $layout"
+    pass "$layout: all four orders repeated three times keep bytes unchanged with zero restarts/reloads"
+done
+# The first LMTP application to an existing edge block must not provoke a restart
+# when edge is next reconciled (the VM regression).
+reset_case
+edge apply -y || fail 'VM regression edge baseline'
+: > "$TMP/calls"
+run -y || fail 'VM regression serial installation'
+cp "$CONF/extra.cf" "$TMP/order.original"
+edge apply -y || fail 'VM regression edge reconcile'
+cmp -s "$CONF/extra.cf" "$TMP/order.original" || fail 'VM regression moved edge'
+! grep -q restart "$TMP/calls" || fail 'VM regression restarted'
+pass 'first LMTP installation after existing edge block does not trigger a following edge restart'
+# A real content change must still use the existing update/restart path.
+: > "$TMP/calls"
+WEBMAIL_RELAY_IPV4=172.22.1.241 edge apply -y || fail 'changed relay apply'
+[ "$(grep -c 'compose restart postfix-mailcow' "$TMP/calls")" -eq 1 ] || fail 'changed content restart count'
+grep -q '!172.22.1.241' "$CONF/extra.cf" || fail 'relay not updated'
+run --check || fail 'content change damaged LMTP block'
+pass 'changed edge block content still updates and restarts once, preserving LMTP state'
+# Exercise the actual verify check function and its LMTP invocation with the
+# real --check script, rather than reaching unrelated live verification paths.
+python3 - "$ROOT/scripts/verify.sh" "$TMP/verify-lmtp.sh" <<'PYVERIFY'
+from pathlib import Path
+import sys
+s=Path(sys.argv[1]).read_text()
+start=s.index('check() {')
+end=s.index('\ncheck_http() {',start)
+checks=[line for line in s.splitlines() if line.startswith('check "Postfix per-recipient LMTP serialization" ')]
+assert len(checks)==1 and 'apply-postfix-lmtp-serial.sh" --check' in checks[0]
+Path(sys.argv[2]).write_text(s[start:end]+'\n'+checks[0]+'\n')
+PYVERIFY
+verify_lmtp() (
+    PASS=0 FAIL=0 GREEN= RED= NC=
+    SCRIPT_DIR="$ROOT/scripts"
+    source "$TMP/verify-lmtp.sh"
+    [ "$PASS/$FAIL" = "$1" ]
+)
+reset_case
+run -y || fail 'verify applied baseline'
+verify_lmtp 1/0 > "$TMP/verify.result" || fail 'verify applied count'
+grep -q 'PASS.*Postfix per-recipient LMTP serialization' "$TMP/verify.result" || fail 'verify missing PASS'
+pass 'verify reports PASS when managed block and live LMTP values match'
+reset_case
+verify_lmtp 0/1 > "$TMP/verify.result" || fail 'verify unapplied count'
+grep -q 'FAIL.*Postfix per-recipient LMTP serialization' "$TMP/verify.result" || fail 'verify missing FAIL'
+pass 'verify reports FAIL when LMTP serialization is not applied'
+printf '\nlmtp_destination_concurrency_limit = 1\n' >> "$CONF/extra.cf"
+verify_lmtp 0/1 > "$TMP/verify.result" || fail 'verify conflicting manual line count'
+pass 'verify reports FAIL for conflicting manual LMTP line outside markers'
 echo "1..$n"

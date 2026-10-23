@@ -16,7 +16,7 @@ const config = {
   imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com',
   defaultTheme: 'olive', defaultMode: 'dark',
 };
-const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null });
+const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null });
 class PrefsImap extends EventEmitter {
   constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.metadata = new Map(); this.calls = []; }
   async connect() { this.usable = true; }
@@ -55,6 +55,7 @@ async function fixture(t) {
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-prefs-test-'));
   const app = await createApp({ config, logger: false, auth: { tempRoot, clientFactory: options => (client = new PrefsImap(options)) } });
   app.directory.mailboxName = async email => email;
+  app.directory.identities = async () => ({ identities: [{ address: 'user@example.com' }, { address: 'alias@example.com' }, { address: 'delegated@example.com' }] });
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'user@example.com', password: 'synthetic-password' } });
   assert.equal(login.statusCode, 200);
@@ -117,7 +118,7 @@ for (const [label, patch] of [
 });
 test('prefs: every top-level field required, objects only and malformed JSON 422', async t => {
   const f = await fixture(t);
-  for (const key of Object.keys(defaults())) { const doc = defaults(); delete doc[key]; status(await f.request('PUT', doc), 422); }
+  for (const key of Object.keys(defaults()).filter(key => key !== 'fromNames')) { const doc = defaults(); delete doc[key]; status(await f.request('PUT', doc), 422); }
   for (const body of ['[]', 'null', '{broken', '']) status(await f.app.inject({ method: 'PUT', url: '/api/prefs', headers: { ...f.headers, 'content-type': 'application/json' }, payload: body }), 422);
   assert.equal(f.client.calls.length, 0);
 });
@@ -322,4 +323,34 @@ test('prefs mirror: corrupt/oversized stored data and failed SET preserve stored
   f.client.value = JSON.stringify(defaults()); f.client.beforeSet = async () => { throw new Error('synthetic-private-failure'); };
   const response = await f.request('PUT', { ...defaults(), theme: 'terra' }); status(response, 503); assert.equal(response.json().error.code, 'MAIL_UNAVAILABLE');
   assert.equal(f.client.value, JSON.stringify(defaults())); assert.strictEqual(f.session.prefs, beforeSession); assert.doesNotMatch(response.body, /synthetic-private-failure/);
+});
+
+test('prefs fromNames: normalize allowed addresses, remove blank and unauthorized names, preserve old-client saves', async t => {
+  const f = await fixture(t);
+  const doc = { ...defaults(), fromNames: { ' USER@EXAMPLE.COM ': ' 내 이름 ', 'alias@example.com': '별칭', 'delegated@example.com': '권한 이름', 'other@example.com': '금지', 'blank@example.com': '' } };
+  status(await f.request('PUT', doc), 204);
+  const expected = { 'user@example.com': '내 이름', 'alias@example.com': '별칭', 'delegated@example.com': '권한 이름' };
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, expected);
+  const oldClient = defaults(); delete oldClient.fromNames;
+  status(await f.request('PUT', oldClient), 204);
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, expected);
+  f.app.directory.identities = async () => ({ identities: [{ address: 'user@example.com' }] });
+  const response = await f.request('GET'); status(response, 200);
+  assert.deepEqual(response.json().fromNames, { 'user@example.com': '내 이름' });
+  status(await f.request('PUT', { ...defaults(), fromNames: { 'user@example.com': '  ' } }), 204);
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, {});
+});
+for (const name of ['x'.repeat(65), 'a\r\nBcc: hidden@example.com', 'a\tname', 'a\0name', 'a\x7fname', 'a\u0085name', 'a\u2028name', '\ud800', 12]) test(`prefs fromNames: reject invalid name ${JSON.stringify(name)}`, async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { ...defaults(), fromNames: { 'user@example.com': name } }), 422);
+  assert.equal(f.client.value, null); assert.equal(f.client.calls.length, 0);
+});
+test('prefs fromNames: 64 Unicode characters accepted; directory outage leaves preferences unchanged', async t => {
+  const f = await fixture(t), fromNames = { 'user@example.com': '😀'.repeat(64) };
+  status(await f.request('PUT', { ...defaults(), fromNames }), 204);
+  assert.deepEqual(JSON.parse(f.client.value).fromNames, fromNames);
+  const before = f.client.value, cached = f.session.prefs;
+  f.app.directory.identities = async () => { throw new Error('synthetic-directory-failure'); };
+  status(await f.request('PUT', { ...defaults(), fromNames: { 'user@example.com': '새 이름' } }), 503);
+  assert.equal(f.client.value, before); assert.strictEqual(f.session.prefs, cached);
 });

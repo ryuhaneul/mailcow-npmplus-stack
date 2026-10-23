@@ -57,7 +57,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   } });
   await app.register(signatureImagesRoutes, { service: images });
   await app.register(signaturesRoutes, { service: signatures, normalizeHtml, imap: app.imap });
-  await app.register(prefsRoutes, { config, service: createPrefsService({ config, imap: app.imap, logger: app.log, signatures }) });
+  await app.register(prefsRoutes, { config, service: createPrefsService({ config, imap: app.imap, logger: app.log, signatures, directory: app.directory }) });
   await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });

@@ -12,6 +12,9 @@ function senderName(value) {
   const name = typeof value === 'string' ? value.trim() : '';
   return senderAddress(name) ? '' : name;
 }
+function customSenderName(value) {
+  return typeof value === 'string' && value.isWellFormed() && [...value].length <= 64 && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value) ? value.trim() : '';
+}
 function enabledDomain(data, domain) {
   return data.domain.some(row => sqlValue(row.domain) === domain && one(row.active))
     || data.alias_domain.some(row => sqlValue(row.alias_domain) === domain && one(row.active));
@@ -69,7 +72,7 @@ export function senderIdentities(data, session) {
   }
   const identities = [...candidates].flatMap(address => {
     const kind = senderKind(data, actor, address);
-    return kind ? [{ address, name: senderName(data.mailbox.find(row => sqlValue(row.username) === address)?.name) || ownName, kind }] : [];
+    return kind ? [{ address, name: customSenderName(session.prefs?.fromNames?.[address]) || senderName(data.mailbox.find(row => sqlValue(row.username) === address)?.name) || ownName, kind }] : [];
   });
   identities.sort((a, b) => (a.kind === 'self' ? -1 : b.kind === 'self' ? 1 : a.address.localeCompare(b.address, 'en')));
   const preferred = senderAddress(session.prefs?.defaultFrom);

@@ -19,7 +19,7 @@ export default function IdentityTabs({ tab }) {
   async function save(doc) {
     if(busy)return;
     setBusy(true);setError(null);setSaved(false);
-    try {await api('/api/prefs',{method:'PUT',body:doc});setPreferences(doc);applyServerPrefs(doc);setSaved(true);}
+    try {await api('/api/prefs',{method:'PUT',body:doc});const saved=await api('/api/prefs');setPreferences(saved);applyServerPrefs(saved);setIdentities(await api('/api/compose/identities'));setSaved(true);}
     catch(e){setError(e);}
     finally{setBusy(false);}
   }

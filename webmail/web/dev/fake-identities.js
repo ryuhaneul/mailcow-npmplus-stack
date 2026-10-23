@@ -1,9 +1,9 @@
 // Synthetic authenticated identity/settings endpoints; never included in production.
 export const exampleIdentities = {identities:[{address:'user@example.com',name:'이서윤',kind:'self'},{address:'sales@example.com',name:'영업팀',kind:'alias'},{address:'support@example.org',name:'고객지원',kind:'acl'}],anyAtDomains:['@example.net'],anyAddress:false,defaultFrom:'user@example.com'};
-export const examplePrefs = {theme:'ink',mode:'light',accent:{},layout:null,folderColors:{거래처:1},imageAllow:['images@example.com'],signatures:{'user@example.com':{html:'<p><b>이서윤</b><br>예시 회사 · user@example.com</p>',auto:true}},defaultFrom:null};
+export const examplePrefs = {theme:'ink',mode:'light',accent:{},layout:null,folderColors:{거래처:1},imageAllow:['images@example.com'],signatures:{'user@example.com':{html:'<p><b>이서윤</b><br>예시 회사 · user@example.com</p>',auto:true}},fromNames:{},defaultFrom:null};
 export async function fakeIdentities(request,response,state,send) {
   const path=new URL(request.url,'http://localhost').pathname;
-  if(path==='/api/compose/identities'){send(response,200,{...state.identities,defaultFrom:state.prefs.defaultFrom ?? state.identities.defaultFrom});return true;}
+  if(path==='/api/compose/identities'){send(response,200,{...state.identities,identities:state.identities.identities.map(item=>({...item,name:state.prefs.fromNames?.[item.address]||item.name})),defaultFrom:state.prefs.defaultFrom ?? state.identities.defaultFrom});return true;}
   if(path!=='/api/prefs')return false;
   if(request.method==='GET'){send(response,200,state.prefs);return true;}
   let raw='';for await(const chunk of request)raw+=chunk;

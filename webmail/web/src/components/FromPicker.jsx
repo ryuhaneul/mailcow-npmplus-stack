@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import Icon from './Icon.jsx';
 function description(person) {
   const kind=({self:'본인 주소',alias:'별칭',acl:'보내기 권한'})[person?.kind]||'보내기 권한',name=person?.name?.trim();
-  return kind+(name&&!/\S+@\S+/.test(name)?` · ${name}`:'');
+  return kind+(name?` · ${name}`:'');
 }
 export default function FromPicker({identities,from,onChange,disabled}) {
   const [open,setOpen]=useState(false),[manual,setManual]=useState(!identities.identities.some(item=>item.address===from)),root=useRef(null),popup=useRef(null),item=identities.identities.find(item=>item.address===from),custom=identities.anyAddress||identities.anyAtDomains.length>0;

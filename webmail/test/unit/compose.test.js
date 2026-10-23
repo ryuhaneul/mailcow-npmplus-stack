@@ -833,3 +833,28 @@ for (const status of ['not_sent', 'unknown', 'sent']) test(`send receipts: manua
   assert.equal((await request(f, 'PUT', '/api/drafts', payload)).statusCode, 200);
   assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), before);
 });
+
+for (const [from, name] of [['user@example.com', '직접 정한 이름'], ['alias@example.com', '별칭, 담당자'], ['delegated@example.com', '권한 이름'], ['manual@example.com', '서버 이름']]) test(`From prefs: ${from} in draft, SMTP and Sent copy`, async t => {
+  const directoryTables = { mailbox: [{ username: 'user@example.com', name: '서버 이름', active: 1 }], domain: [{ domain: 'example.com', active: 1 }], alias: [{ address: 'alias@example.com', goto: 'user@example.com', domain: 'example.com', active: 1, sender_allowed: 1 }], sender_acl: [{ logged_in_as: 'user@example.com', send_as: 'delegated@example.com' }, { logged_in_as: 'user@example.com', send_as: '@example.com' }] };
+  const f = await fixture(t, { directoryTables });
+  f.session.prefs = { fromNames: { 'user@example.com': '직접 정한 이름', 'alias@example.com': '별칭, 담당자', 'delegated@example.com': '권한 이름', 'manual@example.com': '무시할 이름' } };
+  const content = body({ from });
+  assert.equal((await request(f, 'PUT', '/api/drafts', content)).statusCode, 200);
+  assert.equal((await request(f, 'POST', '/api/send', content)).statusCode, 200);
+  assert.equal(f.attempts.length, 1);
+  for (const raw of [...f.calls.filter(call => call.action === 'append').map(call => call.raw), f.attempts[0][1]]) {
+    const headers = libmime.decodeHeaders(raw.toString().split('\r\n\r\n')[0]);
+    const parsed = addressparser(headers.from[0])[0];
+    assert.equal(libmime.decodeWords(parsed.name), name); assert.equal(parsed.address, from);
+    assert.equal(headers.bcc, undefined);
+  }
+});
+test('draft resume preserves stored From name and uses current setting on next save', async t => {
+  const f = await resumeFixture(t, { from: 'Stored Name <user@example.com>' });
+  f.session.prefs = { fromNames: { 'user@example.com': 'Current Name' } };
+  const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
+  const loaded = response.json(); assert.equal(loaded.from[0].name, 'Stored Name');
+  const saved = await request(f, 'PUT', '/api/drafts', resumedBody(loaded)); assert.equal(saved.statusCode, 200, saved.body);
+  const append = f.calls.find(call => call.action === 'append');
+  assert.match(append.raw.toString(), /From: Current Name <user@example.com>/);
+});

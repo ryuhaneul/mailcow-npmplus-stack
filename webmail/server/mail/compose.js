@@ -375,7 +375,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       const mail = validate(body, sending);
       await directory.assertFrom(session, mail.from);
       const { identities } = await directory.identities(session);
-      const name = identities.find(item => item.address === mail.from)?.name || identities.find(item => item.kind === 'self')?.name || '';
+      const identity = identities.find(item => item.address === mail.from);
+      const fallback = identity ? identities : (await directory.identities({ ...session, prefs: { ...session.prefs, fromNames: {} } })).identities;
+      const name = identity?.name ?? fallback.find(item => item.kind === 'self')?.name ?? '';
       mail.from = { address: mail.from, name };
       const draftsPath = body.draftRef ? await specialFolder(session, 'Drafts') : null;
       const draftMessage = body.draftRef ? await checkMessage(session, body.draftRef, draftsPath) : null;

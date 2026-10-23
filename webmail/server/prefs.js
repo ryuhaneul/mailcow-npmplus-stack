@@ -69,14 +69,18 @@ const fields = {
     if (typeof item.html !== 'string' || typeof item.auto !== 'boolean') throw invalid();
     return [address(key), { html: sanitizeComposeHtml(item.html, { publicHostnames: config.publicHostnames }), auto: item.auto }];
   }),
+  fromNames: value => map(value, (key, item) => {
+    if (typeof item !== 'string' || !item.isWellFormed() || [...item].length > 64 || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(item)) throw invalid();
+    return [address(key), item.trim()];
+  }),
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
-  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null };
+  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
-  exact(doc, Object.keys(fields));
-  return Object.fromEntries(Object.entries(fields).map(([key, parse]) => [key, parse(doc[key], config)]));
+  exact(doc, Object.keys(fields).filter(key => key !== 'fromNames' || Object.hasOwn(doc ?? {}, key)));
+  return Object.fromEntries(Object.entries(fields).filter(([key]) => key !== 'fromNames' || Object.hasOwn(doc, key)).map(([key, parse]) => [key, parse(doc[key], config)]));
 }
 function readDocument(raw, config, logger) {
   const result = defaults(config);
@@ -99,17 +103,24 @@ function readDocument(raw, config, logger) {
   if (discarded) logger?.warn({ code: 'PREFS_DISCARDED' }, '저장된 설정에서 사용할 수 없는 항목을 제외했습니다.');
   return result;
 }
-export function createPrefsService({ config, imap, logger, signatures }) {
+export function createPrefsService({ config, imap, logger, signatures, directory }) {
   async function mailCall(session, operation) {
     try { return await imap.withMailbox(session, 'INBOX', operation); } catch (error) {
       if (error instanceof AppError && error.statusCode !== 502) throw error;
       throw new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
     }
   }
+  async function allowedNames(session, names) {
+    if (!Object.keys(names).length) return {};
+    const { identities } = await directory.identities(session);
+    const allowed = new Set(identities.map(item => item.address));
+    return Object.fromEntries(Object.entries(names).filter(([key, value]) => allowed.has(key) && value));
+  }
   return {
     async get(session) {
       const raw = await mailCall(session, client => getMetadata(client, '', PREFS_ENTRY));
       const doc = readDocument(raw, config, logger);
+      doc.fromNames = await allowedNames(session, doc.fromNames);
       session.prefs = doc;
       return doc;
     },
@@ -117,10 +128,12 @@ export function createPrefsService({ config, imap, logger, signatures }) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
       const input = normalize(body, config);
       await withSignatureStoreLock(session.email, () => mailCall(session, async client => {
-        let doc = input;
+        // Older clients omit this field; preserve the stored names under the same lock.
+        const names = Object.hasOwn(input, 'fromNames') ? input.fromNames : readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger).fromNames;
+        let doc = { ...input, fromNames: await allowedNames(session, names) };
         if (signatures) {
           const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
-          const prepared = await signatures.preparePrefs({ session, client, prefs: input });
+          const prepared = await signatures.preparePrefs({ session, client, prefs: doc });
           // The list API alone owns the legacy mirror. Even a pending mirror sync
           // must not replace an unprocessed or preserved legacy edit here.
           const actual = raw === null ? {} : JSON.parse(raw);

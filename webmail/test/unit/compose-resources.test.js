@@ -201,3 +201,34 @@ test('a CLOSED stream that never opened checks once and stops; cleanup suppresse
   connections[1].dispatchEvent(new MessageEvent('session',{data:'{"state":"expired"}'}));
   const pending=checkServerSession();stop();release();await pending;assert.equal(connections.length,2);
 });
+
+
+async function overtakenSse(t) {
+  const previous={fetch:globalThis.fetch,EventSource:globalThis.EventSource,BroadcastChannel:globalThis.BroadcastChannel,window:globalThis.window,document:globalThis.document};
+  const connections=[],channels=[],releases=[];
+  globalThis.window=new EventTarget();globalThis.document=new EventTarget();document.querySelector=()=>null;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();this.readyState=0;connections.push(this);}close(){this.readyState=2;}};
+  globalThis.BroadcastChannel=class{constructor(){channels.push(this);}postMessage(){}close(){}};
+  const {route}=await import('../../web/src/router.js'),before=route.value;route.value={name:'settings',value:''};
+  const owner={user:{email:'same@example.com'},csrf:'old'};session.value=owner;verifiedSession.value=owner;
+  globalThis.fetch=async()=>new Promise(resolve=>releases.push(()=>resolve(Response.json({user:owner.user,csrf:'new'}))));
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stopWatch=watchServerSession(()=>{}),stopEvents=connectMailboxEvents();
+  t.after(()=>{stopEvents();stopWatch();session.value=null;route.value=before;Object.assign(globalThis,previous);});
+  connections[0].readyState=1;connections[0].dispatchEvent(new Event('open'));
+  const expire=()=>connections[0].dispatchEvent(new MessageEvent('session',{data:'{"state":"expired"}'}));
+  return {connections,channels,releases,owner,expire};
+}
+test('SSE confirmation overtaken by a notification waits for the newest check and reconnects once',async t=>{
+  const c=await overtakenSse(t);c.expire();assert.equal(c.releases.length,1);
+  c.channels[0].onmessage();assert.equal(c.releases.length,2);const newest=checkServerSession();
+  c.releases[0]();await new Promise(resolve=>setImmediate(resolve));c.releases[1]();await newest;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(session.value,c.owner);assert.equal(c.owner.csrf,'new');assert.equal(c.connections.length,2);assert.equal(c.connections[0].readyState,2);
+});
+test('SSE stops after three superseded checks and releases its checking guard',async t=>{
+  const c=await overtakenSse(t);c.expire();
+  for(let i=0;i<3;i++){c.channels[0].onmessage();c.releases[i]();await new Promise(resolve=>setImmediate(resolve));}
+  const latest=checkServerSession();c.releases[3]();await latest;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(c.connections.length,1);assert.equal(session.value,c.owner);
+  c.expire();c.expire();assert.equal(c.releases.length,5);
+  const resumed=checkServerSession();c.releases[4]();await resumed;await new Promise(resolve=>setImmediate(resolve));assert.equal(c.connections.length,2);
+});

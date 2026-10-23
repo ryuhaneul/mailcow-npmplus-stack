@@ -110,7 +110,7 @@ await test('real authentication cookies and cross-tab composition ownership',asy
   const temp=await mkdtemp(join(tmpdir(),'compose-auth-'));t.after(()=>rm(temp,{recursive:true,force:true}));
   const backend=Fastify({logger:false});installErrors(backend);backend.decorate('directory',{mailboxName:async email=>email});
   await installAuth(backend,{config:{publicHostnames:['127.0.0.1'],sessionIdleMin:480,sessionMaxHours:24},tempRoot:temp,verifyLogin:async()=>({connection:{logout:async()=>{}}})});
-  let sessionGate,sessionReads=0,delayed,draftSaves=0,nativeEvents=false,streams=[],sseAuthFailures=0;
+  let sessionGate,sessionReads=0,delayed,draftSaves=0,nativeEvents=false,streams=[],sseAuthFailures=0,oldGate,oldStarted=false;const network=[];
   async function late(req,reply,kind){const entry=delayed;if(entry?.kind!==kind||entry.started)return false;entry.started=true;await entry.gate;if(req.session.connection===null){reply.code(403).send({error:{code:'SESSION_EXPIRED',message:'synthetic old credential lifetime'}});return true;}return false;}
   const snapshot=email=>({revision:'r-'+email,items:[{id:sig,name:'합성 서명',html:`<p>${email} 비공개 서명</p>`}],defaults:{[email]:{newDefault:sig,replyDefault:sig}},usedBytes:128,maxBytes:262144,notices:[]});
   backend.get('/api/compose/identities',async req=>({identities:[{address:req.session.email,name:req.session.email,kind:'self'}],defaultFrom:req.session.email,anyAtDomains:[],anyAddress:false}));
@@ -128,12 +128,14 @@ await test('real authentication cookies and cross-tab composition ownership',asy
     const path=new URL(req.url,'http://127.0.0.1').pathname;
     if(path==='/api/events'&&nativeEvents){
       let owner;try{const raw=(req.headers.cookie||'').split(';').map(item=>item.trim()).find(item=>item.startsWith('webmail_sid='))?.slice(12);owner=await backend.sessions.get(raw);}catch(error){sseAuthFailures++;res.statusCode=403;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({error:{code:error.code,message:error.message}}));return;}
-      res.setHeader('Content-Type','text/event-stream');res.setHeader('Cache-Control','no-store');res.write('retry: 20\n\n');streams.push({res,owner});return;
+      res.setHeader('Content-Type','text/event-stream');res.setHeader('Cache-Control','no-store');res.write('retry: 20\n\n');streams.push({res,owner,tag:req.headers['x-eval-page']});return;
     }
     if(!path.startsWith('/api/auth/')&&!paths.has(path))return next();
     if(path==='/api/auth/session'){sessionReads++;if(sessionGate)await sessionGate;}
+    if(path==='/api/signatures/normalize'&&req.headers['x-eval-page']==='secondary'&&oldGate){oldStarted=true;await oldGate;}
     const raw=[];for await(const chunk of req)raw.push(chunk);const body=Buffer.concat(raw),headers={...req.headers};delete headers.host;delete headers['content-length'];if(headers.origin)headers.origin='https://127.0.0.1';
     const response=await backend.inject({method:req.method,url:req.url,headers,...(body.length?{payload:body}:{})});
+    network.push({path,status:response.statusCode,clearsCookie:JSON.stringify(response.headers['set-cookie']||'').includes('Max-Age=0')});
     res.statusCode=response.statusCode;for(const [key,value] of Object.entries(response.headers)){if(key==='set-cookie')res.setHeader(key,Array.isArray(value)?value.map(item=>item.replace(/; Secure/gi,'')):value.replace(/; Secure/gi,''));else if(!['content-length','connection','transfer-encoding'].includes(key))res.setHeader(key,value);}res.end(response.rawPayload);
   });server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0,hmr:false}});
   await server.listen();t.after(()=>{for(const stream of streams)stream.res.destroy();return server.close();});
@@ -142,9 +144,9 @@ await test('real authentication cookies and cross-tab composition ownership',asy
   const login=async(page,email)=>{await page.getByLabel('메일 주소',{exact:true}).fill(email);await page.getByLabel('암호',{exact:true}).fill('synthetic-password');await page.getByRole('button',{name:'로그인',exact:true}).click();await expect(page.locator('.compose-btn')).toBeVisible();};
   async function openPair(fallback=false){
     const context=await browser.newContext();await context.addInitScript(()=>{const Native=window.EventSource;window.testStreams=[];window.EventSource=class extends Native{constructor(...args){super(...args);window.testStreams.push(this);}};});if(fallback)await context.addInitScript(()=>{window.BroadcastChannel=undefined;});
-    const page=await context.newPage();page.setDefaultTimeout(8000);await page.goto(origin);await login(page,'a@example.com');
+    const page=await context.newPage();await page.setExtraHTTPHeaders({'x-eval-page':'primary'});page.setDefaultTimeout(8000);await page.goto(origin);await login(page,'a@example.com');
     await page.locator('.compose-btn').click();const body=page.frameLocator('iframe.compose-editor').locator('body');await expect(body).toContainText('a@example.com 비공개 서명');
-    const tab=await context.newPage();tab.setDefaultTimeout(8000);await tab.goto(origin);await expect(tab.locator('.compose-btn')).toBeVisible();
+    const tab=await context.newPage();await tab.setExtraHTTPHeaders({'x-eval-page':'secondary'});tab.setDefaultTimeout(8000);await tab.goto(origin);await expect(tab.locator('.compose-btn')).toBeVisible();
     return {context,page,tab,body};
   }
   for(const fallback of [false,true])await t.test(`other-tab logout/login invalidates immediately (${fallback?'storage':'BroadcastChannel'})`,async()=>{
@@ -162,7 +164,7 @@ await test('real authentication cookies and cross-tab composition ownership',asy
       await mkdir(captures,{recursive:true});await c.page.screenshot({path:`${captures}/cross-tab-${fallback?'storage':'channel'}.png`});
     }finally{release?.();sessionGate=null;await c.context.close();}
   });
-  await t.test('focus verifies a missed cookie change before composition; open-window transition notice contains no old account',async()=>{
+  for(let repetition=1;repetition<=30;repetition++)await t.test(`focus verifies a missed cookie change before composition; open-window transition notice contains no old account (${repetition}/30)`,async()=>{
     const c=await openPair();try{
       // An HTTP client changes the real cookie without publishing an application event.
       await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
@@ -299,5 +301,50 @@ await test('real authentication cookies and cross-tab composition ownership',asy
         assert.equal(await c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.every(item=>item.subject.startsWith('B 전용 목록 '))),true);
       }
     }finally{await c.context.close();nativeEvents=false;fake.state.mail=previousMail;}
+  });  await t.test('SSE confirmation overtaken by external authentication verification must restore realtime updates',async()=>{
+    nativeEvents=true;streams=[];const previousMail=fake.state.mail;
+    const c=await openPair();let releaseCheck;
+    try{
+      await expect.poll(()=>streams.length).toBe(2);
+      await c.page.bringToFront();await c.page.evaluate(async()=>await(await import('/src/api.js')).checkServerSession());const original=streams.find(x=>x.tag==='primary'),originalNativeCount=await c.page.evaluate(()=>window.testStreams.length);
+      // A real successful login changes the shared cookie; publish its application
+      // notification only once the older SSE-triggered confirmation is waiting.
+      const authResponse=await c.context.request.post(origin+'/api/auth/login',{data:{email:'a@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      const auth=await authResponse.json();assert.equal(original.owner.connection,null);
+      const beforeReads=sessionReads;sessionGate=new Promise(r=>releaseCheck=r);
+      original.res.write('event: session\ndata: {"state":"expired"}\n\n');original.res.end();
+      await expect.poll(()=>sessionReads-beforeReads).toBe(1);console.log('BEFORE_NOTIFY',JSON.stringify(await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {epoch:s.sessionResourceEpoch.value,generation:s.authGeneration,owner:s.session.value?.user.email}})));
+      await c.tab.evaluate(()=>{const channel=new BroadcastChannel('webmail-auth-change');channel.postMessage('changed');channel.close();});const latestAuth=auth;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).authGeneration)).toBeGreaterThan(1);
+      releaseCheck();sessionGate=null;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(latestAuth.csrf);
+      await c.page.waitForTimeout(200);
+      const afterVerification=await c.page.evaluate(async()=>({owner:(await import('/src/state/session.js')).session.value?.user.email,verified:(await import('/src/state/session.js')).verifiedSession.value!==null,streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState)}));
+      await c.page.bringToFront();await c.page.evaluate(async()=>{const api=await import('/src/api.js');window.dispatchEvent(new Event('focus'));await api.checkServerSession();});
+      await c.page.waitForTimeout(150);
+      const afterFocus=await c.page.evaluate(()=>({streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState)}));
+      fake.state.mail=fake.state.mail.map(x=>({...x,subject:'현재 HTTP 조회 '+x.ref}));
+      await c.page.evaluate(async()=>{await(await import('/src/state/list.js')).loadMessages();});
+      const afterHttp=await c.page.evaluate(async()=>({streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState),freshList:(await import('/src/state/list.js')).list.value.items.every(x=>x.subject.startsWith('현재 HTTP 조회 '))}));
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('연결 중단 중에도 작성 본문 보존 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const result={originalNativeCount,afterVerification,afterFocus,afterHttp};
+      console.log('OVERTAKEN_SSE '+JSON.stringify(result));await mkdir(captures,{recursive:true});await writeFile(captures+'/overtaken-sse.json',JSON.stringify(result,null,2));await c.page.screenshot({path:captures+'/overtaken-sse.png'});
+      assert.equal(afterVerification.streams,originalNativeCount+1);assert.equal(afterVerification.states.filter(state=>state===1).length,1);
+    }finally{releaseCheck?.();sessionGate=null;await c.context.close();nativeEvents=false;fake.state.mail=previousMail;}
+  });
+  await t.test('old-account rejection must not delete the replacement login cookie',async()=>{
+    let releaseOld;oldStarted=false;oldGate=new Promise(r=>releaseOld=r);const c=await openPair();
+    try{
+      await expect.poll(()=>oldStarted).toBe(true);const before=network.length;
+      await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      const loggedIn=await c.context.request.get(origin+'/api/auth/session');assert.equal((await loggedIn.json()).user.email,'b@example.com');
+      releaseOld();oldGate=null;await expect.poll(()=>network.slice(before).some(x=>x.path==='/api/signatures/normalize'&&x.status===403)).toBe(true);
+      await c.page.evaluate(()=>{window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));});
+      const response=await c.context.request.get(origin+'/api/auth/session'),value=await response.json();
+      await c.page.waitForTimeout(100);const ui=await c.page.evaluate(async()=>({owner:(await import('/src/state/session.js')).session.value?.user.email||null,composer:Boolean(document.querySelector('.composer')),toast:(await import('/src/state/toast.js')).toast.value}));
+      const result={revision:process.env.EVAL_REVISION||'ecee50b',afterLogin:'b@example.com',afterOldResponse:{status:response.status(),owner:value.user?.email||null,code:value.error?.code},ui,network:network.slice(before)};
+      await mkdir(captures,{recursive:true});await writeFile(captures+'/cookie-replacement-'+result.revision+'.json',JSON.stringify(result,null,2));console.log('COOKIE_REPLACEMENT '+JSON.stringify(result));
+      assert.equal(response.status(),200);assert.equal(value.user.email,'b@example.com');
+    }finally{releaseOld();oldGate=null;await c.context.close();}
   });
 });

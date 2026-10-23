@@ -180,7 +180,7 @@ test('session: no cookie, invented cookie and inbound bearer never authenticate'
   assertFailure(await f.app.inject({ url: '/api/auth/session', headers: { authorization: `Bearer ${token}` } }), 403, 'NO_SESSION');
 });
 
-test('session: invalid, missing-store and expired cookies are cleared with logout cookie options', async t => {
+test('session: invalid, missing-store and expired cookies fail without clearing replacement cookies', async t => {
   const f = await fixture(t, { overrides: { SESSION_IDLE_MIN: '1' } });
   const noCookie = await f.app.inject('/api/auth/session');
   assertFailure(noCookie, 403, 'NO_SESSION');
@@ -196,8 +196,7 @@ test('session: invalid, missing-store and expired cookies are cleared with logou
   ]) {
     const response = await f.app.inject({ url: '/api/auth/session', headers: { cookie } });
     assertFailure(response, 403, code);
-    assert.match(response.headers['set-cookie'], /^webmail_sid=;/);
-    for (const attr of ['Max-Age=0', 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(response.headers['set-cookie'].includes(attr));
+    assert.equal(response.headers['set-cookie'], undefined);
     assert.equal(response.headers['cache-control'], 'no-store');
   }
   const renewed = await login(f.app);

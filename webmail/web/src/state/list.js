@@ -115,14 +115,18 @@ export function connectMailboxEvents() {
       if(stopped||source!==connection||checking)return;
       checking=true;connection.close();
       try {
-        const current=await checkServerSession();
-        if(stopped||source!==connection)return;
-        if(!session.value){resetMailbox();return;}
+        let current;
+        for(let attempt=0;attempt<3;attempt++){
+          current=await checkServerSession();
+          if(stopped||source!==connection)return;
+          if(!session.value){resetMailbox();return;}
+          if(current!==undefined)break;
+        }
         if(current&&opened)connect();
       } catch(error) {
         if(error.code==='SESSION_EXPIRED'&&!session.value)showSessionNotice(error.code);
         if(!stopped&&source===connection&&!session.value)resetMailbox();
-      }
+      } finally { checking=false; }
     }
     connection.addEventListener('mailbox',event=>{
       const value=JSON.parse(event.data);

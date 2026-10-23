@@ -19,7 +19,10 @@ export function replaceSignature(html,signature) {
 export function initialComposition(seed,identities,preferences,email,options) {
   const from=identities.defaultFrom||identities.identities[0]?.address||email,kind=seed?.kind||'new',message=seed?.message;
   const base={composeId:crypto.randomUUID(),kind,from,to:[],cc:[],bcc:[],pendingTo:'',pendingCc:'',pendingBcc:'',subject:'',html:'<p><br></p>',attachments:[],forwardFiles:[],draftRef:null,internalImages:false};
-  if(message){
+  if(kind==='draft'&&message){
+    base.from=message.composeFrom||identities.identities.find(item=>item.address.toLowerCase()===message.from?.[0]?.address?.toLowerCase())?.address||from;
+    Object.assign(base,{to:message.to||[],cc:message.cc||[],bcc:message.bcc||[],subject:message.subject||'',html:message.html||'',draftRef:message.draftRef,fromChanged:Boolean(message.fromChanged),forwardFiles:message.attachments||[],inReplyTo:message.inReplyTo||'',references:message.references||''});
+  }else if(message){
     const own=new Set([email,...identities.identities.map(item=>item.address)].map(value=>value.toLowerCase()));
     const other=items=>recipients((items||[]).filter(item=>!own.has(item.address.toLowerCase())));
     let reply=other(message.replyTo?.length?message.replyTo:message.from);if(!reply.length)reply=other(message.to);
@@ -40,9 +43,9 @@ export function initialComposition(seed,identities,preferences,email,options) {
     base.signatureNonce=options.nonce??composeSignatureNonce();
     if(!/^[A-Za-z0-9_-]{32}$/.test(base.signatureNonce))throw signatureInvalid();
     Object.assign(base,{selectedSignatureId:null,signatureRange:null,signatureBaseline:'',signatureDirty:false,signatureImages:[],signatureImageSizes:{},signatureImageBytes:0});
-    const id=defaultCompositionSignature(options.signatures,from,kind);
+    const id=defaultCompositionSignature(options.signatures,base.from,kind);
     Object.assign(base,selectCompositionSignature(base,id,options.signatures,options.images).patch);
-  }else base.html=replaceSignature(base.html,signatureMarkup(preferences,from,kind!=='forward'));
+  }else if(kind!=='draft')base.html=replaceSignature(base.html,signatureMarkup(preferences,from,kind!=='forward'));
   return base;
 }
 export function composePayload(model,sending=false) {
@@ -57,6 +60,7 @@ function composeSignatureNonce(){
 function signatureFragment(html){const root=document.createElement('template');root.innerHTML=html;return root;}
 function outsideQuote(node){return !node.parentElement?.closest('blockquote');}
 export function defaultCompositionSignature(signatures,from,kind='new'){
+  if(kind==='draft')return null;
   const defaults=signatures?.defaults?.[from.toLowerCase()];
   return defaults?.[kind==='new'?'newDefault':'replyDefault']??null;
 }

@@ -2,6 +2,7 @@ import { route, navigate } from './router.js';
 import { list, cursor, listLocation, isListRoute, runAction, acting } from './state/list.js';
 import { toggleSelection, selectionMode } from './state/selection.js';
 import { runSelectedAction, deleteSelectedMessages, scopedRequestPending, scopedListFrozen } from './state/scoped-actions.js';
+import { openMessage } from './state/compose.js';
 const scopes = new Map();
 // Example: registerShortcuts('read', { r: reply, a: replyAll, f: forward }).
 // Compose may register 'Ctrl+Enter' and 'Ctrl+Shift+H', including inside inputs.
@@ -46,7 +47,7 @@ export function initMailboxShortcuts() {
       event.preventDefault();const next=items[Math.max(0,Math.min(items.length-1,index+(key==='j'?1:-1)))];
       if(next){cursor.value=next.ref;const row=document.getElementById(`mail-${next.ref}`);row?.focus({preventScroll:true});row?.scrollIntoView({block:'nearest'});}return;
     }
-    if(key==='enter'&&!event.target.closest('button,a,[role=checkbox]')&&item&&!item.unavailable){event.preventDefault();navigate(`read/${encodeURIComponent(item.ref)}`);}
+    if(key==='enter'&&!event.target.closest('button,a,[role=checkbox]')&&item&&!item.unavailable){event.preventDefault();openMessage(item);}
     else if(key==='x'&&selectable&&!locked){event.preventDefault();toggleSelection(item.ref);}
     else if(key==='s'&&selectable&&!locked){event.preventDefault();void runAction(item.flagged?'unflag':'flag',[item.ref]);}
     else if(['e','#','!'].includes(key)&&(selectable||selectionMode.value!=='none')&&!locked){event.preventDefault();const fallback=selectable?[item.ref]:[];void (key==='#'?deleteSelectedMessages(fallback):runSelectedAction(key==='e'?'archive':list.value.params.view==='spam'?'notspam':'spam',undefined,fallback));}

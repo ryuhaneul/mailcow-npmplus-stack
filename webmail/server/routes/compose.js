@@ -8,6 +8,7 @@ export default async function composeRoutes(app, { service, config }) {
     await service.remove(request.session, request.params.id);
     return reply.code(204).send();
   });
+  app.get('/api/drafts/:ref', async request => service.loadDraft(request.session, request.params.ref));
   app.put('/api/drafts', async request => service.draft(request.session, request.body));
   app.post('/api/send', async (request, reply) => {
     try { return await service.send(request.session, request.body); } catch (error) {

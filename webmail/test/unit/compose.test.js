@@ -8,6 +8,10 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Fastify from 'fastify';
 import { SMTPServer } from 'smtp-server';
+import libmime from 'libmime';
+import MailComposer from 'nodemailer/lib/mail-composer';
+import addressparser from 'nodemailer/lib/addressparser';
+import { bodyParts } from '../../server/mail/read.js';
 import { JSDOM } from 'jsdom';
 import { createApp } from '../../server/app.js';
 import { createDirectoryService } from '../../server/directory/index.js';
@@ -362,4 +366,136 @@ test('upload expiry: periodic session sweep removes unused uploads after 24h, dr
   assert.equal((await request(f, 'POST', '/api/auth/logout')).statusCode, 204);
   await assert.rejects(access(f.dir), { code: 'ENOENT' });
   assert.equal(f.session.sweepAttachments, undefined);
+});
+
+// Parse only the synthetic MIME emitted by MailComposer, so the IMAP fake reflects
+// real multipart/related reordering and the bytes a subsequent download returns.
+function storedDraft(raw) {
+  const downloads = new Map();
+  function parse(source, part = '') {
+    const split = source.indexOf('\r\n\r\n'), headers = libmime.decodeHeaders(source.slice(0, split));
+    const text = source.slice(split + 4), type = libmime.parseHeaderValue(headers['content-type']?.[0] || 'text/plain');
+    const disposition = libmime.parseHeaderValue(headers['content-disposition']?.[0] || '');
+    const node = { part: part || '1', type: type.value, parameters: type.params, disposition: disposition.value, dispositionParameters: disposition.params, size: Buffer.byteLength(text, 'latin1'), ...(headers['content-id'] ? { id: headers['content-id'][0] } : {}) };
+    if (type.params.boundary) {
+      const chunks = text.split('--' + type.params.boundary).slice(1, -1);
+      node.childNodes = chunks.map((chunk, index) => parse(chunk.replace(/^\r\n/, '').replace(/\r\n$/, ''), part ? `${part}.${index + 1}` : `${index + 1}`));
+    } else {
+      const encoding = headers['content-transfer-encoding']?.[0];
+      const content = encoding === 'base64' ? Buffer.from(text, 'base64') : Buffer.from(encoding === 'quoted-printable' ? text.replace(/=\r\n/g, '').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))) : text, 'latin1');
+      downloads.set(node.part, content);
+    }
+    return node;
+  }
+  const source = raw.toString('latin1'), headers = libmime.decodeHeaders(source.slice(0, source.indexOf('\r\n\r\n')));
+  const envelope = { subject: headers.subject?.[0], inReplyTo: headers['in-reply-to']?.[0] };
+  for (const key of ['from', 'to', 'cc', 'bcc']) envelope[key] = addressparser(headers[key]?.join(', ') || '');
+  return { row: { envelope, bodyStructure: parse(source), headers: Buffer.from(source.slice(0, source.indexOf('\r\n\r\n')), 'latin1') }, downloads };
+}
+async function resumeFixture(t, { textOnly = false, mismatch = false, from = 'user@example.com', directoryTables } = {}) {
+  const cid = 'logo@synthetic.invalid';
+  const content = {
+    from, to: 'Recipient <recipient@example.com>', cc: 'copy@example.com', bcc: 'hidden@example.com', subject: 'synthetic resume',
+    inReplyTo: '<reply@synthetic.invalid>', references: '<parent@synthetic.invalid> <reply@synthetic.invalid>',
+    ...(textOnly ? { text: 'draft <text> & preserved\nsecond line' } : { html: `<p>synthetic body</p><script>evil()</script><img src="cid:${cid}" onerror="evil()"><div class="sig">existing signature</div>` }),
+    attachments: textOnly ? [] : [{ filename: 'same.txt', content: Buffer.from('first-content'), contentType: 'text/plain' }, { filename: 'logo.png', content: Buffer.from('synthetic-image'), contentType: 'image/png', cid, contentDisposition: 'inline' }, { filename: 'same.txt', content: Buffer.from('second-content'), contentType: 'text/plain' }],
+  };
+  const compiled = new MailComposer(content).compile(); compiled.keepBcc = true;
+  const messages = new Map([[10, storedDraft(await compiled.build())]]), originalUids = [];
+  const f = await fixture(t, { directoryTables, clientSetup(client) {
+    const append = client.append.bind(client), remove = client.messageDelete.bind(client);
+    client.fetchOne = async uid => { client.calls.push({ action: 'fetch', path: client.mailbox.path, uid }); return messages.get(uid)?.row || false; };
+    client.download = async (uid, partId) => ({ content: messages.get(uid)?.downloads.has(partId) ? Readable.from([messages.get(uid).downloads.get(partId)]) : null });
+    client.append = async (path, raw, flags) => {
+      const result = await append(path, raw, flags);
+      if (path === 'Drafts') {
+        const stored = storedDraft(raw);
+        if (mismatch) bodyParts(stored.row.bodyStructure).find(part => part.disposition === 'attachment').dispositionParameters.filename = 'wrong.txt';
+        messages.set(result.uid, stored); originalUids.push(result.uid);
+      }
+      return result;
+    };
+    client.messageDelete = async (uid, options) => { messages.delete(uid); return remove(uid, options); };
+  } });
+  return { ...f, messages, originalUids, cid };
+}
+function resumedBody(loaded) {
+  return body({ from: loaded.composeFrom || loaded.from[0].address, to: loaded.to, cc: loaded.cc, bcc: loaded.bcc, subject: loaded.subject, html: loaded.html, inReplyTo: loaded.inReplyTo, references: loaded.references, draftRef: loaded.draftRef, forwardParts: loaded.attachments.map(({ ref, partId }) => ({ ref, partId })) });
+}
+test('load draft restores recipients including stored Bcc, sanitized HTML, attachment refs, CID and reply headers', async t => {
+  const f = await resumeFixture(t), response = await request(f, 'GET', `/api/drafts/${draft}`);
+  assert.equal(response.statusCode, 200, response.body); assert.equal(response.headers['cache-control'], 'no-store');
+  const loaded = response.json();
+  assert.equal(loaded.draftRef, draft); assert.equal(loaded.from[0].address, 'user@example.com'); assert.equal(loaded.to[0].address, 'recipient@example.com'); assert.equal(loaded.cc[0].address, 'copy@example.com'); assert.equal(loaded.bcc[0].address, 'hidden@example.com'); assert.equal(loaded.subject, 'synthetic resume');
+  assert.match(loaded.html, /synthetic body/); assert.match(loaded.html, /cid:logo@synthetic.invalid/); assert.doesNotMatch(loaded.html, /script|onerror/); assert.match(loaded.html, /existing signature/);
+  assert.equal(loaded.attachments.length, 3); assert.ok(loaded.attachments.every(part => part.ref === draft && part.partId)); assert.equal(loaded.attachments.find(part => part.cid).cid, f.cid);
+  assert.equal(loaded.inReplyTo, '<reply@synthetic.invalid>'); assert.equal(loaded.references, '<parent@synthetic.invalid> <reply@synthetic.invalid>'); await assert.rejects(access(f.dir), { code: 'ENOENT' });
+});
+test('load draft rejects absent session, non-draft, shared and virtual refs before opening the source', async t => {
+  const f = await resumeFixture(t);
+  failure(await request(f, 'GET', `/api/drafts/${draft}`, undefined, {}), 403, 'NO_SESSION');
+  for (const path of ['INBOX', 'Shared/other@example.com/Drafts', 'WebmailVirtual/AllMail', 'OtherUser/Drafts']) {
+    const count = f.calls.length;
+    failure(await request(f, 'GET', `/api/drafts/${encodeRef(path, 123, 10)}`), 403, 'DRAFT_NOT_ALLOWED');
+    assert.equal(f.calls.slice(count).some(call => call.action === 'fetch'), false);
+  }
+  failure(await request(f, 'GET', `/api/drafts/${encodeRef('Drafts', 123, 999)}`), 404, 'MESSAGE_NOT_FOUND');
+  failure(await request(f, 'GET', `/api/drafts/${encodeRef('Drafts', 999, 10)}`), 409, 'STALE_REF');
+});
+test('load draft uses the authenticated account IMAP connection, never a foreign mailbox', async t => {
+  const f = await resumeFixture(t);
+  const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', headers: { origin: 'https://newmail.example.com' }, payload: { email: 'other@example.com', password } });
+  assert.equal(login.statusCode, 200, login.body);
+  const other = f.clients.at(-1); assert.equal(other.options.auth.user, 'other@example.com'); other.fetchOne = async () => false;
+  failure(await request(f, 'GET', `/api/drafts/${draft}`, undefined, { cookie: login.headers['set-cookie'].split(';')[0] }), 404, 'MESSAGE_NOT_FOUND');
+});
+test('load text-only draft escapes text into HTML without silently changing the body', async t => {
+  const f = await resumeFixture(t, { textOnly: true }), response = await request(f, 'GET', `/api/drafts/${draft}`);
+  assert.equal(response.statusCode, 200, response.body); assert.match(response.json().html, /^<pre>draft &lt;text&gt; &amp; preserved\nsecond line\n<\/pre>$/); assert.deepEqual(response.json().attachments, []);
+});
+test('resumed draft saves twice, remaps duplicate filenames and inline parts, then sends with bytes and headers intact', async t => {
+  const f = await resumeFixture(t); let loaded = (await request(f, 'GET', `/api/drafts/${draft}`)).json();
+  for (let index = 0; index < 2; index++) {
+    const previous = loaded.draftRef, response = await request(f, 'PUT', '/api/drafts', resumedBody(loaded));
+    assert.equal(response.statusCode, 200, response.body); const saved = response.json(); assert.equal(saved.forwardParts.length, 3);
+    assert.ok(saved.forwardParts.every(part => part.previousRef === previous && part.ref === saved.draftRef)); assert.equal(new Set(saved.forwardParts.map(part => part.partId)).size, 3);
+    assert.equal(f.messages.size, 1); assert.equal(f.messages.has(decodeRef(previous).uid), false);
+    loaded = (await request(f, 'GET', `/api/drafts/${saved.draftRef}`)).json();
+    const state = f.messages.get(decodeRef(saved.draftRef).uid), duplicateParts = loaded.attachments.filter(part => part.filename === 'same.txt');
+    assert.deepEqual(duplicateParts.map(part => state.downloads.get(part.partId).toString()), ['first-content', 'second-content']);
+    assert.match(loaded.html, /cid:logo@synthetic.invalid/); assert.equal(loaded.bcc[0].address, 'hidden@example.com');
+  }
+  const response = await request(f, 'POST', '/api/send', resumedBody(loaded)); assert.equal(response.statusCode, 200, response.body); assert.equal(f.messages.size, 0); assert.equal(f.attempts.length, 1);
+  const sent = storedDraft(f.attempts[0][1]), parts = bodyParts(sent.row.bodyStructure);
+  assert.deepEqual(parts.filter(part => part.disposition === 'attachment').map(part => sent.downloads.get(part.part).toString()), ['first-content', 'second-content']);
+  const inline = parts.find(part => part.id); assert.equal(inline.id, '<logo@synthetic.invalid>'); assert.equal(inline.disposition, 'inline'); assert.equal(sent.downloads.get(inline.part).toString(), 'synthetic-image');
+  assert.equal(parts.filter(part => part.disposition === 'attachment').some(part => part.id), false);
+  assert.equal(sent.row.envelope.inReplyTo, '<reply@synthetic.invalid>'); assert.match(sent.row.headers.toString(), /References: <parent@synthetic.invalid> <reply@synthetic.invalid>/); assert.equal(sent.row.envelope.bcc.length, 0);
+  assert.deepEqual(f.attempts[0][2].to, ['recipient@example.com', 'copy@example.com', 'hidden@example.com']);
+  assert.deepEqual(await readdir(f.dir), []);
+});
+test('resumed draft mapping failure removes only the new copy and keeps old draft and attachments', async t => {
+  const f = await resumeFixture(t, { mismatch: true }), loaded = (await request(f, 'GET', `/api/drafts/${draft}`)).json();
+  const response = await request(f, 'PUT', '/api/drafts', resumedBody(loaded)); failure(response, 503, 'DRAFT_ATTACHMENTS_UNVERIFIED'); assert.match(response.json().error.message, /첨부.*저장하지 않았어요/);
+  assert.deepEqual([...f.messages.keys()], [10]); assert.equal(f.messages.get(10).downloads.size, 4);
+  assert.deepEqual(f.calls.filter(call => call.action === 'delete').map(call => call.uid), [31]); assert.equal(f.attempts.length, 0);
+});
+for (const endpoint of ['/api/drafts', '/api/send']) test(`resumed draft stale ref at ${endpoint} fails before append or SMTP`, async t => {
+  const f = await resumeFixture(t), loaded = (await request(f, 'GET', `/api/drafts/${draft}`)).json(); f.messages.delete(10);
+  failure(await request(f, endpoint === '/api/send' ? 'POST' : 'PUT', endpoint, resumedBody(loaded)), 404, 'MESSAGE_NOT_FOUND'); assert.equal(f.attempts.length, 0); assert.equal(f.calls.some(call => call.action === 'append'), false);
+});
+
+for (const [label, grant, from, expected, changed] of [
+  ['listed identity', 'alias@example.com', 'alias@example.com', 'alias@example.com', false],
+  ['any address', '*', 'manual@synthetic.invalid', 'manual@synthetic.invalid', false],
+  ['any domain address', '@synthetic.invalid', 'manual@synthetic.invalid', 'manual@synthetic.invalid', false],
+  ['revoked address', null, 'revoked@synthetic.invalid', 'user@example.com', true],
+]) test(`load draft sender: ${label} uses send authorization and reports fallback`, async t => {
+  const directoryTables = { mailbox: [{ username: 'user@example.com', active: 1 }], sender_acl: grant ? [{ logged_in_as: 'user@example.com', send_as: grant }] : [] };
+  const f = await resumeFixture(t, { from, directoryTables }), response = await request(f, 'GET', `/api/drafts/${draft}`);
+  assert.equal(response.statusCode, 200, response.body); const loaded = response.json(); assert.equal(loaded.composeFrom, expected); assert.equal(loaded.fromChanged, changed); assert.equal(loaded.from[0].address, from);
+  const identities = await createDirectoryService({ config, imap: {}, db: { async execute(sql) { return [directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || []]; } } }).identities(f.session);
+  assert.equal(identities.identities.some(item => item.address === from), label === 'listed identity');
+  assert.equal((await request(f, 'POST', '/api/send', resumedBody(loaded))).statusCode, 200);
+  assert.equal(f.attempts[0][2].from, expected);
 });

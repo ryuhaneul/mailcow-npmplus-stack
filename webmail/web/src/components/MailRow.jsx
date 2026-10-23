@@ -2,7 +2,7 @@ import { folderLabel } from '../format.js';
 import { cursor, runAction, acting } from '../state/list.js';
 import { isSelected, scopeSelection, toggleSelection } from '../state/selection.js';
 import { folders, folderColor } from '../state/folders.js';
-import { navigate } from '../router.js';
+import { openMessage } from '../state/compose.js';
 import Icon from './Icon.jsx';
 import { scopedRequestPending, scopedListFrozen } from '../state/scoped-actions.js';
 import { failureLabel } from './ScopeActionDialog.jsx';
@@ -17,7 +17,7 @@ export default function MailRow({item,mode}) {
   const date=new Date(item.date),pad=value=>String(value).padStart(2,'0');
   const selected=isSelected(item.ref),from=item.from.name||item.from.address;
   const toggle=event=>{event.stopPropagation();cursor.value=item.ref;toggleSelection(item.ref);};
-  return <li id={`mail-${item.ref}`} class={`m ${!item.seen?'u':''} ${selected?'sel':''} ${cursor.value===item.ref?'cur':''}`} data-ref={item.ref} tabIndex="0" aria-label={`${from}, ${item.subject}`} onFocus={()=>{cursor.value=item.ref;}} onClick={()=>navigate(`read/${encodeURIComponent(item.ref)}`)}>
+  return <li id={`mail-${item.ref}`} class={`m ${!item.seen?'u':''} ${selected?'sel':''} ${cursor.value===item.ref?'cur':''}`} data-ref={item.ref} tabIndex="0" aria-label={`${from}, ${item.subject}`} onFocus={()=>{cursor.value=item.ref;}} onClick={()=>openMessage(item)}>
     <button class="av" type="button" role="checkbox" disabled={selectDisabled} aria-checked={selected} aria-label={`선택: ${item.subject}`} onClick={toggle}>{selected?<Icon name="check"/>:from[0]}</button>
     <button class="cbw" type="button" role="checkbox" disabled={selectDisabled} aria-checked={selected} aria-label={`선택: ${item.subject}`} onClick={toggle}><span class={`cb ${selected?'on':''}`}><Icon name="check"/></span></button>
     <button class={`st ${item.flagged?'on':''}`} type="button" disabled={disabled} aria-label={item.flagged?'별표 해제':'별표'} aria-pressed={item.flagged} onClick={event=>{event.stopPropagation();runAction(item.flagged?'unflag':'flag',[item.ref]);}}><Icon name="star"/></button>

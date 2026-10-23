@@ -64,7 +64,7 @@ await test('draft resume browser flows with synthetic API only',async t=>{
       await expect(page.getByRole('heading',{name:'임시 메일 이어 쓰기'})).toBeVisible();await expect(page.locator('.reader')).toHaveCount(0);
       await expect(page.getByRole('button',{name:'보낸 사람 선택'})).toContainText('sales@example.com');await expect(page.locator('#compose-subject')).toHaveValue(s.initial.subject);
       for(const address of ['recipient@example.com','copy@example.com','hidden@example.com'])await expect(page.locator('.c-inner')).toContainText(address);
-      await expect(body).toContainText('작성 중인 본문');await expect(body.locator('.sig')).toHaveCount(1);await expect(body).not.toContainText('새 기본 서명');await expect(page.getByRole('button',{name:'서명: 없음'})).toBeVisible();
+      assert.equal(await body.evaluate(node=>{const event=new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true});node.dispatchEvent(event);return event.defaultPrevented;}),false);await body.press('Escape');await expect(page.locator('.composer')).toBeVisible();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);await expect(body).toContainText('작성 중인 본문');await expect(body.locator('.sig')).toHaveCount(1);await expect(body).not.toContainText('새 기본 서명');await expect(page.getByRole('button',{name:'서명: 없음'})).toBeVisible();
       await expect.poll(()=>body.locator('img').evaluateAll(imgs=>imgs.length===2&&imgs.every(img=>img.complete&&img.naturalWidth>0&&img.src.startsWith('blob:')))).toBe(true);
       await expect(page.locator('.drop .att')).toHaveCount(3);assert.equal(s.requests.filter(item=>item.path==='save').length,0);
       if(process.env.DRAFT_RESUME_CAPTURE_DIR){await mkdir(process.env.DRAFT_RESUME_CAPTURE_DIR,{recursive:true});await page.screenshot({path:`${process.env.DRAFT_RESUME_CAPTURE_DIR}/draft-resume-${width}.png`,fullPage:true});}
@@ -116,9 +116,53 @@ await test('draft resume browser flows with synthetic API only',async t=>{
     const s=await scenario(),{page}=await s.open();
     try{await page.route('**/api/drafts',route=>route.abort('failed'));await page.locator('#compose-subject').fill('네트워크 오류 시험');await expect(page.getByRole('alert')).toHaveText(/Failed to fetch|NetworkError|연결|저장/,{timeout:8000});assert.equal(s.messages.size,1);}finally{await page.close();}
   });
-  await t.test('Sent copy failure announces the retained original draft',async()=>{
+  await t.test('Drafts fallback notice allows closing after an immediate send with edited body and a new attachment',async()=>{
+    const s=await scenario(),{page,body}=await s.open();
+    try{
+      let sent;
+      await page.route('**/api/send',route=>{sent=route.request().postDataJSON();return route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:'drafts'}});});
+      await body.evaluate(node=>{node.querySelector('p').textContent='자동 저장 전 최신 본문';node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'latest.txt',mimeType:'text/plain',buffer:Buffer.from('latest attachment')});await expect(page.locator('.drop .att').filter({hasText:'latest.txt'})).toContainText('17B');
+      await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'보낸 그대로의 사본을 임시보관함에 남겨 두었어요'})).toBeVisible();assert.match(sent.html,/최신 본문/);assert.equal(sent.attachmentIds.length,1);assert.equal(s.requests.filter(item=>item.path==='save').length,0);
+      await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.deepEqual(s.errors,[]);
+    }finally{await page.close();}
+  });
+  await t.test('all copy failures allow manual recovery and cancelled closes retain the composer at every viewport',async()=>{
+    for(const width of [1280,768,375]){
+      const s=await scenario(width),{page,body}=await s.open();let canSave=false;
+      try{
+        await page.route('**/api/drafts',route=>canSave?route.fallback():route.fulfill({status:503,json:{error:{code:'UNAVAILABLE',message:'합성 저장 실패'}}}));
+        let sends=0;await page.route('**/api/send',route=>{sends++;return route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null}});});
+        await body.evaluate(node=>{node.querySelector('p').textContent='복구할 최신 본문';node.dispatchEvent(new Event('input',{bubbles:true}));});
+        await page.locator('#compose-bcc').fill('latest-hidden@example.com');
+        await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'임시 저장을 눌러 다시 저장해 주세요'})).toBeVisible();await expect(body).toHaveAttribute('contenteditable','true');await expect(page.getByRole('button',{name:'보내기',exact:true})).toBeDisabled();await expect(page.getByRole('button',{name:'임시 메일 삭제'})).toBeDisabled();
+        const dialogs=[];const cancel=async dialog=>{dialogs.push(dialog.message());await dialog.dismiss();};page.on('dialog',cancel);
+        await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toBeVisible();
+        await page.locator('.compose-dim').dispatchEvent('click');await expect(page.locator('.composer')).toBeVisible();
+        await body.press('Escape');await expect.poll(()=>dialogs.length).toBe(3);assert.ok(dialogs.every(message=>message==='이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?'));assert.equal(sends,1);
+        if(process.env.DRAFT_RESUME_CAPTURE_DIR){await mkdir(process.env.DRAFT_RESUME_CAPTURE_DIR,{recursive:true});await page.screenshot({path:`${process.env.DRAFT_RESUME_CAPTURE_DIR}/draft-send-recovery-${width}.png`,fullPage:true});}
+        canSave=true;await page.getByRole('button',{name:'임시 저장',exact:true}).click();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);await expect(page.getByRole('status').filter({hasText:'임시 저장을 눌러'})).toHaveCount(0);await expect(page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible();assert.equal(s.messages.size,1);assert.match([...s.messages.values()][0].html,/복구할 최신 본문/);assert.ok([...s.messages.values()][0].bcc.some(item=>item.address==='latest-hidden@example.com'));
+        await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.equal(dialogs.length,3);assert.equal(sends,1);assert.deepEqual(s.errors,[]);
+      }finally{await page.close();}
+    }
+  });
+  await t.test('all copy failures continue autosave without another SMTP send',async()=>{
+    const s=await scenario(),{page,body}=await s.open();let sends=0;
+    try{
+      await page.route('**/api/send',route=>{sends++;return route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null}});});
+      await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toBeVisible();
+      await body.evaluate(node=>{node.querySelector('p').textContent='자동 저장 복구 본문';node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await expect(page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible({timeout:8000});await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);assert.equal(s.messages.size,1);assert.match([...s.messages.values()][0].html,/자동 저장 복구 본문/);assert.equal(sends,1);
+    }finally{await page.close();}
+  });
+  await t.test('confirmed close after all copy failures skips saving and retains temporary uploads',async()=>{
     const s=await scenario(),{page}=await s.open();
-    try{await page.route('**/api/send',route=>route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED']}}));await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'보냈지만 보낸편지함에 저장하지 못해 임시보관함에 원본을 남겨 두었어요'})).toBeVisible();assert.equal(s.messages.size,1);}finally{await page.close();}
+    try{
+      const deletes=[];await page.route('**/api/attachments/*',route=>{if(route.request().method()==='DELETE')deletes.push(route.request().url());return route.fallback();});
+      await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'retained.txt',mimeType:'text/plain',buffer:Buffer.from('retain on close')});await expect(page.locator('.drop .att').filter({hasText:'retained.txt'})).toContainText('15B');
+      await page.route('**/api/send',route=>route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null}}));await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toBeVisible();
+      page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'닫기',exact:true}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.equal(s.requests.filter(item=>item.path==='save').length,0);assert.deepEqual(deletes,[]);assert.equal(s.messages.size,1);assert.deepEqual(s.errors,[]);
+    }finally{await page.close();}
   });
   await t.test('authorized manual sender is kept and revoked sender fallback is announced',async()=>{
     for(const fallback of [false,true]){

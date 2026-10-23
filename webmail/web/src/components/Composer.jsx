@@ -24,31 +24,31 @@ import './compose.css';
 
 export default function Composer() {
   const [model,setModel]=useState(null),[identity,setIdentity]=useState(null),[domain,setDomain]=useState(''),[raw,setRaw]=useState(false),[error,setError]=useState(null),[busy,setBusy]=useState(''),[saving,setSaving]=useState(false),[savedTime,setSavedTime]=useState(null),[result,setResult]=useState(null),[showCc,setShowCc]=useState(false),[showBcc,setShowBcc]=useState(false);
-  const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0);
+  const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),recovering=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0);
   const [signatureMenu,setSignatureMenu]=useState(false),[replacement,setReplacement]=useState(null),[imageUrls,setImageUrls]=useState(new Map());
   const [draftImageUrls,setDraftImageUrls]=useState(new Map()),draftUrls=useRef(new Map());
   const signatureSnapshot=useRef(null),imageSnapshot=useRef(null),imageMap=useRef(null),signatureRoot=useRef(null),signatureButton=useRef(null),signaturePopup=useRef(null),signatureChange=useRef(0),signaturePromise=useRef(null);
-  const open=route.value.name==='compose',seed=composeSeed.value,disabled=Boolean(busy||result);
+  const open=route.value.name==='compose',seed=composeSeed.value,disabled=Boolean(busy||result&&!recovering.current);
   function active(){return live.current&&session.value===owner.current;}
   function fail(value){if((current.current?.kind==='draft'||seed?.kind==='draft')&&['MESSAGE_NOT_FOUND','STALE_REF'].includes(value.code))value={...value,message:'임시 메일이 다른 창에서 변경되었거나 삭제됐어요. 임시보관함에서 다시 열어 주세요.'};if(active()&&!['NO_SESSION','SESSION_EXPIRED'].includes(value.code))setError(['SIGNATURE_IMAGE_NOT_FOUND','SIGNATURE_INVALID'].includes(value.code)?signatureError(value):value);}
-  function schedule(){clearTimeout(timer.current);if(!completed.current&&!sending.current&&!closing.current)timer.current=setTimeout(()=>{void saveDraft().catch(fail);},Math.max(0,3000-(Date.now()-editedAt.current)));}
+  function schedule(){clearTimeout(timer.current);if((!completed.current||recovering.current)&&!sending.current&&!closing.current)timer.current=setTimeout(()=>{void saveDraft().catch(fail);},Math.max(0,3000-(Date.now()-editedAt.current)));}
   function patch(value,dirty=true){if(!active()||!current.current)return;current.current={...current.current,...value};setModel(current.current);if(dirty){version.current++;editedAt.current=Date.now();setSavedTime(null);schedule();}}
   async function saveDraft(){
     if(savePromise.current)return savePromise.current;
-    if(!current.current||completed.current||savedVersion.current===version.current)return;
+    if(!current.current||completed.current&&!recovering.current||savedVersion.current===version.current)return;
     let captured;
     const pending=(async()=>{
       await uploads.current;if(!active()||!current.current)return;
       captured=version.current;const snapshot=composePayload(current.current);setSaving(true);
       const value=await api('/api/drafts',{method:'PUT',body:snapshot});
-      if(active()&&!completed.current){patch({draftRef:value.draftRef,forwardFiles:current.current.forwardFiles.map(file=>{const mapped=value.forwardParts?.find(part=>part.previousRef===file.ref&&part.previousPartId===file.partId);return mapped?{...file,ref:mapped.ref,partId:mapped.partId,size:mapped.size,sizeKnown:true}:file;})},false);savedVersion.current=captured;setSavedTime(new Date());setError(value=>value?.source==='draft'?null:value);}
+      if(active()&&current.current&&(!completed.current||recovering.current)){patch({draftRef:value.draftRef,forwardFiles:current.current.forwardFiles.map(file=>{const mapped=value.forwardParts?.find(part=>part.previousRef===file.ref&&part.previousPartId===file.partId);return mapped?{...file,ref:mapped.ref,partId:mapped.partId,size:mapped.size,sizeKnown:true}:file;})},false);savedVersion.current=captured;setSavedTime(new Date());setError(value=>value?.source==='draft'?null:value);if(recovering.current&&savedVersion.current===version.current)setResult(previous=>{if(previous?.sentCopySavedTo!==null)return previous;const warnings=previous.warnings.filter(code=>code!=='SENT_COPY_FAILED');return warnings.length||previous.rejected?.length?{...previous,warnings,sentCopySavedTo:'drafts'}:null;});}
     })();
     savePromise.current=pending;
     try{await pending;}catch(value){throw {...value,message:value.message,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
   }
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
   function releaseDraftImages(){for(const url of draftUrls.current.values())URL.revokeObjectURL(url);draftUrls.current.clear();}
-  function reset(){releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;}
+  function reset(){releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;recovering.current=false;}
   useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap();return()=>{live.current=false;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
   useEffect(()=>{
     if(!open||current.current&&!seed)return;
@@ -104,16 +104,19 @@ export default function Composer() {
       await signaturePromise.current;await savePromise.current;await uploads.current;if(!active())return;
       const body=composePayload(current.current,true),value=await api('/api/send',{method:'POST',body});if(!active())return;
       completed.current=true;
+      if(value.sentCopySavedTo===null){recovering.current=true;patch({to:body.to,cc:body.cc,bcc:body.bcc,pendingTo:'',pendingCc:'',pendingBcc:''},false);version.current++;editedAt.current=Date.now();setSavedTime(null);}
       if(value.rejected?.length||value.warnings?.length)setResult(value);
       else{navigate(listLocation.value);reset();toast.value={kind:'sent',message:'보냈어요'};}
-    }catch(value){fail(value);}finally{sending.current=false;if(active()){setBusy('');if(current.current&&!completed.current&&version.current!==savedVersion.current)schedule();}}
+    }catch(value){fail(value);}finally{sending.current=false;if(active()){setBusy('');if(current.current&&(!completed.current||recovering.current)&&version.current!==savedVersion.current)schedule();}}
   }
   async function close(){
     if(sending.current||closing.current)return;
+    const abandon=Boolean(recovering.current&&result?.sentCopySavedTo===null);
+    if(abandon&&!window.confirm('이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?'))return;
     closing.current=true;clearTimeout(timer.current);setBusy('close');
     try{
       await signaturePromise.current;
-      if(current.current&&!completed.current){
+      if(current.current&&(!completed.current||recovering.current)&&!abandon){
         const value=composePayload(current.current,true);patch({to:value.to,cc:value.cc,bcc:value.bcc,pendingTo:'',pendingCc:'',pendingBcc:''},Boolean(current.current.pendingTo||current.current.pendingCc||current.current.pendingBcc));
         while(savedVersion.current!==version.current){await saveDraft();if(!active())return;}
         await releaseAttachments();
@@ -122,7 +125,7 @@ export default function Composer() {
     }catch(value){fail(value);}finally{closing.current=false;if(active())setBusy('');}
   }
   async function discard(){
-    if(sending.current||closing.current||completed.current||!current.current)return;
+    if(sending.current||closing.current||completed.current&&(!recovering.current||result?.sentCopySavedTo===null)||!current.current)return;
     signatureChange.current++;closing.current=true;clearTimeout(timer.current);setBusy('discard');
     try{
       await savePromise.current;await uploads.current;
@@ -132,7 +135,7 @@ export default function Composer() {
     }catch(value){fail(value);}finally{closing.current=false;if(active())setBusy('');}
   }
   async function addFiles(files){
-    if(sending.current||closing.current||completed.current||!current.current)return;
+    if(sending.current||closing.current||completed.current&&!recovering.current||!current.current)return;
     const accepted=[],limit=config.value.attachMaxMb,max=limit*1024**2;let total=[...current.current.attachments,...current.current.forwardFiles].reduce((sum,file)=>sum+file.size,current.current.signatureImageBytes);
     for(const file of files){if(total+file.size>max){setError({code:'ATTACH_TOO_LARGE',message:attachmentLimitMessage(file.name,limit,total+file.size)});continue;}total+=file.size;accepted.push({key:++fileKey.current,file,filename:file.name,size:file.size,contentType:file.type,uploading:true});}
     if(!accepted.length)return;
@@ -156,7 +159,7 @@ export default function Composer() {
     if(!current.current||disabled||sending.current||closing.current)return;
     const change=++signatureChange.current,composeId=current.current.composeId;
     signaturePromise.current=null;
-    const valid=()=>active()&&change===signatureChange.current&&current.current?.composeId===composeId&&!completed.current;
+    const valid=()=>active()&&change===signatureChange.current&&current.current?.composeId===composeId&&(!completed.current||recovering.current);
     const select=(model,document)=>action.type==='from'?changeCompositionFrom(model,action.from,document,imageSnapshot.current,{confirm}):selectCompositionSignature(model,action.id,document,imageSnapshot.current,{confirm});
     try{
       const value=select(current.current,signatureSnapshot.current);
@@ -254,6 +257,7 @@ export default function Composer() {
     const next=event.key==='Home'?0:event.key==='End'?items.length-1:(index+(event.key==='ArrowDown'?1:-1)+items.length)%items.length;
     items[next]?.focus();
   }
+  useEffect(()=>{if(!open||result?.sentCopySavedTo!==null)return;const key=event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();void close();}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key);},[open,result]);
   useEffect(()=>open?registerShortcuts('compose',{'Ctrl+Enter':()=>void send(),'Ctrl+Shift+H':()=>setRaw(value=>!value)}):undefined,[open]);
   if(!open&&!model)return null;
   const title=({reply:'답장',replyall:'전체 답장',forward:'전달',draft:'임시 메일 이어 쓰기'})[model?.kind]||'새 메일',signature=signatureSnapshot.current?.items.find(item=>item.id===model?.selectedSignatureId),layout=document.documentElement.dataset.compose;
@@ -263,7 +267,7 @@ export default function Composer() {
     <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy)} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
     {model?.fromChanged&&<div class="compose-alert compose-result" role="status">보내는 주소를 기본 주소로 바꿨어요.</div>}
     {error&&<div class="compose-alert" role="alert">{error.message}{error.smtpMessage&&<> {error.smtpMessage}</>}</div>}
-    {result&&<div class="compose-alert compose-result" role="status"><ul>{result.rejected?.map(item=><li key={item.address}>{item.address}에는 보내지 못했어요: {item.smtpMessage}</li>)}{result.warnings?.map(code=><li key={code}>{code==='SENT_COPY_FAILED'&&model?.draftRef?'보냈지만 보낸편지함에 저장하지 못해 임시보관함에 원본을 남겨 두었어요':sendWarnings[code]||code}</li>)}</ul><button class="btn sm" type="button" onClick={()=>void close()}>닫기</button></div>}
+    {result&&<div class="compose-alert compose-result" role="status"><ul>{result.rejected?.map(item=><li key={item.address}>{item.address}에는 보내지 못했어요: {item.smtpMessage}</li>)}{result.warnings?.map(code=><li key={code}>{code==='SENT_COPY_FAILED'?(result.sentCopySavedTo===null?'보냈지만 사본을 저장하지 못했어요. 임시 저장을 눌러 다시 저장해 주세요':'보냈지만 보낸편지함에 저장하지 못해, 보낸 그대로의 사본을 임시보관함에 남겨 두었어요'):sendWarnings[code]||code}</li>)}</ul>{result.sentCopySavedTo===null&&<button class="btn sm" type="button" disabled={Boolean(busy||saving)} onClick={()=>void saveDraft().catch(fail)}>임시 저장</button>}<button class="btn sm" type="button" onClick={()=>void close()}>닫기</button></div>}
     {model&&identity?<><div class="c-inner"><FromPicker identities={identity} from={model.from} onChange={from} disabled={disabled}/><RecipientInput label="받는 사람" id="compose-to" values={model.to} query={model.pendingTo} onValues={to=>patch({to})} onQuery={pendingTo=>patch({pendingTo})} onError={fail} domain={domain} disabled={disabled}><div class="side-l"><button type="button" disabled={disabled} onClick={()=>setShowCc(!showCc)}>참조</button><button type="button" disabled={disabled} onClick={()=>setShowBcc(!showBcc)}>숨은참조</button></div></RecipientInput>
       {showCc&&<RecipientInput label="참조" id="compose-cc" values={model.cc} query={model.pendingCc} onValues={cc=>patch({cc})} onQuery={pendingCc=>patch({pendingCc})} onError={fail} disabled={disabled}/>}{showBcc&&<RecipientInput label="숨은참조" id="compose-bcc" values={model.bcc} query={model.pendingBcc} onValues={bcc=>patch({bcc})} onQuery={pendingBcc=>patch({pendingBcc})} onError={fail} disabled={disabled}/>}
       <div class="fld"><label for="compose-subject">제목</label><div class="val"><input id="compose-subject" value={model.subject} disabled={disabled} onInput={event=>patch({subject:event.currentTarget.value})}/></div><span/></div>
@@ -272,6 +276,6 @@ export default function Composer() {
       <ComposeEditor signatureNonce={model.signatureNonce} html={editorHtml()} onChange={html=>editHtml(html,true)} disabled={disabled} editor={editor}/><HtmlSource html={model.html} onChange={html=>editHtml(html)} disabled={disabled}/>
       <div class="compose-signature-bar" ref={signatureRoot} onKeyDown={signatureKeyboard} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget))setSignatureMenu(false);}}><span>서명</span><button ref={signatureButton} class="signature-picker" type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={signatureMenu} aria-controls="compose-signature-menu" onClick={()=>setSignatureMenu(!signatureMenu)}>서명: {signature?.name||'없음'} <Icon name="down" size="xs"/></button>{model.signatureDirty&&<small>이 메일에서 수정함</small>}{signatureMenu&&<div ref={signaturePopup} id="compose-signature-menu" class="signature-menu" role="menu" aria-label="서명 바꾸기">{signatureItems.map(item=><button key={item.id??'none'} type="button" role="menuitemradio" tabIndex={-1} aria-checked={model.selectedSignatureId===item.id} onClick={()=>{changeSignature({type:'signature',id:item.id});signatureButton.current.focus();}}>{item.name}{model.selectedSignatureId===item.id&&<Icon name="check" size="s"/>}</button>)}</div>}</div>
       <AttachDrop files={[...model.attachments,...model.forwardFiles]} limit={config.value.attachMaxMb} disabled={disabled} onFiles={addFiles} onRemove={removeFile} inputRef={fileInput}/><small class="compose-grants" role="status">첨부 {[...model.attachments,...model.forwardFiles].some(file=>file.sizeKnown===false)?'크기 확인 필요':formatBytes(totalBytes)} / {config.value.attachMaxMb}MB · 서명 이미지 포함</small>
-    </div><div class="c-foot"><div class="send"><button type="button" disabled={disabled||model.attachments.some(file=>file.uploading)} onClick={()=>void send()}><Icon name="send" size="s"/>{busy==='send'?'보내는 중…':'보내기'}</button></div><div class="r"><button class="ib" type="button" aria-label="파일 첨부" disabled={disabled} onClick={()=>fileInput.current.click()}><Icon name="clip" size="s"/></button><button class="ib" type="button" aria-label="임시 메일 삭제" disabled={disabled} onClick={()=>void discard()}><Icon name="trash" size="s"/></button></div></div></>:<div class="empty-read" role="status">{error?'':seed?.kind==='draft'?'임시 메일을 불러오는 중…':'보낼 주소를 불러오는 중…'}</div>}
+    </div><div class="c-foot"><div class="send"><button type="button" disabled={disabled||completed.current||model.attachments.some(file=>file.uploading)} onClick={()=>void send()}><Icon name="send" size="s"/>{busy==='send'?'보내는 중…':'보내기'}</button></div><div class="r"><button class="ib" type="button" aria-label="파일 첨부" disabled={disabled} onClick={()=>fileInput.current.click()}><Icon name="clip" size="s"/></button><button class="ib" type="button" aria-label="임시 메일 삭제" disabled={disabled||result?.sentCopySavedTo===null} onClick={()=>void discard()}><Icon name="trash" size="s"/></button></div></div></>:<div class="empty-read" role="status">{error?'':seed?.kind==='draft'?'임시 메일을 불러오는 중…':'보낼 주소를 불러오는 중…'}</div>}
   </section>{replacement&&<SignatureDialog key={`${replacement.type}:${replacement.from??replacement.id??'none'}`} type="replace" nextSignature={signatureSnapshot.current.items.find(item=>item.id===nextId)||null} returnFocusRef={signatureButton} onCancel={()=>setReplacement(null)} onConfirm={()=>changeSignature(replacement,true)}/>}</>;
 }

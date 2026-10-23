@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { mkdtemp, readFile, rm, access, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -226,10 +227,10 @@ test('send partial rejection: 200 ok with rejected recipient detail and normal p
   assert.equal(response.statusCode, 200, response.body); const result = response.json(); assert.equal(result.ok, true); assert.equal(result.rejected.length, 1); assert.equal(result.rejected[0].address, 'rejected@example.com'); assert.match(result.rejected[0].smtpMessage, /synthetic recipient rejected/);
   assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'append').length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 1); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1);
 });
-test('send postprocessing failure: Sent APPEND failure returns 200 warning, preserves draft and continues Answered, always removes uploads', async t => {
+test('send postprocessing failure: all copy APPEND failures return 200 warning, preserve draft and uploads, and continue Answered', async t => {
   const smtp = await smtpFixture(t), f = await fixture(t, { smtp, clientSetup(client) { client.append = async () => { throw new Error(password + ' synthetic private body'); }; } }), attachment = (await upload(f, 'temporary')).json();
   const response = await request(f, 'POST', '/api/send', body({ attachmentIds: [attachment.id], draftRef: draft, replyToRef: original }));
-  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['SENT_COPY_FAILED'] }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 0); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); assert.deepEqual(await readdir(f.dir), []);
+  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['SENT_COPY_FAILED'], sentCopySavedTo: null }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 0); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); await access(join(f.dir, attachment.id));
   assert.match(f.logs, /SENT_COPY_FAILED/); assert.ok(!f.logs.includes(password)); assert.ok(!f.logs.includes('synthetic private body'));
 });
 test('send postprocessing: independent failures produce exactly their warning codes and preserve 200', async t => {
@@ -595,13 +596,37 @@ test('webmail-saved draft remains resumable, including alternative with related 
   const next=await request(g,'PUT','/api/drafts',resumedBody(loaded));assert.equal(next.statusCode,200,next.body);const stored=g.messages.get(decodeRef(next.json().draftRef).uid);assert.ok(bodyParts(stored.row.bodyStructure).some(part=>part.type==='text/plain'&&!part.attachment));assert.equal((await request(g,'GET',`/api/drafts/${next.json().draftRef}`)).statusCode,200);
 });
 
-test('SMTP success and Sent failure retain the exact original draft and attachments',async t=>{
-  const f=await resumeFixture(t),original=f.messages.get(10),client=f.clients[0],append=client.append.bind(client);
-  client.append=async(path,...args)=>{if(path==='Sent')throw new Error('synthetic Sent failure');return append(path,...args);};
-  const loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json(),response=await request(f,'POST','/api/send',resumedBody(loaded));
-  assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED']});assert.equal(f.attempts.length,1);assert.equal(f.messages.get(10),original);assert.equal(f.messages.size,1);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);
-});
-test('new mail Sent failure still cleans temporary uploads without a draft',async t=>{
-  const f=await fixture(t,{clientSetup(client){client.append=async()=>false;}}),attachment=(await upload(f,'temporary new mail attachment')).json();
-  const response=await request(f,'POST','/api/send',body({attachmentIds:[attachment.id]}));assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED']});assert.equal(f.attempts.length,1);assert.deepEqual(await readdir(f.dir),[]);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);
-});
+for(const resumed of [true,false]) {
+  test(`Sent failure saves identical latest raw in Drafts after one retry: ${resumed?'resumed':'new'} mail`,async t=>{
+    const f=await resumeFixture(t),loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json();
+    if(!resumed)f.messages.clear();
+    const attachment=(await upload(f,'new unsaved attachment',f.headers,'new.txt')).json(),client=f.clients[0],append=client.append.bind(client),sent=[];
+    client.append=async(path,raw,...args)=>{if(path==='Sent'){sent.push(raw);throw new Error('synthetic Sent failure');}return append(path,raw,...args);};
+    const payload=resumed?resumedBody(loaded):body({bcc:['hidden@example.com']}),html='<p>latest body before autosave</p>';
+    const response=await request(f,'POST','/api/send',{...payload,html,attachmentIds:[attachment.id]});
+    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:'drafts'});assert.equal(f.attempts.length,1);assert.equal(sent.length,2);
+    const copies=f.calls.filter(call=>call.action==='append');assert.equal(copies.length,1);assert.equal(copies[0].path,'Drafts');assert.deepEqual(copies[0].flags,['\\Draft','\\Seen']);assert.deepEqual(copies[0].raw,sent[0]);assert.deepEqual(sent[0],sent[1]);
+    assert.equal(f.messages.size,1);assert.equal(f.messages.has(10),false);assert.equal(f.calls.filter(call=>call.action==='delete').length,resumed?1:0);
+    const stored=[...f.messages.values()][0],parts=bodyParts(stored.row.bodyStructure);assert.match([...stored.downloads.values()].map(bytes=>bytes.toString()).join(''),/latest body before autosave/);assert.equal(stored.row.envelope.bcc[0].address,'hidden@example.com');
+    const hash=bytes=>createHash('sha256').update(bytes).digest('hex'),actual=parts.filter(part=>part.attachment).map(part=>hash(stored.downloads.get(part.part))).sort();
+    const expected=(resumed?['first-content','synthetic-image','second-content']:[]).concat('new unsaved attachment').map(value=>hash(Buffer.from(value))).sort();assert.deepEqual(actual,expected);
+    await assert.rejects(access(join(f.dir,attachment.id)),{code:'ENOENT'});
+  });
+  test(`all copy failures retain original and uploaded bytes for recovery: ${resumed?'resumed':'new'} mail`,async t=>{
+    const f=await resumeFixture(t),loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json(),original=f.messages.get(10);if(!resumed)f.messages.clear();
+    const attachment=(await upload(f,'retained recovery bytes')).json(),paths=[];
+    f.clients[0].append=async path=>{paths.push(path);throw new Error('synthetic account copy failure');};
+    const response=await request(f,'POST','/api/send',{...(resumed?resumedBody(loaded):body()),html:'<p>unsaved latest body</p>',attachmentIds:[attachment.id]});
+    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null});assert.deepEqual(paths,['Sent','Sent','Drafts']);assert.equal(f.attempts.length,1);
+    assert.equal(f.messages.size,resumed?1:0);if(resumed)assert.equal(f.messages.get(10),original);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);assert.equal((await readFile(join(f.dir,attachment.id))).toString(),'retained recovery bytes');
+    // Once the account recovers, the retained upload can be saved without another SMTP send.
+    f.clients[0].append=async(path,raw,flags)=>{const uid=99;f.messages.set(uid,storedDraft(raw));return {uid,uidValidity:123n};};
+    const saved=await request(f,'PUT','/api/drafts',{...(resumed?resumedBody(loaded):body()),html:'<p>unsaved latest body</p>',attachmentIds:[attachment.id]});assert.equal(saved.statusCode,200,saved.body);assert.equal(f.messages.size,1);assert.equal(f.attempts.length,1);
+  });
+  test(`Sent retry success creates one Sent copy with normal response: ${resumed?'resumed':'new'} mail`,async t=>{
+    const f=await resumeFixture(t),loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json();if(!resumed)f.messages.clear();
+    const attachment=(await upload(f,'retry attachment')).json(),client=f.clients[0],append=client.append.bind(client);let attempts=0;
+    client.append=async(path,...args)=>{assert.equal(path,'Sent');if(++attempts===1)throw new Error('synthetic first APPEND failure');return append(path,...args);};
+    const response=await request(f,'POST','/api/send',{...(resumed?resumedBody(loaded):body()),attachmentIds:[attachment.id]});assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true});assert.equal(attempts,2);assert.equal(f.attempts.length,1);assert.equal(f.calls.filter(call=>call.action==='append').length,1);assert.equal(f.messages.size,0);await assert.rejects(access(join(f.dir,attachment.id)),{code:'ENOENT'});
+  });
+}

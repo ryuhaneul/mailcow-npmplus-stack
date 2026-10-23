@@ -403,17 +403,36 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             logger?.error({ code, email: session.email }, '발송된 메일의 후처리에 실패했습니다.');
           }
         }
+        let copySaved = false, sentCopySavedTo;
         try {
-          const sentCopySaved = await afterSend('SENT_COPY_FAILED', async () => {
-            const path = await specialFolder(session, 'Sent');
-            if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Seen']))) throw unavailable();
-          });
-          if (body.draftRef && sentCopySaved) await afterSend('DRAFT_DELETE_FAILED', () => deleteDraft(session, body.draftRef));
+          for (let attempt = 0; attempt < 2 && !copySaved; attempt++) {
+            try {
+              const path = await specialFolder(session, 'Sent');
+              if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Seen']))) throw unavailable();
+              copySaved = true;
+            } catch {
+              logger?.error({ code: 'SENT_COPY_FAILED', email: session.email }, '발송된 메일의 사본 저장에 실패했습니다.');
+            }
+          }
+          if (!copySaved) {
+            warnings.push('SENT_COPY_FAILED');
+            sentCopySavedTo = null;
+            try {
+              const path = await specialFolder(session, 'Drafts');
+              // Preserve the exact completed message, including Bcc and newly uploaded parts.
+              if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']))) throw unavailable();
+              copySaved = true;
+              sentCopySavedTo = 'drafts';
+            } catch {
+              logger?.error({ code: 'SENT_COPY_FAILED', email: session.email }, '발송된 메일의 대체 사본 저장에 실패했습니다.');
+            }
+          }
+          if (body.draftRef && copySaved) await afterSend('DRAFT_DELETE_FAILED', () => deleteDraft(session, body.draftRef));
           if (body.replyToRef) await afterSend('ANSWERED_FAILED', () => imap.withRef(session, body.replyToRef, async (client, ref) => {
             if (!await client.messageFlagsAdd(ref.uid, ['\\Answered'], { uid: true })) throw unavailable();
           }));
-        } finally { await cleanup(); }
-        return { ok: true, ...(result?.rejected?.length ? { rejected: result.rejected } : {}), ...(warnings.length ? { warnings } : {}) };
+        } finally { if (copySaved) await cleanup(); }
+        return { ok: true, ...(result?.rejected?.length ? { rejected: result.rejected } : {}), ...(warnings.length ? { warnings } : {}), ...(sentCopySavedTo !== undefined ? { sentCopySavedTo } : {}) };
       }
       const path = await specialFolder(session, 'Drafts');
       const appended = await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']));

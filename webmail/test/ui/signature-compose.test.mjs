@@ -53,7 +53,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     });
     await page.route('**/api/send',route=>{
       requests.push({path:'send',body:route.request().postDataJSON()});
-      return route.fulfill(options.sendError?{status:422,json:{error:{code:options.sendError,message:'technical signature error'}}}:{status:200,json:{ok:true,rejected:[],warnings:[]}});
+      return route.fulfill(options.sendError?{status:422,json:{error:{code:options.sendError,message:'technical signature error'}}}:{status:200,json:{status:'sent',ok:true,sentCopySavedTo:'sent',rejected:[],warnings:[]}});
     });
     if(options.sendError)await page.route('**/api/send/*',route=>route.fulfill({json:{status:'not_sent',error:{code:options.sendError,message:'technical signature error'}}}));
     if(options.kind){

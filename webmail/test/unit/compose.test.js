@@ -793,6 +793,12 @@ test('send receipts: manual recovery updates only the sent/no-copy receipt locat
   const saved = await request(f, 'PUT', '/api/drafts', { ...payload, html: '<p>edited manual recovery</p>' }); assert.equal(saved.statusCode, 200, saved.body);
   const receipt = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
   assert.deepEqual(receipt, { ...before, sentCopySavedTo: 'drafts', sentCopyRef: saved.json().draftRef, manualRecovery: true });
+  const second = await request(f, 'PUT', '/api/drafts', { ...payload, draftRef: saved.json().draftRef, html: '<p>second manual recovery</p>' });
+  assert.equal(second.statusCode, 200, second.body); assert.notEqual(second.json().draftRef, saved.json().draftRef);
+  const latest = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  assert.equal(latest.sentCopyRef, second.json().draftRef); assert.equal(latest.manualRecovery, true);
+  assert.deepEqual(f.calls.filter(call => call.action === 'delete').map(call => call.uid), [31]);
+  const copies = f.calls.filter(call => call.action === 'append'); assert.match(copies.at(-1).raw.toString(), /second manual recovery/);
   assert.equal((await request(f, 'POST', '/api/send', payload)).json().manualRecovery, true); assert.equal(f.attempts.length, 1);
 });
 

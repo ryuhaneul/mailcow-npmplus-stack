@@ -515,7 +515,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     const key = body?.composeId === undefined ? null : sendKey(body.composeId);
     const result = await write(session, body, false);
     const receipt = key && states.get(session)?.sends.get(key);
-    if (receipt?.value.status === 'sent' && receipt.value.sentCopySavedTo === null) {
+    if (receipt?.value.status === 'sent' && (receipt.value.sentCopySavedTo === null || receipt.value.manualRecovery)) {
       receipt.value = { ...receipt.value, sentCopySavedTo: 'drafts', sentCopyRef: result.draftRef, manualRecovery: true };
       receipt.updatedAt = now();
     }

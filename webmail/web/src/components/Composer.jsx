@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { api, endSession } from '../api.js';
 import { route, navigate } from '../router.js';
 import { registerShortcuts } from '../shortcuts.js';
-import { composeSeed, pendingSend, sendResultNotice, hasPendingSendAttempt, rememberSendAttempt, restoreSendAttempt, clearSendAttempt } from '../state/compose.js';
+import { composeSeed, pendingSend, detachedSendAttempts, detachSendAttempt, sendResultNotice, hasPendingSendAttempt, rememberSendAttempt, restoreSendAttempt, clearSendAttempt } from '../state/compose.js';
 import { folders } from '../state/folders.js';
 import { prefs, updatePrefs } from '../state/prefs.js';
 import { session } from '../state/session.js';
@@ -25,7 +25,7 @@ import './compose.css';
 
 export default function Composer() {
   const [model,setModel]=useState(null),[identity,setIdentity]=useState(null),[domain,setDomain]=useState(''),[raw,setRaw]=useState(false),[error,setError]=useState(null),[busy,setBusy]=useState(''),[saving,setSaving]=useState(false),[savedTime,setSavedTime]=useState(null),[result,setResult]=useState(null),[showCc,setShowCc]=useState(false),[showBcc,setShowBcc]=useState(false);
-  const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),recovering=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0),delivery=useRef('idle');
+  const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),recovering=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0),delivery=useRef('idle'),lookupPending=useRef(false);
   const [signatureMenu,setSignatureMenu]=useState(false),[replacement,setReplacement]=useState(null),[imageUrls,setImageUrls]=useState(new Map());
   const [restoration,setRestoration]=useState(()=>hasPendingSendAttempt()?undefined:null),restoredAttempt=useRef(false);
   const [draftImageUrls,setDraftImageUrls]=useState(new Map()),draftUrls=useRef(new Map());
@@ -37,13 +37,13 @@ export default function Composer() {
   function patch(value,dirty=true){if(!active()||!current.current)return;current.current={...current.current,...value};setModel(current.current);if(dirty){version.current++;editedAt.current=Date.now();setSavedTime(null);schedule();}}
   async function saveDraft(manual=false){
     if(savePromise.current)return savePromise.current;
-    if(!current.current||completed.current&&(!recovering.current||!manual)||['checking','unknown'].includes(delivery.current)||savedVersion.current===version.current)return;
+    if(!current.current||restoredAttempt.current||delivery.current==='checking'||!manual&&(completed.current||delivery.current==='unknown'||savedVersion.current===version.current))return;
     let captured;
     const pending=(async()=>{
       await uploads.current;if(!active()||!current.current)return;
-      captured=version.current;const snapshot={...composePayload(current.current),...(manual&&completed.current?{composeId:current.current.composeId}:{})};setSaving(true);
+      captured=version.current;const snapshot={...composePayload(current.current),...(manual?{composeId:current.current.composeId}:{})};setSaving(true);
       const value=await api('/api/drafts',{method:'PUT',body:snapshot});
-      if(active()&&current.current&&(!completed.current||recovering.current)){patch({draftRef:value.draftRef,forwardFiles:current.current.forwardFiles.map(file=>{const mapped=value.forwardParts?.find(part=>part.previousRef===file.ref&&part.previousPartId===file.partId);return mapped?{...file,ref:mapped.ref,partId:mapped.partId,size:mapped.size,sizeKnown:true}:file;})},false);savedVersion.current=captured;setSavedTime(new Date());setError(value=>value?.source==='draft'?null:value);if(recovering.current&&savedVersion.current===version.current){recovering.current=false;setResult(previous=>({...previous,warnings:(previous.warnings||[]).filter(code=>code!=='SENT_COPY_FAILED'),sentCopySavedTo:'drafts',sentCopyRef:value.draftRef,manualRecovery:true,recoveryError:null}));}}
+      if(active()&&current.current){patch({draftRef:value.draftRef,forwardFiles:current.current.forwardFiles.map(file=>{const mapped=value.forwardParts?.find(part=>part.previousRef===file.ref&&part.previousPartId===file.partId);return mapped?{...file,ref:mapped.ref,partId:mapped.partId,size:mapped.size,sizeKnown:true}:file;})},false);savedVersion.current=captured;setSavedTime(new Date());setError(value=>value?.source==='draft'?null:value);if(completed.current&&manual&&savedVersion.current===version.current){recovering.current=false;setResult(previous=>({...previous,warnings:(previous.warnings||[]).filter(code=>code!=='SENT_COPY_FAILED'),sentCopySavedTo:'drafts',sentCopyRef:value.draftRef,copyPending:false,manualRecovery:true,recoveryError:null}));}}
     })();
     savePromise.current=pending;
     try{await pending;}catch(value){throw {...value,message:value.message,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
@@ -51,7 +51,7 @@ export default function Composer() {
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
   function releaseDraftImages(){for(const url of draftUrls.current.values())URL.revokeObjectURL(url);draftUrls.current.clear();}
   function reset(){if(sendResultNotice.value?.composeId===current.current?.composeId)sendResultNotice.value=null;releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;recovering.current=false;delivery.current='idle';restoredAttempt.current=false;}
-  useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap();return()=>{live.current=false;if(['checking','unknown'].includes(delivery.current))toast.value={kind:'send-unknown',message:'발송 여부를 확인할 수 없어요. 보낸편지함·임시보관함을 확인해 주세요.',ownerEmail:owner.current?.user?.email};pendingSend.value=null;sendResultNotice.value=null;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
+  useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap();return()=>{live.current=false;if(['checking','unknown'].includes(delivery.current))toast.value={kind:'send-unknown',message:'발송 여부를 확인할 수 없어요. 보낸편지함·임시보관함을 확인해 주세요.',ownerEmail:owner.current?.user?.email};pendingSend.value=null;detachedSendAttempts.value=[];sendResultNotice.value=null;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
   useEffect(()=>{if(restoration!==undefined)return;let cancelled=false;restoreSendAttempt(owner.current.user.email).then(value=>{if(!cancelled){setRestoration(value);if(value)navigate('compose');}});return()=>{cancelled=true;};},[]);
   useEffect(()=>{
     if(restoration===undefined)return;
@@ -113,12 +113,12 @@ export default function Composer() {
     if(!active())return;
     const status=value.status||(value.ok?'sent':'unknown');
     delivery.current=status;clearTimeout(timer.current);setError(null);
-    if(status==='sent'||status==='not_sent'){clearSendAttempt();if(toast.value?.kind==='send-unknown')toast.value=null;}
-    else if(value.reason==='NOT_FOUND'){clearSendAttempt();toast.value={kind:'send-unknown',message:unknownMessage,ownerEmail:owner.current?.user?.email};}
+    if(status==='sent'&&!value.copyPending||status==='not_sent'){clearSendAttempt(current.current.composeId);if(toast.value?.kind==='send-unknown')toast.value=null;}
+    else if(value.reason==='NOT_FOUND'){clearSendAttempt(current.current.composeId);toast.value={kind:'send-unknown',message:unknownMessage,ownerEmail:owner.current?.user?.email};}
     else if(pendingSend.value)pendingSend.value={...pendingSend.value,status};
     if(status==='sent'){
       completed.current=true;
-      recovering.current=value.sentCopySavedTo===null&&!value.copyPending&&!restoredAttempt.current;
+      recovering.current=!value.sentCopySavedTo&&!value.copyPending&&!restoredAttempt.current;
       if(recovering.current){version.current++;setSavedTime(null);}
     }
     if(status==='not_sent'&&['SIGNATURE_IMAGE_NOT_FOUND','SIGNATURE_INVALID'].includes(value.error?.code))value={...value,error:signatureError(value.error)};
@@ -126,22 +126,22 @@ export default function Composer() {
     setResult({...value,status});
     if(['sent','not_sent'].includes(status)&&(route.value.name!=='compose'||sendResultNotice.value?.composeId===current.current?.composeId)){
       const composeId=current.current.composeId;
-      const message=status==='not_sent'?'보내지 못했어요':value.rejected?.length?'메일을 보냈어요 · 일부 주소는 거절됐어요':value.copyPending?'메일을 보냈어요 · 사본 저장 확인 중':value.sentCopySavedTo===null?'메일을 보냈어요 · 사본 저장이 필요해요':value.sentCopySavedTo==='drafts'?'메일을 보냈어요 · 사본은 임시보관함에 있어요':'메일을 보냈어요';
+      const message=status==='not_sent'?'보내지 못했어요':value.rejected?.length?'메일을 보냈어요 · 일부 주소는 거절됐어요':value.copyPending?'메일을 보냈어요 · 사본 저장 확인 중':!value.sentCopySavedTo?'메일을 보냈어요 · 사본 저장이 필요해요':value.sentCopySavedTo==='drafts'?'메일을 보냈어요 · 사본은 임시보관함에 있어요':'메일을 보냈어요';
       sendResultNotice.value={composeId,status,message,onView:()=>navigate('compose'),onClose:()=>{
         if(current.current?.composeId===composeId&&status==='sent'&&!recovering.current&&!value.copyPending&&!value.rejected?.length)reset();
       }};
     }
   }
   async function checkDelivery(){
-    if(!current.current)return;
-    setBusy('check');
+    if(!current.current||lookupPending.current)return;
+    lookupPending.current=true;setBusy('check');
     try{
       const value=await api(`/api/send/${encodeURIComponent(current.current.composeId)}`,{silentSessionErrors:true,signal:AbortSignal.timeout(15000)});
       applyDelivery(value);
     }catch(value){
       if(['NO_SESSION','SESSION_EXPIRED'].includes(value.code)||!active())toast.value={kind:'send-unknown',message:unknownMessage,ownerEmail:owner.current?.user?.email};
-      else applyDelivery({status:'unknown',reason:'LOOKUP_FAILED'});
-    }finally{if(active())setBusy('');}
+      else {delivery.current=delivery.current==='checking'?'unknown':delivery.current;setResult(previous=>({...previous,status:previous?.status==='checking'?'unknown':previous?.status||'unknown',lookupError:'결과를 다시 확인하지 못했어요 — 잠시 뒤 다시 확인'}));}
+    }finally{lookupPending.current=false;if(active())setBusy('');}
   }
   async function send(){
     if(sending.current||closing.current||completed.current||['checking','unknown'].includes(delivery.current)||!current.current)return;
@@ -171,32 +171,46 @@ export default function Composer() {
     navigate(`f/${encodeURIComponent(folder?.path||specialUse)}`);
   }
   function finishChecking(){
+    if(!restoredAttempt.current)return;
     if(!window.confirm('보낸편지함에 메일이 없으면 임시보관함 사본이나 새 메일로 다시 보내 주세요'))return;
-    clearSendAttempt();if(toast.value?.kind==='send-unknown')toast.value=null;navigate(listLocation.value);reset();
+    clearSendAttempt(current.current?.composeId);if(toast.value?.kind==='send-unknown')toast.value=null;navigate(listLocation.value);reset();
   }
   async function resendUnknown(){
     if(busy||result?.status!=='unknown'||result.reason!=='SMTP_OUTCOME_UNKNOWN')return;
     if(!window.confirm('받는 사람에게 같은 메일이 두 번 갈 수 있어요. 다시 보낼까요?'))return;
     // An explicit duplicate-risk confirmation creates a new attempt; the old
     // unknown key remains locked on the server for the rest of the session.
-    patch({composeId:crypto.randomUUID()},false);delivery.current='idle';setResult(null);
+    detachSendAttempt(current.current.composeId);patch({composeId:crypto.randomUUID()},false);delivery.current='idle';setResult(null);
     await send();
   }
   async function close(){
-    if(sending.current||closing.current||['checking','unknown'].includes(delivery.current))return;
-    if(restoredAttempt.current){navigate(listLocation.value);reset();return;}
-    const abandon=Boolean(recovering.current&&result?.sentCopySavedTo===null);
-    if(abandon&&!window.confirm('이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?'))return;
+    if(sending.current||closing.current||lookupPending.current||delivery.current==='checking')return;
+    if(restoredAttempt.current){
+      if(delivery.current==='unknown'){finishChecking();return;}
+      navigate(listLocation.value);if(!result?.copyPending)reset();return;
+    }
     closing.current=true;clearTimeout(timer.current);setBusy('close');
+    const unresolved=delivery.current==='unknown', needsCopy=completed.current&&(!result?.sentCopySavedTo||result?.copyPending);
+    let saved=false;
     try{
-      await signaturePromise.current;
-      if(current.current&&(!completed.current||recovering.current)&&!abandon){
+      await signaturePromise.current;await savePromise.current;
+      if(current.current&&(!completed.current||needsCopy)){
         const value=composePayload(current.current,true);patch({to:value.to,cc:value.cc,bcc:value.bcc,pendingTo:'',pendingCc:'',pendingBcc:''},Boolean(current.current.pendingTo||current.current.pendingCc||current.current.pendingBcc));
-        while(savedVersion.current!==version.current){await saveDraft();if(!active())return;}
-        await releaseAttachments();
+        if(unresolved||needsCopy)await saveDraft(true);
+        while(savedVersion.current!==version.current){await saveDraft(true);if(!active())return;}
+        saved=true;
       }
-      if(active()){navigate(listLocation.value);reset();}
-    }catch(value){fail(value);}finally{closing.current=false;if(active())setBusy('');}
+    }catch(value){
+      fail(value);
+      if(!active()||!window.confirm('이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?')){closing.current=false;if(active())setBusy('');return;}
+    }
+    try{
+      if(!active())return;
+      if(saved)await releaseAttachments();
+      if(unresolved)detachSendAttempt(current.current.composeId);
+      else clearSendAttempt(current.current?.composeId);
+      navigate(listLocation.value);reset();
+    }finally{closing.current=false;if(active())setBusy('');}
   }
   async function discard(){
     if(sending.current||closing.current||['checking','unknown'].includes(delivery.current)||completed.current&&(!recovering.current||result?.sentCopySavedTo===null)||!current.current)return;
@@ -331,32 +345,33 @@ export default function Composer() {
     const next=event.key==='Home'?0:event.key==='End'?items.length-1:(index+(event.key==='ArrowDown'?1:-1)+items.length)%items.length;
     items[next]?.focus();
   }
-  useEffect(()=>{if(!open||result?.sentCopySavedTo!==null)return;const key=event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();void close();}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key);},[open,result]);
+  useEffect(()=>{if(!open||result?.status!=='sent'||result.sentCopySavedTo)return;const key=event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();void close();}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key);},[open,result]);
   useEffect(()=>open?registerShortcuts('compose',{'Ctrl+Enter':()=>void send(),'Ctrl+Shift+H':()=>setRaw(value=>!value)}):undefined,[open]);
   if(!open&&!model)return null;
   const title=({reply:'답장',replyall:'전체 답장',forward:'전달',draft:'임시 메일 이어 쓰기'})[model?.kind]||'새 메일',signature=signatureSnapshot.current?.items.find(item=>item.id===model?.selectedSignatureId),layout=document.documentElement.dataset.compose;
   const signatureItems=[{id:null,name:'없음'},...(signatureSnapshot.current?.items||[])],totalBytes=model?[...model.attachments,...model.forwardFiles].reduce((sum,file)=>sum+file.size,model.signatureImageBytes):0;
   const nextId=replacement?.type==='from'?defaultCompositionSignature(signatureSnapshot.current,replacement.from,model.kind):replacement?.id;
   return <><div class="compose-dim" onClick={()=>void close()} aria-hidden="true"/><section class={`composer ${raw?'html':''}`} aria-label={title} aria-busy={Boolean(busy)}>
-    <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy||['checking','unknown'].includes(result?.status))} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
+    <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy||result?.status==='checking')} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
     {model?.fromChanged&&<div class="compose-alert compose-result" role="status">보내는 주소를 기본 주소로 바꿨어요.</div>}
     {error&&<div class="compose-alert" role="alert">{error.message}{error.smtpMessage&&<> {error.smtpMessage}</>}</div>}
     {result&&<div class={`compose-alert compose-result delivery-${result.status}`} role="status" aria-live="polite">
       <strong>{result.status==='sent'?'보냈어요':result.status==='not_sent'?'안 보냈어요':result.status==='checking'?'발송 결과 확인 중…':'발송 여부 확인 필요'}</strong>
       {result.status==='sent'&&<>
-        <p>{result.manualRecovery?'보낸 메일은 나갔어요. 작성 내용의 복구본을 임시보관함에 저장했어요':result.copyPending?'메일 서버가 발송을 수락했어요. 사본 저장 결과를 확인 중이에요.':result.sentCopySavedTo==='drafts'?'보냈지만 보낸편지함에 저장하지 못해, 보낸 그대로의 사본을 임시보관함에 남겨 두었어요':result.sentCopySavedTo===null?(restoredAttempt.current?'보냈지만 사본을 저장하지 못했어요. 작성 내용은 임시보관함에서 확인해 주세요.':'보냈지만 사본을 저장하지 못했어요. 임시 저장을 눌러 다시 저장해 주세요'):'보낸편지함에 사본을 저장했어요.'}</p>
+        <p>{result.manualRecovery?'보낸 메일은 나갔어요. 작성 내용의 복구본을 임시보관함에 저장했어요':result.copyPending?'메일 서버가 발송을 수락했어요. 사본 저장 결과를 확인 중이에요.':result.sentCopySavedTo===undefined?'보냈지만 사본 저장 위치를 확인하지 못했어요. 임시보관함을 확인하고 작성 내용을 임시 저장해 주세요.':result.sentCopySavedTo==='drafts'?'보냈지만 보낸편지함에 저장하지 못해, 보낸 그대로의 사본을 임시보관함에 남겨 두었어요':result.sentCopySavedTo===null?(restoredAttempt.current?'보냈지만 사본을 저장하지 못했어요. 작성 내용은 임시보관함에서 확인해 주세요.':'보냈지만 사본을 저장하지 못했어요. 임시 저장을 눌러 다시 저장해 주세요'):'보낸편지함에 사본을 저장했어요.'}</p>
         <ul>{result.rejected?.map(item=><li key={item.address}>{item.address}에는 보내지 못했어요: {item.smtpMessage}</li>)}{result.warnings?.filter(code=>code!=='SENT_COPY_FAILED').map(code=><li key={code}>{sendWarnings[code]||code}</li>)}</ul>
         {result.recoveryError&&<p>{result.recoveryError}</p>}
         {result.sentCopyRef&&<a class="compose-browse" href={`#read/${encodeURIComponent(result.sentCopyRef)}`} onClick={()=>{navigate(`read/${encodeURIComponent(result.sentCopyRef)}`);reset();}}>{result.sentCopySavedTo==='drafts'?'임시보관함의 사본 보기':'보낸 메일 보기'}</a>}
-        {result.sentCopySavedTo===null&&!restoredAttempt.current&&<button class="btn sm" type="button" disabled={Boolean(busy||saving)} onClick={()=>void saveDraft(true).catch(fail)}>임시 저장</button>}
+        {!result.sentCopySavedTo&&!result.copyPending&&!restoredAttempt.current&&<button class="btn sm" type="button" disabled={Boolean(busy||saving)} onClick={()=>void saveDraft(true).catch(fail)}>임시 저장</button>}
       </>}
       {result.status==='not_sent'&&<p>{result.error?.message}{result.error?.smtpMessage&&<> {result.error.smtpMessage}</>} 내용을 확인하고 다시 보내 주세요.</p>}
       {['checking','unknown'].includes(result.status)&&<p>{result.status==='checking'?'아직 보내는 중이에요. 결과를 확인할 때까지 다시 보내지 마세요.':unknownMessage}</p>}
       {(['checking','unknown'].includes(result.status)||result.copyPending)&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={()=>void checkDelivery()}>다시 확인</button>}
       {result.status==='unknown'&&<><button class="btn sm" type="button" onClick={()=>viewMailbox('Sent')}>보낸편지함 확인</button><button class="btn sm" type="button" onClick={()=>viewMailbox('Drafts')}>임시보관함 확인</button></>}
-      {result.status==='unknown'&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={finishChecking}>확인 끝내기</button>}
+      {result.status==='unknown'&&restoredAttempt.current&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={finishChecking}>확인 끝내기</button>}
       {result.status==='unknown'&&result.reason==='SMTP_OUTCOME_UNKNOWN'&&!restoredAttempt.current&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={()=>void resendUnknown()}>확인했는데 없으면 다시 보내기</button>}
-      {!['checking','unknown'].includes(result.status)&&<button class="btn sm" type="button" onClick={()=>void close()}>닫기</button>}
+      {result.lookupError&&<small>{result.lookupError}</small>}
+      {result.status!=='checking'&&(result.status!=='unknown'||!restoredAttempt.current)&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={()=>void close()}>닫기</button>}
     </div>}
 
     {model&&identity&&!restoredAttempt.current?<><div class="c-inner"><FromPicker identities={identity} from={model.from} onChange={from} disabled={disabled}/><RecipientInput label="받는 사람" id="compose-to" values={model.to} query={model.pendingTo} onValues={to=>patch({to})} onQuery={pendingTo=>patch({pendingTo})} onError={fail} domain={domain} disabled={disabled}><div class="side-l"><button type="button" disabled={disabled} onClick={()=>setShowCc(!showCc)}>참조</button><button type="button" disabled={disabled} onClick={()=>setShowBcc(!showBcc)}>숨은참조</button></div></RecipientInput>

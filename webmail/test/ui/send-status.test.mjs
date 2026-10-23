@@ -17,7 +17,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
   const sentRef = fake.state.mail.find(item => item.folder === 'Sent').ref;
   const sent = { status: 'sent', ok: true, sentCopySavedTo: 'sent', sentCopyRef: sentRef };
   const unknown = { status: 'unknown', reason: 'SMTP_OUTCOME_UNKNOWN' };
-  async function open({ width = 1280, send = sent, lookup = sent, saveError = false, accelerateTimeout = false, sendGate } = {}) {
+  async function open({ width = 1280, send = sent, lookup = sent, saveError = false, accelerateTimeout = false, sendGate, attachment = false } = {}) {
     fake.state.authenticated = true;
     const page = await browser.newPage({ viewport: { width, height: 900 } }), sends = [], lookups = [], saves = [], errors = [];
     page.setDefaultTimeout(6000); page.on('pageerror', error => errors.push(error.message));
@@ -49,6 +49,8 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     await page.getByRole('combobox', { name: '받는 사람 추가', exact: true }).fill('recipient@example.com');
     await page.locator('#compose-subject').fill('합성 발송 시험');
     await body.fill('합성 본문');
+    if(attachment){await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'retained.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic attachment')});await expect(page.locator('.drop .att').filter({hasText:'retained.txt'})).toContainText('20B');}
+
     await page.getByRole('button', { name: '보내기', exact: true }).click();
     return { page, body, sends, lookups, saves, errors, result: page.locator('.compose-result'), sendButton: page.getByRole('button', { name: '보내기', exact: true }) };
   }
@@ -113,7 +115,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     try {
       await expect(c.result).toContainText('발송 여부 확인 필요'); await expect(c.sendButton).toBeDisabled();
       await expect(c.page.getByRole('button', { name: '확인했는데 없으면 다시 보내기' })).toHaveCount(0);
-      await expect(c.page.getByRole('button', { name: '쓰기 창 닫기' })).toBeDisabled();
+      await expect(c.page.getByRole('button', { name: '쓰기 창 닫기' })).toBeEnabled();
       await c.page.waitForTimeout(3500); assert.equal(c.lookups.length, 1); assert.equal(c.saves.length, 0);
       await c.page.getByRole('button', { name: '다시 확인', exact: true }).click(); await expect.poll(() => c.lookups.length).toBe(2);
     } finally { await c.page.close(); }
@@ -182,8 +184,8 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     const c = await open({ send: unknown, lookup: unknown });
     try {
       await expect(c.result).toContainText('발송 여부 확인 필요');
-      const record = await c.page.evaluate(() => JSON.parse(sessionStorage.getItem('webmail.pending-send')));
-      assert.deepEqual(Object.keys(record).sort(), ['accountHash', 'composeId']); assert.match(record.accountHash, /^[a-f0-9]{64}$/); assert.equal(record.composeId, c.sends[0].composeId);
+      const record = await c.page.evaluate(() => JSON.parse(sessionStorage.getItem('webmail.pending-sends'))[0]);
+      assert.deepEqual(Object.keys(record).sort(), ['accountHash', 'composeId', 'recordedAt']); assert.match(record.accountHash, /^[a-f0-9]{64}$/); assert.equal(record.composeId, c.sends[0].composeId);
       assert.equal(JSON.stringify(record).includes('recipient@example.com'), false); assert.equal(JSON.stringify(record).includes('user@example.com'), false); assert.equal(JSON.stringify(record).includes('합성'), false);
       await c.page.reload(); await expect(c.result).toContainText('발송 여부 확인 필요');
       assert.deepEqual(c.lookups, [record.composeId]); assert.equal(c.sends.length, 1);
@@ -191,7 +193,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
       await expect(c.page.getByRole('button', { name: '보낸편지함 확인' })).toBeVisible();
       await c.page.route('**/api/send/*', route => route.fulfill({ json: sent }));
       await c.page.getByRole('button', { name: '다시 확인', exact: true }).click(); await expect(c.result).toContainText('보냈어요');
-      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-send')), null);
+      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null);
     } finally { await c.page.close(); }
   });
   await t.test('missing server receipt restores a generic notice, clears storage, and does not guess delivery', async () => {
@@ -199,7 +201,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     try {
       await expect(c.result).toContainText('발송 여부 확인 필요'); await c.page.reload();
       await expect(c.result).toContainText('발송 여부 확인 필요'); await expect(c.result).toContainText('보낸편지함·임시보관함을 확인해 주세요');
-      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-send')), null); assert.equal(c.sends.length, 1);
+      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null); assert.equal(c.sends.length, 1);
       await expect(c.result).not.toContainText('보냈어요'); await expect(c.result).not.toContainText('안 보냈어요');
     } finally { await c.page.close(); }
   });
@@ -209,9 +211,9 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
       await expect(c.result).toContainText('발송 여부 확인 필요'); await c.page.reload(); await expect(c.result).toContainText('발송 여부 확인 필요');
       const finish = c.page.getByRole('button', { name: '확인 끝내기', exact: true });
       c.page.once('dialog', dialog => dialog.dismiss()); await finish.click(); await expect(c.result).toBeVisible();
-      assert.notEqual(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-send')), null);
+      assert.notEqual(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null);
       c.page.once('dialog', async dialog => { assert.equal(dialog.message(), '보낸편지함에 메일이 없으면 임시보관함 사본이나 새 메일로 다시 보내 주세요'); await dialog.accept(); });
-      await finish.click(); await expect(c.page.locator('.composer')).toHaveCount(0); assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-send')), null);
+      await finish.click(); await expect(c.page.locator('.composer')).toHaveCount(0); assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null);
       await expect(c.page.locator('.pending-send-notice')).toHaveCount(0); assert.equal(c.sends.length, 1); assert.equal(c.saves.length, 0);
     } finally { await c.page.close(); }
   });
@@ -222,7 +224,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
       await c.page.route('**/api/auth/session', route => route.fulfill({ json: { user: { email: 'other@example.com', name: '합성 사용자' }, csrf: 'other-csrf', expiresAt: Date.now() + 3600000 } }));
       await c.page.goto(origin + '/#inbox'); await c.page.reload(); await expect(c.page.locator('.mailview')).toBeVisible();
       await expect(c.page.locator('.composer')).toHaveCount(0); await expect(c.page.locator('.pending-send-notice')).toHaveCount(0); await expect(c.page.locator('.toast')).toHaveCount(0);
-      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-send')), null); assert.equal(c.lookups.length, 0); assert.equal(c.sends.length, 1);
+      assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null); assert.equal(c.lookups.length, 0); assert.equal(c.sends.length, 1);
     } finally { await c.page.close(); }
   });
 
@@ -241,7 +243,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     const c=await open({send:{error:{code,message:'요청을 확인할 수 없어요. 화면을 새로 고친 뒤 다시 시도해 주세요.'}},lookup:{status:'unknown',reason:'NOT_FOUND'}});
     try {
       await expect(c.result).toContainText('안 보냈어요');await expect(c.sendButton).toBeEnabled();assert.equal(c.lookups.length,0);
-      assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-send')),null);assert.equal(c.sends.length,1);
+      assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),null);assert.equal(c.sends.length,1);
     } finally {await c.page.close();}
   });
 
@@ -280,6 +282,163 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
       await c.page.getByRole('button',{name:'임시 저장',exact:true}).click();await expect(c.result).toContainText('보낸 메일은 나갔어요. 작성 내용의 복구본을 임시보관함에 저장했어요');
       await capture(c,'manual-recovery',375);assert.equal(c.sends.length,1);
     } finally {release();await c.page.close();}
+  });
+
+  await t.test('real unknown model has no finish action and failed close preserves body and attachment until confirmed', async () => {
+    const c=await open({send:unknown,lookup:unknown,saveError:true,attachment:true});
+    try {
+      await expect(c.result).toContainText('발송 여부 확인 필요');
+      await expect(c.page.getByRole('button',{name:'확인 끝내기',exact:true})).toHaveCount(0);
+      await expect(c.page.getByRole('button',{name:'쓰기 창 닫기'})).toBeEnabled();
+      let dismissed=false;c.page.once('dialog',async dialog=>{assert.equal(dialog.message(),'이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?');await dialog.dismiss();dismissed=true;});
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();
+      await expect.poll(()=>c.saves.length).toBe(1);await expect(c.body).toHaveText('합성 본문');
+      await expect(c.page.locator('#compose-subject')).toHaveValue('합성 발송 시험');await expect(c.page.locator('.drop .att')).toContainText('retained.txt');assert.deepEqual(c.saves[0].attachmentIds,c.sends[0].attachmentIds);
+      await expect.poll(()=>dismissed).toBe(true);await expect(c.page.getByRole('button',{name:'쓰기 창 닫기'})).toBeEnabled();
+      c.page.once('dialog',dialog=>dialog.accept());await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();
+      await expect(c.page.locator('.composer')).toHaveCount(0);await expect(c.page.locator('.detached-send-notice')).toContainText('1통');
+      assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+  await t.test('copy pending retains receipt and model when close save fails, then closes after saving', async () => {
+    const c=await open({send:'lost',lookup:{status:'sent',copyPending:true},saveError:true,attachment:true});
+    try {
+      await expect(c.result).toContainText('보냈어요');
+      assert.match(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),new RegExp(c.sends[0].composeId));
+      c.page.once('dialog',dialog=>dialog.dismiss());await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();
+      await expect.poll(()=>c.saves.length).toBe(1);await expect(c.body).toHaveText('합성 본문');await expect(c.page.locator('.drop .att')).toContainText('retained.txt');assert.deepEqual(c.saves[0].attachmentIds,c.sends[0].attachmentIds);
+      assert.match(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),new RegExp(c.sends[0].composeId));
+      await c.page.unroute('**/api/drafts');await c.page.route('**/api/drafts',route=>{c.saves.push(route.request().postDataJSON());return route.fallback();});
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      assert.equal(c.saves.length,2);assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+  for(const outcome of [unknown,{status:'sent',copyPending:true}])await t.test(`lookup failure preserves authoritative ${outcome.status} outcome and actions`, async()=>{
+    const c=await open({send:outcome,lookup:'lost'});
+    try{
+      await expect(c.result).toContainText(outcome.status==='sent'?'보냈어요':'발송 여부 확인 필요');
+      await c.page.getByRole('button',{name:'다시 확인',exact:true}).click();
+      await expect(c.result).toContainText('결과를 다시 확인하지 못했어요 — 잠시 뒤 다시 확인');
+      await expect(c.result).toContainText(outcome.status==='sent'?'보냈어요':'발송 여부 확인 필요');
+      if(outcome.status==='unknown')await expect(c.page.getByRole('button',{name:'확인했는데 없으면 다시 보내기',exact:true})).toBeVisible();
+      await c.page.route('**/api/send/*',route=>route.fulfill({json:outcome.status==='sent'?sent:unknown}));await c.page.getByRole('button',{name:'다시 확인',exact:true}).click();await expect(c.result).not.toContainText('결과를 다시 확인하지 못했어요');
+    }finally{await c.page.close();}
+  });
+  for(const width of [1280,768,375])await t.test(`closing unknown preserves its record across a new successful send and detached lookup at ${width}`, async()=>{
+    const c=await open({width,send:unknown,lookup:sent,attachment:true});
+    try{
+      await expect(c.result).toContainText('발송 여부 확인 필요');const key=c.sends[0].composeId;
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      assert.equal(c.saves.length,1);assert.match(c.saves[0].html,/합성 본문/);assert.equal(c.saves[0].attachmentIds.length,1);assert.deepEqual(c.saves[0].attachmentIds,c.sends[0].attachmentIds);
+      await expect(c.page.locator('.detached-send-notice')).toContainText('1통');
+      await c.page.evaluate(async()=>{const {startCompose}=await import('/src/state/compose.js');startCompose('new');});
+      await expect(c.body).toHaveAttribute('contenteditable','true');await c.body.fill('두 번째 메일');
+      await c.page.getByRole('combobox',{name:'받는 사람 추가',exact:true}).fill('second@example.com');
+      await c.page.locator('#compose-subject').fill('두 번째 제목');
+      await c.page.route('**/api/send',route=>{c.sends.push(route.request().postDataJSON());return route.fulfill({json:sent});});
+      await c.sendButton.click();await expect(c.result).toContainText('보냈어요');
+      const records=await c.page.evaluate(()=>JSON.parse(sessionStorage.getItem('webmail.pending-sends')));
+      assert.deepEqual(records.map(item=>item.composeId),[key]);
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      await capture(c,'detached-pending',width);await c.page.locator('.detached-send-notice').getByRole('button',{name:'다시 확인',exact:true}).click();
+      await expect(c.page.locator('.detached-send-notice')).toContainText('보냈어요');await capture(c,'detached-sent',width);
+      assert.deepEqual(c.lookups,[key]);assert.equal(c.sends.length,2);
+      assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),null);
+    }finally{await c.page.close();}
+  });
+
+  await t.test('receipt storage migrates legacy metadata, caps at twenty and removes only the confirmed key',async()=>{
+    const c=await open();
+    try{
+      await expect(c.result).toContainText('보냈어요');
+      const evidence=await c.page.evaluate(async()=>{
+        const state=await import('/src/state/compose.js');
+        for(let index=0;index<22;index++){await state.rememberSendAttempt(`synthetic-${index}`,'user@example.com');state.detachSendAttempt(`synthetic-${index}`);}
+        const capped=JSON.parse(sessionStorage.getItem('webmail.pending-sends'));
+        state.clearSendAttempt('synthetic-10');const remaining=JSON.parse(sessionStorage.getItem('webmail.pending-sends'));
+        sessionStorage.removeItem('webmail.pending-sends');sessionStorage.setItem('webmail.pending-send',JSON.stringify({composeId:'legacy-synthetic',accountHash:capped[0].accountHash}));
+        await state.restoreSendAttempt('user@example.com');
+        const migrated=JSON.parse(sessionStorage.getItem('webmail.pending-sends')),legacy=sessionStorage.getItem('webmail.pending-send');
+        await state.restoreSendAttempt('other@example.com');
+        return {capped,remaining,migrated,legacy,other:sessionStorage.getItem('webmail.pending-sends'),detached:state.detachedSendAttempts.value};
+      });
+      assert.equal(evidence.capped.length,20);assert.equal(evidence.capped[0].composeId,'synthetic-2');assert.equal(evidence.capped.at(-1).composeId,'synthetic-21');
+      assert.equal(evidence.remaining.length,19);assert.equal(evidence.remaining.some(item=>item.composeId==='synthetic-10'),false);
+      assert.deepEqual(Object.keys(evidence.migrated[0]).sort(),['accountHash','composeId','recordedAt']);assert.equal(evidence.migrated[0].composeId,'legacy-synthetic');
+      assert.equal(evidence.legacy,null);assert.equal(evidence.other,null);assert.deepEqual(evidence.detached,[]);
+    }finally{await c.page.close();}
+  });
+  for(const outcome of [{status:'not_sent',error:{message:'합성 SMTP 거절'}},{status:'unknown',reason:'NOT_FOUND'}])await t.test(`detached lookup clears only resolved ${outcome.status} record and shows accurate guidance`,async()=>{
+    const c=await open({send:unknown,lookup:outcome});
+    try{
+      await expect(c.result).toContainText('발송 여부 확인 필요');await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      await c.page.locator('.detached-send-notice').getByRole('button',{name:'다시 확인',exact:true}).click();
+      const notice=c.page.locator('.detached-send-notice');await expect(notice).toContainText(outcome.status==='not_sent'?'임시보관함에 저장된 메일을 열어 다시 보내 주세요':'보낸편지함·임시보관함을 확인해 주세요');
+      if(outcome.status==='unknown')await expect(notice).not.toContainText('보냈어요');else await expect(notice).toContainText('안 보냈어요');assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),null);assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+
+  await t.test('detached receipts are queried sequentially without sending and an unresolved key survives',async()=>{
+    const c=await open({send:unknown,lookup:unknown});
+    try{
+      await expect(c.result).toContainText('발송 여부 확인 필요');const first=c.sends[0].composeId;
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      await c.page.evaluate(async()=>{const {startCompose}=await import('/src/state/compose.js');startCompose('new');});
+      await expect(c.body).toHaveAttribute('contenteditable','true');await c.body.fill('다른 합성 본문');
+      await c.page.getByRole('combobox',{name:'받는 사람 추가',exact:true}).fill('other@example.com');await c.page.locator('#compose-subject').fill('다른 합성 제목');
+      await c.sendButton.click();await expect(c.result).toContainText('발송 여부 확인 필요');const second=c.sends[1].composeId;
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      const notice=c.page.locator('.detached-send-notice');await expect(notice).toContainText('2통');
+      let active=0,maxActive=0;const queried=[];
+      await c.page.route('**/api/send/*',async route=>{
+        const key=decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1));queried.push(key);active++;maxActive=Math.max(maxActive,active);
+        await new Promise(resolve=>setTimeout(resolve,50));await route.fulfill({json:key===first?sent:unknown});active--;
+      });
+      await notice.getByRole('button',{name:'다시 확인',exact:true}).click();await expect(notice).toContainText('1통');
+      await expect(notice.getByRole('button',{name:'다시 확인',exact:true})).toBeEnabled();assert.deepEqual(queried,[first,second]);assert.equal(maxActive,1);assert.equal(c.sends.length,2);
+      assert.deepEqual(await c.page.evaluate(()=>JSON.parse(sessionStorage.getItem('webmail.pending-sends')).map(record=>record.composeId)),[second]);
+      await c.page.route('**/api/send/*',route=>route.abort('failed'));await notice.getByRole('button',{name:'다시 확인',exact:true}).click();
+      await expect(notice).toContainText('결과를 다시 확인하지 못했어요');await expect(notice).toContainText('보냈어요');await expect(notice).toContainText('1통');
+      c.page.once('dialog',dialog=>dialog.dismiss());await notice.getByRole('button',{name:'확인 끝내기',exact:true}).click();await expect(notice).toContainText('1통');
+      c.page.once('dialog',dialog=>dialog.accept());await notice.getByRole('button',{name:'확인 끝내기',exact:true}).click();await expect(notice).toHaveCount(0);
+      assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),null);assert.equal(c.sends.length,2);
+    }finally{await c.page.close();}
+  });
+
+  await t.test('pending copy confirmation releases its receipt and closes without an extra recovery save',async()=>{
+    const c=await open({send:'lost',lookup:count=>count===1?{status:'sent',copyPending:true}:sent});
+    try{
+      await expect(c.result).toContainText('사본 저장 결과를 확인 중');
+      await c.page.getByRole('button',{name:'다시 확인',exact:true}).click();await expect(c.result).toContainText('보낸편지함에 사본을 저장했어요');
+      assert.equal(await c.page.evaluate(()=>sessionStorage.getItem('webmail.pending-sends')),null);
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);assert.equal(c.saves.length,0);assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+
+  await t.test('legacy ok-only result has unknown copy location and close saves before asking to abandon',async()=>{
+    const c=await open({send:{ok:true},saveError:true,attachment:true});
+    try{
+      await expect(c.result).toContainText('보냈어요');await expect(c.result).toContainText('사본 저장 위치를 확인하지 못했어요');await expect(c.result).not.toContainText('보낸편지함에 사본을 저장했어요');
+      let dismissed=false;c.page.once('dialog',async dialog=>{assert.equal(dialog.message(),'이 내용은 계정에 남아 있지 않아요. 그래도 닫을까요?');await dialog.dismiss();dismissed=true;});
+      await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect.poll(()=>c.saves.length).toBe(1);await expect(c.body).toHaveText('합성 본문');await expect(c.page.locator('.drop .att')).toContainText('retained.txt');
+      await expect.poll(()=>dismissed).toBe(true);await expect(c.page.getByRole('button',{name:'쓰기 창 닫기'})).toBeEnabled();
+      c.page.once('dialog',dialog=>dialog.accept());await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);assert.equal(c.saves.length,2);assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+  await t.test('a second manual recovery keeps intervening edits and exposes the latest saved reference',async()=>{
+    const c=await open({send:{status:'sent',sentCopySavedTo:null},attachment:true});let release;
+    const gate=new Promise(resolve=>release=resolve);
+    try{
+      await expect(c.result).toContainText('임시 저장을 눌러 다시 저장해 주세요');
+      await c.page.unroute('**/api/drafts');await c.page.route('**/api/drafts',async route=>{
+        c.saves.push(route.request().postDataJSON());const index=c.saves.length;if(index===1)await gate;
+        await route.fulfill({json:{draftRef:index===1?'first-synthetic-copy':'latest-synthetic-copy'}});
+      });
+      await c.page.getByRole('button',{name:'임시 저장',exact:true}).click();await expect.poll(()=>c.saves.length).toBe(1);await c.body.fill('두 번째 복구 본문');release();
+      const save=c.page.getByRole('button',{name:'임시 저장',exact:true});await expect(save).toBeEnabled();await save.click();
+      await expect(c.result).toContainText('작성 내용의 복구본을 임시보관함에 저장했어요');await expect(c.result.getByRole('link',{name:'임시보관함의 사본 보기'})).toHaveAttribute('href','#read/latest-synthetic-copy');
+      assert.equal(c.saves.length,2);assert.equal(c.saves[1].draftRef,'first-synthetic-copy');assert.match(c.saves[1].html,/두 번째 복구 본문/);assert.deepEqual(c.saves[1].attachmentIds,c.sends[0].attachmentIds);assert.equal(c.sends.length,1);
+    }finally{release();await c.page.close();}
   });
 
 });

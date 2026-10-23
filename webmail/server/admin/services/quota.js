@@ -1,6 +1,14 @@
 import { AppError } from '../../errors.js';
 import { isMailboxAddress } from '../doveadm.js';
 
+// Shared by quota management and the forthcoming quota notification scheduler.
+export async function collectMailboxQuota(mailcow, session) {
+  const rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
+  if (Array.isArray(rows)) return rows;
+  if (rows && typeof rows === 'object' && !Object.keys(rows).length) return [];
+  throw new AppError(502, 'MAILCOW_REJECTED', '계정 용량을 읽을 수 없어요.');
+}
+
 export function quotaUsage(rows) {
   const storage = rows.find(row => row?.type === 'STORAGE');
   const numeric = value => typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value) * 1024);

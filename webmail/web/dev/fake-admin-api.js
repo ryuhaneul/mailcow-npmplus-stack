@@ -199,6 +199,9 @@ export function createFakeAdminApi() {
       if(body.action==='unwhitelist'){if(!data.whitelist.includes(body.network))return fail({status:404,code:'NOT_FOUND',message:'차단 안 함 목록에 없는 주소예요.'});data.whitelist=data.whitelist.filter(value=>value!==body.network);return response.end(JSON.stringify({network:body.network,whitelist:false,blacklist:data.blacklist.includes(body.network),auditId:'77777777777777777777777777777777'}));}
       data.whitelist=data.whitelist.filter(value=>value!==body.network);data.blacklist=data.blacklist.filter(value=>value!==body.network);data[body.action].push(body.network);return response.end(JSON.stringify({auditId:'77777777777777777777777777777777'}));
     }
+    if (url.pathname === '/api/admin/quota' && request.method === 'GET') {
+      return response.end(JSON.stringify({ items: state.accounts.items.map(({ address, name, kind, usedBytes, quotaGb }) => ({ address, name, kind, usedBytes, quotaGb, etag: `synthetic-account-${state.accounts.version}` })) }));
+    }
     if (url.pathname === '/api/admin/mailboxes' && request.method === 'GET') {
       const q = (url.searchParams.get('q') ?? '').toLowerCase(), kind = url.searchParams.get('kind') ?? 'all', page = Number(url.searchParams.get('page') ?? 1);
       const items = state.accounts.items.filter(row => `${row.name} ${row.address}`.toLowerCase().includes(q) && (kind === 'all' || (kind === 'off' ? row.active !== 1 : row.kind === kind))).sort((a,b) => a.address.localeCompare(b.address));

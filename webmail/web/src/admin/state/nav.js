@@ -1,6 +1,6 @@
 export const adminNav = [
   ['home','처음 화면','home'],
-  ['overview','운영 현황','status'], ['accounts','계정','users'], ['teams','팀 분배 필터','team'], ['aliases','별칭','alias'],
+  ['overview','운영 현황','status'], ['accounts','계정','users'], ['quota','쿼터','status'], ['teams','팀 분배 필터','team'], ['aliases','별칭','alias'],
   ['permissions','보내기 권한','send'], ['shares','공유','share'], ['sync','동기화','sync'], ['domains','도메인·DKIM','relay'], ['filters','필터','team'], ['cleanup','메일 정리','clean'],
   ['quarantine','격리함','shield'], ['relay','릴레이 허용 IP','relay'], ['trusted','신뢰 발신 장비','shield'], ['trust','전달·발신자 허용','share'], ['fail2ban','fail2ban','shield'], ['logs','로그·큐','search'], ['settings','보기 설정','palette'], ['api-keys','API 키','shield'], ['logo','웹메일 로고','logo'], ['history','변경 기록','history'],
 ];

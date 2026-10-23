@@ -1,3 +1,4 @@
+import { collectMailboxQuota } from './quota.js';
 import { sieveDisabledWarning } from '../messages.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
@@ -99,6 +100,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const found = boxes.filter(row => typeof row.username === 'string' && `${row.username} ${row.name ?? ''}`.toLowerCase().includes(search) &&
       (kind === 'all' || (kind === 'off' ? String(row.active) !== '1' : kindOf(row, groups) === kind))).sort((a, b) => a.username.localeCompare(b.username));
     return { items: found.slice((Number(page) - 1) * 50, Number(page) * 50).map(row => summary(row, groups)), total: found.length, page: Number(page), pageSize: 50 };
+  }
+  async function quotaList(session) {
+    const boxes = await collectMailboxQuota(mailcow, session), groups = groupMailboxAddresses(await rows(session, 'filters/all'));
+    return { items: boxes.filter(row => typeof row.username === 'string').map(row => {
+      const item = summary(row, groups);
+      return { address: item.address, name: item.name, kind: item.kind, usedBytes: item.usedBytes, quotaGb: item.quotaGb, etag: etag(snapshot(row)) };
+    }) };
   }
   async function detail(session, rawAddress, { allShares = false, aclSnapshot } = {}) {
     const addr = address(rawAddress), row = await box(session, addr);
@@ -859,5 +867,5 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       });
     } finally { password?.fill(0); }
   }
-  return { list, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename, convert };
+  return { list, quotaList, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename, convert };
 }

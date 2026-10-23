@@ -1,3 +1,4 @@
+import { watchServerSession } from './api.js';
 import { useEffect } from 'preact/hooks';
 import { preloadComposeResources, refreshComposeResources } from './state/compose-resources.js';
 import './styles/shared.css';
@@ -11,9 +12,7 @@ export default function App() {
   useEffect(() => {
     if (!owner || !ready) return;
     void preloadComposeResources().catch(() => {});
-    const refresh = () => { void refreshComposeResources(); };
-    window.addEventListener('focus', refresh);
-    return () => window.removeEventListener('focus', refresh);
   }, [owner, ready]);
+  useEffect(() => watchServerSession(() => { if (session.value && sessionReady.value) void refreshComposeResources(); }), []);
   return <><Icons/>{session.value && sessionReady.value ? <Shell/> : <>{prefs.value.theme === 'seland' && mode === 'dark' && <Starflow/>}<Login/></>}</>;
 }

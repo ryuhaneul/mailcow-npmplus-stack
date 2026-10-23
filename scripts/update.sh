@@ -149,7 +149,7 @@ fi
 # ============================================================
 header "Phase 1: git pull component repos"
 
-if [ "$TOOLKIT_ENABLE" = true ]; then git_pull_if_repo "$TOOLKIT_DIR" "mailcow-toolkit"; fi
+# Toolkit sources ship in this repository (toolkit/) and are synced in Phase 5.
 # mailcow-dockerized is managed by its own update.sh; pulling here races with Phase 3.
 # npmplus dirs are typically not git repos (compose files copied from stack).
 git_pull_if_repo "$NPMPLUS_DIR" "npmplus (runtime)"

@@ -170,16 +170,34 @@ test('late old-account draft auth failure cannot end a newly logged-in account',
 });
 
 
-test('old-generation SSE expiry reconnects quietly; current-generation expiry still logs out',async t=>{
-  const previous=globalThis.EventSource,connections=[];
-  globalThis.EventSource=class extends EventTarget{constructor(){super();connections.push(this);}close(){this.closed=true;}};
-  setup(t,path=>path==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'new-sse-csrf'}):undefined);
+test('SSE expiry verifies the server, reconnects once when valid and logs out when expired',async t=>{
+  const previous=globalThis.EventSource,connections=[];let expired=false;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();connections.push(this);}close(){this.readyState=2;}};
+  setup(t,path=>path==='/api/auth/session'?(expired?Response.json({error:{code:'SESSION_EXPIRED',message:'synthetic expiry'}},{status:403}):Response.json({user:{email:'person@account.example'},csrf:'new-sse-csrf'})):undefined);
   const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
   const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stop=connectMailboxEvents();
   t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
   const owner=session.value;await checkServerSession();
   const expire=source=>source.dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})}));
-  expire(connections[0]);assert.equal(session.value,owner);assert.equal(connections[0].closed,true);assert.equal(connections.length,2);
+  connections[0].dispatchEvent(new Event('open'));
+  expire(connections[0]);expire(connections[0]);await checkServerSession();
+  assert.equal(session.value,owner);assert.equal(connections[0].readyState,2);assert.equal(connections.length,2);
   expire(connections[0]);assert.equal(connections.length,2);
-  expire(connections[1]);assert.equal(session.value,null);
+  connections[1].dispatchEvent(new Event('open'));expire(connections[1]);await checkServerSession();
+  assert.equal(session.value,owner);assert.equal(connections.length,3);
+  expired=true;expire(connections[2]);await assert.rejects(checkServerSession());assert.equal(session.value,null);
+});
+test('a CLOSED stream that never opened checks once and stops; cleanup suppresses late reconnection',async t=>{
+  const previous=globalThis.EventSource,connections=[];let release;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();connections.push(this);}close(){this.readyState=2;}};
+  const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
+  const requests=setup(t,path=>path==='/api/auth/session'?new Promise(resolve=>{release=()=>resolve(Response.json(session.value));}):undefined);
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');let stop=connectMailboxEvents();
+  t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
+  connections[0].readyState=2;connections[0].dispatchEvent(new Event('error'));connections[0].dispatchEvent(new Event('error'));
+  assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);
+  const checked=checkServerSession();release();await checked;assert.equal(connections.length,1);assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);
+  stop();stop=connectMailboxEvents();connections[1].dispatchEvent(new Event('open'));
+  connections[1].dispatchEvent(new MessageEvent('session',{data:'{"state":"expired"}'}));
+  const pending=checkServerSession();stop();release();await pending;assert.equal(connections.length,2);
 });

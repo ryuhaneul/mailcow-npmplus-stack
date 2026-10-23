@@ -35,6 +35,10 @@ export async function logout() {
 
 export function endSession(code, { notify = true } = {}) {
   session.value = null; sessionReady.value = false; invalidateSessionResources();
+  showSessionNotice(code, { notify });
+}
+
+export function showSessionNotice(code, { notify = true } = {}) {
   if (!['password-changed', 'send-unknown'].includes(toast.value?.kind)) {
     toast.value = notify && code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
   }
@@ -93,6 +97,7 @@ export function checkServerSession() {
 export function watchServerSession(onVerified) {
   const verify = () => { verifiedSession.value = null; void checkServerSession().then(value => { if (value) onVerified(); }).catch(() => {}); };
   const changed = () => {
+    advanceAuthGeneration();
     checkVersion++; sessionCheck = null;
     invalidateSessionResources(); verify();
   };

@@ -5,7 +5,7 @@ import { registerShortcuts } from '../shortcuts.js';
 import { composeSeed, pendingSend, detachedSendAttempts, detachSendAttempt, sendResultNotice, hasPendingSendAttempt, rememberSendAttempt, restoreSendAttempt, clearSendAttempt } from '../state/compose.js';
 import { folders } from '../state/folders.js';
 import { prefs, updatePrefs } from '../state/prefs.js';
-import { session } from '../state/session.js';
+import { session, authGeneration } from '../state/session.js';
 import { composeIdentities, getComposeResources, prepareComposeSignature, composeImageContent, senderDomain } from '../state/compose-resources.js';
 import { signatures as cachedSignatures, signatureImages as cachedImages } from '../state/signatures.js';
 import { config } from '../state/config.js';
@@ -100,8 +100,9 @@ export default function Composer() {
         try{
           for(const file of value.forwardFiles.filter(file=>file.cid&&/^image\/(png|jpeg|gif|webp)$/.test(file.contentType))){
             if(cidUrls.has(file.cid))continue;
+            const generation=authGeneration;
             const response=await fetch(`/api/messages/${encodeURIComponent(file.ref)}/parts/${encodeURIComponent(file.partId)}?inline=1`,{credentials:'same-origin'});
-            if(!response.ok){const {error}=await response.json();if(active()&&['NO_SESSION','SESSION_EXPIRED'].includes(error.code))endSession(error.code);throw error;}
+            if(!response.ok){const {error}=await response.json();if(active()&&generation===authGeneration&&['NO_SESSION','SESSION_EXPIRED'].includes(error.code))endSession(error.code);throw error;}
             cidUrls.set(file.cid,URL.createObjectURL(await response.blob()));
           }
           if(cancelled||!active()){for(const url of cidUrls.values())URL.revokeObjectURL(url);return;}

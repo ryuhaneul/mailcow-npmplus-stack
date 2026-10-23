@@ -110,34 +110,43 @@ await test('real authentication cookies and cross-tab composition ownership',asy
   const temp=await mkdtemp(join(tmpdir(),'compose-auth-'));t.after(()=>rm(temp,{recursive:true,force:true}));
   const backend=Fastify({logger:false});installErrors(backend);backend.decorate('directory',{mailboxName:async email=>email});
   await installAuth(backend,{config:{publicHostnames:['127.0.0.1'],sessionIdleMin:480,sessionMaxHours:24},tempRoot:temp,verifyLogin:async()=>({connection:{logout:async()=>{}}})});
-  let sessionGate,sessionReads=0;
+  let sessionGate,sessionReads=0,delayed,draftSaves=0,nativeEvents=false,streams=[],sseAuthFailures=0,oldGate,oldStarted=false;const network=[];
+  async function late(req,reply,kind){const entry=delayed;if(entry?.kind!==kind||entry.started)return false;entry.started=true;await entry.gate;if(req.session.connection===null){reply.code(403).send({error:{code:'SESSION_EXPIRED',message:'synthetic old credential lifetime'}});return true;}return false;}
   const snapshot=email=>({revision:'r-'+email,items:[{id:sig,name:'합성 서명',html:`<p>${email} 비공개 서명</p>`}],defaults:{[email]:{newDefault:sig,replyDefault:sig}},usedBytes:128,maxBytes:262144,notices:[]});
   backend.get('/api/compose/identities',async req=>({identities:[{address:req.session.email,name:req.session.email,kind:'self'}],defaultFrom:req.session.email,anyAtDomains:[],anyAddress:false}));
-  backend.get('/api/signatures',async req=>snapshot(req.session.email));
+  backend.get('/api/signatures',async(req,reply)=>{if(await late(req,reply,'signature'))return;return snapshot(req.session.email);});
   backend.post('/api/signatures/normalize',async req=>({html:req.body.html}));
   backend.get('/api/signature-images',async()=>({revision:'i1',images:[],usedBytes:0,maxBytes:1048576,maxFileBytes:204800,maxCount:20}));
   backend.post('/api/drafts',async()=>({draftRef:'synthetic'}));
+  backend.put('/api/drafts',async(req,reply)=>{if(await late(req,reply,'draft'))return;draftSaves++;return {draftRef:'synthetic'};});
+  backend.get('/api/signature-images/:id/content',async(req,reply)=>{if(await late(req,reply,'image'))return;return reply.type('image/png').send(bytes);});
   await backend.ready();t.after(()=>backend.close());
   const fake=createFakeApi({authenticated:true});t.after(()=>fake.close());
-  const paths=new Set(['/api/compose/identities','/api/signatures','/api/signatures/normalize','/api/signature-images','/api/drafts']);
+  const paths=new Set(['/api/compose/identities','/api/signatures','/api/signatures/normalize','/api/signature-images','/api/drafts',`/api/signature-images/${asset}/content`]);
   const root=process.env.COMPOSE_AUTH_ROOT||fileURLToPath(new URL('../../web',import.meta.url));
   const server=await createServer({configFile:false,root,logLevel:'error',plugins:[preact(),{name:'compose-real-auth',configureServer(server){server.middlewares.use(async(req,res,next)=>{
     const path=new URL(req.url,'http://127.0.0.1').pathname;
+    if(path==='/api/events'&&nativeEvents){
+      let owner;try{const raw=(req.headers.cookie||'').split(';').map(item=>item.trim()).find(item=>item.startsWith('webmail_sid='))?.slice(12);owner=await backend.sessions.get(raw);}catch(error){sseAuthFailures++;res.statusCode=403;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({error:{code:error.code,message:error.message}}));return;}
+      res.setHeader('Content-Type','text/event-stream');res.setHeader('Cache-Control','no-store');res.write('retry: 20\n\n');streams.push({res,owner,tag:req.headers['x-eval-page']});return;
+    }
     if(!path.startsWith('/api/auth/')&&!paths.has(path))return next();
     if(path==='/api/auth/session'){sessionReads++;if(sessionGate)await sessionGate;}
+    if(path==='/api/signatures/normalize'&&req.headers['x-eval-page']==='secondary'&&oldGate){oldStarted=true;await oldGate;}
     const raw=[];for await(const chunk of req)raw.push(chunk);const body=Buffer.concat(raw),headers={...req.headers};delete headers.host;delete headers['content-length'];if(headers.origin)headers.origin='https://127.0.0.1';
     const response=await backend.inject({method:req.method,url:req.url,headers,...(body.length?{payload:body}:{})});
+    network.push({path,status:response.statusCode,clearsCookie:JSON.stringify(response.headers['set-cookie']||'').includes('Max-Age=0')});
     res.statusCode=response.statusCode;for(const [key,value] of Object.entries(response.headers)){if(key==='set-cookie')res.setHeader(key,Array.isArray(value)?value.map(item=>item.replace(/; Secure/gi,'')):value.replace(/; Secure/gi,''));else if(!['content-length','connection','transfer-encoding'].includes(key))res.setHeader(key,value);}res.end(response.rawPayload);
   });server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0,hmr:false}});
-  await server.listen();t.after(()=>server.close());
+  await server.listen();t.after(()=>{for(const stream of streams)stream.res.destroy();return server.close();});
   const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE,args:['--no-sandbox']});t.after(()=>browser.close());
   const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
   const login=async(page,email)=>{await page.getByLabel('메일 주소',{exact:true}).fill(email);await page.getByLabel('암호',{exact:true}).fill('synthetic-password');await page.getByRole('button',{name:'로그인',exact:true}).click();await expect(page.locator('.compose-btn')).toBeVisible();};
   async function openPair(fallback=false){
-    const context=await browser.newContext();if(fallback)await context.addInitScript(()=>{window.BroadcastChannel=undefined;});
-    const page=await context.newPage();page.setDefaultTimeout(8000);await page.goto(origin);await login(page,'a@example.com');
+    const context=await browser.newContext();await context.addInitScript(()=>{const Native=window.EventSource;window.testStreams=[];window.EventSource=class extends Native{constructor(...args){super(...args);window.testStreams.push(this);}};});if(fallback)await context.addInitScript(()=>{window.BroadcastChannel=undefined;});
+    const page=await context.newPage();await page.setExtraHTTPHeaders({'x-eval-page':'primary'});page.setDefaultTimeout(8000);await page.goto(origin);await login(page,'a@example.com');
     await page.locator('.compose-btn').click();const body=page.frameLocator('iframe.compose-editor').locator('body');await expect(body).toContainText('a@example.com 비공개 서명');
-    const tab=await context.newPage();tab.setDefaultTimeout(8000);await tab.goto(origin);await expect(tab.locator('.compose-btn')).toBeVisible();
+    const tab=await context.newPage();await tab.setExtraHTTPHeaders({'x-eval-page':'secondary'});tab.setDefaultTimeout(8000);await tab.goto(origin);await expect(tab.locator('.compose-btn')).toBeVisible();
     return {context,page,tab,body};
   }
   for(const fallback of [false,true])await t.test(`other-tab logout/login invalidates immediately (${fallback?'storage':'BroadcastChannel'})`,async()=>{
@@ -155,12 +164,12 @@ await test('real authentication cookies and cross-tab composition ownership',asy
       await mkdir(captures,{recursive:true});await c.page.screenshot({path:`${captures}/cross-tab-${fallback?'storage':'channel'}.png`});
     }finally{release?.();sessionGate=null;await c.context.close();}
   });
-  await t.test('focus verifies a missed cookie change before composition; open-window transition notice contains no old account',async()=>{
+  for(let repetition=1;repetition<=30;repetition++)await t.test(`focus verifies a missed cookie change before composition; open-window transition notice contains no old account (${repetition}/30)`,async()=>{
     const c=await openPair();try{
       // An HTTP client changes the real cookie without publishing an application event.
       await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
       await c.page.evaluate(()=>{window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));});
-      await expect(c.page.locator('.toast')).toContainText('다른 탭에서 계정이 바뀌어 작성 중이던 창을 닫았어요. 마지막 자동 저장본은 이전 계정의 임시보관함에 있어요.');
+      try {await expect(c.page.locator('.toast')).toContainText('다른 탭에서 계정이 바뀌어 작성 중이던 창을 닫았어요. 마지막 자동 저장본은 이전 계정의 임시보관함에 있어요.');} catch(error) {console.log('FOCUS_TRANSITION',await c.page.evaluate(async()=>({owner:(await import('/src/state/session.js')).session.value?.user.email,toast:(await import('/src/state/toast.js')).toast.value,composer:Boolean(document.querySelector('.composer'))})));throw error;}
       await expect(c.page.locator('.toast')).not.toContainText('a@example.com');await expect(c.page.locator('.composer')).toHaveCount(0);
       await c.page.locator('.compose-btn').click();await expect(c.body).toContainText('b@example.com 비공개 서명');await expect(c.body).not.toContainText('a@example.com');
       await c.page.screenshot({path:`${captures}/cross-tab-notice.png`});
@@ -183,5 +192,159 @@ await test('real authentication cookies and cross-tab composition ownership',asy
       assert.equal(sessionReads-before,1);assert.equal(await c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value===window.previousOwner),true);
       await expect(c.body).toContainText('작성 중 본문');await expect(c.body).toContainText('a@example.com 비공개 서명');await expect(c.page.locator('.toast')).toHaveCount(0);
     }finally{release?.();sessionGate=null;await c.context.close();}
+  });
+  for(const kind of ['signature','image','draft'])await t.test(`same-account relogin keeps editor after late old-session ${kind} failure`,async()=>{
+    const c=await openPair();let release;
+    try{
+      const entry={kind,gate:new Promise(resolve=>release=resolve),started:false};delayed=entry;
+      if(kind==='draft')await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('이전 저장 요청 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      else await c.page.evaluate(async kind=>{window.lateResult=null;window.oldRequest=(kind==='signature'?(await import('/src/state/signatures.js')).loadSignatures():(await import('/src/signature-images.js')).getSignatureImageContent('A'.repeat(32))).catch(error=>{window.lateResult=error.code;});},kind);
+      await expect.poll(()=>entry.started,{timeout:7000}).toBe(true);
+      const auth=await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(auth.csrf);
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('새 세션의 저장 전 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const successBefore=draftSaves;
+      const response=c.page.waitForResponse(response=>response.status()===403&&response.url().includes(kind==='draft'?'/api/drafts':kind==='signature'?'/api/signatures':'/content'));
+      release();delayed=null;await response;
+      if(kind!=='draft')await c.page.evaluate(()=>window.oldRequest);
+      else await expect(c.page.locator('.c-head .saved')).not.toContainText('임시 저장 중');
+      assert.equal(await c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email),'a@example.com');
+      await expect(c.body).toContainText('새 세션의 저장 전 본문');await expect(c.page.locator('#login-email')).toHaveCount(0);
+      await mkdir(captures,{recursive:true});await c.page.screenshot({path:`${captures}/late-${kind}.png`});
+      if(kind==='draft'){await expect.poll(()=>draftSaves,{timeout:7000}).toBeGreaterThan(successBefore);await expect(c.page.locator('.c-head .saved')).toContainText('임시 저장됨');}
+    }finally{release?.();delayed=null;await c.context.close();}
+  });
+  await t.test('late A autosave error preserves B editor and its next successful save',async()=>{
+    const c=await openPair();let release;
+    try{
+      const entry={kind:'draft',gate:new Promise(resolve=>release=resolve),started:false};delayed=entry;
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('A 저장 중 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await expect.poll(()=>entry.started,{timeout:7000}).toBe(true);
+      await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      await c.page.evaluate(()=>{window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));});
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email)).toBe('b@example.com');
+      await expect(c.page.locator('.compose-btn')).toBeVisible();await c.page.locator('.compose-btn').click();await expect(c.body).toContainText('b@example.com 비공개 서명');
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('B 저장 전 중요한 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const successBefore=draftSaves,response=c.page.waitForResponse(response=>response.status()===403&&response.url().includes('/api/drafts'));
+      release();delayed=null;await response;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email)).toBe('b@example.com');await expect(c.body).toContainText('B 저장 전 중요한 본문');
+      await expect.poll(()=>draftSaves,{timeout:7000}).toBeGreaterThan(successBefore);await expect(c.page.locator('.c-head .saved')).toContainText('임시 저장됨');
+      await c.page.screenshot({path:`${captures}/late-draft-account-switch.png`});
+    }finally{release?.();delayed=null;await c.context.close();}
+  });
+  await t.test('late SSE expiry reconnects after relogin without closing the editor; fresh expiry logs out',async()=>{
+    const c=await openPair();try{
+      await c.page.evaluate(()=>{window.oldStream=window.testStreams.at(-1);window.streamCount=window.testStreams.length;});
+      const auth=await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(auth.csrf);
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('SSE 이후 유지할 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await expect.poll(()=>c.page.evaluate(()=>window.oldStream.readyState)).toBe(1);
+      await c.page.evaluate(()=>window.oldStream.dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})})));
+      await expect.poll(()=>c.page.evaluate(()=>window.testStreams.length-window.streamCount)).toBe(1);await expect(c.body).toContainText('SSE 이후 유지할 본문');
+      await c.page.screenshot({path:`${captures}/late-sse.png`});
+      await c.context.request.post(origin+'/api/auth/logout',{headers:{origin:'https://127.0.0.1','x-webmail-csrf':auth.csrf}});
+      await c.page.evaluate(()=>window.testStreams.at(-1).dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})})));
+      await expect(c.page.locator('#login-email')).toBeVisible();await expect(c.page.locator('.composer')).toHaveCount(0);
+    }finally{await c.context.close();}
+  });
+  for(const fallback of [false,true]) await t.test(`old auth failure between external notification and session verification (${fallback?'storage':'BroadcastChannel'})`,async()=>{
+    const c=await openPair(fallback);let releaseOld,releaseCheck;
+    try{
+      const entry={kind:'signature',gate:new Promise(r=>releaseOld=r),started:false};delayed=entry;
+      await c.page.evaluate(async()=>{window.oldRequest=(await import('/src/signatures.js')).getSignatures().catch(e=>({code:e.code}));});
+      await expect.poll(()=>entry.started).toBe(true);
+      const before=await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {epoch:s.sessionResourceEpoch.value,generation:s.authGeneration};});
+      sessionGate=new Promise(r=>releaseCheck=r);
+      await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).sessionResourceEpoch.value)).toBeGreaterThan(before.epoch);
+      await c.page.evaluate(async()=>{window.pendingVerification=(await import('/src/api.js')).checkServerSession().catch(e=>({code:e.code}));});const notified=await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {epoch:s.sessionResourceEpoch.value,generation:s.authGeneration,verified:s.verifiedSession.value!==null};});
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('재확인 중 보존해야 할 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      releaseOld();delayed=null;await c.page.evaluate(()=>window.oldRequest);await c.page.waitForTimeout(100);
+      const afterError=await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {owner:s.session.value?.user.email||null,composer:Boolean(document.querySelector('.composer')),generation:s.authGeneration};});
+      releaseCheck();sessionGate=null;await c.page.evaluate(()=>window.pendingVerification);
+      const afterCheck=await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {owner:s.session.value?.user.email||null,composer:Boolean(document.querySelector('.composer')),serverOwner:(await(await fetch('/api/auth/session')).json()).user?.email};});
+      const result={mode:fallback?'storage':'BroadcastChannel',before,notified,afterError,afterCheck};console.log('PREVERIFY '+JSON.stringify(result));
+      await mkdir(captures,{recursive:true});await writeFile(captures+'/preverify-'+(fallback?'storage':'channel')+'.json',JSON.stringify(result,null,2));await c.page.screenshot({path:captures+'/preverify-'+(fallback?'storage':'channel')+'.png'});
+      assert.equal(afterError.owner,'a@example.com');await expect(c.body).toContainText('재확인 중 보존해야 할 본문');
+    }finally{releaseOld?.();releaseCheck?.();delayed=null;sessionGate=null;await c.context.close();}
+  });
+  await t.test('native EventSource reconnect uses fresh cookies; expiry of that current session must log out',async()=>{
+    nativeEvents=true;streams=[];sseAuthFailures=0;
+    const previousMail=fake.state.mail;fake.state.mail=previousMail.map(item=>({...item,subject:'A 전용 목록 '+item.ref}));
+    const c=await openPair();try{
+      await expect.poll(()=>streams.length).toBe(2);
+      const pageStream=streams.find(item=>item.owner.email==='a@example.com');
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.length)).toBeGreaterThan(0);
+      assert.equal(await c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.every(item=>item.subject.startsWith('A 전용 목록 '))),true);
+      const nativeCount=await c.page.evaluate(()=>window.testStreams.length);
+      const auth=await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(auth.csrf);
+      await c.page.bringToFront();await c.page.evaluate(async()=>{await(await import('/src/api.js')).checkServerSession();});const generation=await c.page.evaluate(async()=>(await import('/src/state/session.js')).authGeneration);
+      pageStream.res.destroy();
+      await expect.poll(()=>streams.length,{timeout:5000}).toBe(3);
+      assert.equal(await c.page.evaluate(()=>window.testStreams.length),nativeCount,'native reconnect retains its JavaScript EventSource object');
+      const current=streams.at(-1);assert.notEqual(current.owner,pageStream.owner);assert.equal(current.owner.csrf,auth.csrf);
+      await backend.sessions.destroy(current.owner,'SESSION_EXPIRED');
+      assert.equal(current.owner.connection,null);
+      current.res.write('event: session\ndata: {"state":"expired"}\n\n');current.res.end();
+      if(process.env.COMPOSE_AUTH_ROOT){await expect.poll(()=>sseAuthFailures).toBeGreaterThan(0);}else{await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value)).toBe(null);}await c.page.waitForTimeout(150);
+      const result=await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {owner:s.session.value?.user.email||null,ready:s.sessionReady.value,composer:Boolean(document.querySelector('.composer')),nativeStreams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState),generation:s.authGeneration};});
+      result.baseline=Boolean(process.env.COMPOSE_AUTH_ROOT);result.generationAfterRelogin=generation;result.serverSessionConnection=current.owner.connection;result.sseAuthFailures=sseAuthFailures;
+      console.log('NATIVE_SSE '+JSON.stringify(result));await mkdir(captures,{recursive:true});await writeFile(captures+'/'+(process.env.COMPOSE_AUTH_ROOT?'baseline-':'')+'native-sse.json',JSON.stringify(result,null,2));await c.page.screenshot({path:captures+'/'+(process.env.COMPOSE_AUTH_ROOT?'baseline-':'')+'native-sse.png'});
+      assert.equal(result.owner,null);await expect(c.page.locator('.composer')).toHaveCount(0);
+      if(!process.env.COMPOSE_AUTH_ROOT){
+        await expect(c.page.getByRole('status')).toContainText('로그인이 만료됐어요. 다시 로그인해 주세요.');
+        assert.equal(await c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.length),0);
+        fake.state.mail=previousMail.map(item=>({...item,subject:'B 전용 목록 '+item.ref}));
+        await login(c.page,'b@example.com');
+        await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.length)).toBeGreaterThan(0);
+        assert.equal(await c.page.evaluate(async()=>(await import('/src/state/list.js')).list.value.items.every(item=>item.subject.startsWith('B 전용 목록 '))),true);
+      }
+    }finally{await c.context.close();nativeEvents=false;fake.state.mail=previousMail;}
+  });  await t.test('SSE confirmation overtaken by external authentication verification must restore realtime updates',async()=>{
+    nativeEvents=true;streams=[];const previousMail=fake.state.mail;
+    const c=await openPair();let releaseCheck;
+    try{
+      await expect.poll(()=>streams.length).toBe(2);
+      await c.page.bringToFront();await c.page.evaluate(async()=>await(await import('/src/api.js')).checkServerSession());const original=streams.find(x=>x.tag==='primary'),originalNativeCount=await c.page.evaluate(()=>window.testStreams.length);
+      // A real successful login changes the shared cookie; publish its application
+      // notification only once the older SSE-triggered confirmation is waiting.
+      const authResponse=await c.context.request.post(origin+'/api/auth/login',{data:{email:'a@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      const auth=await authResponse.json();assert.equal(original.owner.connection,null);
+      const beforeReads=sessionReads;sessionGate=new Promise(r=>releaseCheck=r);
+      original.res.write('event: session\ndata: {"state":"expired"}\n\n');original.res.end();
+      await expect.poll(()=>sessionReads-beforeReads).toBe(1);console.log('BEFORE_NOTIFY',JSON.stringify(await c.page.evaluate(async()=>{const s=await import('/src/state/session.js');return {epoch:s.sessionResourceEpoch.value,generation:s.authGeneration,owner:s.session.value?.user.email}})));
+      await c.tab.evaluate(()=>{const channel=new BroadcastChannel('webmail-auth-change');channel.postMessage('changed');channel.close();});const latestAuth=auth;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).authGeneration)).toBeGreaterThan(1);
+      releaseCheck();sessionGate=null;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(latestAuth.csrf);
+      await c.page.waitForTimeout(200);
+      const afterVerification=await c.page.evaluate(async()=>({owner:(await import('/src/state/session.js')).session.value?.user.email,verified:(await import('/src/state/session.js')).verifiedSession.value!==null,streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState)}));
+      await c.page.bringToFront();await c.page.evaluate(async()=>{const api=await import('/src/api.js');window.dispatchEvent(new Event('focus'));await api.checkServerSession();});
+      await c.page.waitForTimeout(150);
+      const afterFocus=await c.page.evaluate(()=>({streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState)}));
+      fake.state.mail=fake.state.mail.map(x=>({...x,subject:'현재 HTTP 조회 '+x.ref}));
+      await c.page.evaluate(async()=>{await(await import('/src/state/list.js')).loadMessages();});
+      const afterHttp=await c.page.evaluate(async()=>({streams:window.testStreams.length,states:window.testStreams.map(x=>x.readyState),freshList:(await import('/src/state/list.js')).list.value.items.every(x=>x.subject.startsWith('현재 HTTP 조회 '))}));
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('연결 중단 중에도 작성 본문 보존 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const result={originalNativeCount,afterVerification,afterFocus,afterHttp};
+      console.log('OVERTAKEN_SSE '+JSON.stringify(result));await mkdir(captures,{recursive:true});await writeFile(captures+'/overtaken-sse.json',JSON.stringify(result,null,2));await c.page.screenshot({path:captures+'/overtaken-sse.png'});
+      assert.equal(afterVerification.streams,originalNativeCount+1);assert.equal(afterVerification.states.filter(state=>state===1).length,1);
+    }finally{releaseCheck?.();sessionGate=null;await c.context.close();nativeEvents=false;fake.state.mail=previousMail;}
+  });
+  await t.test('old-account rejection must not delete the replacement login cookie',async()=>{
+    let releaseOld;oldStarted=false;oldGate=new Promise(r=>releaseOld=r);const c=await openPair();
+    try{
+      await expect.poll(()=>oldStarted).toBe(true);const before=network.length;
+      await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      const loggedIn=await c.context.request.get(origin+'/api/auth/session');assert.equal((await loggedIn.json()).user.email,'b@example.com');
+      releaseOld();oldGate=null;await expect.poll(()=>network.slice(before).some(x=>x.path==='/api/signatures/normalize'&&x.status===403)).toBe(true);
+      await c.page.evaluate(()=>{window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));});
+      const response=await c.context.request.get(origin+'/api/auth/session'),value=await response.json();
+      await c.page.waitForTimeout(100);const ui=await c.page.evaluate(async()=>({owner:(await import('/src/state/session.js')).session.value?.user.email||null,composer:Boolean(document.querySelector('.composer')),toast:(await import('/src/state/toast.js')).toast.value}));
+      const result={revision:process.env.EVAL_REVISION||'ecee50b',afterLogin:'b@example.com',afterOldResponse:{status:response.status(),owner:value.user?.email||null,code:value.error?.code},ui,network:network.slice(before)};
+      await mkdir(captures,{recursive:true});await writeFile(captures+'/cookie-replacement-'+result.revision+'.json',JSON.stringify(result,null,2));console.log('COOKIE_REPLACEMENT '+JSON.stringify(result));
+      assert.equal(response.status(),200);assert.equal(value.user.email,'b@example.com');
+    }finally{releaseOld();oldGate=null;await c.context.close();}
   });
 });

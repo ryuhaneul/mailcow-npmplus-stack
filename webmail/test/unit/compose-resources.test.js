@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { session, verifiedSession, invalidateSessionResources } from '../../web/src/state/session.js';
 import { checkServerSession, watchServerSession, api } from '../../web/src/api.js';
+import { signatureRequest } from '../../web/src/signatures.js';
+import { getSignatureImageContent } from '../../web/src/signature-images.js';
+import { toast } from '../../web/src/state/toast.js';
 import { signatures, signatureImages } from '../../web/src/state/signatures.js';
 import { composeIdentities, getComposeResources, preloadComposeResources, loadComposeIdentities, refreshComposeIdentities, prepareComposeSignature, composeImageContent, MAX_COMPOSE_IMAGE_BYTES, senderDomain } from '../../web/src/state/compose-resources.js';
 
@@ -136,4 +139,96 @@ test('cross-tab invalidation rejects late normalized HTML and image bytes before
   invalidateSessionResources();normalize();image();
   await assert.rejects(html);await assert.rejects(bytes);
   assert.equal(requests.filter(path=>path.endsWith('/content')).length,1);
+});
+
+
+for (const code of ['SESSION_EXPIRED','NO_SESSION']) for (const [name,request,path] of [
+  ['api',()=>api('/api/drafts',{method:'PUT',body:{}}),'/api/drafts'],
+  ['signature JSON',()=>signatureRequest('/api/signatures'),'/api/signatures'],
+  ['image content',()=>getSignatureImageContent(id),`/api/signature-images/${id}/content`],
+]) {
+  test(`${name}: late ${code} after same-account relogin cannot end the new session`,async t=>{
+    let release;
+    setup(t,p=>p===path?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code,message:'synthetic old session'}},{status:403}));}):p==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'new-csrf'}):undefined);
+    const owner=session.value,notice={kind:'test-notice',message:'keep'};toast.value=notice;
+    const old=request(),failed=assert.rejects(old);
+    await checkServerSession();release();await failed;
+    assert.equal(session.value,owner);assert.equal(owner.csrf,'new-csrf');assert.equal(toast.value,notice);
+    t.after(()=>{toast.value=null;});
+  });
+  test(`${name}: current-generation ${code} still ends the session`,async t=>{
+    setup(t,p=>p===path?Response.json({error:{code,message:'synthetic current session'}},{status:403}):undefined);
+    await assert.rejects(request());assert.equal(session.value,null);
+  });
+}
+test('late old-account draft auth failure cannot end a newly logged-in account',async t=>{
+  let release;
+  setup(t,p=>p==='/api/drafts'?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code:'SESSION_EXPIRED',message:'old draft'}},{status:403}));}):p==='/api/auth/login'?Response.json({user:{email:'next@another.example'},csrf:'next'}):undefined);
+  const old=api('/api/drafts',{method:'PUT',body:{}}),failed=assert.rejects(old);
+  await api('/api/auth/login',{method:'POST',body:{}});const next=session.value;
+  release();await failed;assert.equal(session.value,next);
+});
+
+
+test('SSE expiry verifies the server, reconnects once when valid and logs out when expired',async t=>{
+  const previous=globalThis.EventSource,connections=[];let expired=false;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();connections.push(this);}close(){this.readyState=2;}};
+  setup(t,path=>path==='/api/auth/session'?(expired?Response.json({error:{code:'SESSION_EXPIRED',message:'synthetic expiry'}},{status:403}):Response.json({user:{email:'person@account.example'},csrf:'new-sse-csrf'})):undefined);
+  const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stop=connectMailboxEvents();
+  t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
+  const owner=session.value;await checkServerSession();
+  const expire=source=>source.dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})}));
+  connections[0].dispatchEvent(new Event('open'));
+  expire(connections[0]);expire(connections[0]);await checkServerSession();
+  assert.equal(session.value,owner);assert.equal(connections[0].readyState,2);assert.equal(connections.length,2);
+  expire(connections[0]);assert.equal(connections.length,2);
+  connections[1].dispatchEvent(new Event('open'));expire(connections[1]);await checkServerSession();
+  assert.equal(session.value,owner);assert.equal(connections.length,3);
+  expired=true;expire(connections[2]);await assert.rejects(checkServerSession());assert.equal(session.value,null);
+});
+test('a CLOSED stream that never opened checks once and stops; cleanup suppresses late reconnection',async t=>{
+  const previous=globalThis.EventSource,connections=[];let release;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();connections.push(this);}close(){this.readyState=2;}};
+  const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
+  const requests=setup(t,path=>path==='/api/auth/session'?new Promise(resolve=>{release=()=>resolve(Response.json(session.value));}):undefined);
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');let stop=connectMailboxEvents();
+  t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
+  connections[0].readyState=2;connections[0].dispatchEvent(new Event('error'));connections[0].dispatchEvent(new Event('error'));
+  assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);
+  const checked=checkServerSession();release();await checked;assert.equal(connections.length,1);assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);
+  stop();stop=connectMailboxEvents();connections[1].dispatchEvent(new Event('open'));
+  connections[1].dispatchEvent(new MessageEvent('session',{data:'{"state":"expired"}'}));
+  const pending=checkServerSession();stop();release();await pending;assert.equal(connections.length,2);
+});
+
+
+async function overtakenSse(t) {
+  const previous={fetch:globalThis.fetch,EventSource:globalThis.EventSource,BroadcastChannel:globalThis.BroadcastChannel,window:globalThis.window,document:globalThis.document};
+  const connections=[],channels=[],releases=[];
+  globalThis.window=new EventTarget();globalThis.document=new EventTarget();document.querySelector=()=>null;
+  globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();this.readyState=0;connections.push(this);}close(){this.readyState=2;}};
+  globalThis.BroadcastChannel=class{constructor(){channels.push(this);}postMessage(){}close(){}};
+  const {route}=await import('../../web/src/router.js'),before=route.value;route.value={name:'settings',value:''};
+  const owner={user:{email:'same@example.com'},csrf:'old'};session.value=owner;verifiedSession.value=owner;
+  globalThis.fetch=async()=>new Promise(resolve=>releases.push(()=>resolve(Response.json({user:owner.user,csrf:'new'}))));
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stopWatch=watchServerSession(()=>{}),stopEvents=connectMailboxEvents();
+  t.after(()=>{stopEvents();stopWatch();session.value=null;route.value=before;Object.assign(globalThis,previous);});
+  connections[0].readyState=1;connections[0].dispatchEvent(new Event('open'));
+  const expire=()=>connections[0].dispatchEvent(new MessageEvent('session',{data:'{"state":"expired"}'}));
+  return {connections,channels,releases,owner,expire};
+}
+test('SSE confirmation overtaken by a notification waits for the newest check and reconnects once',async t=>{
+  const c=await overtakenSse(t);c.expire();assert.equal(c.releases.length,1);
+  c.channels[0].onmessage();assert.equal(c.releases.length,2);const newest=checkServerSession();
+  c.releases[0]();await new Promise(resolve=>setImmediate(resolve));c.releases[1]();await newest;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(session.value,c.owner);assert.equal(c.owner.csrf,'new');assert.equal(c.connections.length,2);assert.equal(c.connections[0].readyState,2);
+});
+test('SSE stops after three superseded checks and releases its checking guard',async t=>{
+  const c=await overtakenSse(t);c.expire();
+  for(let i=0;i<3;i++){c.channels[0].onmessage();c.releases[i]();await new Promise(resolve=>setImmediate(resolve));}
+  const latest=checkServerSession();c.releases[3]();await latest;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(c.connections.length,1);assert.equal(session.value,c.owner);
+  c.expire();c.expire();assert.equal(c.releases.length,5);
+  const resumed=checkServerSession();c.releases[4]();await resumed;await new Promise(resolve=>setImmediate(resolve));assert.equal(c.connections.length,2);
 });

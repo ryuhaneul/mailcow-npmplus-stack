@@ -1,5 +1,5 @@
 import { effect, signal, untracked } from '@preact/signals';
-import { api, endSession } from '../api.js';
+import { api, checkServerSession, showSessionNotice } from '../api.js';
 import { selection, scopeSelection, selectionScopeKey, updateSelectionPage } from './selection.js';
 import { interruptScopedAction, resetScopedAction, scopedListFrozen } from './scoped-actions.js';
 import { session } from './session.js';
@@ -106,16 +106,40 @@ export async function runAction(action, refs = [...selection.value], target) {
   finally {if(generation===mailboxGeneration)acting.value=false;}
 }
 export function connectMailboxEvents() {
-  const source=new EventSource('/api/events');
-  source.addEventListener('mailbox',event=>{
-    const value=JSON.parse(event.data);
-    folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
-    const params=list.value.params;
-    if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
-  });
-  source.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
-  source.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired'){source.close();resetMailbox();endSession('SESSION_EXPIRED');}});
-  return ()=>source.close();
+  let source, stopped=false;
+  function connect() {
+    const connection=new EventSource('/api/events');source=connection;
+    let opened=false, checking=false;
+    connection.addEventListener('open',()=>{opened=true;});
+    async function confirm() {
+      if(stopped||source!==connection||checking)return;
+      checking=true;connection.close();
+      try {
+        let current;
+        for(let attempt=0;attempt<3;attempt++){
+          current=await checkServerSession();
+          if(stopped||source!==connection)return;
+          if(!session.value){resetMailbox();return;}
+          if(current!==undefined)break;
+        }
+        if(current&&opened)connect();
+      } catch(error) {
+        if(error.code==='SESSION_EXPIRED'&&!session.value)showSessionNotice(error.code);
+        if(!stopped&&source===connection&&!session.value)resetMailbox();
+      } finally { checking=false; }
+    }
+    connection.addEventListener('mailbox',event=>{
+      const value=JSON.parse(event.data);
+      folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
+      const params=list.value.params;
+      if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
+    });
+    connection.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
+    connection.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired')void confirm();});
+    connection.addEventListener('error',()=>{if(connection.readyState===EventSource.CLOSED)void confirm();});
+  }
+  connect();
+  return ()=>{stopped=true;source.close();};
 }
 
 export function resetMailbox() {

@@ -8,3 +8,6 @@ export function invalidateSessionResources() {
   verifiedSession.value = null;
   sessionResourceEpoch.value++;
 }
+// Separate credential lifetimes even when same-account editors keep their owner object.
+export let authGeneration = 0;
+export function advanceAuthGeneration() { authGeneration++; }

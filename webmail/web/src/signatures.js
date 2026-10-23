@@ -1,5 +1,5 @@
 import { endSession } from './api.js';
-import { session } from './state/session.js';
+import { session, authGeneration } from './state/session.js';
 
 const messages = {
   SIGNATURE_INVALID: '서명 이름과 기본 서명 설정을 확인해 주세요.',
@@ -31,7 +31,7 @@ export function signatureSessionChanged() {
 }
 
 export async function signatureRequest(path, { method = 'GET', body, ...options } = {}) {
-  const owner = session.value, headers = new Headers(options.headers);
+  const owner = session.value, generation = authGeneration, headers = new Headers(options.headers);
   const multipart = body instanceof FormData;
   if (body !== undefined && !multipart) headers.set('Content-Type', 'application/json');
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.toUpperCase()) && owner?.csrf) headers.set('X-Webmail-CSRF', owner.csrf);
@@ -42,7 +42,7 @@ export async function signatureRequest(path, { method = 'GET', body, ...options 
     if (session.value !== owner) throw signatureSessionChanged();
     if (!response.ok) {
       const error = value.error;
-      if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) endSession(error.code);
+      if (generation === authGeneration && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) endSession(error.code);
       throw { ...error, status: response.status };
     }
     return value;

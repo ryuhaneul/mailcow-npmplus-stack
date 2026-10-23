@@ -58,12 +58,12 @@ test('a stale list request cannot replace a newer quick-filter result',async t=>
   assert.deepEqual(list.value.items.map(item=>item.ref),[rows[1].ref]);assert.equal(list.value.params.quick,'unread');
 });
 test('mailbox/quota/session SSE events update counts, storage and session',async t=>{
-  setup(t,async()=>result(rows));const previous=globalThis.EventSource;let stream;
+  setup(t,async path=>path==='/api/auth/session'?Response.json({error:{code:'SESSION_EXPIRED',message:'synthetic expiry'}},{status:403}):result(rows));const previous=globalThis.EventSource;let stream;
   globalThis.EventSource=class{listeners={};closed=false;constructor(){stream=this;}addEventListener(name,handler){this.listeners[name]=handler;}close(){this.closed=true;}emit(name,value){this.listeners[name]({data:JSON.stringify(value)});}};
   t.after(()=>{globalThis.EventSource=previous;});route.value=parseRoute('#inbox');folders.value={folders:[{path:'INBOX',unseen:1,total:3}],virtualAllMail:'WebmailVirtual/AllMail'};
   const close=connectMailboxEvents();stream.emit('mailbox',{path:'INBOX',unseen:7,total:12});assert.equal(folders.value.folders[0].unseen,7);assert.equal(folders.value.folders[0].total,12);
   stream.emit('quota',{usedBytes:95,limitBytes:100});assert.deepEqual(storage.value.quota,{usedBytes:95,limitBytes:100});
-  stream.emit('session',{state:'expired'});assert.equal(session.value,null);assert.equal(sessionReady.value,false);assert.equal(stream.closed,true);assert.equal(toast.value.kind,'session-expired');close();
+  stream.emit('session',{state:'expired'});await new Promise(resolve=>setImmediate(resolve));assert.equal(session.value,null);assert.equal(sessionReady.value,false);assert.equal(stream.closed,true);assert.equal(toast.value.kind,'session-expired');close();
 });
 test('server preferences are applied and copied before session becomes ready',async t=>{
   const server={theme:'olive',mode:'dark',accent:{},layout:null,folderColors:{},imageAllow:[],signatures:{},defaultFrom:null};

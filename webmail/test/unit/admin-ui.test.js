@@ -12,7 +12,7 @@ const response = (status, value) => ({ status, ok: status < 400, json: async () 
 test('admin nav IDs/titles/icons/order and three groups match approved fixture', () => {
  assert.deepEqual(adminNav, fixture.nav);
  assert.deepEqual(navGroups, fixture.groups);
- assert.equal(adminNav.length, 21);
+ assert.equal(adminNav.length, 22);
  assert.deepEqual(adminNav[0], ['home', '처음 화면', 'home']);
 });
 for (const hash of ['#trusted','#trusted/cdpmanager%40example.com','#home','#logs','#accounts/person%40example.com','#teams/team%40example.com','#aliases/a%40example.com','#permissions/p%40example.com','#sync/12','#history/abcd','#flow/team-move']) test(`admin route ${hash}`, () => { const value = parseAdminRoute(hash); assert.equal(value.name, hash.slice(1).split('/')[0]); assert.ok(!value.parts.join('').includes('%40')); });
@@ -69,7 +69,7 @@ test('flow initial password uses cryptographic randomness and all four permitted
 });
 test('CSV chunks contain at most50 and retry selects only failed, not partial/unknown rows', async () => {const{chunks,failedLines}=await import('../../web/src/admin/flows/helpers.js');const lines=Array.from({length:60},(_,i)=>i+2);assert.deepEqual(chunks(lines).map(rows=>rows.length),[50,10]);assert.deepEqual(chunks(lines).flat(),lines);assert.deepEqual(failedLines([{line:2,result:'ok'},{line:3,result:'failed'},{line:4,result:'partial'},{line:5,result:'unknown'}]),[3]);});
 test('flow memory strips passwords after auth interruption and clears on leaving normally', async () => {const{saveFlow,readFlow,leaveFlow}=await import('../../web/src/admin/flows/memory.js');const value={draft:{csv:'synthetic csv'},results:[{line:2,password:'synthetic-only-secret',result:'ok'}]};saveFlow('csv',value);leaveFlow('csv',true);assert.equal(readFlow('csv').draft.csv,'synthetic csv');assert.equal(JSON.stringify(readFlow('csv')).includes('synthetic-only-secret'),false);assert.equal(value.results[0].password,undefined);leaveFlow('csv',false);assert.equal(readFlow('csv').draft.csv,'');assert.equal(readFlow('csv').results.length,0);});
-test('admin menu feature flags hide cleanup/relay/trusted while retaining operation group heading',async()=>{const{visibleAdminNav}=await import('../../web/src/admin/state/nav.js');const off=visibleAdminNav();assert.equal(off.length,18);assert.ok(!off.some(item=>['cleanup','relay','trusted'].includes(item.row[0])));assert.equal(off.find(item=>item.row[0]==='quarantine').heading,'운영 · 보안');assert.equal(visibleAdminNav({cleanup:true,relay:true}).length,20);assert.equal(visibleAdminNav({cleanup:true,relay:true,trusted:true}).length,21);assert.equal(visibleAdminNav({trusted:true}).find(item=>item.row[0]==='trusted').row[2],'shield');});
+test('admin menu feature flags hide cleanup/relay/trusted while retaining operation group heading',async()=>{const{visibleAdminNav}=await import('../../web/src/admin/state/nav.js');const off=visibleAdminNav();assert.equal(off.length,19);assert.ok(!off.some(item=>['cleanup','relay','trusted'].includes(item.row[0])));assert.equal(off.find(item=>item.row[0]==='quarantine').heading,'운영 · 보안');assert.equal(visibleAdminNav({cleanup:true,relay:true}).length,21);assert.equal(visibleAdminNav({cleanup:true,relay:true,trusted:true}).length,22);assert.equal(visibleAdminNav({trusted:true}).find(item=>item.row[0]==='trusted').row[2],'shield');});
 
 test('KST display accepts epoch seconds, milliseconds and ISO with identical approved format',async()=>{
  const {kst}=await import('../../web/src/admin/pages/status.js');

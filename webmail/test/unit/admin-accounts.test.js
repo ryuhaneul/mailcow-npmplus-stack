@@ -322,3 +322,26 @@ test('accounts: join team stage succeeds after creating the first team on an emp
   assert.equal(response.result, 'ok');
   assert.deepEqual(response.steps.map(row => [row.stage, row.status]), [['mailbox', 'ok'], ['team', 'ok']]);
 });
+
+test('quota accounts: entire 500-account projection is compact and etag matches existing PATCH snapshot', async t => {
+  const f = await fixture(t);
+  for (let i = f.boxes.length; i < 500; i++) f.boxes.push(makeBox(`person${i}@example.com`));
+  f.boxes[0].quota = 0;
+  const result = await f.service.quotaList({});
+  assert.equal(result.items.length, 500);
+  assert.deepEqual(Object.keys(result.items[0]).sort(), ['address','etag','kind','name','quotaGb','usedBytes']);
+  assert.equal(result.items[0].quotaGb, 0); assert.equal(result.items[1].kind, 'team'); assert.equal(result.items[2].kind, 'admin');
+  assert.equal(result.items[0].etag, (await read(f)).etag);
+  const size = Buffer.byteLength(JSON.stringify(result)); t.diagnostic(`quota projection: 500 accounts ${size} bytes; 95 accounts ${Buffer.byteLength(JSON.stringify({ items: result.items.slice(0, 95) }))} bytes`); assert.ok(size < 150_000, `500 rows: ${size} bytes`);
+  const saved = await patch(f, result.items[0].etag, { quotaGb: 25 });
+  assert.equal(saved.mailbox.quotaGb, 25);
+  await assert.rejects(patch(f, result.items[0].etag, { quotaGb: 30 }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+});
+test('quota HTTP: list is protected and exposes the mailcow usage with no-store', async t => {
+  const f = await fixture(t), { app, headers } = await http(t, f);
+  assert.equal((await app.inject('/api/admin/quota')).statusCode, 403);
+  const response = await app.inject({ url: '/api/admin/quota', headers });
+  assert.equal(response.statusCode, 200, response.body); assert.equal(response.headers['cache-control'], 'no-store');
+  assert.equal(response.json().items[0].usedBytes, f.boxes[0].quota_used);
+  assert.ok(!response.body.includes(secret));
+});

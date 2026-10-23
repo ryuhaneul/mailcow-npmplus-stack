@@ -12,7 +12,8 @@ export function createHistoryService({ audit, lock }) {
     const adapter = adapters.get(record.action);
     // 목록 시점의 가능 여부이며 실행 직전 현재 값이 바뀌면 409로 멈춘다.
     const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter) && !isOldShare(record);
-    const label = adapter?.label ?? '설정을 바꿨어요';
+    const countsKnown = [record.detail?.sent, record.detail?.failed].every(value => Number.isSafeInteger(value) && value >= 0);
+    const label = record.action === 'quota.notifications.send' ? countsKnown ? `쿼터 알림 발송 ${record.detail.sent}건/실패 ${record.detail.failed}건` : '쿼터 알림 발송 건수 확인 안 됨' : adapter?.label ?? '설정을 바꿨어요';
     const suffix = !record.result ? ' (결과 확인 안 됨)' : record.result === 'failed' ? ' (실패)' : record.result === 'partial' ? ' (일부 적용)' : record.kind === 'irreversible' ? ' (되돌리기 불가)' : '';
     return { ...record, ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.action.startsWith('trusted.') ? '' : `${record.target} `}${label}${suffix}` };
   }

@@ -17,6 +17,11 @@
       "users"
     ],
     [
+      "quota",
+      "쿼터",
+      "status"
+    ],
+    [
       "teams",
       "팀 분배 필터",
       "team"

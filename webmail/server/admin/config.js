@@ -108,7 +108,7 @@ export function loadAdminConfig(env = process.env) {
   if (typeof rspamdMapDir !== 'string' || !isAbsolute(rspamdMapDir) || rspamdMapDir.includes('\0')) invalid('ADMIN_RSPAMD_MAP_DIR');
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly,

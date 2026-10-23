@@ -1,4 +1,5 @@
 export default async function accountsRoutes(app, { service }) {
+  app.get('/api/admin/quota', { config: { adminMailcowApi: true } }, async request => service.quotaList(request.session.mailcow));
   app.get('/api/admin/mailboxes', { config: { adminMailcowApi: true } }, async request => service.list(request.session.mailcow, request.query));
   app.get('/api/admin/mailboxes/:addr', async request => service.detail(request.session.mailcow, request.params.addr));
   app.post('/api/admin/mailboxes', async request => service.create({ session: request.session.mailcow, actor: request.session.username, ip: request.ip, data: request.body }));

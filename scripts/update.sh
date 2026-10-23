@@ -395,6 +395,13 @@ else
     warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
+# Run duplicate detection before user/admin scripts can stop or file/redirect copies.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-dedupe.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "dovecot early duplicate detection applied (or already present)"
+else
+    warn "apply-dovecot-dedupe.sh failed — check state with: scripts/apply-dovecot-dedupe.sh --check"
+fi
+
 webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
 
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then

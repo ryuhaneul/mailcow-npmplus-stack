@@ -1150,3 +1150,7 @@ docker compose exec -T dovecot-mailcow doveadm quota get -u user@example.test
 2. doveadm 허용 목록에서 야간 색인용 다섯 명령만 빠집니다. 기존 `search`, `expunge`, `quota get`, `quota recalc`, `mailbox list`, `acl get` 여섯 개와 키·remote 구조는 유지합니다. **이 기능만 끌 때 `apply-dovecot-admin-api.sh --revert`를 쓰면 기존 관리 기능까지 꺼지므로 사용하지 않습니다.** 허용 목록 축소도 reload와 세션 단절을 수반합니다.
 3. 앱 판도 되돌려야 하면 배포 전에 보관한 이전 이미지의 태그·다이제스트로 `/home/webmail/docker-compose.yml`의 해당 `image:`를 복원하고 `cd /home/webmail` 후 `sudo docker compose --profile admin up -d --no-build`로 다시 올립니다. 기존 이미지 복귀에 `build`를 섞지 않습니다. 예약 꺼짐을 유지하고 관리·웹메일 상태를 확인합니다.
 4. 관리 컨테이너의 `/data/fts-nightly`는 복구·조사와 이후 재적용을 위해 보존합니다. 이미 생성된 검색 색인은 그대로 둬도 됩니다. 메일이나 색인 파일을 삭제하는 작업은 되돌리기에 필요하지 않습니다.
+
+### 메일 중복 검사 위치
+
+설치·업데이트는 `scripts/apply-dovecot-dedupe.sh apply -y`로 mailcow의 기본 Message-ID 중복 검사를 `global_sieve_before`로 옮기고 `global_sieve_after`의 기존 검사는 마커 안에서 주석 처리합니다. 관리·개인 필터의 `stop`, `fileinto`, `redirect`보다 먼저 검사하여 같은 수신자에게 복제된 메일을 걸러냅니다. 첫 사본은 다음 필터로 통과하며 키·기간은 바꾸지 않습니다(기본 mailcow 기간 1분). 두 호스트 파일을 백업한 뒤 실행 파일에 복사·`sievec`하며 reload·재시작은 하지 않습니다. 기존 before에 명령이 있거나 after의 upstream 중복 블록이 예상과 다르면 무변경 중단합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-dovecot-dedupe.sh --check`로 호스트·컨테이너 일치를 확인하고, `--revert -y`로 before 블록 제거와 after 원문 복원을 합니다(다음 설치·업데이트 시 다시 적용). 실제 배달 검증은 고유 Message-ID의 합성 메일로 첫 사본 보존과 후속 중복 제거를 확인합니다.

@@ -286,9 +286,11 @@ PY
 # attached; only enabled apps gain a .2 attachment. Caller applies it in N2b.
 edge_generate_npmplus_override() (
     set -o pipefail
-    local dest="$1" app subnet address enabled
+    local dest="$1" app subnet address enabled profile
+    # Missing selects classic; explicitly empty keeps the NPMplus default.
+    profile=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].replace("$", "$$")))' "${NPM_ACME_PROFILE-classic}") || return 1
     {
-        printf 'services:\n  npmplus:\n    networks:\n      npmplus-net: {}\n      mailcow-network: {}\n'
+        printf 'services:\n  npmplus:\n    environment:\n      ACME_PROFILE: %s\n    networks:\n      npmplus-net: {}\n      mailcow-network: {}\n' "$profile"
         for app in webmail admin; do
             if [ "$app" = webmail ]; then enabled="${WEBMAIL_ENABLE:-true}"; subnet="$WEBMAIL_EDGE_SUBNET"
             else enabled="${WEBMAIL_ADMIN_ENABLE:-false}"; subnet="${ADMIN_EDGE_SUBNET:-172.22.12.0/24}"; fi

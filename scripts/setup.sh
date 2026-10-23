@@ -1388,6 +1388,13 @@ else
     warn "apply-dovecot-shared-index.sh failed — check state with: scripts/apply-dovecot-shared-index.sh --check"
 fi
 
+# Run duplicate detection before user/admin scripts can stop or file/redirect copies.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-dedupe.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "dovecot early duplicate detection applied (or already present)"
+else
+    warn "apply-dovecot-dedupe.sh failed — check state with: scripts/apply-dovecot-dedupe.sh --check"
+fi
+
 # Reload php-fpm + nginx so Twig picks up the patched base.twig (twig cache).
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     log "Restarting php-fpm + nginx to refresh Twig cache..."

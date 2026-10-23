@@ -104,6 +104,22 @@ await test('draft resume browser flows with synthetic API only',async t=>{
       }finally{await page.close();}
     }
   });
+  await t.test('unsupported draft opens the reader with an explanation and never saves',async()=>{
+    const s=await scenario(),message=s.initial;
+    const page=await browser.newPage({viewport:{width:1280,height:900}});page.setDefaultTimeout(7000);
+    try{
+      await page.route('**/api/drafts/*',route=>route.fulfill({status:422,json:{error:{code:'DRAFT_UNSUPPORTED',message:'다른 프로그램에서 만든 임시 메일이라 웹메일에서 이어 쓸 수 없어요'}}}));
+      await page.goto(origin+'/#f/Drafts');await page.locator('.m[data-ref] .sj').click();await expect(page.locator('.reader')).toBeVisible();await expect(page.locator('.composer')).toHaveCount(0);await expect(page.getByRole('status').filter({hasText:'다른 프로그램에서 만든 임시 메일이라'})).toBeVisible();assert.equal(fake.state.requests.some(item=>item.path==='/api/drafts'&&item.method==='PUT'&&item.body?.draftRef===message.draftRef),false);assert.ok(fake.state.mail.some(item=>item.ref===message.draftRef));
+    }finally{await page.close();}
+  });
+  await t.test('native autosave network error retains a visible message',async()=>{
+    const s=await scenario(),{page}=await s.open();
+    try{await page.route('**/api/drafts',route=>route.abort('failed'));await page.locator('#compose-subject').fill('네트워크 오류 시험');await expect(page.getByRole('alert')).toHaveText(/Failed to fetch|NetworkError|연결|저장/,{timeout:8000});assert.equal(s.messages.size,1);}finally{await page.close();}
+  });
+  await t.test('Sent copy failure announces the retained original draft',async()=>{
+    const s=await scenario(),{page}=await s.open();
+    try{await page.route('**/api/send',route=>route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED']}}));await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'보냈지만 보낸편지함에 저장하지 못해 임시보관함에 원본을 남겨 두었어요'})).toBeVisible();assert.equal(s.messages.size,1);}finally{await page.close();}
+  });
   await t.test('authorized manual sender is kept and revoked sender fallback is announced',async()=>{
     for(const fallback of [false,true]){
       const composeFrom=fallback?'user@example.com':'manual@example.net';

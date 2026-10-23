@@ -1,10 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, rm, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Transform } from 'node:stream';
+import { Transform, Readable, PassThrough } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import libmime from 'libmime';
+import libbase64 from 'libbase64';
+import libqp from 'libqp';
+import { JSDOM } from 'jsdom';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import { AppError } from '../errors.js';
 import { encodeRef, decodeRef } from './ref.js';
@@ -45,6 +48,47 @@ function validate(body, sending) {
   for (const part of body.forwardParts || []) decodeRef(part.ref);
   for (const key of ['draftRef', 'replyToRef']) if (body[key] !== undefined) decodeRef(body[key]);
   return { ...result, subject: body.subject ?? '', html: body.html ?? '', inReplyTo: body.inReplyTo, references: body.references };
+}
+
+const unsupportedDraft = () => new AppError(422, 'DRAFT_UNSUPPORTED', '다른 프로그램에서 만든 임시 메일이라 웹메일에서 이어 쓸 수 없어요');
+function draftParts(structure) {
+  const bodies = [], attachments = [];
+  // One editable body, or the standard plain+HTML alternative (also allowing
+  // related HTML+CID images). Every other leaf must have an attachment name or
+  // disposition, or be a supported CID image. Never discard independent bodies,
+  // unnamed inline text CIDs, nested messages, signed/encrypted containers.
+  function walk(node, alternative = null) {
+    if (!node || /^message\//.test(node.type)) throw unsupportedDraft();
+    const named = Boolean(node.dispositionParameters?.filename || node.parameters?.name), attached = node.disposition === 'attachment' || named;
+    if (node.childNodes?.length) {
+      if (attached || !['multipart/mixed','multipart/related','multipart/alternative'].includes(node.type) || (alternative && node.type !== 'multipart/related')) throw unsupportedDraft();
+      const group = node.type === 'multipart/alternative' ? node : alternative;
+      for (const child of node.childNodes) walk(child, group);
+      return;
+    }
+    if (!['7bit','8bit','binary','base64','quoted-printable'].includes((node.encoding || '7bit').toLowerCase())) throw unsupportedDraft();
+    const part = { ...node, part: node.part || '1', attachment: attached };
+    if (!attached && !node.id && ['text/plain','text/html'].includes(node.type)) bodies.push({ part, alternative });
+    else if (attached || (node.id && /^image\/(png|jpeg|gif|webp)$/.test(node.type))) attachments.push(part);
+    else throw unsupportedDraft();
+  }
+  walk(structure);
+  if (bodies.length === 1) return { body: bodies[0].part, attachments, alternative: false };
+  if (bodies.length === 2 && bodies[0].alternative && bodies[0].alternative === bodies[1].alternative && new Set(bodies.map(item=>item.part.type)).size === 2) {
+    return { body: bodies.find(item=>item.part.type==='text/html').part, attachments, alternative: true };
+  }
+  throw unsupportedDraft();
+}
+function mimeIdentity(part) {
+  const ordered = parameters => Object.fromEntries(Object.entries(parameters || {}).sort(([a],[b])=>a.localeCompare(b)));
+  return JSON.stringify({ type: part.type, parameters: ordered(part.parameters), disposition: part.disposition || '', dispositionParameters: ordered(part.dispositionParameters), id: part.id || '' });
+}
+function alternativeText(html) {
+  const fragment = JSDOM.fragment(html);
+  for (const node of fragment.querySelectorAll('style')) node.remove();
+  for (const node of fragment.querySelectorAll('br')) node.replaceWith('\n');
+  for (const node of fragment.querySelectorAll('p,div,blockquote,pre,li,h1,h2,h3,h4,h5,h6,tr')) node.append('\n');
+  return fragment.textContent;
 }
 
 export function createComposeService({ config, imap, directory, smtp, logger, images = createSignatureImagesService({ imap }), tempRoot = '/tmp/webmail', now = Date.now }) {
@@ -140,8 +184,10 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
   }
   async function checkMessage(session, token, expectedPath) {
     if (expectedPath && decodeRef(token).path !== expectedPath) throw invalid();
-    await imap.withRef(session, token, async (client, ref) => {
-      if (!await client.fetchOne(ref.uid, { uid: true }, { uid: true })) throw new AppError(404, 'MESSAGE_NOT_FOUND', '메일을 찾을 수 없어요.');
+    return imap.withRef(session, token, async (client, ref) => {
+      const row = await client.fetchOne(ref.uid, { uid: true, ...(expectedPath ? { bodyStructure: true } : {}) }, { uid: true });
+      if (!row) throw new AppError(404, 'MESSAGE_NOT_FOUND', '메일을 찾을 수 없어요.');
+      return row;
     });
   }
   async function deleteDraft(session, token) {
@@ -149,6 +195,36 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     return imap.withRef(session, token, async (client, ref) => {
       if (!await client.messageDelete(ref.uid, { uid: true })) throw unavailable();
     });
+  }
+  async function rawPart(client, uid, node, path) {
+    const mimeKey = `${node.part}.mime`;
+    const headers = await client.fetchOne(uid, { bodyParts: [mimeKey] }, { uid: true, binary: false });
+    const mime = headers?.bodyParts?.get(mimeKey);
+    if (Number(headers?.uid) !== uid || !Buffer.isBuffer(mime) || !mime.subarray(-4).equals(Buffer.from('\r\n\r\n'))) throw unavailable();
+    const file = path ? await open(path, 'wx', 0o600) : null;
+    const hash = createHash('sha256'); let size = 0;
+    try {
+      if (file) await file.writeFile(mime);
+      async function* chunks() {
+        const chunkSize = 64 * 1024; let offset = 0;
+        while (true) {
+          const row = await client.fetchOne(uid, { bodyParts: [{ key: node.part, start: offset, maxLength: chunkSize }] }, { uid: true, binary: false });
+          const chunk = row?.bodyParts?.get(node.part), origin = row?.partialOrigins?.get(node.part);
+          if (Number(row?.uid) !== uid || !Buffer.isBuffer(chunk) || chunk.length > chunkSize || (origin !== offset && !(origin === undefined && offset === 0 && chunk.length === node.size && chunk.length < chunkSize))) throw unavailable();
+          if (file) await file.writeFile(chunk);
+          offset += chunk.length; yield chunk;
+          if (chunk.length < chunkSize) { if (offset !== node.size) throw unavailable(); break; }
+          if (offset > node.size) throw unavailable();
+        }
+      }
+      const encoding = (node.encoding || '7bit').toLowerCase();
+      const decoder = encoding === 'base64' ? new libbase64.Decoder() : encoding === 'quoted-printable' ? new libqp.Decoder() : new PassThrough();
+      // Only transfer decoding: never interpret format=flowed or transcode charset.
+      await pipeline(Readable.from(chunks()), decoder, async source => {
+        for await (const chunk of source) { size += chunk.length; if (size > maxBytes) throw tooLarge(); hash.update(chunk); }
+      });
+      return { size, sha256: hash.digest('hex') };
+    } finally { await file?.close(); }
   }
   async function decodedPartSize(client, uid, partId) {
     if (client.capabilities?.has('BINARY') || client.capabilities?.has('IMAP4rev2')) {
@@ -171,11 +247,10 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       } catch { /* Unsupported or rejected BINARY.SIZE falls back to decoded streaming. */ }
     }
     // The caller's withRef applies the same 60s mailbox deadline as other downloads.
-    const download = await client.download(uid, partId, { uid: true, binary: true });
-    if (!download.content) throw notFound();
-    let size = 0;
-    for await (const chunk of download.content) size += Buffer.byteLength(chunk);
-    return size;
+    const row = await client.fetchOne(uid, { bodyStructure: true }, { uid: true });
+    const node = bodyParts(row?.bodyStructure).find(part => part.part === partId);
+    if (!node) throw notFound();
+    return (await rawPart(client, uid, node)).size;
   }
   async function loadDraft(session, token) {
     active(session);
@@ -186,8 +261,8 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     const result = await imap.withRef(session, token, async (client, ref) => {
       const row = await client.fetchOne(ref.uid, { envelope: true, bodyStructure: true, headers: ['REFERENCES', 'IN-REPLY-TO'] }, { uid: true });
       if (!row) throw new AppError(404, 'MESSAGE_NOT_FOUND', '임시 메일을 찾을 수 없어요. 임시보관함에서 다시 열어 주세요.');
-      const parts = bodyParts(row.bodyStructure), envelope = row.envelope || {};
-      const body = parts.find(part => !part.attachment && part.type === 'text/html') || parts.find(part => !part.attachment && part.type === 'text/plain');
+      const representation = draftParts(row.bodyStructure), envelope = row.envelope || {};
+      const body = representation.body;
       const maxBodyBytes = (config.bodyMaxMb ?? 5) * 1024 * 1024;
       let html = '';
       if (body) {
@@ -213,7 +288,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
         composeFrom = identities.defaultFrom || identities.identities[0]?.address || session.email;
         fromChanged = true;
       }
-      const attachments = parts.filter(part => part !== body && (part.attachment || !['text/html', 'text/plain'].includes(part.type))).map(part => ({
+      const attachments = representation.attachments.map(part => ({
         ref: token, partId: part.part, filename: decodeWords(part.dispositionParameters?.filename || part.parameters?.name || `attachment-${part.part}`), size: part.size || 0, contentType: part.type,
         ...(part.id ? { cid: part.id.trim().replace(/^<|>$/g, '') } : {}), inline: part.disposition === 'inline',
       }));
@@ -230,7 +305,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     }
     return result;
   }
-  async function build(session, state, body, mail) {
+  async function build(session, state, body, mail, alternative = false) {
     const temporary = [], streams = [];
     try {
       let total = 0;
@@ -251,18 +326,20 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           const node = bodyParts(row?.bodyStructure).find(node => node.part === part.partId);
           if (!node) throw notFound();
           if (typeof node.id === 'string') existingCids.push(node.id);
+          if (body.draftRef === part.ref) {
+            const verified = await rawPart(client, ref.uid, node, path);
+            total += verified.size; if (total > maxBytes) throw tooLarge();
+            const headers = attachmentHeaders(node, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
+            const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'], raw: true, ...(node.id ? { cid: node.id.trim().replace(/^<|>$/g, '') } : {}), contentDisposition: node.disposition || 'attachment' };
+            resumedParts.push({ ...part, ...metadata, ...verified, mime: mimeIdentity(node) });
+            return metadata;
+          }
           const download = await client.download(ref.uid, part.partId, { uid: true, binary: true });
           if (!download.content) throw notFound();
-          let size = 0;
-          await pipeline(download.content, limiter(bytes => { size += bytes; total += bytes; if (total > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
+          await pipeline(download.content, limiter(bytes => { total += bytes; if (total > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           const headers = attachmentHeaders(node, false);
           const encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
           const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'] };
-          if (body.draftRef === part.ref) {
-            if (node.id) metadata.cid = node.id.trim().replace(/^<|>$/g, '');
-            metadata.contentDisposition = node.disposition === 'inline' ? 'inline' : 'attachment';
-            resumedParts.push({ ...part, ...metadata, size });
-          }
           return metadata;
         });
         attachments.push({ ...metadata, path });
@@ -277,9 +354,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       mail.html = sanitizeComposeHtml(inline.html, { publicHostnames: config.publicHostnames });
       active(session);
       // Explicit streams prevent nodemailer from treating user content as a URL/path.
-      const compiled = new MailComposer({ ...mail, attachments: attachments.map(file => {
+      const compiled = new MailComposer({ ...mail, ...(alternative ? { text: alternativeText(mail.html) } : {}), attachments: attachments.map(file => {
         const content = createReadStream(file.path); streams.push(content);
-        return { filename: file.filename, contentType: file.contentType, ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), content };
+        return { filename: file.filename, contentType: file.contentType, ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), ...(file.raw ? { raw: content } : { content }) };
       }).concat(inline.parts), disableFileAccess: true, disableUrlAccess: true }).compile();
       compiled.keepBcc = true;
       return { raw: await compiled.build(), resumedParts };
@@ -299,9 +376,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       const name = identities.find(item => item.address === mail.from)?.name || identities.find(item => item.kind === 'self')?.name || '';
       mail.from = { address: mail.from, name };
       const draftsPath = body.draftRef ? await specialFolder(session, 'Drafts') : null;
-      if (body.draftRef) await checkMessage(session, body.draftRef, draftsPath);
+      const draftMessage = body.draftRef ? await checkMessage(session, body.draftRef, draftsPath) : null;
       if (sending && body.replyToRef) await checkMessage(session, body.replyToRef);
-      const { raw, resumedParts } = await build(session, state, body, mail);
+      const { raw, resumedParts } = await build(session, state, body, mail, Boolean(draftMessage && bodyParts(draftMessage.bodyStructure).filter(part=>!part.attachment&&['text/html','text/plain'].includes(part.type)).length === 2));
       for (const attachmentId of new Set(body.attachmentIds || [])) state.attachments.get(attachmentId).lastUsedAt = now();
       async function cleanup() {
         for (const attachmentId of new Set(body.attachmentIds || [])) {
@@ -321,17 +398,17 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
         const result = await smtp.send(session, delivery, { from: mail.from.address, to: [...mail.to, ...mail.cc, ...mail.bcc].map(item => item.address) });
         const warnings = [];
         async function afterSend(code, operation) {
-          try { await operation(); } catch {
+          try { await operation(); return true; } catch {
             warnings.push(code);
             logger?.error({ code, email: session.email }, '발송된 메일의 후처리에 실패했습니다.');
           }
         }
         try {
-          await afterSend('SENT_COPY_FAILED', async () => {
+          const sentCopySaved = await afterSend('SENT_COPY_FAILED', async () => {
             const path = await specialFolder(session, 'Sent');
             if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Seen']))) throw unavailable();
           });
-          if (body.draftRef) await afterSend('DRAFT_DELETE_FAILED', () => deleteDraft(session, body.draftRef));
+          if (body.draftRef && sentCopySaved) await afterSend('DRAFT_DELETE_FAILED', () => deleteDraft(session, body.draftRef));
           if (body.replyToRef) await afterSend('ANSWERED_FAILED', () => imap.withRef(session, body.replyToRef, async (client, ref) => {
             if (!await client.messageFlagsAdd(ref.uid, ['\\Answered'], { uid: true })) throw unavailable();
           }));
@@ -355,16 +432,10 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             for (const previous of resumedParts) {
               const part = previous.cid ? parts.find(part => !used.has(part.part) && part.id?.trim().replace(/^<|>$/g, '') === previous.cid) : regular[regularIndex++];
               if (!part || used.has(part.part)) throw unavailable();
-              const headers = attachmentHeaders(part, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
-              if (decodeURIComponent(encoded[1]) !== previous.filename || headers['content-type'] !== previous.contentType || (part.disposition === 'inline' ? 'inline' : 'attachment') !== previous.contentDisposition) throw unavailable();
-              const download = await client.download(ref.uid, part.part, { uid: true, binary: true });
-              if (!download.content) throw unavailable();
-              let size = 0;
-              for await (const chunk of download.content) {
-                size += Buffer.byteLength(chunk);
-                if (size > previous.size) { download.content.destroy(); throw unavailable(); }
-              }
-              if (size !== previous.size) throw unavailable();
+              if (mimeIdentity(part) !== previous.mime) throw unavailable();
+              const verified = await rawPart(client, ref.uid, part);
+              if (verified.sha256 !== previous.sha256 || verified.size !== previous.size) throw unavailable();
+              const size = verified.size;
               used.add(part.part);
               forwardParts.push({ previousRef: previous.ref, previousPartId: previous.partId, ref: draftRef, partId: part.part, size });
             }

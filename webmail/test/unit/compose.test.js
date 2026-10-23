@@ -13,6 +13,7 @@ import imapParser from 'imapflow/lib/handler/imap-parser.js';
 import imapCompiler from 'imapflow/lib/handler/imap-compiler.js';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import addressparser from 'nodemailer/lib/addressparser';
+import { downloadMessage } from 'imapflow/lib/download.js';
 import { bodyParts } from '../../server/mail/read.js';
 import { JSDOM } from 'jsdom';
 import { createApp } from '../../server/app.js';
@@ -225,10 +226,10 @@ test('send partial rejection: 200 ok with rejected recipient detail and normal p
   assert.equal(response.statusCode, 200, response.body); const result = response.json(); assert.equal(result.ok, true); assert.equal(result.rejected.length, 1); assert.equal(result.rejected[0].address, 'rejected@example.com'); assert.match(result.rejected[0].smtpMessage, /synthetic recipient rejected/);
   assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'append').length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 1); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1);
 });
-test('send postprocessing failure: Sent APPEND failure returns 200 warning, continues draft/Answered, always removes uploads', async t => {
+test('send postprocessing failure: Sent APPEND failure returns 200 warning, preserves draft and continues Answered, always removes uploads', async t => {
   const smtp = await smtpFixture(t), f = await fixture(t, { smtp, clientSetup(client) { client.append = async () => { throw new Error(password + ' synthetic private body'); }; } }), attachment = (await upload(f, 'temporary')).json();
   const response = await request(f, 'POST', '/api/send', body({ attachmentIds: [attachment.id], draftRef: draft, replyToRef: original }));
-  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['SENT_COPY_FAILED'] }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 1); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); assert.deepEqual(await readdir(f.dir), []);
+  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['SENT_COPY_FAILED'] }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 0); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); assert.deepEqual(await readdir(f.dir), []);
   assert.match(f.logs, /SENT_COPY_FAILED/); assert.ok(!f.logs.includes(password)); assert.ok(!f.logs.includes('synthetic private body'));
 });
 test('send postprocessing: independent failures produce exactly their warning codes and preserve 200', async t => {
@@ -373,28 +374,28 @@ test('upload expiry: periodic session sweep removes unused uploads after 24h, dr
 // Parse only the synthetic MIME emitted by MailComposer, so the IMAP fake reflects
 // real multipart/related reordering and the bytes a subsequent download returns.
 function storedDraft(raw) {
-  const downloads = new Map();
+  const downloads = new Map(), wireParts = new Map(), mimeHeaders = new Map();
   function parse(source, part = '') {
     const split = source.indexOf('\r\n\r\n'), headers = libmime.decodeHeaders(source.slice(0, split));
     const text = source.slice(split + 4), type = libmime.parseHeaderValue(headers['content-type']?.[0] || 'text/plain');
     const disposition = libmime.parseHeaderValue(headers['content-disposition']?.[0] || '');
-    const node = { part: part || '1', type: type.value, parameters: type.params, disposition: disposition.value, dispositionParameters: disposition.params, size: Buffer.byteLength(text, 'latin1'), ...(headers['content-id'] ? { id: headers['content-id'][0] } : {}) };
+    const node = { part: part || '1', type: type.value, parameters: type.params, disposition: disposition.value, dispositionParameters: disposition.params, size: Buffer.byteLength(text, 'latin1'), encoding: headers['content-transfer-encoding']?.[0] || '7bit', ...(headers['content-id'] ? { id: headers['content-id'][0] } : {}) };
     if (type.params.boundary) {
       const chunks = text.split('--' + type.params.boundary).slice(1, -1);
       node.childNodes = chunks.map((chunk, index) => parse(chunk.replace(/^\r\n/, '').replace(/\r\n$/, ''), part ? `${part}.${index + 1}` : `${index + 1}`));
     } else {
       const encoding = headers['content-transfer-encoding']?.[0];
       const content = encoding === 'base64' ? Buffer.from(text, 'base64') : Buffer.from(encoding === 'quoted-printable' ? text.replace(/=\r\n/g, '').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))) : text, 'latin1');
-      downloads.set(node.part, content);
+      downloads.set(node.part, content); wireParts.set(node.part, Buffer.from(text,'latin1')); mimeHeaders.set(node.part,Buffer.from(source.slice(0,split+4),'latin1'));
     }
     return node;
   }
   const source = raw.toString('latin1'), headers = libmime.decodeHeaders(source.slice(0, source.indexOf('\r\n\r\n')));
   const envelope = { subject: headers.subject?.[0], inReplyTo: headers['in-reply-to']?.[0] };
   for (const key of ['from', 'to', 'cc', 'bcc']) envelope[key] = addressparser(headers[key]?.join(', ') || '');
-  return { row: { envelope, bodyStructure: parse(source), headers: Buffer.from(source.slice(0, source.indexOf('\r\n\r\n')), 'latin1') }, downloads };
+  return { row: { envelope, bodyStructure: parse(source), headers: Buffer.from(source.slice(0, source.indexOf('\r\n\r\n')), 'latin1') }, downloads, wireParts, mimeHeaders };
 }
-async function resumeFixture(t, { textOnly = false, mismatch = false, from = 'user@example.com', directoryTables } = {}) {
+async function resumeFixture(t, { textOnly = false, mismatch = false, from = 'user@example.com', directoryTables, draftRaw, attachmentOptions, mutateSaved, realDownload = false } = {}) {
   const cid = 'logo@synthetic.invalid';
   const content = {
     from, to: 'Recipient <recipient@example.com>', cc: 'copy@example.com', bcc: 'hidden@example.com', subject: 'synthetic resume',
@@ -402,18 +403,39 @@ async function resumeFixture(t, { textOnly = false, mismatch = false, from = 'us
     ...(textOnly ? { text: 'draft <text> & preserved\nsecond line' } : { html: `<p>synthetic body</p><script>evil()</script><img src="cid:${cid}" onerror="evil()"><div class="sig">existing signature</div>` }),
     attachments: textOnly ? [] : [{ filename: 'same.txt', content: Buffer.from('first-content'), contentType: 'text/plain' }, { filename: 'logo.png', content: Buffer.from('synthetic-image'), contentType: 'image/png', cid, contentDisposition: 'inline' }, { filename: 'same.txt', content: Buffer.from('second-content'), contentType: 'text/plain' }],
   };
+  if (attachmentOptions) content.attachments = attachmentOptions;
   const compiled = new MailComposer(content).compile(); compiled.keepBcc = true;
-  const messages = new Map([[10, storedDraft(await compiled.build())]]), originalUids = [];
+  const messages = new Map([[10, storedDraft(draftRaw || await compiled.build())]]), originalUids = [];
   const f = await fixture(t, { directoryTables, clientSetup(client) {
     const append = client.append.bind(client), remove = client.messageDelete.bind(client);
-    client.fetchOne = async uid => { client.calls.push({ action: 'fetch', path: client.mailbox.path, uid }); return messages.get(uid)?.row || false; };
-    client.download = async (uid, partId) => ({ content: messages.get(uid)?.downloads.has(partId) ? Readable.from([messages.get(uid).downloads.get(partId)]) : null });
+    client.fetchOne = async (uid, query) => {
+      client.calls.push({ action: 'fetch', path: client.mailbox.path, uid }); const stored = messages.get(uid); if (!stored) return false;
+      if (!query.bodyParts) return {uid,...stored.row};
+      const bodyParts = new Map();
+      for (const request of query.bodyParts) {
+        const key=typeof request==='string'?request:request.key;
+        const bytes=key.endsWith('.mime')?stored.mimeHeaders.get(key.slice(0,-5)):stored.wireParts.get(key);
+        if(bytes)bodyParts.set(key,typeof request==='string'?bytes:bytes.subarray(request.start,request.start+request.maxLength));
+      }
+      return {uid,bodyParts,partialOrigins:new Map(query.bodyParts.filter(item=>typeof item!=='string').map(item=>[item.key,item.start]))};
+    };
+    client.download = async (uid, partId, options) => {
+      const stored=messages.get(uid);
+      if(realDownload&&partId!=='1.1'){
+        const connection={mailbox:{},usable:true,_openDownloads:0,autoidle(){},log:{warn(){},error(){}},fetchOne:async(_uid,query)=>{
+          const bodyParts=new Map();for(const entry of query.bodyParts||[]){if(typeof entry==='string')bodyParts.set(entry,stored.mimeHeaders.get(partId));else bodyParts.set(entry.key,stored.wireParts.get(partId).subarray(entry.start,entry.start+entry.maxLength));}
+          return {uid,bodyStructure:stored.row.bodyStructure,bodyParts};
+        }};
+        return downloadMessage(connection,uid,partId,options);
+      }
+      return {content:stored?.downloads.has(partId)?Readable.from([stored.downloads.get(partId)]):null};
+    };
     client.append = async (path, raw, flags) => {
       const result = await append(path, raw, flags);
       if (path === 'Drafts') {
         const stored = storedDraft(raw);
         if (mismatch) bodyParts(stored.row.bodyStructure).find(part => part.disposition === 'attachment').dispositionParameters.filename = 'wrong.txt';
-        messages.set(result.uid, stored); originalUids.push(result.uid);
+        mutateSaved?.(stored); messages.set(result.uid, stored); originalUids.push(result.uid);
       }
       return result;
     };
@@ -470,7 +492,7 @@ test('resumed draft saves twice, remaps duplicate filenames and inline parts, th
   const response = await request(f, 'POST', '/api/send', resumedBody(loaded)); assert.equal(response.statusCode, 200, response.body); assert.equal(f.messages.size, 0); assert.equal(f.attempts.length, 1);
   const sent = storedDraft(f.attempts[0][1]), parts = bodyParts(sent.row.bodyStructure);
   assert.deepEqual(parts.filter(part => part.disposition === 'attachment').map(part => sent.downloads.get(part.part).toString()), ['first-content', 'second-content']);
-  const inline = parts.find(part => part.id); assert.equal(inline.id, '<logo@synthetic.invalid>'); assert.equal(inline.disposition, 'inline'); assert.equal(sent.downloads.get(inline.part).toString(), 'synthetic-image');
+  const inline = parts.find(part => part.id); assert.equal(inline.id, '<logo@synthetic.invalid>'); assert.equal(inline.disposition, 'inline'); assert.equal((sent.mimeHeaders.get(inline.part).toString().match(/^Content-ID:/gim)||[]).length,1); assert.equal(sent.downloads.get(inline.part).toString(), 'synthetic-image');
   assert.equal(parts.filter(part => part.disposition === 'attachment').some(part => part.id), false);
   assert.equal(sent.row.envelope.inReplyTo, '<reply@synthetic.invalid>'); assert.match(sent.row.headers.toString(), /References: <parent@synthetic.invalid> <reply@synthetic.invalid>/); assert.equal(sent.row.envelope.bcc.length, 0);
   assert.deepEqual(f.attempts[0][2].to, ['recipient@example.com', 'copy@example.com', 'hidden@example.com']);
@@ -527,13 +549,59 @@ for (const mode of ['rejected', 'invalid response']) test(`draft attachment size
     options.untagged.FETCH(await imapParser(Buffer.from('* 1 FETCH (UID 999 BINARY.SIZE[2] 1)'))); return { next() {} };
   };
   const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
-  assert.deepEqual(response.json().attachments.map(part => part.size), [15,13,14]); assert.deepEqual(downloads, ['1.1','1.2','2','3']);
+  assert.deepEqual(response.json().attachments.map(part => part.size), [15,13,14]); assert.deepEqual(downloads, ['1.1']);
 });
 test('draft still opens with explicitly unknown attachment sizes when size lookup and streaming fail', async t => {
   const f = await resumeFixture(t), client = f.clients[0], download = client.download.bind(client); client.capabilities = new Set(['BINARY']);
   client.exec = async () => { throw new Error('synthetic size failure'); };
   client.download = async (uid, partId, ...args) => { if (partId !== '1.1') throw new Error('synthetic download failure'); return download(uid, partId, ...args); };
+  const fetchOne=client.fetchOne.bind(client);client.fetchOne=async(uid,query,...args)=>{if(query.bodyParts)throw new Error('synthetic raw size failure');return fetchOne(uid,query,...args);};
   const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
   const loaded = response.json(), encoded = bodyParts(f.messages.get(10).row.bodyStructure).filter(part => part.part !== '1.1');
   assert.match(loaded.html, /synthetic body/); assert.deepEqual(loaded.attachments.map(part => part.size), encoded.map(part => part.size)); assert.ok(loaded.attachments.every(part => part.sizeKnown === false));
+});
+
+for(const kind of ['unnamed inline text CID','mixed independent bodies'])test(`unsupported draft keeps every original part: ${kind}`,async t=>{
+  const draftRaw=kind==='unnamed inline text CID'?await new MailComposer({from:'user@example.com',to:'recipient@example.com',html:'<p>body</p>',attachments:[{filename:false,content:'independent inline note',contentType:'text/plain',contentDisposition:'inline',cid:'note@synthetic.invalid'}]}).compile().build():Buffer.from('From: user@example.com\r\nTo: recipient@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="synthetic"\r\n\r\n--synthetic\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nindependent first body\r\n--synthetic\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>independent second body</p>\r\n--synthetic--\r\n');
+  const f=await resumeFixture(t,{draftRaw}),before=f.messages.get(10);failure(await request(f,'GET',`/api/drafts/${draft}`),422,'DRAFT_UNSUPPORTED');assert.equal(f.messages.get(10),before);assert.equal(f.calls.some(call=>['append','delete'].includes(call.action)),false);
+});
+for(const kind of ['flowed','EUC-KR'])test(`resumed attachment preserves raw bytes and all MIME parameters through save and send: ${kind}`,async t=>{
+  const bytes=kind==='flowed'?Buffer.from('original first line \r\ncontinued on next line\r\n'):Buffer.from([0xbe,0xc8,0xb3,0xe7]);
+  const contentType=kind==='flowed'?'text/plain; charset=utf-8; format=flowed; delsp=yes':'text/plain; charset=euc-kr';
+  const f=await resumeFixture(t,{realDownload:true,attachmentOptions:[{filename:'original.txt',content:bytes,contentType,contentDisposition:kind==='flowed'?'inline':'attachment'}]});
+  const originalPart=bodyParts(f.messages.get(10).row.bodyStructure).find(part=>part.attachment);let loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json();
+  for(let index=0;index<2;index++){
+    const response=await request(f,'PUT','/api/drafts',resumedBody(loaded));assert.equal(response.statusCode,200,response.body);
+    const stored=f.messages.get(decodeRef(response.json().draftRef).uid),part=bodyParts(stored.row.bodyStructure).find(part=>part.attachment);
+    assert.deepEqual(stored.downloads.get(part.part),bytes);assert.deepEqual(part.parameters,originalPart.parameters);assert.deepEqual(part.dispositionParameters,originalPart.dispositionParameters);assert.equal(part.disposition,originalPart.disposition);
+    loaded=(await request(f,'GET',`/api/drafts/${response.json().draftRef}`)).json();
+  }
+  const response=await request(f,'POST','/api/send',resumedBody(loaded));assert.equal(response.statusCode,200,response.body);
+  const stored=storedDraft(f.attempts[0][1]),part=bodyParts(stored.row.bodyStructure).find(part=>part.attachment);assert.deepEqual(stored.downloads.get(part.part),bytes);assert.deepEqual(part.parameters,originalPart.parameters);assert.deepEqual(part.dispositionParameters,originalPart.dispositionParameters);
+  const headers=stored.mimeHeaders.get(part.part).toString('latin1');for(const name of ['Content-Type','Content-Disposition','Content-Transfer-Encoding'])assert.equal((headers.match(new RegExp('^'+name+':','gim'))||[]).length,1,headers);
+});
+for(const mismatch of ['same-size bytes','MIME parameters'])test(`resumed attachment verification rolls back on ${mismatch}`,async t=>{
+  const f=await resumeFixture(t,{attachmentOptions:[{filename:'original.txt',content:Buffer.from('keep original bytes'),contentType:'text/plain; charset=euc-kr'}],mutateSaved(stored){
+    const part=bodyParts(stored.row.bodyStructure).find(part=>part.attachment);
+    if(mismatch==='MIME parameters')part.parameters.charset='utf-8';
+    else {const bytes=Buffer.from(stored.downloads.get(part.part));bytes[0]^=1;stored.downloads.set(part.part,bytes);stored.wireParts.set(part.part,Buffer.from(bytes.toString('base64')));part.size=stored.wireParts.get(part.part).length;}
+  }}),loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json();
+  failure(await request(f,'PUT','/api/drafts',resumedBody(loaded)),503,'DRAFT_ATTACHMENTS_UNVERIFIED');assert.deepEqual([...f.messages.keys()],[10]);assert.deepEqual(f.calls.filter(call=>call.action==='delete').map(call=>call.uid),[31]);
+});
+test('webmail-saved draft remains resumable, including alternative with related HTML and CID image',async t=>{
+  const f=await resumeFixture(t),saved=await request(f,'PUT','/api/drafts',body());assert.equal(saved.statusCode,200,saved.body);assert.equal((await request(f,'GET',`/api/drafts/${saved.json().draftRef}`)).statusCode,200);
+  const raw=await new MailComposer({from:'user@example.com',to:'recipient@example.com',text:'automatic plain alternative',html:'<p>HTML alternative</p><img src="cid:logo@synthetic.invalid">',attachments:[{filename:'logo.png',content:Buffer.from('image'),cid:'logo@synthetic.invalid',contentType:'image/png'}]}).compile().build();
+  const g=await resumeFixture(t,{draftRaw:raw}),loaded=(await request(g,'GET',`/api/drafts/${draft}`)).json();assert.match(loaded.html,/HTML alternative/);assert.equal(loaded.attachments.length,1);
+  const next=await request(g,'PUT','/api/drafts',resumedBody(loaded));assert.equal(next.statusCode,200,next.body);const stored=g.messages.get(decodeRef(next.json().draftRef).uid);assert.ok(bodyParts(stored.row.bodyStructure).some(part=>part.type==='text/plain'&&!part.attachment));assert.equal((await request(g,'GET',`/api/drafts/${next.json().draftRef}`)).statusCode,200);
+});
+
+test('SMTP success and Sent failure retain the exact original draft and attachments',async t=>{
+  const f=await resumeFixture(t),original=f.messages.get(10),client=f.clients[0],append=client.append.bind(client);
+  client.append=async(path,...args)=>{if(path==='Sent')throw new Error('synthetic Sent failure');return append(path,...args);};
+  const loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json(),response=await request(f,'POST','/api/send',resumedBody(loaded));
+  assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED']});assert.equal(f.attempts.length,1);assert.equal(f.messages.get(10),original);assert.equal(f.messages.size,1);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);
+});
+test('new mail Sent failure still cleans temporary uploads without a draft',async t=>{
+  const f=await fixture(t,{clientSetup(client){client.append=async()=>false;}}),attachment=(await upload(f,'temporary new mail attachment')).json();
+  const response=await request(f,'POST','/api/send',body({attachmentIds:[attachment.id]}));assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED']});assert.equal(f.attempts.length,1);assert.deepEqual(await readdir(f.dir),[]);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);
 });

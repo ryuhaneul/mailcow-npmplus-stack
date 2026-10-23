@@ -44,7 +44,7 @@ export default function Composer() {
       if(active()&&!completed.current){patch({draftRef:value.draftRef,forwardFiles:current.current.forwardFiles.map(file=>{const mapped=value.forwardParts?.find(part=>part.previousRef===file.ref&&part.previousPartId===file.partId);return mapped?{...file,ref:mapped.ref,partId:mapped.partId,size:mapped.size,sizeKnown:true}:file;})},false);savedVersion.current=captured;setSavedTime(new Date());setError(value=>value?.source==='draft'?null:value);}
     })();
     savePromise.current=pending;
-    try{await pending;}catch(value){throw {...value,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
+    try{await pending;}catch(value){throw {...value,message:value.message,source:'draft'};}finally{savePromise.current=null;if(active()){setSaving(false);if(captured!==undefined&&version.current!==captured)schedule();}}
   }
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
   function releaseDraftImages(){for(const url of draftUrls.current.values())URL.revokeObjectURL(url);draftUrls.current.clear();}
@@ -89,7 +89,11 @@ export default function Composer() {
         draftUrls.current=cidUrls;setDraftImageUrls(cidUrls);
         setImageUrls(urls);current.current=value;setModel(value);setShowCc(value.cc.length>0);setShowBcc(value.bcc.length>0);composeSeed.value=null;
         if(seed&&seed.kind!=='draft'){version.current=1;editedAt.current=Date.now();schedule();}
-      }catch(value){if(!cancelled)fail(value);}
+      }catch(value){
+        if(!cancelled&&active()&&value.code==='DRAFT_UNSUPPORTED'&&seed?.kind==='draft'){
+          reset();composeSeed.value=null;navigate(`read/${encodeURIComponent(seed.message.ref)}`);toast.value={kind:'info',message:value.message};
+        }else if(!cancelled)fail(value);
+      }
     })();
     return()=>{cancelled=true;};
   },[open,seed]);
@@ -259,7 +263,7 @@ export default function Composer() {
     <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy)} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
     {model?.fromChanged&&<div class="compose-alert compose-result" role="status">보내는 주소를 기본 주소로 바꿨어요.</div>}
     {error&&<div class="compose-alert" role="alert">{error.message}{error.smtpMessage&&<> {error.smtpMessage}</>}</div>}
-    {result&&<div class="compose-alert compose-result" role="status"><ul>{result.rejected?.map(item=><li key={item.address}>{item.address}에는 보내지 못했어요: {item.smtpMessage}</li>)}{result.warnings?.map(code=><li key={code}>{sendWarnings[code]||code}</li>)}</ul><button class="btn sm" type="button" onClick={()=>void close()}>닫기</button></div>}
+    {result&&<div class="compose-alert compose-result" role="status"><ul>{result.rejected?.map(item=><li key={item.address}>{item.address}에는 보내지 못했어요: {item.smtpMessage}</li>)}{result.warnings?.map(code=><li key={code}>{code==='SENT_COPY_FAILED'&&model?.draftRef?'보냈지만 보낸편지함에 저장하지 못해 임시보관함에 원본을 남겨 두었어요':sendWarnings[code]||code}</li>)}</ul><button class="btn sm" type="button" onClick={()=>void close()}>닫기</button></div>}
     {model&&identity?<><div class="c-inner"><FromPicker identities={identity} from={model.from} onChange={from} disabled={disabled}/><RecipientInput label="받는 사람" id="compose-to" values={model.to} query={model.pendingTo} onValues={to=>patch({to})} onQuery={pendingTo=>patch({pendingTo})} onError={fail} domain={domain} disabled={disabled}><div class="side-l"><button type="button" disabled={disabled} onClick={()=>setShowCc(!showCc)}>참조</button><button type="button" disabled={disabled} onClick={()=>setShowBcc(!showBcc)}>숨은참조</button></div></RecipientInput>
       {showCc&&<RecipientInput label="참조" id="compose-cc" values={model.cc} query={model.pendingCc} onValues={cc=>patch({cc})} onQuery={pendingCc=>patch({pendingCc})} onError={fail} disabled={disabled}/>}{showBcc&&<RecipientInput label="숨은참조" id="compose-bcc" values={model.bcc} query={model.pendingBcc} onValues={bcc=>patch({bcc})} onQuery={pendingBcc=>patch({pendingBcc})} onError={fail} disabled={disabled}/>}
       <div class="fld"><label for="compose-subject">제목</label><div class="val"><input id="compose-subject" value={model.subject} disabled={disabled} onInput={event=>patch({subject:event.currentTarget.value})}/></div><span/></div>

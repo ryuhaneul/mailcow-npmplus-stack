@@ -11,6 +11,7 @@ import { ImapFlow } from 'imapflow';
 import { createImapPool, mailTlsOptions } from '../../server/mail/imap-pool.js';
 import { fetchOriginals, mailboxStatus, getMetadata, setMetadata, setMetadataEntries } from '../../server/mail/imap-raw.js';
 import { encodeRef, decodeRef, assertUidValidity, originalRefs } from '../../server/mail/ref.js';
+import { createEventService } from '../../server/mail/events.js';
 import { createApp } from '../../server/app.js';
 
 const config = { imapHost: '127.0.0.1', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com', mailTlsPinFile: '' };
@@ -25,12 +26,15 @@ before(async () => {
 });
 after(async () => { await rm(certDir, { recursive: true, force: true }); });
 
-async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = false, greeting = true } = {}) {
+async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = false, greeting = true, liveEvents = false } = {}) {
   const sockets = new Set();
   const commands = [];
+  let delivered = 2;
+  const monitors = new Set();
   const server = tls.createServer({ cert, key: privateKey }, socket => {
     sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket));
     if (greeting) socket.write('* OK synthetic example.com IMAP\r\n');
+    let selectedCount = 2;
     let input = Buffer.alloc(0);
     let literal = null;
     socket.on('data', chunk => {
@@ -49,10 +53,11 @@ async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = fa
         const line = input.subarray(0, end).toString('utf8'); input = input.subarray(end + 2);
         const [, tag, verb, rest = ''] = /^(\S+) (\S+)(?: (.*))?$/.exec(line) ?? [];
         if (!tag) continue;
+        if (tag === 'DONE') { monitors.delete(socket); socket.write('idle OK idle done\r\n'); continue; }
         commands.push({ verb, rest });
         const ok = () => socket.write(`${tag} OK synthetic complete\r\n`);
         switch (verb.toUpperCase()) {
-          case 'CAPABILITY': socket.write('* CAPABILITY IMAP4rev1 ID NAMESPACE\r\n'); ok(); break;
+          case 'CAPABILITY': socket.write(`* CAPABILITY IMAP4rev1 ID NAMESPACE${liveEvents ? ' IDLE QUOTA' : ''}\r\n`); ok(); break;
           case 'ID': socket.write('* ID ("name" "synthetic" "version" "1")\r\n'); ok(); break;
           case 'LOGIN': if (server.rejectLogin) socket.write(`${tag} NO [AUTHENTICATIONFAILED] synthetic rejection\r\n`); else ok(); break;
           case 'NAMESPACE': socket.write('* NAMESPACE (("" "/")) NIL NIL\r\n'); ok(); break;
@@ -60,12 +65,16 @@ async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = fa
             const path = /"([^"]*)"$/.exec(rest)?.[1] || 'INBOX';
             socket.write(`* ${verb} (\\HasNoChildren) "/" "${path}"\r\n`); ok(); break;
           }
-          case 'SELECT': case 'EXAMINE': socket.write('* FLAGS (\\Seen)\r\n* 2 EXISTS\r\n* OK [UIDVALIDITY 123] valid\r\n'); ok(); break;
+          case 'SELECT': case 'EXAMINE': selectedCount = delivered; socket.write(`* FLAGS (\\Seen)\r\n* ${selectedCount} EXISTS\r\n* OK [UIDVALIDITY 123] valid\r\n`); ok(); break;
+          case 'NOOP': selectedCount = delivered; socket.write(`* ${selectedCount} EXISTS\r\n`); ok(); break;
+          case 'IDLE': monitors.add(socket); socket.write('+ idle ready\r\n'); break;
+          case 'GETQUOTAROOT': socket.write(`* QUOTAROOT INBOX root\r\n* QUOTA root (STORAGE ${delivered} 100)\r\n`); ok(); break;
           case 'UID': socket.write('* 1 FETCH (UID 7 X-MAILBOX "INBOX" X-REAL-UID 42)\r\n'); ok(); break;
           case 'STATUS': {
             const box = /^"((?:[^"\\]|\\.)*)"/.exec(rest)?.[1] ?? 'INBOX';
             const values = [];
-            if (rest.includes('MESSAGES')) values.push('MESSAGES 2');
+            if (rest.includes('MESSAGES')) values.push(`MESSAGES ${liveEvents ? selectedCount : 2}`);
+            if (rest.includes('UNSEEN')) values.push(`UNSEEN ${liveEvents ? selectedCount : 2}`);
             if (rest.includes('SIZE')) values.push('SIZE 4096');
             if (rest.includes('UIDVALIDITY')) values.push('UIDVALIDITY 123');
             socket.write(`* STATUS "${box}" (${values.join(' ')})\r\n`); ok(); break;
@@ -95,7 +104,7 @@ async function serverFixture(t, { cert = pem, privateKey = key, rejectLogin = fa
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
   });
-  return { port: server.address().port, commands, server, sockets };
+  return { port: server.address().port, commands, server, sockets, deliver() { delivered++; for (const socket of monitors) socket.write(`* ${delivered} EXISTS\r\n`); } };
 }
 function poolFor(configOverrides = {}, extra = {}) {
   return createImapPool({ config: { ...config, ...configOverrides }, destroySession: async session => { session.password.fill(0); await session.connection.logout(); session.connection = null; }, ...extra });
@@ -728,4 +737,30 @@ test('pool mutation guard: request expiry preserves the held lock and excludes t
   finish(); assert.equal(await pending, 'acknowledged'); assert.equal(await next, 'next');
   assert.equal(f.clients[0].locks, 0); assert.equal(f.clients[0].maxLocks, 1);
   assert.equal(f.clients.length, 1);
+});
+
+
+test('SSE: real ImapFlow TLS delivery synchronizes a selected work mailbox before STATUS', { timeout: 6000 }, async t => {
+  const fixture = await serverFixture(t, { liveEvents: true });
+  const pool = poolFor({ imapPort: fixture.port, mailTlsMode: 'pin', mailTlsPinFile: join(certDir, 'one.pem') });
+  const logged = await pool.verifyLogin(credentials());
+  t.after(() => logged.connection.logout());
+  const session = { connection: logged.connection };
+  let invalidations = 0, text = '';
+  const service = createEventService({ imap: pool, sessions: { expiresAt: () => new Date(Date.now() + 60000).toISOString() }, listService: { invalidate() { invalidations++; } } });
+  const stream = service.open(session); t.after(() => stream.destroy());
+  stream.on('data', chunk => { text += chunk; });
+  const wait = async predicate => {
+    const until = Date.now() + 2000;
+    while (!predicate() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(predicate(), text);
+  };
+  await wait(() => text.includes('"total":2') && fixture.commands.some(command => command.verb === 'IDLE'));
+  fixture.deliver();
+  await wait(() => text.includes('"total":3'));
+  assert.match(text, /"unseen":3/);
+  assert.match(text, /"usedBytes":3072/);
+  assert.equal(invalidations, 2);
+  const statusIndex = fixture.commands.findLastIndex(command => command.verb === 'STATUS');
+  assert.equal(fixture.commands[statusIndex - 1].verb, 'NOOP');
 });

@@ -38,6 +38,8 @@ export function createEventService({ imap, sessions, logger, listService, now = 
           pending = false;
           if (await expired()) return;
           const snapshot = await imap.withMailbox(session, 'INBOX', async client => {
+            // The work connection does not IDLE; sync its selected mailbox before STATUS.
+            await client.noop();
             const status = await client.status('INBOX', { messages: true, unseen: true });
             const quota = await client.getQuota('INBOX');
             return { status, quota };

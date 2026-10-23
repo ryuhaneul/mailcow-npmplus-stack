@@ -190,6 +190,7 @@ test('SSE mailbox change: watch invalidates only the matching session list cache
   const f = fixture(), other = {};
   let notify;
   f.imap.watch = (session, callback) => { assert.equal(session, f.session); notify = callback; return () => {}; };
+  f.client.noop = async () => true;
   f.client.status = async () => ({ messages: f.client.uids.length, unseen: 2 });
   f.client.getQuota = async () => ({ storage: { usage: 100, limit: 1000 } });
   const events = createEventService({ imap: f.imap, listService: f.service, sessions: { expiresAt: () => '2099-01-01T00:00:00Z' } });

@@ -33,6 +33,7 @@ class ActionImap extends EventEmitter {
   async messageMove(...args) { this.calls.push(['move',...args]); if(this.reject) throw new Error('synthetic failure'); return true; }
   async messageFlagsAdd(...args) { this.calls.push(['add',...args]); return !this.reject; }
   async messageFlagsRemove(...args) { this.calls.push(['remove',...args]); return true; }
+  async noop() { return true; }
   async status(path, query) { this.statusQuery = {path,query}; return {messages:this.total,unseen:this.unseen}; }
   async getQuota() { return {storage:{usage:this.usage,limit:this.limit}}; }
 }

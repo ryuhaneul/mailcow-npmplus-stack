@@ -79,8 +79,8 @@ function defaults(config) {
   return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
-  exact(doc, Object.keys(fields).filter(key => key !== 'fromNames' || Object.hasOwn(doc ?? {}, key)));
-  return Object.fromEntries(Object.entries(fields).filter(([key]) => key !== 'fromNames' || Object.hasOwn(doc, key)).map(([key, parse]) => [key, parse(doc[key], config)]));
+  if (!object(doc) || !Object.keys(doc).length || Object.keys(doc).some(key => !Object.hasOwn(fields, key) && key !== 'imageAllowAdd')) throw invalid();
+  return Object.fromEntries(Object.entries(doc).map(([key, value]) => [key, (key === 'imageAllowAdd' ? fields.imageAllow : fields[key])(value, config)]));
 }
 function readDocument(raw, config, logger) {
   const result = defaults(config);
@@ -126,22 +126,16 @@ export function createPrefsService({ config, imap, logger, signatures, directory
     },
     async put(session, body) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
-      // Only sender fields opt into partial updates. Any other field retains the
-      // existing full-document PUT contract used by the other settings screens.
-      const partial = object(body) && Object.keys(body).length > 0 && Object.keys(body).every(key => ['fromNames', 'defaultFrom'].includes(key));
-      const input = partial ? Object.fromEntries(Object.entries(body).map(([key, value]) => [key, fields[key](value, config)])) : normalize(body, config);
+      // Every request updates only its supplied fields, including legacy full PUTs.
+      const input = normalize(body, config);
       if (Object.values(input.fromNames ?? {}).some(name => name.includes('=?'))) throw new AppError(422, 'PREFS_FROM_NAME_INVALID', '이름에 =? 문자 조합은 쓸 수 없어요');
       await withSignatureStoreLock(session.email, () => mailCall(session, async client => {
-        let doc = input;
-        if (partial) {
-          const stored = readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger);
-          doc = { ...stored, ...input, fromNames: { ...stored.fromNames, ...input.fromNames } };
-        }
-        // Older clients omit this field; preserve the stored names under the same lock.
-        const names = Object.hasOwn(doc, 'fromNames') ? doc.fromNames : readDocument(await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES }), config, logger).fromNames;
-        doc = { ...doc, fromNames: await allowedNames(session, names) };
+        const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
+        const stored = readDocument(raw, config, logger);
+        const { imageAllowAdd, ...patch } = input;
+        let doc = { ...stored, ...patch, fromNames: await allowedNames(session, { ...stored.fromNames, ...patch.fromNames }) };
+        if (imageAllowAdd) doc.imageAllow = fields.imageAllow([...new Set([...doc.imageAllow, ...imageAllowAdd])]);
         if (signatures) {
-          const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
           const prepared = await signatures.preparePrefs({ session, client, prefs: doc });
           // The list API alone owns the legacy mirror. Even a pending mirror sync
           // must not replace an unprocessed or preserved legacy edit here.

@@ -68,6 +68,34 @@ await test('sender names settings and composer use synthetic mail only', async t
       await expect(page.locator('.from-name-edit').first()).not.toContainText('고쳐 주세요');
     } finally { await page.close(); }
   });
+  for (const kind of ['appearance', 'image permission']) await t.test(`${kind} write preserves a name saved in another session`, async () => {
+    fake.state.authenticated = true; fake.state.prefs.mode = 'light'; fake.state.prefs.defaultFrom = null; fake.state.prefs.fromNames = {}; fake.state.prefs.imageAllow = [];
+    const first = await browser.newPage({ viewport: { width: 1280, height: 900 } }), second = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    let release, started, body;
+    const gate = new Promise(resolve => { release = resolve; }), begin = new Promise(resolve => { started = resolve; });
+    try {
+      const ref = fake.state.mail.find(item => item.folder === 'INBOX').ref;
+      await first.goto(origin + (kind === 'appearance' ? '/#filters/from' : '/#read/' + encodeURIComponent(ref)));
+      if (kind === 'appearance') await expect(first.locator('[id="from-name-user@example.com"]')).toBeVisible();
+      else await expect(first.getByRole('button', { name: '이 보낸 사람은 항상', exact: true })).toBeVisible();
+      await second.goto(origin + '/#filters/from');
+      await expect(second.locator('[id="from-name-user@example.com"]')).toBeVisible();
+      await first.route('**/api/prefs', async route => {
+        if (route.request().method() === 'PUT') { body = route.request().postDataJSON(); started(); await gate; }
+        return route.fallback();
+      });
+      await first.getByRole('button', { name: kind === 'appearance' ? '다크 모드로 전환' : '이 보낸 사람은 항상', exact: true }).click();
+      await begin;
+      await second.locator('[id="from-name-user@example.com"]').fill('다른 세션에서 저장한 이름');
+      await second.getByRole('button', { name: 'user@example.com 이름 저장', exact: true }).click();
+      await expect(second.locator('.from-addresses .say').first()).toContainText('다른 세션에서 저장한 이름');
+      release();
+      if (kind === 'appearance') { assert.deepEqual(body, { mode: 'dark' }); await expect.poll(() => fake.state.prefs.mode).toBe('dark'); }
+      else { assert.deepEqual(Object.keys(body), ['imageAllowAdd']); await expect.poll(() => fake.state.prefs.imageAllow.includes(body.imageAllowAdd[0].toLowerCase())).toBe(true); }
+      assert.equal(fake.state.prefs.fromNames['user@example.com'], '다른 세션에서 저장한 이름');
+      await expect.poll(() => first.evaluate(() => JSON.parse(localStorage.getItem('webmail-prefs')).fromNames['user@example.com'])).toBe('다른 세션에서 저장한 이름');
+    } finally { release(); await first.close(); await second.close(); }
+  });
   for (const width of [1280, 768, 375]) await t.test(`names save, clear, failure and composer at ${width}`, async () => {
     fake.state.authenticated = true; fake.state.prefs.defaultFrom = null; fake.state.prefs.fromNames = {};
     const page = await browser.newPage({ viewport: { width, height: 900 } });

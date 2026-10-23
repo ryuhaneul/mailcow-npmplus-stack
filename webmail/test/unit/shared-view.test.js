@@ -99,13 +99,17 @@ test('shared view: prefs connection coalesces selection saves with appearance an
   applyServerPrefs(document); copies.length = 0;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => { globalThis.fetch = beforeFetch; globalThis.localStorage = beforeStorage; session.value = null; sessionReady.value = false; toast.value = null; });
-  globalThis.fetch = async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return new Response(null, { status: 204 }); };
+  let serverDoc = document;
+  globalThis.fetch = async (url, options) => {
+    if (options.method === 'PUT') { const patch = JSON.parse(options.body); requests.push({ url, body: patch }); serverDoc = { ...serverDoc, ...patch }; return new Response(null, { status: 204 }); }
+    return Response.json(serverDoc);
+  };
   updateSharedView(setting('all')); updatePrefs({ theme: 'olive' });
   assert.equal(copies.length, 0); assert.equal(requests.length, 0);
   t.mock.timers.tick(500); await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.length, 1); assert.equal(requests[0].url, '/api/prefs');
   const saved = { ...document, theme: 'olive', sharedView: setting('all') };
-  assert.deepEqual(requests[0].body, saved); assert.deepEqual(copies, [saved]);
+  assert.deepEqual(requests[0].body, { theme: 'olive', sharedView: setting('all') }); assert.deepEqual(copies, [saved]);
   globalThis.fetch = async () => Response.json({ error: { code: 'MAIL_UNAVAILABLE', message: '저장 실패' } }, { status: 503 });
   updateSharedView(setting('custom', [path('Sent')]));
   t.mock.timers.tick(500); await new Promise(resolve => setImmediate(resolve));

@@ -116,9 +116,9 @@ for (const [label, patch] of [
 ]) test(`prefs: rejects invalid ${label} without saving`, async t => {
   const f = await fixture(t); status(await f.request('PUT', { ...defaults(), ...patch }), 422); assert.equal(f.client.calls.length, 0); assert.equal(f.session.prefs, undefined);
 });
-test('prefs: every top-level field required, objects only and malformed JSON 422', async t => {
+test('prefs: rejects empty document, non-objects and malformed JSON 422', async t => {
   const f = await fixture(t);
-  for (const key of Object.keys(defaults()).filter(key => key !== 'fromNames')) { const doc = defaults(); delete doc[key]; status(await f.request('PUT', doc), 422); }
+  status(await f.request('PUT', {}), 422);
   for (const body of ['[]', 'null', '{broken', '']) status(await f.app.inject({ method: 'PUT', url: '/api/prefs', headers: { ...f.headers, 'content-type': 'application/json' }, payload: body }), 422);
   assert.equal(f.client.calls.length, 0);
 });
@@ -368,7 +368,7 @@ test('prefs partial sender updates merge into latest stored document and preserv
   assert.equal(JSON.parse(f.client.value).defaultFrom, 'alias@example.com');
   status(await f.request('PUT', { fromNames: { 'user@example.com': '', 'other@example.com': 'Forbidden' } }), 204);
   assert.deepEqual(JSON.parse(f.client.value).fromNames, { 'alias@example.com': 'Existing Alias' });
-  for (const patch of [{}, { mode: 'light' }, { fromNames: {}, mode: 'light' }, { defaultFrom: 'alias@example.com', extra: true }, { fromNames: { 'user@example.com': 'bad\r\nBcc: hidden@example.com' } }]) status(await f.request('PUT', patch), 422);
+  for (const patch of [{}, { defaultFrom: 'alias@example.com', extra: true }, { fromNames: { 'user@example.com': 'bad\r\nBcc: hidden@example.com' } }]) status(await f.request('PUT', patch), 422);
 });
 
 
@@ -383,4 +383,33 @@ test('prefs fromNames rejects encoded-word markers with guidance and exposes leg
   assert.equal(f.client.value, before);
   const loaded = await f.request('GET'); status(loaded, 200);
   assert.equal(loaded.json().fromNames['user@example.com'], name);
+});
+
+
+test('prefs field updates preserve concurrent sender names and add image permissions atomically', async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', defaults()), 204);
+  status(await f.request('PUT', { fromNames: { 'user@example.com': 'Concurrent Name' } }), 204);
+  status(await f.request('PUT', { mode: 'dark' }), 204);
+  status(await f.request('PUT', { imageAllowAdd: [' Sender@EXAMPLE.COM '] }), 204);
+  let stored = JSON.parse(f.client.value);
+  assert.equal(stored.mode, 'dark'); assert.equal(stored.fromNames['user@example.com'], 'Concurrent Name');
+  assert.deepEqual(stored.imageAllow, ['sender@example.com']); assert.equal('imageAllowAdd' in stored, false);
+  status(await f.request('PUT', { folderColors: { INBOX: 1 }, sharedView: {}, accent: { ink: 2 } }), 204);
+  status(await f.request('PUT', { folderColors: {}, accent: {} }), 204);
+  stored = JSON.parse(f.client.value); assert.deepEqual(stored.folderColors, {}); assert.deepEqual(stored.accent, {});
+  const service = createPrefsService({ config, imap: { withMailbox: async (_session, _path, run) => run(f.client) }, directory: f.app.directory });
+  const first = { email: 'user@example.com', prefs: defaults() }, second = { email: 'user@example.com', prefs: defaults() };
+  await Promise.all([service.put(first, { fromNames: { 'alias@example.com': 'Alias Name' }, imageAllowAdd: ['one@example.com'] }), service.put(second, { mode: 'light', imageAllowAdd: ['two@example.com'] })]);
+  stored = JSON.parse(f.client.value);
+  assert.equal(stored.fromNames['user@example.com'], 'Concurrent Name'); assert.equal(stored.fromNames['alias@example.com'], 'Alias Name');
+  assert.equal(stored.mode, 'light'); assert.deepEqual(stored.imageAllow, ['sender@example.com', 'one@example.com', 'two@example.com']);
+  for (const patch of [{ imageAllowAdd: ['invalid'] }, { imageAllowAdd: Array.from({ length: 501 }, (_, i) => `u${i}@example.com`) }, { mode: 'dark', unknown: 1 }]) status(await f.request('PUT', patch), 422);
+  status(await f.request('PUT', { imageAllow: Array.from({ length: 500 }, (_, i) => `u${i}@example.com`) }), 204);
+  const before = f.client.value;
+  status(await f.request('PUT', { imageAllowAdd: ['overflow@example.com'] }), 422); assert.equal(f.client.value, before);
+  const oldClient = defaults(); delete oldClient.fromNames;
+  status(await f.request('PUT', oldClient), 204);
+  stored = JSON.parse(f.client.value); assert.deepEqual(stored.imageAllow, []); assert.equal(stored.mode, 'dark');
+  assert.equal(stored.fromNames['user@example.com'], 'Concurrent Name');
 });

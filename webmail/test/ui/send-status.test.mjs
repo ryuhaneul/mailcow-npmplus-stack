@@ -442,4 +442,25 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     }finally{release();await c.page.close();}
   });
 
+  for(const width of [1280,768,375])await t.test(`twenty detached rejections scroll within the viewport and keep controls visible at ${width}`,async()=>{
+    const c=await open({width,lookup:{status:'not_sent',error:{message:'메일 서버가 보내기를 거절했어요.'}}});
+    try{
+      await expect(c.result).toContainText('보냈어요');await c.page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(c.page.locator('.composer')).toHaveCount(0);
+      await c.page.evaluate(async()=>{
+        const state=await import('/src/state/compose.js');
+        for(let index=0;index<20;index++){const key=`twenty-rejections-${index}`;await state.rememberSendAttempt(key,'user@example.com');state.detachSendAttempt(key);}
+      });
+      const notice=c.page.locator('.detached-send-notice');await expect(notice).toContainText('20통');await notice.getByRole('button',{name:'다시 확인',exact:true}).click();
+      const list=notice.locator('ol'),close=notice.getByRole('button',{name:'결과 닫기',exact:true});
+      await expect(list.locator('li')).toHaveCount(20);await expect(notice.getByRole('button',{name:'다시 확인',exact:true})).toHaveCount(0);
+      const size=await list.evaluate(node=>({height:node.getBoundingClientRect().height,viewport:innerHeight,scrollHeight:node.scrollHeight,clientHeight:node.clientHeight}));
+      assert.ok(size.height<=size.viewport*0.45+1);assert.ok(size.scrollHeight>size.clientHeight);
+      let bounds=await close.boundingBox();assert.ok(bounds.y>=0&&bounds.y+bounds.height<=900);await expect(close).toBeInViewport();
+      await capture(c,'twenty-rejections',width);
+      await list.evaluate(node=>{node.scrollTop=node.scrollHeight;});await expect(list.locator('li').last()).toBeInViewport();
+      bounds=await close.boundingBox();assert.ok(bounds.y>=0&&bounds.y+bounds.height<=900);await capture(c,'twenty-rejections-end',width);
+      await close.click();await expect(notice).toHaveCount(0);assert.equal(c.lookups.length,20);assert.equal(c.sends.length,1);
+    }finally{await c.page.close();}
+  });
+
 });

@@ -28,7 +28,7 @@ async function fixture(t) {
   const rows = [mailbox()], sent = [], calls = [];
   const mailcow = { createApiContext: value => { assert.deepEqual(value, { permission: 'read' }); return {}; }, async call(...args) { calls.push(args); if (args[2].endsWith('/domain/all')) return [{ domain_name: 'example.com' }]; if (fail === 'collection') throw new Error('synthetic private error'); return structuredClone(rows); } };
   const send = async (from, row) => { assert.ok((await store.readState()).accounts[row.username].pendingAt); if (fail) throw fail; sent.push({ from, to: row.username }); };
-  const service = (overrides = {}) => createQuotaNotificationsService({ store, mailcow, config, audit, lock, history, send, now: () => time, ...overrides });
+  const service = (overrides = {}) => createQuotaNotificationsService({ store, mailcow, config, audit, lock, history, send, now: () => time, monotonicNow: () => time - Date.UTC(2026, 9, 23), ...overrides });
   await store.saveSettings(settings);
   return { dir, store, audit, history, config, rows, sent, calls, service, now: () => time, advance: ms => { time += ms; }, fail: value => { fail = value; } };
 }
@@ -119,6 +119,9 @@ test('quota notification store: persistence failure after SMTP acceptance retain
   const f = await fixture(t), native = f.store.saveState; let writes = 0;
   f.store.saveState = async state => { if (++writes === 2) throw new Error('disk unavailable'); return native(state); };
   await assert.rejects(f.service().runOnce()); assert.equal(f.sent.length, 1);
+  const summary = (await f.history.list()).items[0].summary;
+  assert.ok(summary.includes('발송 건수 확인 안 됨'), summary);
+  assert.ok(!summary.includes('발송 0건/실패 0건'), summary);
   f.store.saveState = native; await f.service().runOnce(); assert.equal(f.sent.length, 1); assert.equal((await f.store.readState()).accounts[address].lastFailure.code, 'UNCONFIRMED');
 });
 test('quota scheduler: first check is 5 minutes later, no replay/overlap, stop waits for in-flight work', async () => {
@@ -152,4 +155,54 @@ for (const permission of ['read','full']) test(`quota notification HTTP: ${permi
   const write = await app.inject({ url: '/api/admin/quota/notifications', method: 'PUT', headers, payload: { ...settings, threshold: 95, etag: response.json().etag } });
   assert.equal(write.statusCode, permission === 'full' ? 200 : 403, write.body); assert.equal(write.headers['www-authenticate'], undefined); assert.equal((await f.store.readSettings()).threshold, permission === 'full' ? 95 : 90);
   assert.equal((await app.inject('/api/admin/quota/notifications')).statusCode, 403);
+});
+
+function correctedClockFixture() {
+  let elapsed = 0, offset = 0, sent = 0;
+  const wall = () => Date.UTC(2026, 9, 23, 10) + elapsed + offset;
+  let state = emptyQuotaNotificationState();
+  const options = {
+    store: { readState: async () => structuredClone(state), saveState: async value => { state = structuredClone(value); }, readSettings: async () => structuredClone(settings) },
+    mailcow: { createApiContext: () => ({}), call: async () => [mailbox(95)] }, config: { mailcowApiKey: 'synthetic' },
+    audit: { run: async (_entry, operation) => operation() }, send: async () => { sent++; }, now: wall, monotonicNow: () => elapsed,
+  };
+  return { options, wall, state: () => state, sent: () => sent, elapsed: minutes => { elapsed = minutes * 60_000; }, offset: minutes => { offset = minutes * 60_000; } };
+}
+test('quota clock: evaluator forward-correction repro cannot resend before 60 elapsed minutes', async () => {
+  const f = correctedClockFixture(), service = createQuotaNotificationsService(f.options);
+  const scheduler = createQuotaNotificationScheduler({ service, setInterval: () => ({ unref() {} }), clearInterval() {} });
+  scheduler.start();
+  try {
+    await scheduler.tick(); assert.equal(f.sent(), 1);
+    f.elapsed(5); await scheduler.tick(); assert.equal(f.sent(), 1);
+    f.offset(60); await scheduler.tick(); assert.equal(f.sent(), 1);
+    f.elapsed(59); await scheduler.tick(); assert.equal(f.sent(), 1);
+    f.elapsed(60); await scheduler.tick(); assert.equal(f.sent(), 2);
+  } finally { await scheduler.stop(); }
+});
+test('quota clock: backward correction clamps future lastSentAt and resumes after one interval', async () => {
+  const f = correctedClockFixture(), service = createQuotaNotificationsService(f.options);
+  await service.runOnce(); f.elapsed(5); f.offset(-120); await service.runOnce();
+  assert.equal(f.sent(), 1); assert.equal(f.state().accounts[address].lastSentAt, new Date(f.wall()).toISOString());
+  f.elapsed(64); await service.runOnce(); assert.equal(f.sent(), 1);
+  f.elapsed(65); await service.runOnce(); assert.equal(f.sent(), 2);
+});
+test('quota clock: monotonic expiry alone cannot bypass the wall-clock interval', async () => {
+  const f = correctedClockFixture(), service = createQuotaNotificationsService(f.options);
+  await service.runOnce(); f.elapsed(60); f.offset(-5); await service.runOnce(); assert.equal(f.sent(), 1);
+  f.elapsed(65); await service.runOnce(); assert.equal(f.sent(), 2);
+});
+test('quota clock: restart uses persisted wall time and clamps a future timestamp durably', async () => {
+  const f = correctedClockFixture(); await createQuotaNotificationsService(f.options).runOnce();
+  f.elapsed(5); f.offset(-120); await createQuotaNotificationsService(f.options).runOnce();
+  assert.equal(f.state().accounts[address].lastSentAt, new Date(f.wall()).toISOString());
+  f.elapsed(64); await createQuotaNotificationsService(f.options).runOnce(); assert.equal(f.sent(), 1);
+  f.elapsed(65); await createQuotaNotificationsService(f.options).runOnce(); assert.equal(f.sent(), 2);
+  f.elapsed(70); f.offset(60); await createQuotaNotificationsService(f.options).runOnce(); assert.equal(f.sent(), 3);
+});
+test('quota clock: unconfirmed SMTP attempts retain the same-process monotonic interval', async () => {
+  const f = correctedClockFixture(); let attempts = 0;
+  const service = createQuotaNotificationsService({ ...f.options, send: async () => { attempts++; throw new Error('response lost'); } });
+  await service.runOnce(); f.elapsed(5); f.offset(60); await service.runOnce(); assert.equal(attempts, 1);
+  f.elapsed(60); await service.runOnce(); assert.equal(attempts, 2);
 });

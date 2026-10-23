@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { AppError } from '../../errors.js';
 import { collectMailboxQuota } from './quota.js';
 import { etag, assertUnchanged } from '../lock.js';
@@ -8,18 +9,19 @@ export const quotaNotificationErrors = {
   UNCONFIRMED: '마지막 시도 결과 확인 안 됨. 중복 방지를 위해 발송 간격을 기다립니다.',
   COLLECTION_FAILED: '계정 사용량 수집에 실패했어요. mailcow API 연결 설정을 확인해 주세요.',
 };
-export function quotaNotificationTargets(rows, settings, accounts, now) {
+export function quotaNotificationTargets(rows, settings, accounts, now, monotonicElapsed = () => Infinity) {
   if (!settings.enabled || !settings.sender) return [];
   const time = value => value ? Date.parse(value) : 0;
   return rows.map(row => ({ ...row, username: String(row.username ?? '').toLowerCase(), quota: Number(row.quota), quota_used: Number(row.quota_used) }))
     .filter(row => notificationAddress(row.username) && Number(row.active) === 1 && Number.isFinite(row.quota) && row.quota > 0 && Number.isFinite(row.quota_used) && row.quota_used >= 0 &&
-      row.quota_used / row.quota * 100 >= settings.threshold && (!accounts[row.username]?.lastSentAt || now - time(accounts[row.username].lastSentAt) >= settings.intervalMinutes * 60_000))
+      row.quota_used / row.quota * 100 >= settings.threshold && (!accounts[row.username]?.lastSentAt || (now - time(accounts[row.username].lastSentAt) >= settings.intervalMinutes * 60_000 && monotonicElapsed(row.username) >= settings.intervalMinutes * 60_000)))
     .sort((a, b) => {
       const attempted = row => Math.max(time(accounts[row.username]?.lastSentAt), time(accounts[row.username]?.lastFailure?.at));
       return attempted(a) - attempted(b) || a.username.localeCompare(b.username);
     }).filter((row, index, all) => all.findIndex(other => other.username === row.username) === index).slice(0, 200);
 }
-export function createQuotaNotificationsService({ store, mailcow, config, audit, lock, history, send, now = Date.now }) {
+export function createQuotaNotificationsService({ store, mailcow, config, audit, lock, history, send, now = Date.now, monotonicNow = () => performance.now() }) {
+  const sentMonotonic = new Map();
   history?.register('quota.notifications.settings', { label: '쿼터 알림 설정을 바꿨어요' });
   history?.register('quota.notifications.send', { label: '쿼터 알림을 보냈어요' });
   async function view(session) {
@@ -46,8 +48,17 @@ export function createQuotaNotificationsService({ store, mailcow, config, audit,
   async function runOnce({ stopped = () => false } = {}) {
     const state = await store.readState(), stamp = () => new Date(now()).toISOString();
     let recovered = false;
-    for (const row of Object.values(state.accounts)) if (row.pendingAt) {
-      row.lastSentAt = row.pendingAt; row.lastFailure = { at: stamp(), code: 'UNCONFIRMED' }; row.pendingAt = null; recovered = true;
+    const wallNow = now();
+    for (const [address, row] of Object.entries(state.accounts)) {
+      if (row.pendingAt) {
+        row.lastSentAt = row.pendingAt; row.lastFailure = { at: stamp(), code: 'UNCONFIRMED' }; row.pendingAt = null; recovered = true;
+      }
+      // A backward correction starts a fresh interval instead of leaving a future anchor.
+      if (row.lastSentAt && Date.parse(row.lastSentAt) > wallNow) {
+        row.lastSentAt = new Date(wallNow).toISOString();
+        if (sentMonotonic.has(address)) sentMonotonic.set(address, monotonicNow());
+        recovered = true;
+      }
     }
     if (recovered) await store.saveState(state);
     const settings = await store.readSettings();
@@ -61,19 +72,20 @@ export function createQuotaNotificationsService({ store, mailcow, config, audit,
         state.lastCheckAt = stamp(); state.lastRunFailure = { at: stamp(), code: 'COLLECTION_FAILED' }; await store.saveState(state);
         return { result: 'partial', detail: { sent: 0, failed: 1 } };
       }
-      const candidates = quotaNotificationTargets(rows, settings, state.accounts, now());
+      const candidates = quotaNotificationTargets(rows, settings, state.accounts, now(), address => sentMonotonic.has(address) ? monotonicNow() - sentMonotonic.get(address) : Infinity);
       let sent = 0, failed = 0;
       for (const mailbox of candidates) {
         if (stopped() || etag(await store.readSettings()) !== etag(settings)) break;
         const row = state.accounts[mailbox.username] ??= { lastSentAt: null, lastFailure: null, pendingAt: null };
+        const attemptedMonotonic = monotonicNow();
         row.pendingAt = stamp(); await store.saveState(state);
         let error;
         try { await send(settings.sender, mailbox); } catch (failure) { error = failure; }
-        if (!error) { row.lastSentAt = stamp(); row.lastFailure = null; sent++; }
+        if (!error) { row.lastSentAt = stamp(); sentMonotonic.set(mailbox.username, monotonicNow()); row.lastFailure = null; sent++; }
         else {
           failed++;
           const code = error.explicit === true ? error.code === 'SMTP_REJECTED' ? 'SMTP_REJECTED' : 'SEND_FAILED' : 'UNCONFIRMED';
-          if (code === 'UNCONFIRMED') row.lastSentAt = row.pendingAt;
+          if (code === 'UNCONFIRMED') { row.lastSentAt = row.pendingAt; sentMonotonic.set(mailbox.username, attemptedMonotonic); }
           row.lastFailure = { at: stamp(), code };
         }
         row.pendingAt = null; await store.saveState(state);

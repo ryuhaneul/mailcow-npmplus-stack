@@ -150,13 +150,40 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       if (!await client.messageDelete(ref.uid, { uid: true })) throw unavailable();
     });
   }
+  async function decodedPartSize(client, uid, partId) {
+    if (client.capabilities?.has('BINARY') || client.capabilities?.has('IMAP4rev2')) {
+      try {
+        const rows = [];
+        if (typeof client.preCheck === 'function') await client.preCheck();
+        const response = await client.exec('UID FETCH', [{ type: 'SEQUENCE', value: String(uid) }, [{ type: 'ATOM', value: 'UID' }, { type: 'ATOM', value: 'BINARY.SIZE', section: [{ type: 'ATOM', value: partId }] }]], { untagged: { FETCH: row => { rows.push(row); } } });
+        response.next();
+        for (const row of rows) {
+          const fields = row.attributes?.[1];
+          if (!Array.isArray(fields) || fields.length % 2) continue;
+          let rowUid, size;
+          for (let index = 0; index < fields.length; index += 2) {
+            const key = String(fields[index]?.value).toUpperCase(), value = String(fields[index + 1]?.value);
+            if (key === 'UID') rowUid = Number(value);
+            if (key === `BINARY.SIZE[${partId}]` && /^\d+$/.test(value)) size = Number(value);
+          }
+          if (rowUid === uid && Number.isSafeInteger(size) && size >= 0) return size;
+        }
+      } catch { /* Unsupported or rejected BINARY.SIZE falls back to decoded streaming. */ }
+    }
+    // The caller's withRef applies the same 60s mailbox deadline as other downloads.
+    const download = await client.download(uid, partId, { uid: true, binary: true });
+    if (!download.content) throw notFound();
+    let size = 0;
+    for await (const chunk of download.content) size += Buffer.byteLength(chunk);
+    return size;
+  }
   async function loadDraft(session, token) {
     active(session);
     const path = decodeRef(token).path;
     if (/^(Shared|WebmailVirtual)(\/|$)/.test(path) || path !== await specialFolder(session, 'Drafts')) {
       throw new AppError(403, 'DRAFT_NOT_ALLOWED', '내 임시보관함의 메일만 이어 쓸 수 있어요.');
     }
-    return imap.withRef(session, token, async (client, ref) => {
+    const result = await imap.withRef(session, token, async (client, ref) => {
       const row = await client.fetchOne(ref.uid, { envelope: true, bodyStructure: true, headers: ['REFERENCES', 'IN-REPLY-TO'] }, { uid: true });
       if (!row) throw new AppError(404, 'MESSAGE_NOT_FOUND', '임시 메일을 찾을 수 없어요. 임시보관함에서 다시 열어 주세요.');
       const parts = bodyParts(row.bodyStructure), envelope = row.envelope || {};
@@ -175,7 +202,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           chunks.push(Buffer.from(chunk));
         }
         const text = decodeCharset(Buffer.concat(chunks), download.meta?.charset || body.parameters?.charset || 'utf-8');
-        html = body.type === 'text/html' ? text : `<pre>${text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))}</pre>`;
+        html = body.type === 'text/html' ? text : `<pre style="font-family:inherit">${text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))}</pre>`;
       }
       const addresses = items => (items || []).filter(item => item.address).map(item => ({ address: item.address, name: decodeWords(item.name) }));
       const headers = libmime.decodeHeaders(row.headers?.toString('latin1') || '');
@@ -192,6 +219,16 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       }));
       return { draftRef: token, composeFrom, fromChanged, from: addresses(envelope.from), to: addresses(envelope.to), cc: addresses(envelope.cc), bcc: addresses(envelope.bcc), subject: decodeWords(envelope.subject), html: sanitizeComposeHtml(html, { publicHostnames: config.publicHostnames }), attachments, inReplyTo: envelope.inReplyTo || headers['in-reply-to']?.[0] || '', references: headers.references?.join(' ') || '' };
     });
+    for (const attachment of result.attachments) {
+      try {
+        attachment.size = await imap.withRef(session, token, (client, ref) => decodedPartSize(client, ref.uid, attachment.partId));
+      } catch (error) {
+        if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) throw error;
+        // Keep encoded size only for conservative limit checks, never as a displayed byte count.
+        attachment.sizeKnown = false;
+      }
+    }
+    return result;
   }
   async function build(session, state, body, mail) {
     const temporary = [], streams = [];
@@ -329,7 +366,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
               }
               if (size !== previous.size) throw unavailable();
               used.add(part.part);
-              forwardParts.push({ previousRef: previous.ref, previousPartId: previous.partId, ref: draftRef, partId: part.part });
+              forwardParts.push({ previousRef: previous.ref, previousPartId: previous.partId, ref: draftRef, partId: part.part, size });
             }
           });
         } catch {

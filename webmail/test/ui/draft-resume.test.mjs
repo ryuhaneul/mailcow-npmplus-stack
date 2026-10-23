@@ -41,7 +41,7 @@ await test('draft resume browser flows with synthetic API only',async t=>{
         const body=route.request().postDataJSON();requests.push({path:'save',body});
         const previous=messages.get(body.draftRef);
         if(!previous)return route.fulfill({status:404,json:{error:{code:'MESSAGE_NOT_FOUND',message:'technical missing ref'}}});
-        const draftRef=ref(++uid),forwardParts=body.forwardParts.map((part,index)=>({previousRef:part.ref,previousPartId:part.partId,ref:draftRef,partId:`${index+5}`}));
+        const draftRef=ref(++uid),forwardParts=body.forwardParts.map((part,index)=>({previousRef:part.ref,previousPartId:part.partId,ref:draftRef,partId:`${index+5}`,size:previous.attachments.find(file=>file.ref===part.ref&&file.partId===part.partId).size}));
         const saved={...previous,...body,from:[{address:body.from}],draftRef,attachments:body.forwardParts.map((part,index)=>({...previous.attachments.find(file=>file.ref===part.ref&&file.partId===part.partId),ref:draftRef,partId:forwardParts[index].partId}))};
         messages.delete(body.draftRef);messages.set(draftRef,saved);fake.state.mail=fake.state.mail.filter(item=>item.ref!==body.draftRef);fake.state.mail.push(row(saved));
         return route.fulfill({json:{draftRef,forwardParts}});
@@ -70,6 +70,39 @@ await test('draft resume browser flows with synthetic API only',async t=>{
       if(process.env.DRAFT_RESUME_CAPTURE_DIR){await mkdir(process.env.DRAFT_RESUME_CAPTURE_DIR,{recursive:true});await page.screenshot({path:`${process.env.DRAFT_RESUME_CAPTURE_DIR}/draft-resume-${width}.png`,fullPage:true});}
       await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.equal(s.messages.size,1);assert.equal(s.requests.filter(item=>item.path==='save').length,0);assert.deepEqual(s.errors,[]);
     }finally{await page.close();}
+  });
+  await t.test('decoded sizes allow an exact-limit upload; unknown sizes stay conservative until save remaps them',async()=>{
+    const previousLimit=fake.state.config.attachMaxMb;fake.state.config.attachMaxMb=1;
+    try{
+      for(const unknown of [false,true]){
+        const s=await scenario();s.initial.html='<p>첨부 크기 시험</p>';s.initial.attachments=[{...s.initial.attachments[0],filename:'large.bin',size:unknown?1048576:786432,...(unknown?{sizeKnown:false}:{})}];
+        const {page}=await s.open();
+        try{
+          if(unknown){
+            await expect(page.locator('.drop .att')).toContainText('크기 미확인');await expect(page.locator('.compose-grants').filter({hasText:'첨부'})).toContainText('크기 확인 필요');
+            await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'blocked.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(1)});await expect(page.getByRole('alert')).toContainText('붙일 수 없어요');
+            await page.route('**/api/drafts',route=>{const body=route.request().postDataJSON(),draftRef=ref(++uid);return route.fulfill({json:{draftRef,forwardParts:[{previousRef:body.draftRef,previousPartId:'2',ref:draftRef,partId:'5',size:786432}]}});});
+            await page.locator('#compose-subject').fill('크기 재확인');await expect(page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible({timeout:8000});
+          }
+          await expect(page.locator('.drop .att')).toContainText('768KB');await expect(page.locator('.drop .att')).not.toContainText('크기 미확인');
+          const uploads=fake.state.requests.filter(item=>item.path==='/api/attachments').length;
+          await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'quarter.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(262144)});
+          await expect(page.locator('.drop .att')).toHaveCount(2);await expect(page.locator('.drop .att').filter({hasText:'quarter.bin'})).toContainText('256KB');assert.equal(fake.state.requests.filter(item=>item.path==='/api/attachments').length,uploads+1);
+          await page.getByLabel('첨부 파일 선택',{exact:true}).setInputFiles({name:'overflow.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(1)});await expect(page.getByRole('alert')).toContainText('붙일 수 없어요');await expect(page.locator('.drop .att')).toHaveCount(2);assert.deepEqual(s.errors,[]);
+        }finally{await page.close();}
+      }
+    }finally{fake.state.config.attachMaxMb=previousLimit;}
+  });
+  await t.test('plain draft inherits the Korean editor font and preserves whitespace at all viewports',async()=>{
+    for(const width of [1280,768,375]){
+      const s=await scenario(width,{html:'<pre style="font-family:inherit">한글  공백\n  다음 줄</pre>',attachments:[]}),{page,body}=await s.open();
+      try{
+        await expect(body.locator('pre')).toHaveText('한글  공백\n  다음 줄',{useInnerText:false});
+        const style=await body.locator('pre').evaluate(async node=>{await node.ownerDocument.fonts.ready;return {font:getComputedStyle(node).fontFamily,body:getComputedStyle(node.ownerDocument.body).fontFamily,space:getComputedStyle(node).whiteSpace,text:node.textContent,koreanFont:node.ownerDocument.fonts.check('15px Pretendard','한글')};});
+        assert.equal(style.font,style.body);assert.match(style.font,/Pretendard/);assert.equal(style.space,'pre');assert.equal(style.text,'한글  공백\n  다음 줄');assert.equal(style.koreanFont,true);
+        if(process.env.DRAFT_RESUME_CAPTURE_DIR){await mkdir(process.env.DRAFT_RESUME_CAPTURE_DIR,{recursive:true});await page.screenshot({path:`${process.env.DRAFT_RESUME_CAPTURE_DIR}/draft-plain-${width}.png`,fullPage:true});}assert.deepEqual(s.errors,[]);
+      }finally{await page.close();}
+    }
   });
   await t.test('authorized manual sender is kept and revoked sender fallback is announced',async()=>{
     for(const fallback of [false,true]){

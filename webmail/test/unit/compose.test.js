@@ -9,6 +9,8 @@ import { execFileSync } from 'node:child_process';
 import Fastify from 'fastify';
 import { SMTPServer } from 'smtp-server';
 import libmime from 'libmime';
+import imapParser from 'imapflow/lib/handler/imap-parser.js';
+import imapCompiler from 'imapflow/lib/handler/imap-compiler.js';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import addressparser from 'nodemailer/lib/addressparser';
 import { bodyParts } from '../../server/mail/read.js';
@@ -428,7 +430,7 @@ test('load draft restores recipients including stored Bcc, sanitized HTML, attac
   const loaded = response.json();
   assert.equal(loaded.draftRef, draft); assert.equal(loaded.from[0].address, 'user@example.com'); assert.equal(loaded.to[0].address, 'recipient@example.com'); assert.equal(loaded.cc[0].address, 'copy@example.com'); assert.equal(loaded.bcc[0].address, 'hidden@example.com'); assert.equal(loaded.subject, 'synthetic resume');
   assert.match(loaded.html, /synthetic body/); assert.match(loaded.html, /cid:logo@synthetic.invalid/); assert.doesNotMatch(loaded.html, /script|onerror/); assert.match(loaded.html, /existing signature/);
-  assert.equal(loaded.attachments.length, 3); assert.ok(loaded.attachments.every(part => part.ref === draft && part.partId)); assert.equal(loaded.attachments.find(part => part.cid).cid, f.cid);
+  assert.equal(loaded.attachments.length, 3); assert.deepEqual(loaded.attachments.map(part=>part.size), [15,13,14]); assert.ok(loaded.attachments.every(part => part.ref === draft && part.partId)); assert.equal(loaded.attachments.find(part => part.cid).cid, f.cid);
   assert.equal(loaded.inReplyTo, '<reply@synthetic.invalid>'); assert.equal(loaded.references, '<parent@synthetic.invalid> <reply@synthetic.invalid>'); await assert.rejects(access(f.dir), { code: 'ENOENT' });
 });
 test('load draft rejects absent session, non-draft, shared and virtual refs before opening the source', async t => {
@@ -451,13 +453,13 @@ test('load draft uses the authenticated account IMAP connection, never a foreign
 });
 test('load text-only draft escapes text into HTML without silently changing the body', async t => {
   const f = await resumeFixture(t, { textOnly: true }), response = await request(f, 'GET', `/api/drafts/${draft}`);
-  assert.equal(response.statusCode, 200, response.body); assert.match(response.json().html, /^<pre>draft &lt;text&gt; &amp; preserved\nsecond line\n<\/pre>$/); assert.deepEqual(response.json().attachments, []);
+  assert.equal(response.statusCode, 200, response.body); assert.match(response.json().html, /^<pre style="font-family: inherit;">draft &lt;text&gt; &amp; preserved\nsecond line\n<\/pre>$/); assert.deepEqual(response.json().attachments, []);
 });
 test('resumed draft saves twice, remaps duplicate filenames and inline parts, then sends with bytes and headers intact', async t => {
   const f = await resumeFixture(t); let loaded = (await request(f, 'GET', `/api/drafts/${draft}`)).json();
   for (let index = 0; index < 2; index++) {
     const previous = loaded.draftRef, response = await request(f, 'PUT', '/api/drafts', resumedBody(loaded));
-    assert.equal(response.statusCode, 200, response.body); const saved = response.json(); assert.equal(saved.forwardParts.length, 3);
+    assert.equal(response.statusCode, 200, response.body); const saved = response.json(); assert.equal(saved.forwardParts.length, 3); assert.deepEqual(saved.forwardParts.map(part=>part.size), loaded.attachments.map(part=>part.size));
     assert.ok(saved.forwardParts.every(part => part.previousRef === previous && part.ref === saved.draftRef)); assert.equal(new Set(saved.forwardParts.map(part => part.partId)).size, 3);
     assert.equal(f.messages.size, 1); assert.equal(f.messages.has(decodeRef(previous).uid), false);
     loaded = (await request(f, 'GET', `/api/drafts/${saved.draftRef}`)).json();
@@ -498,4 +500,40 @@ for (const [label, grant, from, expected, changed] of [
   assert.equal(identities.identities.some(item => item.address === from), label === 'listed identity');
   assert.equal((await request(f, 'POST', '/api/send', resumedBody(loaded))).statusCode, 200);
   assert.equal(f.attempts[0][2].from, expected);
+});
+
+test('draft attachment size uses BINARY.SIZE with real IMAP tokens and no attachment download', async t => {
+  const f = await resumeFixture(t), client = f.clients[0], downloads = [], commands = [];
+  const download = client.download.bind(client);
+  client.capabilities = new Set(['BINARY']);
+  client.download = async (...args) => { downloads.push(args[1]); return download(...args); };
+  client.exec = async (command, attributes, options) => {
+    commands.push((await imapCompiler({ tag: 'A1', command, attributes })).toString());
+    const uid = Number(attributes[0].value), partId = attributes[1][1].section[0].value;
+    const size = f.messages.get(uid).downloads.get(partId).length;
+    options.untagged.FETCH(await imapParser(Buffer.from(`* 1 FETCH (UID ${uid} BINARY.SIZE[${partId}] ${size})`)));
+    return { next() {} };
+  };
+  const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(response.json().attachments.map(part => part.size), [15,13,14]); assert.ok(response.json().attachments.every(part => part.sizeKnown !== false));
+  assert.deepEqual(downloads, ['1.1']); assert.deepEqual(commands, ['A1 UID FETCH 10 (UID BINARY.SIZE[1.2])','A1 UID FETCH 10 (UID BINARY.SIZE[2])','A1 UID FETCH 10 (UID BINARY.SIZE[3])']);
+});
+for (const mode of ['rejected', 'invalid response']) test(`draft attachment size streams decoded bytes after BINARY.SIZE ${mode}`, async t => {
+  const f = await resumeFixture(t), client = f.clients[0], downloads = [];
+  const download = client.download.bind(client); client.capabilities = new Set(['BINARY']);
+  client.download = async (...args) => { downloads.push(args[1]); return download(...args); };
+  client.exec = async (_command, _attributes, options) => {
+    if (mode === 'rejected') throw Object.assign(new Error('synthetic BINARY rejection'), { responseStatus: 'BAD' });
+    options.untagged.FETCH(await imapParser(Buffer.from('* 1 FETCH (UID 999 BINARY.SIZE[2] 1)'))); return { next() {} };
+  };
+  const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(response.json().attachments.map(part => part.size), [15,13,14]); assert.deepEqual(downloads, ['1.1','1.2','2','3']);
+});
+test('draft still opens with explicitly unknown attachment sizes when size lookup and streaming fail', async t => {
+  const f = await resumeFixture(t), client = f.clients[0], download = client.download.bind(client); client.capabilities = new Set(['BINARY']);
+  client.exec = async () => { throw new Error('synthetic size failure'); };
+  client.download = async (uid, partId, ...args) => { if (partId !== '1.1') throw new Error('synthetic download failure'); return download(uid, partId, ...args); };
+  const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
+  const loaded = response.json(), encoded = bodyParts(f.messages.get(10).row.bodyStructure).filter(part => part.part !== '1.1');
+  assert.match(loaded.html, /synthetic body/); assert.deepEqual(loaded.attachments.map(part => part.size), encoded.map(part => part.size)); assert.ok(loaded.attachments.every(part => part.sizeKnown === false));
 });

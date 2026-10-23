@@ -5,7 +5,7 @@ import { notificationAddress } from './quota-notification-state.js';
 export function quotaNotificationMessage(sender, row) {
   if (!notificationAddress(sender) || !notificationAddress(row.username) || !Number.isFinite(row.quota) || row.quota <= 0 || !Number.isFinite(row.quota_used) || row.quota_used < 0) throw new AppError(422, 'INVALID_INPUT', '알림 메일 주소와 용량을 확인해 주세요.');
   const percent = (row.quota_used / row.quota * 100).toFixed(1);
-  const usage = `${(row.quota_used / 1024 ** 3).toFixed(2)} GB / ${(row.quota / 1024 ** 3).toFixed(2)} GB (${percent}%)`;
+  const usage = `${(row.quota_used / 1024 ** 3).toFixed(1)} GB / ${row.quota / 1024 ** 3} GB (${percent}%)`;
   const text = `메일함 용량이 부족해요.\n현재 사용량: ${usage}\n\n휴지통을 비우고 큰 첨부 메일을 정리해 주세요. 용량이 더 필요하면 관리자에게 문의해 주세요.\n\n이 메일에는 답장하지 마세요.`;
   return { from: { address: sender }, to: [{ address: row.username }], envelope: { from: sender, to: [row.username] },
     subject: `[메일함 용량 경고] 사용률 ${percent}%`, text,

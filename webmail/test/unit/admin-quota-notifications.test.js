@@ -1,3 +1,4 @@
+import { bytes } from '../../web/src/admin/pages/status.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -205,4 +206,13 @@ test('quota clock: unconfirmed SMTP attempts retain the same-process monotonic i
   const service = createQuotaNotificationsService({ ...f.options, send: async () => { attempts++; throw new Error('response lost'); } });
   await service.runOnce(); f.elapsed(5); f.offset(60); await service.runOnce(); assert.equal(attempts, 1);
   f.elapsed(60); await service.runOnce(); assert.equal(attempts, 2);
+});
+
+test('quota notification body formats usage and fractional limits like quota management', () => {
+  const row = mailbox(90, { quota: 1.625 * GB, quota_used: Math.round(1.58 * GB) });
+  const message = quotaNotificationMessage(sender, row);
+  const displayed = `${bytes(row.quota_used)} / ${row.quota / GB} GB (97.2%)`;
+  assert.equal(displayed, '1.6 GB / 1.625 GB (97.2%)');
+  assert.ok(message.text.includes(displayed), message.text);
+  assert.ok(message.html.includes(displayed), message.html);
 });

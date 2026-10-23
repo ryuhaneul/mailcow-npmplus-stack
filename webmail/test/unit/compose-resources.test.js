@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { session } from '../../web/src/state/session.js';
+import { session, verifiedSession, invalidateSessionResources } from '../../web/src/state/session.js';
+import { checkServerSession, watchServerSession, api } from '../../web/src/api.js';
 import { signatures, signatureImages } from '../../web/src/state/signatures.js';
 import { composeIdentities, getComposeResources, preloadComposeResources, loadComposeIdentities, refreshComposeIdentities, prepareComposeSignature, composeImageContent, MAX_COMPOSE_IMAGE_BYTES, senderDomain } from '../../web/src/state/compose-resources.js';
 
@@ -9,8 +10,9 @@ const doc=()=>({revision:'r1',items:[{id:'sig',name:'Example',html:'<p>Example</
 const library=()=>({revision:'i1',images:[],usedBytes:0,maxBytes:1048576,maxFileBytes:204800,maxCount:20});
 function setup(t, handler) {
   const before=globalThis.fetch, requests=[];
-  globalThis.fetch=async(path,options)=>{requests.push(path);return handler?.(path,options) ?? Response.json(path==='/api/compose/identities'?{identities:[{address:session.value.user.email,name:'Example',kind:'self'}],defaultFrom:session.value.user.email,anyAtDomains:[],anyAddress:false}:path==='/api/signatures'?doc():library());};
+  globalThis.fetch=async(path,options)=>{requests.push(path);if(path==='/api/auth/session')return handler?.(path,options) ?? Response.json(session.value);return handler?.(path,options) ?? Response.json(path==='/api/compose/identities'?{identities:[{address:session.value.user.email,name:'Example',kind:'self'}],defaultFrom:session.value.user.email,anyAtDomains:[],anyAddress:false}:path==='/api/signatures'?doc():library());};
   session.value={user:{email:'person@account.example'},csrf:'synthetic'};
+  verifiedSession.value=session.value;
   t.after(()=>{session.value=null;globalThis.fetch=before;});
   return requests;
 }
@@ -80,4 +82,58 @@ test('late authentication failure from a previous identity preload cannot log ou
   const old=loadComposeIdentities(),next={user:{email:'next@another.example'},csrf:'next'};
   session.value=next;release();await assert.rejects(old);
   assert.equal(session.value,next);assert.equal(composeIdentities.value,null);
+});
+
+
+test('unverified compose open waits for one shared server session check before cache reuse',async t=>{
+  let release;
+  const requests=setup(t,path=>path==='/api/auth/session'?new Promise(resolve=>{release=()=>resolve(Response.json(session.value));}):undefined);
+  await preloadComposeResources();const owner=session.value;
+  verifiedSession.value=null;
+  const first=getComposeResources(),second=getComposeResources();
+  assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);
+  release();await Promise.all([first,second]);
+  assert.equal(session.value,owner);assert.equal(verifiedSession.value,owner);
+  assert.equal(requests.filter(path=>path==='/api/compose/identities').length,1);
+});
+test('cross-tab invalidation discards identities, signatures and late old-account metadata',async t=>{
+  let release;
+  setup(t,path=>path==='/api/signatures'?new Promise(resolve=>{release=()=>resolve(Response.json(doc()));}):undefined);
+  const pending=preloadComposeResources();await Promise.resolve();
+  invalidateSessionResources();release();await assert.rejects(pending);
+  assert.equal(composeIdentities.value,null);assert.equal(signatures.value,null);assert.equal(signatureImages.value,null);
+  assert.equal(verifiedSession.value,null);
+});
+test('same-account relogin updates CSRF without replacing the session object',async t=>{
+  setup(t,path=>path==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'replacement'}):undefined);
+  const owner=session.value;await checkServerSession();
+  assert.equal(session.value,owner);assert.equal(owner.csrf,'replacement');assert.equal(verifiedSession.value,owner);
+});
+test('session verification failures cannot authorize a cached composition',async t=>{
+  const requests=setup(t,path=>path==='/api/auth/session'?Response.json({error:{code:'MAIL_UNAVAILABLE',message:'synthetic'}},{status:503}):undefined);
+  await preloadComposeResources();verifiedSession.value=null;
+  await assert.rejects(getComposeResources());assert.equal(verifiedSession.value,null);
+  assert.equal(requests.filter(path=>path==='/api/compose/identities').length,1);
+});
+test('storage fallback broadcasts login/logout and coalesces focus checks',async t=>{
+  const original={window:globalThis.window,document:globalThis.document,BroadcastChannel:globalThis.BroadcastChannel,localStorage:globalThis.localStorage};
+  const win=new EventTarget(),document=new EventTarget(),writes=[];
+  document.querySelector=()=>null;document.visibilityState='visible';
+  globalThis.window=win;globalThis.document=document;globalThis.BroadcastChannel=undefined;globalThis.localStorage={setItem:(...args)=>writes.push(args)};
+  let release;const requests=setup(t,path=>path==='/api/auth/session'?new Promise(resolve=>{release=()=>resolve(Response.json(session.value));}):path==='/api/auth/login'?Response.json(session.value):path==='/api/auth/logout'?new Response(null,{status:204}):undefined);
+  const stop=watchServerSession(()=>{});t.after(()=>{stop();Object.assign(globalThis,original);});
+  win.dispatchEvent(new Event('focus'));document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(requests.filter(path=>path==='/api/auth/session').length,1);release();await checkServerSession();
+  await api('/api/auth/login',{method:'POST',body:{}});await api('/api/auth/logout',{method:'POST'});
+  assert.equal(writes.filter(([key])=>key==='webmail-auth-change').length,2);
+});
+
+
+test('cross-tab invalidation rejects late normalized HTML and image bytes before they reach a composer',async t=>{
+  let normalize,image;
+  const requests=setup(t,(path,options)=>path.endsWith('/normalize')?new Promise(resolve=>{normalize=()=>resolve(Response.json({html:JSON.parse(options.body).html}));}):path.endsWith('/content')?new Promise(resolve=>{image=()=>resolve(new Response('synthetic-image'));}):undefined);
+  const html=prepareComposeSignature(doc(),'sig'),bytes=composeImageContent(id);
+  invalidateSessionResources();normalize();image();
+  await assert.rejects(html);await assert.rejects(bytes);
+  assert.equal(requests.filter(path=>path.endsWith('/content')).length,1);
 });

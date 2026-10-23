@@ -73,7 +73,7 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
   const oldFetch = globalThis.fetch;
   const { h, render } = await import('preact');
   const { act } = await import('preact/test-utils');
-  const { session } = await import('../../web/src/state/session.js');
+  const { session, verifiedSession } = await import('../../web/src/state/session.js');
   const { config } = await import('../../web/src/state/config.js');
   const { prefs } = await import('../../web/src/state/prefs.js');
   const { route } = await import('../../web/src/router.js');
@@ -86,13 +86,13 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
   const root = document.querySelector('main'), requests = [];
   const owner = { user: { email: 'user@example.com' }, csrf: 'synthetic-csrf' };
   const message = '이 계정은 메일 필터 기능이 꺼져 있어요. 관리자에게 켜 달라고 요청해 주세요.';
-  const previous = { session: session.value, config: config.value, prefs: prefs.value, route: route.value, toast: toast.value, vacation: vacation.value };
+  const previous = { session: session.value, verifiedSession: verifiedSession.value, config: config.value, prefs: prefs.value, route: route.value, toast: toast.value, vacation: vacation.value };
   t.after(() => {
     render(null, root); hooks.deregister(); dom.window.close(); globalThis.fetch = oldFetch;
     for (const [name, value] of originals) globalThis[name] = value;
-    session.value = previous.session; config.value = previous.config; prefs.value = previous.prefs; route.value = previous.route; toast.value = previous.toast; vacation.value = previous.vacation;
+    session.value = previous.session; verifiedSession.value = previous.verifiedSession; config.value = previous.config; prefs.value = previous.prefs; route.value = previous.route; toast.value = previous.toast; vacation.value = previous.vacation;
   });
-  session.value = owner;
+  session.value = owner; verifiedSession.value = owner;
   config.value = { contactsEnabled: false, attachMaxMb: 25 };
   prefs.value = { signatures: {}, defaultFrom: 'user@example.com' };
   globalThis.fetch = async path => {

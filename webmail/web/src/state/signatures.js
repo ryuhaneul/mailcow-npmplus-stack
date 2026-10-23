@@ -1,5 +1,5 @@
 import { batch, effect, signal } from '@preact/signals';
-import { session } from './session.js';
+import { session, sessionResourceEpoch } from './session.js';
 import { getSignatures, putSignatures, signatureSessionChanged } from '../signatures.js';
 import { deleteSignatureImage, getSignatureImages, uploadSignatureImage } from '../signature-images.js';
 
@@ -9,15 +9,16 @@ export const signatureImages = signal(null);
 export const selectedSignatureId = signal(null);
 let listPending, imagesPending, listVersion = 0, imagesVersion = 0;
 effect(() => {
-  session.value; listPending = null; imagesPending = null; listVersion++; imagesVersion++;
+  session.value; sessionResourceEpoch.value; listPending = null; imagesPending = null; listVersion++; imagesVersion++;
   batch(() => { signatures.value = null; signatureImages.value = null; selectedSignatureId.value = null; });
 });
 
 export function loadSignatures() {
   if (listPending) return listPending;
-  const owner = session.value, version = listVersion;
+  const owner = session.value, epoch = sessionResourceEpoch.value, version = listVersion;
   const pending = getSignatures().then(value => {
     if (session.value !== owner) throw signatureSessionChanged();
+    if (sessionResourceEpoch.value !== epoch) throw signatureSessionChanged();
     if (version !== listVersion) return signatures.value || loadSignatures();
     signatures.value = value;
     return value;
@@ -40,9 +41,10 @@ export async function saveSignatures(draft) {
 }
 export function loadSignatureImages() {
   if (imagesPending) return imagesPending;
-  const owner = session.value, version = imagesVersion;
+  const owner = session.value, epoch = sessionResourceEpoch.value, version = imagesVersion;
   const pending = getSignatureImages().then(value => {
     if (session.value !== owner) throw signatureSessionChanged();
+    if (sessionResourceEpoch.value !== epoch) throw signatureSessionChanged();
     if (version !== imagesVersion) return signatureImages.value || loadSignatureImages();
     signatureImages.value = value;
     return value;

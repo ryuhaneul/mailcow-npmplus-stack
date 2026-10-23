@@ -364,7 +364,7 @@ export default function Composer() {
         {result.sentCopyRef&&<a class="compose-browse" href={`#read/${encodeURIComponent(result.sentCopyRef)}`} onClick={()=>{navigate(`read/${encodeURIComponent(result.sentCopyRef)}`);reset();}}>{result.sentCopySavedTo==='drafts'?'임시보관함의 사본 보기':'보낸 메일 보기'}</a>}
         {!result.sentCopySavedTo&&!result.copyPending&&!restoredAttempt.current&&<button class="btn sm" type="button" disabled={Boolean(busy||saving)} onClick={()=>void saveDraft(true).catch(fail)}>임시 저장</button>}
       </>}
-      {result.status==='not_sent'&&<p>{result.error?.message}{result.error?.smtpMessage&&<> {result.error.smtpMessage}</>} 내용을 확인하고 다시 보내 주세요.</p>}
+      {result.status==='not_sent'&&<><p>{result.error?.message}</p>{result.error?.smtpMessage&&<p>서버 응답: {result.error.smtpMessage}</p>}<p>내용을 확인하고 다시 보내 주세요.</p></>}
       {['checking','unknown'].includes(result.status)&&<p>{result.status==='checking'?'아직 보내는 중이에요. 결과를 확인할 때까지 다시 보내지 마세요.':unknownMessage}</p>}
       {(['checking','unknown'].includes(result.status)||result.copyPending)&&<button class="btn sm" type="button" disabled={Boolean(busy)} onClick={()=>void checkDelivery()}>다시 확인</button>}
       {result.status==='unknown'&&<><button class="btn sm" type="button" onClick={()=>viewMailbox('Sent')}>보낸편지함 확인</button><button class="btn sm" type="button" onClick={()=>viewMailbox('Drafts')}>임시보관함 확인</button></>}

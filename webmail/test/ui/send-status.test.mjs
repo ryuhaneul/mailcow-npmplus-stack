@@ -79,6 +79,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
       const c = await open({ width, send: { error }, lookup: { status: 'not_sent', error } });
       try {
         await expect(c.result).toContainText('안 보냈어요'); await expect(c.result).toContainText(error.message); await expect(c.result).toContainText(error.smtpMessage);
+        await expect(c.result.locator('p')).toHaveText([error.message, `서버 응답: ${error.smtpMessage}`, '내용을 확인하고 다시 보내 주세요.']);
         await expect(c.sendButton).toBeEnabled(); await expect(c.page.locator('#compose-subject')).toBeEnabled();
         assert.deepEqual(c.lookups, [c.sends[0].composeId]); await capture(c, 'not-sent', width);
       } finally { await c.page.close(); }

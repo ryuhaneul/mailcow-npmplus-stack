@@ -402,6 +402,13 @@ else
     warn "apply-dovecot-dedupe.sh failed — check state with: scripts/apply-dovecot-dedupe.sh --check"
 fi
 
+# Serialize simultaneous LMTP deliveries to the same recipient before Sieve runs.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-serial.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "postfix per-recipient LMTP serialization applied (or already present)"
+else
+    warn "apply-postfix-lmtp-serial.sh failed — check state with: scripts/apply-postfix-lmtp-serial.sh --check"
+fi
+
 webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
 
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then

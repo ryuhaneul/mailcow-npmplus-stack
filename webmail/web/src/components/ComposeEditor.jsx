@@ -11,7 +11,11 @@ export default function ComposeEditor({signatureNonce,html,onChange,disabled,edi
       const start=()=>{composing.current=true;};
       const finish=()=>{for(const resolve of idle.current)resolve();idle.current.clear();};
       const end=()=>{composing.current=false;changed();finish();};
-      const key=event=>{if(event.ctrlKey&&(event.key==='Enter'||event.shiftKey&&event.key.toLowerCase()==='h')){event.preventDefault();element.dispatchEvent(new KeyboardEvent('keydown',{key:event.key,ctrlKey:true,shiftKey:event.shiftKey,bubbles:true,cancelable:true}));}};
+      const key=event=>{
+        if(event.key==='Escape'){
+          if(!element.dispatchEvent(new KeyboardEvent('keydown',{key:event.key,bubbles:true,cancelable:true})))event.preventDefault();
+        }else if(event.ctrlKey&&(event.key==='Enter'||event.shiftKey&&event.key.toLowerCase()==='h')){event.preventDefault();element.dispatchEvent(new KeyboardEvent('keydown',{key:event.key,ctrlKey:true,shiftKey:event.shiftKey,bubbles:true,cancelable:true}));}
+      };
       doc.addEventListener('compositionstart',start);doc.addEventListener('compositionend',end);doc.addEventListener('input',changed);doc.addEventListener('mouseup',remember);doc.addEventListener('keyup',remember);doc.addEventListener('keydown',key);
       editor.current={whenIdle(){return composing.current?new Promise(resolve=>idle.current.add(resolve)):Promise.resolve();},format(command,value){if(latest.current.disabled)return;doc.body.focus();if(range.current){const selection=doc.getSelection();selection.removeAllRanges();selection.addRange(range.current);}doc.execCommand(command,false,value);changed();}};
       detach=()=>{finish();doc.removeEventListener('compositionstart',start);doc.removeEventListener('compositionend',end);doc.removeEventListener('input',changed);doc.removeEventListener('mouseup',remember);doc.removeEventListener('keyup',remember);doc.removeEventListener('keydown',key);};

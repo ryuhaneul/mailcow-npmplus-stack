@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initialComposition, composePayload, recipients, replaceSignature, signatureMarkup, attachmentLimitMessage, sendWarnings } from '../../web/src/compose.js';
+import { folders } from '../../web/src/state/folders.js';
+import { openMessage, composeSeed } from '../../web/src/state/compose.js';
+import { route } from '../../web/src/router.js';
 import { api } from '../../web/src/api.js';
 import { session } from '../../web/src/state/session.js';
 const identities={identities:[{address:'user@example.com'},{address:'alias@example.com'}],defaultFrom:'user@example.com'};
@@ -27,4 +30,29 @@ test('approved attachment and delivery warning wording is stable',()=>{
 test('multipart upload retains same-origin credentials and CSRF while browser supplies its boundary',async t=>{
  const old=globalThis.fetch,oldSession=session.value;session.value={csrf:'synthetic-csrf'};t.after(()=>{globalThis.fetch=old;session.value=oldSession;});const body=new FormData();body.append('file',new Blob(['synthetic']), 'example.txt');
  globalThis.fetch=async(path,options)=>{assert.equal(path,'/api/attachments');assert.equal(options.body,body);assert.equal(options.credentials,'same-origin');assert.equal(options.headers.get('X-Webmail-CSRF'),'synthetic-csrf');assert.equal(options.headers.has('Content-Type'),false);return Response.json({id:'example-upload'});};assert.deepEqual(await api('/api/attachments',{method:'POST',body}),{id:'example-upload'});
+});
+
+test('draft composition restores values and matching sender, preserves body verbatim and never inserts a default signature',()=>{
+ const message={draftRef:'synthetic-draft',from:[{address:'ALIAS@EXAMPLE.COM'}],to:[{address:'recipient@example.com'}],cc:[{address:'cc@example.com'}],bcc:[{address:'hidden@example.com'}],subject:'unfinished',html:'<p>draft body</p><div class="sig">existing signature</div><img src="cid:logo@synthetic.invalid">',attachments:[{ref:'synthetic-draft',partId:'2',filename:'same.txt',size:12}],inReplyTo:'<reply@synthetic.invalid>',references:'<parent@synthetic.invalid>'};
+ for(const options of [undefined,{nonce:'N'.repeat(32),signatures:{items:[{id:'default',html:'new signature'}],defaults:{'alias@example.com':{newDefault:'default',replyDefault:'default'}}},images:{images:[]}}]){
+   const model=initialComposition({kind:'draft',message},identities,prefs,'user@example.com',options);
+   assert.equal(model.kind,'draft');assert.equal(model.from,'alias@example.com');assert.equal(model.html,message.html);assert.equal(model.subject,message.subject);assert.equal(model.draftRef,message.draftRef);assert.deepEqual(model.to,message.to);assert.deepEqual(model.cc,message.cc);assert.deepEqual(model.bcc,message.bcc);assert.deepEqual(model.forwardFiles,message.attachments);assert.equal(model.internalImages,false);
+   const payload=composePayload(model,true);assert.equal(payload.inReplyTo,message.inReplyTo);assert.equal(payload.references,message.references);assert.equal(payload.draftRef,message.draftRef);assert.deepEqual(payload.forwardParts,[{ref:message.draftRef,partId:'2'}]);assert.deepEqual(payload.attachmentIds,[]);assert.equal('replyToRef'in payload,false);
+   if(options){assert.equal(model.selectedSignatureId,null);assert.deepEqual(model.signatureImages,[]);}
+ }
+ const fallback=initialComposition({kind:'draft',message:{...message,from:[{address:'revoked@example.com'}]}},identities,prefs,'user@example.com');assert.equal(fallback.from,'user@example.com');
+});
+test('opening a personal special-use Drafts row composes; ordinary and shared draft rows still read',t=>{
+ const oldFolders=folders.value,oldLocation=globalThis.location,oldSeed=composeSeed.value,oldRoute=route.value;
+ globalThis.location={hash:''};t.after(()=>{folders.value=oldFolders;globalThis.location=oldLocation;composeSeed.value=oldSeed;route.value=oldRoute;});
+ folders.value={folders:[{path:'My drafts',specialUse:'\\Drafts',shared:false},{path:'INBOX',specialUse:'\\Inbox',shared:false},{path:'Shared/other@example.com/Drafts',specialUse:'\\Drafts',shared:true}]};
+ openMessage({folder:'My drafts',ref:'draft-ref'});assert.equal(route.value.name,'compose');assert.deepEqual(composeSeed.value,{kind:'draft',message:{ref:'draft-ref'}});
+ for(const folder of ['INBOX','Shared/other@example.com/Drafts','Unknown']){composeSeed.value=null;openMessage({folder,ref:'read-ref'});assert.equal(route.value.name,'read');assert.equal(route.value.value,'read-ref');assert.equal(composeSeed.value,null);}
+});
+
+test('draft composition uses the server-authorized manual sender and carries the fallback notice',()=>{
+ for(const [composeFrom,fromChanged] of [['manual@synthetic.invalid',false],['user@example.com',true]]){
+   const model=initialComposition({kind:'draft',message:{from:[{address:'old@synthetic.invalid'}],composeFrom,fromChanged,draftRef:'synthetic-ref',html:'<p>draft</p>'}},identities,prefs,'user@example.com');
+   assert.equal(model.from,composeFrom);assert.equal(model.fromChanged,fromChanged);assert.equal(composePayload(model,true).from,composeFrom);
+ }
 });

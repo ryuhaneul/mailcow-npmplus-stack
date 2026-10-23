@@ -36,7 +36,7 @@ export function decodeCharset(bytes, charset = 'utf-8') {
   if (['euc-kr', 'ks_c_5601-1987', 'ks_c_5601-1989', 'windows-949'].includes(charset)) charset = 'cp949';
   return iconv.decode(bytes, iconv.encodingExists(charset) ? charset : 'utf-8');
 }
-function decodeWords(value = '') {
+export function decodeWords(value = '') {
   // libmime handles the other charsets; its ISO-2022-KR decoder is unavailable.
   value = String(value).replace(/(=\?iso-?2022-?kr\?[bq]\?[^?]*\?=)\s+(?==\?iso-?2022-?kr\?)/gi, '$1');
   value = value.replace(/=\?(iso-?2022-?kr)\?([bq])\?([^?]*)\?=/gi, (_, charset, mode, content) => {

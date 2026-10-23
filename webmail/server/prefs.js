@@ -69,14 +69,18 @@ const fields = {
     if (typeof item.html !== 'string' || typeof item.auto !== 'boolean') throw invalid();
     return [address(key), { html: sanitizeComposeHtml(item.html, { publicHostnames: config.publicHostnames }), auto: item.auto }];
   }),
+  fromNames: value => map(value, (key, item) => {
+    if (typeof item !== 'string' || !item.isWellFormed() || [...item].length > 64 || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(item)) throw invalid();
+    return [address(key), item.trim()];
+  }),
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
-  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null };
+  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
-  exact(doc, Object.keys(fields));
-  return Object.fromEntries(Object.entries(fields).map(([key, parse]) => [key, parse(doc[key], config)]));
+  if (!object(doc) || !Object.keys(doc).length || Object.keys(doc).some(key => !Object.hasOwn(fields, key) && key !== 'imageAllowAdd')) throw invalid();
+  return Object.fromEntries(Object.entries(doc).map(([key, value]) => [key, (key === 'imageAllowAdd' ? fields.imageAllow : fields[key])(value, config)]));
 }
 function readDocument(raw, config, logger) {
   const result = defaults(config);
@@ -99,28 +103,40 @@ function readDocument(raw, config, logger) {
   if (discarded) logger?.warn({ code: 'PREFS_DISCARDED' }, '저장된 설정에서 사용할 수 없는 항목을 제외했습니다.');
   return result;
 }
-export function createPrefsService({ config, imap, logger, signatures }) {
+export function createPrefsService({ config, imap, logger, signatures, directory }) {
   async function mailCall(session, operation) {
     try { return await imap.withMailbox(session, 'INBOX', operation); } catch (error) {
       if (error instanceof AppError && error.statusCode !== 502) throw error;
       throw new AppError(503, 'MAIL_UNAVAILABLE', '메일 서버에 연결할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
     }
   }
+  async function allowedNames(session, names) {
+    if (!Object.keys(names).length) return {};
+    const { identities } = await directory.identities(session);
+    const allowed = new Set(identities.map(item => item.address));
+    return Object.fromEntries(Object.entries(names).filter(([key, value]) => allowed.has(key) && value));
+  }
   return {
     async get(session) {
       const raw = await mailCall(session, client => getMetadata(client, '', PREFS_ENTRY));
       const doc = readDocument(raw, config, logger);
+      doc.fromNames = await allowedNames(session, doc.fromNames);
       session.prefs = doc;
       return doc;
     },
     async put(session, body) {
       if (Buffer.byteLength(JSON.stringify(body) ?? '') > MAX_PREFS_BYTES) throw tooLarge();
+      // Every request updates only its supplied fields, including legacy full PUTs.
       const input = normalize(body, config);
+      if (Object.values(input.fromNames ?? {}).some(name => name.includes('=?'))) throw new AppError(422, 'PREFS_FROM_NAME_INVALID', '이름에 =? 문자 조합은 쓸 수 없어요');
       await withSignatureStoreLock(session.email, () => mailCall(session, async client => {
-        let doc = input;
+        const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
+        const stored = readDocument(raw, config, logger);
+        const { imageAllowAdd, ...patch } = input;
+        let doc = { ...stored, ...patch, fromNames: await allowedNames(session, { ...stored.fromNames, ...patch.fromNames }) };
+        if (imageAllowAdd) doc.imageAllow = fields.imageAllow([...new Set([...doc.imageAllow, ...imageAllowAdd])]);
         if (signatures) {
-          const raw = await getMetadata(client, '', PREFS_ENTRY, { maxSize: MAX_PREFS_BYTES });
-          const prepared = await signatures.preparePrefs({ session, client, prefs: input });
+          const prepared = await signatures.preparePrefs({ session, client, prefs: doc });
           // The list API alone owns the legacy mirror. Even a pending mirror sync
           // must not replace an unprocessed or preserved legacy edit here.
           const actual = raw === null ? {} : JSON.parse(raw);

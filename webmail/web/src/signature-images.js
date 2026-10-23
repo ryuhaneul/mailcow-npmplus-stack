@@ -42,7 +42,7 @@ export async function getSignatureImageContent(id) {
 }
 
 // Use one map per editor/preview lifetime. Normalize HTML before projecting it to live DOM.
-export function createSignatureImageMap() {
+export function createSignatureImageMap({ loadContent = getSignatureImageContent } = {}) {
   const entries = new Map(), reverse = new Map();
   let disposed = false, generation = 0;
   function release(id) {
@@ -60,7 +60,7 @@ export function createSignatureImageMap() {
     if (!entries.has(id)) {
       const entry = {};
       entries.set(id, entry);
-      entry.promise = getSignatureImageContent(id).then(blob => {
+      entry.promise = loadContent(id).then(blob => {
         if (disposed || entries.get(id) !== entry) throw signatureSessionChanged();
         entry.url = URL.createObjectURL(blob);
         reverse.set(entry.url, signatureImageCid(id));

@@ -31,7 +31,7 @@ export async function logout() {
 
 export function endSession(code, { notify = true } = {}) {
   session.value = null; sessionReady.value = false;
-  if (toast.value?.kind !== 'password-changed') {
+  if (!['password-changed', 'send-unknown'].includes(toast.value?.kind)) {
     toast.value = notify && code === 'SESSION_EXPIRED' ? { kind: 'session-expired', message: '로그인이 만료됐어요. 다시 로그인해 주세요.' } : null;
   }
 }

@@ -1,7 +1,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createHash } from 'node:crypto';
+import { createServer } from 'node:net';
+import nodemailer from 'nodemailer';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { mkdtemp, readFile, rm, access, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -25,7 +27,7 @@ import { sanitizeComposeHtml } from '../../server/mail/sanitize.js';
 import { encodeRef, decodeRef } from '../../server/mail/ref.js';
 import { installAuth } from '../../server/routes/auth.js';
 import composeRoutes from '../../server/routes/compose.js';
-import { installErrors } from '../../server/errors.js';
+import { installErrors, AppError } from '../../server/errors.js';
 import { logOptions } from '../../server/log.js';
 
 const password = 'synthetic-compose-password';
@@ -38,13 +40,13 @@ before(async () => {
   [cert, key, otherCert, otherKey] = await Promise.all(['one.pem', 'one.key', 'two.pem', 'two.key'].map(name => readFile(join(tlsDir, name))));
 });
 after(async () => { await rm(tlsDir, { recursive: true, force: true }); });
-async function smtpFixture(t, { reject = false, partial = false, differentCert = false } = {}) {
+async function smtpFixture(t, { reject = false, partial = false, differentCert = false, dropAfterData = false } = {}) {
   const messages = [], auth = []; let connections = 0;
   const server = new SMTPServer({ key: differentCert ? otherKey : key, cert: differentCert ? otherCert : cert, logger: false,
     onConnect(_session, callback) { connections++; callback(); },
     onAuth(credentials, session, callback) { auth.push({ ...credentials, secure: session.secure }); callback(null, { user: credentials.username }); },
     onRcptTo(address, _session, callback) { callback((reject || (partial && address.address === 'rejected@example.com')) ? Object.assign(new Error('synthetic recipient rejected'), { responseCode: 550 }) : null); },
-    onData(stream, session, callback) { const chunks = []; stream.on('data', chunk => chunks.push(chunk)); stream.on('end', () => { messages.push({ raw: Buffer.concat(chunks), envelope: session.envelope }); callback(); }); },
+    onData(stream, session, callback) { const chunks = []; stream.on('data', chunk => chunks.push(chunk)); stream.on('end', () => { messages.push({ raw: Buffer.concat(chunks), envelope: session.envelope }); if (dropAfterData) { for (const connection of server.connections) connection.close(); } else callback(); }); },
   });
   server.on('error', () => {});
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -64,14 +66,14 @@ class FakeImap extends EventEmitter {
   async messageDelete(uid, options) { this.calls.push({ action: 'delete', path: this.mailbox.path, uid, options }); return true; }
   async messageFlagsAdd(uid, flags, options) { this.calls.push({ action: 'flags', path: this.mailbox.path, uid, flags, options }); return true; }
 }
-async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, images } = {}) {
+async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, images, smtpSend } = {}) {
   let time = Date.UTC(2026, 0, 1), logs = ''; const calls = [], clients = [], attempts = [];
   const actualConfig = { ...config, ...smtp?.options, ...overrides }, tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w09-'));
   const stream = new Writable({ write(chunk, _encoding, callback) { logs += chunk.toString(); callback(); } });
   const app = Fastify({ logger: { ...logOptions('info'), stream } }); installErrors(app);
   await installAuth(app, { config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
   const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [directoryTables ? directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || [] : sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
-  const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); } };
+  const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); return smtpSend?.(...args); } };
   const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot, now: () => time, ...(images ? { images } : {}) });
   await app.register(composeRoutes, { config: actualConfig, service });
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
@@ -83,7 +85,7 @@ async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, 
   const headers = await login(), session = await app.sessions.get(headers.cookie.split('=')[1]);
   return { app, calls, clients, service, attempts, headers, session, login, tempRoot, dir: join(tempRoot, session.id), get logs() { return logs; }, advance(ms) { time += ms; } };
 }
-const body = extra => ({ from: 'user@example.com', to: ['recipient@example.com'], cc: [], bcc: [], subject: 'synthetic subject', html: '<p>synthetic private body</p>', attachmentIds: [], ...extra });
+const body = extra => ({ composeId: randomUUID(), from: 'user@example.com', to: ['recipient@example.com'], cc: [], bcc: [], subject: 'synthetic subject', html: '<p>synthetic private body</p>', attachmentIds: [], ...extra });
 function upload(f, content, headers = f.headers, filename = 'example.txt', composeId) {
   const boundary = 'synthetic-compose-boundary';
   const field = composeId === undefined ? '' : `--${boundary}\r\nContent-Disposition: form-data; name="composeId"\r\n\r\n${composeId}\r\n`;
@@ -131,7 +133,7 @@ for (const [extra, status, code] of [
 test('send: real STARTTLS user auth, attachment streams, Sent Seen APPEND, draft delete and original Answered', async t => {
   const smtp = await smtpFixture(t), f = await fixture(t, { smtp }), attachment = (await upload(f, 'uploaded-content')).json();
   const response = await request(f, 'POST', '/api/send', body({ bcc: ['hidden@example.com'], attachmentIds: [attachment.id], draftRef: draft, replyToRef: original, forwardParts: [{ ref: original, partId: '2' }], inReplyTo: '<original@example.com>', references: '<parent@example.com>', html: '<p style="color:red" onclick="evil()">hello</p><script>evil()</script>' }));
-  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true }); assert.equal(smtp.auth.length, 1); assert.equal(smtp.auth[0].secure, true); assert.equal(smtp.auth[0].username, 'user@example.com'); assert.equal(smtp.auth[0].password, password);
+  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { status: 'sent', ok: true, sentCopySavedTo: 'sent', sentCopyRef: encodeRef('Sent', 123, 31) }); assert.equal(smtp.auth.length, 1); assert.equal(smtp.auth[0].secure, true); assert.equal(smtp.auth[0].username, 'user@example.com'); assert.equal(smtp.auth[0].password, password);
   assert.equal(smtp.messages.length, 1); const sent = smtp.messages[0], text = sent.raw.toString();
   assert.deepEqual(sent.envelope.rcptTo.map(item => item.address), ['recipient@example.com', 'hidden@example.com']); assert.ok(!/^Bcc:/im.test(text)); assert.ok(!text.includes('onclick')); assert.ok(!text.includes('<script>'));
   for (const value of ['uploaded-content', 'forward-content']) assert.ok(text.includes(Buffer.from(value).toString('base64')));
@@ -187,7 +189,7 @@ for (const mode of ['verify', 'wrong pin', 'wrong name']) test(`SMTP TLS: ${mode
   failure(await request(f, 'POST', '/api/send', body()), 503, 'MAIL_UNAVAILABLE'); assert.equal(smtp.auth.length, 0); assert.equal(f.calls.filter(call => call.action === 'append').length, 0);
 });
 test('SMTP: STARTTLS required, shared TLS checks, deadlines and credentials cleared after send', async () => {
-  let options, closed = 0; const service = createSmtpService({ config, transportFactory(value) { options = value; return { async sendMail() { return { accepted: ['recipient@example.com'], rejected: [] }; }, close() { closed++; } }; } });
+  let options, closed = 0; const service = createSmtpService({ config, transportFactory(value) { options = value; return { use() {}, async sendMail() { return { accepted: ['recipient@example.com'], rejected: [] }; }, close() { closed++; } }; } });
   await service.send({ email: 'user@example.com', password: Buffer.from(password) }, Buffer.from('synthetic'), { from: 'user@example.com', to: ['recipient@example.com'] });
   assert.equal(options.secure, false); assert.equal(options.requireTLS, true); assert.equal(options.tls.rejectUnauthorized, true); assert.equal(options.tls.servername, 'mail.example.com'); assert.equal(options.auth.user, 'user@example.com'); assert.equal(options.auth.pass, ''); assert.equal(options.connectionTimeout, 10000); assert.equal(options.socketTimeout, 60000); assert.equal(options.logger, false); assert.equal(options.debug, false); assert.equal(closed, 1);
 });
@@ -213,7 +215,7 @@ test('HTTP smoke: multipart upload and send over an actual listener', async t =>
   const form = new FormData(); form.append('file', new Blob(['http-upload-content'], { type: 'text/plain' }), 'example.txt');
   const uploaded = await fetch(base + '/api/attachments', { method: 'POST', headers: f.headers, body: form }); assert.equal(uploaded.status, 201); const attachment = await uploaded.json();
   const response = await fetch(base + '/api/send', { method: 'POST', headers: { ...f.headers, 'content-type': 'application/json' }, body: JSON.stringify(body({ attachmentIds: [attachment.id] })) });
-  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { ok: true }); assert.equal(smtp.messages.length, 1); await assert.rejects(access(join(f.dir, attachment.id)), { code: 'ENOENT' });
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'sent', ok: true, sentCopySavedTo: 'sent', sentCopyRef: encodeRef('Sent', 123, 31) }); assert.equal(smtp.messages.length, 1); await assert.rejects(access(join(f.dir, attachment.id)), { code: 'ENOENT' });
 });
 test('upload multipart: second file rejected and no temporary file retained', async t => {
   const f = await fixture(t), boundary = 'synthetic-multi-file';
@@ -230,13 +232,13 @@ test('send partial rejection: 200 ok with rejected recipient detail and normal p
 test('send postprocessing failure: all copy APPEND failures return 200 warning, preserve draft and uploads, and continue Answered', async t => {
   const smtp = await smtpFixture(t), f = await fixture(t, { smtp, clientSetup(client) { client.append = async () => { throw new Error(password + ' synthetic private body'); }; } }), attachment = (await upload(f, 'temporary')).json();
   const response = await request(f, 'POST', '/api/send', body({ attachmentIds: [attachment.id], draftRef: draft, replyToRef: original }));
-  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['SENT_COPY_FAILED'], sentCopySavedTo: null }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 0); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); await access(join(f.dir, attachment.id));
+  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { status: 'sent', ok: true, warnings: ['SENT_COPY_FAILED'], sentCopySavedTo: null }); assert.equal(smtp.messages.length, 1); assert.equal(f.calls.filter(call => call.action === 'delete').length, 0); assert.equal(f.calls.filter(call => call.action === 'flags').length, 1); await access(join(f.dir, attachment.id));
   assert.match(f.logs, /SENT_COPY_FAILED/); assert.ok(!f.logs.includes(password)); assert.ok(!f.logs.includes('synthetic private body'));
 });
 test('send postprocessing: independent failures produce exactly their warning codes and preserve 200', async t => {
   const f = await fixture(t, { clientSetup(client) { client.messageDelete = async () => false; client.messageFlagsAdd = async () => false; } });
   const response = await request(f, 'POST', '/api/send', body({ draftRef: draft, replyToRef: original }));
-  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { ok: true, warnings: ['DRAFT_DELETE_FAILED', 'ANSWERED_FAILED'] }); assert.equal(f.calls.filter(call => call.action === 'append').length, 1); assert.match(f.logs, /DRAFT_DELETE_FAILED/); assert.match(f.logs, /ANSWERED_FAILED/);
+  assert.equal(response.statusCode, 200, response.body); assert.deepEqual(response.json(), { status: 'sent', ok: true, warnings: ['DRAFT_DELETE_FAILED', 'ANSWERED_FAILED'], sentCopySavedTo: 'sent', sentCopyRef: encodeRef('Sent', 123, 31) }); assert.equal(f.calls.filter(call => call.action === 'append').length, 1); assert.match(f.logs, /DRAFT_DELETE_FAILED/); assert.match(f.logs, /ANSWERED_FAILED/);
 });
 
 
@@ -604,7 +606,7 @@ for(const resumed of [true,false]) {
     client.append=async(path,raw,...args)=>{if(path==='Sent'){sent.push(raw);throw new Error('synthetic Sent failure');}return append(path,raw,...args);};
     const payload=resumed?resumedBody(loaded):body({bcc:['hidden@example.com']}),html='<p>latest body before autosave</p>';
     const response=await request(f,'POST','/api/send',{...payload,html,attachmentIds:[attachment.id]});
-    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:'drafts'});assert.equal(f.attempts.length,1);assert.equal(sent.length,2);
+    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{status:'sent',ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:'drafts',sentCopyRef:encodeRef('Drafts',123,31)});assert.equal(f.attempts.length,1);assert.equal(sent.length,2);
     const copies=f.calls.filter(call=>call.action==='append');assert.equal(copies.length,1);assert.equal(copies[0].path,'Drafts');assert.deepEqual(copies[0].flags,['\\Draft','\\Seen']);assert.deepEqual(copies[0].raw,sent[0]);assert.deepEqual(sent[0],sent[1]);
     assert.equal(f.messages.size,1);assert.equal(f.messages.has(10),false);assert.equal(f.calls.filter(call=>call.action==='delete').length,resumed?1:0);
     const stored=[...f.messages.values()][0],parts=bodyParts(stored.row.bodyStructure);assert.match([...stored.downloads.values()].map(bytes=>bytes.toString()).join(''),/latest body before autosave/);assert.equal(stored.row.envelope.bcc[0].address,'hidden@example.com');
@@ -617,7 +619,7 @@ for(const resumed of [true,false]) {
     const attachment=(await upload(f,'retained recovery bytes')).json(),paths=[];
     f.clients[0].append=async path=>{paths.push(path);throw new Error('synthetic account copy failure');};
     const response=await request(f,'POST','/api/send',{...(resumed?resumedBody(loaded):body()),html:'<p>unsaved latest body</p>',attachmentIds:[attachment.id]});
-    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null});assert.deepEqual(paths,['Sent','Sent','Drafts']);assert.equal(f.attempts.length,1);
+    assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{status:'sent',ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null});assert.deepEqual(paths,['Sent','Sent','Drafts']);assert.equal(f.attempts.length,1);
     assert.equal(f.messages.size,resumed?1:0);if(resumed)assert.equal(f.messages.get(10),original);assert.equal(f.calls.filter(call=>call.action==='delete').length,0);assert.equal((await readFile(join(f.dir,attachment.id))).toString(),'retained recovery bytes');
     // Once the account recovers, the retained upload can be saved without another SMTP send.
     f.clients[0].append=async(path,raw,flags)=>{const uid=99;f.messages.set(uid,storedDraft(raw));return {uid,uidValidity:123n};};
@@ -627,6 +629,248 @@ for(const resumed of [true,false]) {
     const f=await resumeFixture(t),loaded=(await request(f,'GET',`/api/drafts/${draft}`)).json();if(!resumed)f.messages.clear();
     const attachment=(await upload(f,'retry attachment')).json(),client=f.clients[0],append=client.append.bind(client);let attempts=0;
     client.append=async(path,...args)=>{assert.equal(path,'Sent');if(++attempts===1)throw new Error('synthetic first APPEND failure');return append(path,...args);};
-    const response=await request(f,'POST','/api/send',{...(resumed?resumedBody(loaded):body()),attachmentIds:[attachment.id]});assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{ok:true});assert.equal(attempts,2);assert.equal(f.attempts.length,1);assert.equal(f.calls.filter(call=>call.action==='append').length,1);assert.equal(f.messages.size,0);await assert.rejects(access(join(f.dir,attachment.id)),{code:'ENOENT'});
+    const response=await request(f,'POST','/api/send',{...(resumed?resumedBody(loaded):body()),attachmentIds:[attachment.id]});assert.equal(response.statusCode,200,response.body);assert.deepEqual(response.json(),{status:'sent',ok:true,sentCopySavedTo:'sent',sentCopyRef:encodeRef('Sent',123,31)});assert.equal(attempts,2);assert.equal(f.attempts.length,1);assert.equal(f.calls.filter(call=>call.action==='append').length,1);assert.equal(f.messages.size,0);await assert.rejects(access(join(f.dir,attachment.id)),{code:'ENOENT'});
   });
 }
+
+for (const copy of ['sent', 'drafts', null]) test(`send receipts: lost response recovers SMTP success and ${copy} copy location without resending`, async t => {
+  const f = await fixture(t, { clientSetup(client) {
+    const append = client.append.bind(client);
+    client.append = async (path, ...args) => {
+      if (copy === null || copy === 'drafts' && path === 'Sent') throw new Error('synthetic copy failure');
+      return append(path, ...args);
+    };
+  } });
+  const payload = body(), response = await request(f, 'POST', '/api/send', payload);
+  assert.equal(response.statusCode, 200);
+  // Treat the POST response as lost; GET is the user's authoritative result.
+  const status = await request(f, 'GET', `/api/send/${payload.composeId}`), receipt = status.json();
+  assert.equal(status.statusCode, 200); assert.equal(status.headers['cache-control'], 'no-store');
+  assert.equal(receipt.status, 'sent'); assert.equal(receipt.sentCopySavedTo, copy);
+  assert.equal(receipt.startedAt, Date.UTC(2026, 0, 1)); assert.equal(receipt.updatedAt, receipt.startedAt);
+  if (copy) assert.deepEqual(decodeRef(receipt.sentCopyRef), { path: copy === 'sent' ? 'Sent' : 'Drafts', uidValidity: 123, uid: 31 });
+  else assert.equal(receipt.sentCopyRef, undefined);
+  const duplicate = await request(f, 'POST', '/api/send', { ...payload, from: 'changed-invalid-address', attachmentIds: ['already-cleaned'] });
+  assert.deepEqual(duplicate.json(), response.json()); assert.equal(f.attempts.length, 1);
+});
+
+test('send receipts: simultaneous same-key request reports checking; SMTP runs once', async t => {
+  let release, started; const gate = new Promise(resolve => release = resolve), began = new Promise(resolve => started = resolve);
+  t.after(() => release());
+  const f = await fixture(t, { smtpSend: async () => { started(); await gate; } }), payload = body();
+  const first = request(f, 'POST', '/api/send', payload).then(value => value);
+  await began;
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().status, 'checking');
+  assert.deepEqual((await request(f, 'POST', '/api/send', payload)).json(), { status: 'checking' });
+  assert.equal(f.attempts.length, 1);
+  release(); assert.equal((await first).json().status, 'sent');
+});
+
+test('send receipts: SMTP acceptance is visible while the Sent copy is still pending', async t => {
+  let release, started; const gate = new Promise(resolve => release = resolve), began = new Promise(resolve => started = resolve);
+  t.after(() => release());
+  const f = await fixture(t, { clientSetup(client) {
+    const append = client.append.bind(client);
+    client.append = async (...args) => { started(); await gate; return append(...args); };
+  } }), payload = body(), first = request(f, 'POST', '/api/send', payload).then(value => value);
+  await began;
+  const receipt = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  assert.equal(receipt.status, 'sent'); assert.equal(receipt.copyPending, true);
+  assert.equal((await request(f, 'POST', '/api/send', payload)).json().status, 'sent');
+  assert.equal(f.attempts.length, 1); release(); await first;
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().sentCopySavedTo, 'sent');
+});
+
+test('send receipts: pre-send validation and SMTP rejection permit a same-key retry only after not_sent', async t => {
+  let reject = true;
+  const f = await fixture(t, { smtpSend: async () => { if (reject) throw Object.assign(new Error('synthetic rejection'), { code: 'SMTP_REJECTED', statusCode: 502 }); } });
+  const payload = body({ to: [] });
+  failure(await request(f, 'POST', '/api/send', payload), 422, 'NO_RECIPIENT');
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().status, 'not_sent');
+  payload.to = ['recipient@example.com'];
+  await request(f, 'POST', '/api/send', payload);
+  const failed = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  assert.equal(failed.status, 'not_sent'); assert.equal(f.attempts.length, 1);
+  reject = false; assert.equal((await request(f, 'POST', '/api/send', payload)).json().status, 'sent');
+  assert.equal(f.attempts.length, 2);
+});
+
+test('send receipts: unknown SMTP outcome stays locked; only a different key can deliver again', async t => {
+  const f = await fixture(t, { smtpSend: async () => { throw new AppError(503, 'SMTP_OUTCOME_UNKNOWN', '발송 여부 확인 필요'); } });
+  const payload = body();
+  assert.equal((await request(f, 'POST', '/api/send', payload)).json().status, 'unknown');
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().reason, 'SMTP_OUTCOME_UNKNOWN');
+  assert.equal((await request(f, 'POST', '/api/send', payload)).json().status, 'unknown'); assert.equal(f.attempts.length, 1);
+  await request(f, 'POST', '/api/send', { ...payload, composeId: randomUUID() }); assert.equal(f.attempts.length, 2);
+});
+
+test('send receipts: key validation, session isolation, expiry and sweep', async t => {
+  const f = await fixture(t), payload = body();
+  failure(await request(f, 'POST', '/api/send', { ...payload, composeId: undefined }), 422, 'BAD_REQUEST');
+  failure(await request(f, 'POST', '/api/send', { ...payload, composeId: 'bad key' }), 422, 'BAD_REQUEST');
+  failure(await request(f, 'GET', '/api/send/bad%20key'), 422, 'BAD_REQUEST');
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().reason, 'NOT_FOUND');
+  await request(f, 'POST', '/api/send', payload);
+  const other = await f.login();
+  assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`, undefined, other)).json(), { status: 'unknown', reason: 'NOT_FOUND' });
+  failure(await request(f, 'GET', `/api/send/${payload.composeId}`, undefined, {}), 403, 'NO_SESSION');
+  f.advance(60_001); await f.app.sessions.sweep();
+  failure(await request(f, 'GET', `/api/send/${payload.composeId}`), 403, 'SESSION_EXPIRED');
+  const fresh = await f.login();
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`, undefined, fresh)).json().reason, 'NOT_FOUND');
+});
+
+test('SMTP real connection refusal is not_sent and has no IMAP copy', async t => {
+  const listener = createServer(); await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const smtpPort = listener.address().port; await new Promise(resolve => listener.close(resolve));
+  const f = await fixture(t, { smtp: { options: { smtpPort } } }), payload = body();
+  failure(await request(f, 'POST', '/api/send', payload), 503, 'MAIL_UNAVAILABLE');
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().status, 'not_sent');
+  assert.equal(f.calls.some(call => call.action === 'append'), false);
+});
+
+test('SMTP real RCPT rejection is not_sent, and DATA loss after the final dot is unknown even with CONN errors', async t => {
+  const rejecting = await smtpFixture(t, { reject: true }), f = await fixture(t, { smtp: rejecting }), payload = body();
+  failure(await request(f, 'POST', '/api/send', payload), 502, 'SMTP_REJECTED');
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`)).json().status, 'not_sent'); assert.equal(rejecting.messages.length, 0);
+  const dropping = await smtpFixture(t, { dropAfterData: true }), g = await fixture(t, { smtp: dropping }), uncertain = body();
+  const response = await request(g, 'POST', '/api/send', uncertain);
+  assert.equal(response.statusCode, 200, response.body); assert.equal(response.json().status, 'unknown');
+  assert.equal(dropping.messages.length, 1); assert.equal(g.calls.some(call => call.action === 'append'), false);
+  assert.equal((await request(g, 'GET', `/api/send/${uncertain.composeId}`)).json().status, 'unknown');
+  await request(g, 'POST', '/api/send', uncertain); assert.equal(dropping.messages.length, 1);
+});
+
+test('SMTP lazy stream preserves the exact wire bytes and SHA-256 of the previous Buffer path', async t => {
+  const smtp = await smtpFixture(t), actualConfig = { ...config, ...smtp.options };
+  const raw = Buffer.from('From: user@example.com\r\nTo: recipient@example.com\r\nSubject: synthetic bytes\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n한글 원문\r\n.leading dot\r\n..two dots\r\n');
+  const envelope = { from: 'user@example.com', to: ['recipient@example.com'] }, session = { email: 'user@example.com', password: Buffer.from(password) };
+  // Baseline is precisely the old sendMail({raw: Buffer, envelope}) path.
+  const baseline = nodemailer.createTransport({ host: actualConfig.smtpHost, port: actualConfig.smtpPort, secure: false, requireTLS: true, tls: { rejectUnauthorized: true, servername: actualConfig.mailTlsServername, ca: cert }, auth: { user: session.email, pass: password }, logger: false, debug: false });
+  try { await baseline.sendMail({ raw, envelope }); } finally { baseline.close(); }
+  await createSmtpService({ config: actualConfig }).send(session, raw, envelope);
+  assert.equal(smtp.messages.length, 2);
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  assert.equal(hash(smtp.messages[0].raw), hash(raw)); assert.equal(hash(smtp.messages[1].raw), hash(smtp.messages[0].raw));
+  assert.deepEqual(smtp.messages[1].raw, raw);
+});
+
+for (const [command, code, consume, expected] of [
+  ['CONN', 'ETIMEDOUT', false, 'MAIL_UNAVAILABLE'],
+  ['EHLO', 'ESOCKET', false, 'MAIL_UNAVAILABLE'],
+  ['STARTTLS', 'ETLS', false, 'MAIL_UNAVAILABLE'],
+  ['AUTH PLAIN', 'EAUTH', false, 'MAIL_UNAVAILABLE'],
+  ['MAIL FROM', 'ETIMEDOUT', false, 'MAIL_UNAVAILABLE'],
+  ['RCPT TO', 'ESOCKET', false, 'MAIL_UNAVAILABLE'],
+  ['CONN', 'ECONNECTION', true, 'SMTP_OUTCOME_UNKNOWN'],
+  ['CONN', 'ESOCKET', true, 'SMTP_OUTCOME_UNKNOWN'],
+  ['CONN', 'ETIMEDOUT', true, 'SMTP_OUTCOME_UNKNOWN'],
+  ['DATA', 'ETIMEDOUT', true, 'SMTP_OUTCOME_UNKNOWN'],
+  [undefined, undefined, false, 'SMTP_OUTCOME_UNKNOWN'],
+]) test(`SMTP phase classification: ${command || 'unknown phase'} ${code || 'unknown error'} bodyStarted=${consume}`, async () => {
+  let plugin;
+  const service = createSmtpService({ config, transportFactory: () => ({
+    use(stage, callback) { assert.equal(stage, 'stream'); plugin = callback; },
+    async sendMail() {
+      const mail = { message: { createReadStream: () => Readable.from([Buffer.from('synthetic')]) } };
+      await new Promise((resolve, reject) => plugin(mail, error => error ? reject(error) : resolve()));
+      if (consume) for await (const _chunk of mail.message.createReadStream()) { /* Trigger the same lazy DATA boundary. */ }
+      throw Object.assign(new Error('synthetic failure'), { command, code });
+    },
+    close() {},
+  }) });
+  await assert.rejects(service.send({ email: 'user@example.com', password: Buffer.from(password) }, Buffer.from('synthetic'), { from: 'user@example.com', to: ['recipient@example.com'] }), { code: expected });
+});
+
+test('send receipts: manual recovery updates only the sent/no-copy receipt location and keeps SMTP locked', async t => {
+  let failing = true;
+  const f = await fixture(t, { clientSetup(client) {
+    const append = client.append.bind(client); client.append = async (...args) => { if (failing) throw new Error('synthetic copy failure'); return append(...args); };
+  } }), payload = body();
+  await request(f, 'POST', '/api/send', payload);
+  const before = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json(); assert.equal(before.sentCopySavedTo, null);
+  failing = false;
+  const saved = await request(f, 'PUT', '/api/drafts', { ...payload, html: '<p>edited manual recovery</p>' }); assert.equal(saved.statusCode, 200, saved.body);
+  const receipt = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  assert.deepEqual(receipt, { ...before, sentCopySavedTo: 'drafts', sentCopyRef: saved.json().draftRef, manualRecovery: true });
+  const second = await request(f, 'PUT', '/api/drafts', { ...payload, draftRef: saved.json().draftRef, html: '<p>second manual recovery</p>' });
+  assert.equal(second.statusCode, 200, second.body); assert.notEqual(second.json().draftRef, saved.json().draftRef);
+  const latest = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  assert.equal(latest.sentCopyRef, second.json().draftRef); assert.equal(latest.manualRecovery, true);
+  assert.deepEqual(f.calls.filter(call => call.action === 'delete').map(call => call.uid), [31]);
+  const copies = f.calls.filter(call => call.action === 'append'); assert.match(copies.at(-1).raw.toString(), /second manual recovery/);
+  assert.equal((await request(f, 'POST', '/api/send', payload)).json().manualRecovery, true); assert.equal(f.attempts.length, 1);
+});
+
+test('send receipts: manual saving with another key or session never changes the original receipt', async t => {
+  let failing = true;
+  const f = await fixture(t, { clientSetup(client) {
+    const append = client.append.bind(client); client.append = async (...args) => { if (failing) throw new Error('synthetic copy failure'); return append(...args); };
+  } }), payload = body();
+  await request(f, 'POST', '/api/send', payload); failing = false;
+  const before = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), different = body();
+  assert.equal((await request(f, 'PUT', '/api/drafts', different)).statusCode, 200);
+  assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), before);
+  assert.equal((await request(f, 'GET', `/api/send/${different.composeId}`)).json().reason, 'NOT_FOUND');
+  const other = await f.login();
+  assert.equal((await request(f, 'PUT', '/api/drafts', payload, other)).statusCode, 200);
+  assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), before);
+  assert.equal((await request(f, 'GET', `/api/send/${payload.composeId}`, undefined, other)).json().reason, 'NOT_FOUND');
+});
+
+test('send receipts: failed manual recovery leaves the sent/no-copy receipt untouched', async t => {
+  const f = await fixture(t, { clientSetup(client) { client.append = async () => { throw new Error('synthetic copy failure'); }; } }), payload = body();
+  await request(f, 'POST', '/api/send', payload);
+  const before = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json();
+  failure(await request(f, 'PUT', '/api/drafts', payload), 503, 'MAIL_UNAVAILABLE');
+  assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), before); assert.equal(f.attempts.length, 1);
+});
+
+for (const status of ['not_sent', 'unknown', 'sent']) test(`send receipts: manual save cannot reclassify ${status} or replace an existing Sent copy`, async t => {
+  const f = await fixture(t, { smtpSend: async () => { if (status === 'unknown') throw new AppError(503, 'SMTP_OUTCOME_UNKNOWN', '합성 불명'); } }), payload = body({ ...(status === 'not_sent' ? { to: [] } : {}) });
+  await request(f, 'POST', '/api/send', payload);
+  const before = (await request(f, 'GET', `/api/send/${payload.composeId}`)).json(); assert.equal(before.status, status);
+  assert.equal((await request(f, 'PUT', '/api/drafts', payload)).statusCode, 200);
+  assert.deepEqual((await request(f, 'GET', `/api/send/${payload.composeId}`)).json(), before);
+});
+
+for (const [from, name] of [['user@example.com', '직접 정한 이름'], ['alias@example.com', '별칭, 담당자'], ['delegated@example.com', '권한 이름'], ['manual@example.com', '서버 이름']]) test(`From prefs: ${from} in draft, SMTP and Sent copy`, async t => {
+  const directoryTables = { mailbox: [{ username: 'user@example.com', name: '서버 이름', active: 1 }], domain: [{ domain: 'example.com', active: 1 }], alias: [{ address: 'alias@example.com', goto: 'user@example.com', domain: 'example.com', active: 1, sender_allowed: 1 }], sender_acl: [{ logged_in_as: 'user@example.com', send_as: 'delegated@example.com' }, { logged_in_as: 'user@example.com', send_as: '@example.com' }] };
+  const f = await fixture(t, { directoryTables });
+  f.session.prefs = { fromNames: { 'user@example.com': '직접 정한 이름', 'alias@example.com': '별칭, 담당자', 'delegated@example.com': '권한 이름', 'manual@example.com': '무시할 이름' } };
+  const content = body({ from });
+  assert.equal((await request(f, 'PUT', '/api/drafts', content)).statusCode, 200);
+  assert.equal((await request(f, 'POST', '/api/send', content)).statusCode, 200);
+  assert.equal(f.attempts.length, 1);
+  for (const raw of [...f.calls.filter(call => call.action === 'append').map(call => call.raw), f.attempts[0][1]]) {
+    const headers = libmime.decodeHeaders(raw.toString().split('\r\n\r\n')[0]);
+    const parsed = addressparser(headers.from[0])[0];
+    assert.equal(libmime.decodeWords(parsed.name), name); assert.equal(parsed.address, from);
+    assert.equal(headers.bcc, undefined);
+  }
+});
+test('draft resume preserves stored From name and uses current setting on next save', async t => {
+  const f = await resumeFixture(t, { from: 'Stored Name <user@example.com>' });
+  f.session.prefs = { fromNames: { 'user@example.com': 'Current Name' } };
+  const response = await request(f, 'GET', `/api/drafts/${draft}`); assert.equal(response.statusCode, 200, response.body);
+  const loaded = response.json(); assert.equal(loaded.from[0].name, 'Stored Name');
+  const saved = await request(f, 'PUT', '/api/drafts', resumedBody(loaded)); assert.equal(saved.statusCode, 200, saved.body);
+  const append = f.calls.find(call => call.action === 'append');
+  assert.match(append.raw.toString(), /From: Current Name <user@example.com>/);
+});
+
+
+for (const name of ['=?UTF-8?B?SGVsbG8=?=', 'Team =?UTF-8?Q?Other_Name?=']) test(`From legacy encoded-word name falls back: ${name}`, async t => {
+  const f = await fixture(t);
+  f.session.prefs = { fromNames: { 'user@example.com': name } };
+  const content = body();
+  assert.equal((await request(f, 'PUT', '/api/drafts', content)).statusCode, 200);
+  assert.equal((await request(f, 'POST', '/api/send', content)).statusCode, 200);
+  for (const raw of [...f.calls.filter(call => call.action === 'append').map(call => call.raw), f.attempts[0][1]]) {
+    const headers = libmime.decodeHeaders(raw.toString().split('\r\n\r\n')[0]);
+    const parsed = addressparser(headers.from[0])[0];
+    assert.equal(libmime.decodeWords(parsed.name), '서버 표시 이름');
+    assert.equal(parsed.address, 'user@example.com');
+    assert.equal(headers.bcc, undefined);
+  }
+});

@@ -3,8 +3,19 @@
 .composer.html .compose-editor-wrap{display:none}
 .composer .compose-alert{margin:0;padding:10px 20px;font-size:13px;color:var(--ink);background:var(--danger-bg);border-bottom:1px solid var(--line);overflow-wrap:anywhere;flex:none;max-height:180px;overflow:auto}
 .composer .compose-result{background:var(--sunken)}
+.composer .compose-result strong{display:block;font-size:16px;line-height:1.6;word-break:keep-all}
+.composer .compose-result p{margin:4px 0 8px;font-size:16px;line-height:1.6}
+.composer .compose-result .btn,.composer .compose-result .compose-browse{margin:4px 8px 4px 0}
+.composer .delivery-not_sent{background:var(--danger-bg)}
+.composer .delivery-unknown{max-height:45vh}
+.pending-send-notice{padding:8px 16px;background:var(--sunken);color:var(--ink);border-bottom:1px solid var(--line);text-align:left;font-size:14px;line-height:1.6}
+.pending-send-notice span{text-decoration:underline;text-underline-offset:2px;white-space:nowrap}
+.send-result-notice{flex-wrap:wrap;font-size:16px;line-height:1.6}
+.send-result-notice.error{background:var(--danger);color:var(--on-danger)}
+.toast.send-result-notice button{color:inherit;white-space:nowrap}
 .compose-alert ul{margin:0;padding-left:18px}
 .compose-grants{padding:0 10px;font-size:12px;color:var(--ink-2);overflow-wrap:anywhere}
+.c-inner>.compose-grants{padding-left:20px}
 .composer .compose-browse{color:var(--accent-ink);font-weight:700;text-decoration:underline;text-underline-offset:2px}
 .composer .drop{max-height:160px;overflow:auto}
 .composer .drop .att{min-width:0;max-width:100%;white-space:normal}

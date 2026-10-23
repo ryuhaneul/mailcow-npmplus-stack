@@ -17,8 +17,11 @@ export function loadPrefs(config) {
 }
 
 export function applyServerPrefs(value) {
-  clearTimeout(saveTimer); revision++; confirmed = structuredClone(value);
-  prefs.value = value;
+  clearTimeout(saveTimer);
+  if (prefsOwner !== session.value) { pending = {}; inFlight = {}; prefsOwner = session.value; }
+  confirmed = structuredClone(value);
+  prefs.value = { ...value, ...inFlight, ...pending };
+  if (Object.keys(pending).length) saveTimer = setTimeout(savePrefs, 500);
   try { localStorage.setItem('webmail-prefs', JSON.stringify(value)); } catch {}
 }
 
@@ -28,13 +31,13 @@ export async function loadSessionPrefs() {
   sessionReady.value = true;
 }
 
-// Keep rapid appearance changes in one complete document; persist copies only after success.
-let confirmed, saveTimer, saving = false, revision = 0;
+// Coalesce changed fields only; unrelated server preferences remain authoritative.
+let confirmed, saveTimer, saving = false, pending = {}, inFlight = {}, prefsOwner;
 export const prefsSaving = signal(false);
 export function updatePrefs(patch) {
   if (!confirmed) confirmed = structuredClone(prefs.value);
   prefs.value = { ...prefs.value, ...patch };
-  revision++;
+  pending = { ...pending, ...structuredClone(patch) };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(savePrefs, 500);
 }
@@ -42,21 +45,25 @@ async function savePrefs() {
   if (saving) return;
   const owner = session.value;
   if (!owner || !sessionReady.value) return;
-  const snapshot = structuredClone(prefs.value), version = revision;
+  const patch = pending;
+  if (!Object.keys(patch).length) return;
+  pending = {}; inFlight = patch;
   saving = true; prefsSaving.value = true;
   try {
-    await api('/api/prefs', { method: 'PUT', body: snapshot });
+    await api('/api/prefs', { method: 'PUT', body: patch });
+    const saved = await api('/api/prefs');
     if (session.value !== owner) return;
-    confirmed = snapshot;
-    try { localStorage.setItem('webmail-prefs', JSON.stringify(snapshot)); } catch {}
+    confirmed = saved; inFlight = {};
+    prefs.value = { ...saved, ...pending };
+    try { localStorage.setItem('webmail-prefs', JSON.stringify(saved)); } catch {}
   } catch (error) {
     if (session.value !== owner) return;
-    clearTimeout(saveTimer); revision = version;
+    clearTimeout(saveTimer); pending = {}; inFlight = {};
     prefs.value = structuredClone(confirmed);
     toast.value = { kind: 'error', message: error.message || '설정을 저장하지 못했어요. 이전 설정으로 되돌렸어요.' };
   } finally {
     saving = false; prefsSaving.value = false;
-    if (session.value === owner && revision !== version) {
+    if (Object.keys(pending).length) {
       clearTimeout(saveTimer); saveTimer = setTimeout(savePrefs, 500);
     }
   }

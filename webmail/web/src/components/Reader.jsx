@@ -5,7 +5,7 @@ import { list, cursor, listLocation, notify, runAction, deleteMessages } from '.
 import { navigate } from '../router.js';
 import { initShortcuts } from '../shortcuts.js';
 import { startCompose } from '../state/compose.js';
-import { senderOf, allowSender } from '../reader.js';
+import { senderOf } from '../reader.js';
 import { FolderTag } from './MailRow.jsx';
 import Icon from './Icon.jsx';
 import ReaderToolbar from './ReaderToolbar.jsx';
@@ -28,8 +28,8 @@ export default function Reader({messageRef}) {
   async function always() {
     setBusy(true);
     try {
-      const document=await api('/api/prefs'),next=allowSender(document,senderOf(message).address);
-      await api('/api/prefs',{method:'PUT',body:next});
+      await api('/api/prefs',{method:'PUT',body:{imageAllowAdd:[senderOf(message).address]}});
+      const next=await api('/api/prefs');
       if(!active.current)return;
       applyServerPrefs(next);await load();
     } catch(value){if(active.current){setBusy(false);notify(value);}}

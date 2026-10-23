@@ -19,6 +19,10 @@
 .signature-editor.c-body{min-height:calc(var(--row-h) + var(--row-h) + var(--row-h))}
 .signature-editor:is(:empty,:has(>br:only-child))::before{content:attr(aria-placeholder);color:var(--ink-3);pointer-events:none}
 .from-addresses .rule{grid-template-columns:minmax(0,1fr) auto auto}
+.from-addresses .say{overflow-wrap:anywhere}
+.from-name-edit{grid-column:1/-1;min-width:0}
+.from-name-edit>div{display:flex;gap:8px}
+.from-name-edit .inp{min-width:0;flex:1}
 
 .gi-lead-btns{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .lead .gi-lead-btns .btn{margin-left:0}

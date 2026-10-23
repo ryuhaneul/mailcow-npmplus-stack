@@ -107,3 +107,11 @@ test('failed content does not create a URL and next explicit attempt may retry',
   assert.equal(created.length, 0); missing = false;
   assert.equal(await map.urlFor(id), 'blob:synthetic-0'); assert.equal(requests.length, 2);
 });
+
+test('optional content loader affects only its map; omitted loader keeps the original fetch path',async t=>{
+  const {map,created,requests}=setup(t),blob=new Blob(['cached-bytes'],{type:'image/png'}),calls=[];
+  const cached=createSignatureImageMap({loadContent:async value=>{calls.push(value);return blob;}});
+  t.after(()=>cached.dispose());
+  await cached.urlFor(id);assert.deepEqual(calls,[id]);assert.equal(created[0].blob,blob);assert.equal(requests.length,0);
+  await map.urlFor(id);assert.equal(requests[0][0],`/api/signature-images/${id}/content`);
+});

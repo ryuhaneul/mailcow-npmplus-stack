@@ -324,3 +324,18 @@ test('disabled contacts return an empty list before query validation with no DB 
   assert.equal(calls.length, 0);
   assert.equal(imapCalls, 0);
 });
+
+test('sender display overrides affect identities only; revoked and invalid overrides are ignored', async () => {
+  const data = tables(); data.alias = [alias('team@example.com')]; data.sender_acl = [acl('delegated@example.com')];
+  const { service } = fixture(data);
+  const actor = { ...session(), prefs: { fromNames: { 'user@example.com': '내 이름', 'team@example.com': '별칭 이름', 'delegated@example.com': '권한 이름', 'revoked@example.com': '금지' } } };
+  assert.deepEqual((await service.identities(actor)).identities.map(item => item.name), ['내 이름', '권한 이름', '별칭 이름']);
+  assert.equal(await service.mailboxName(actor.email), '사용자');
+  assert.equal((await service.contacts(actor, { q: '사용자' })).items[0].name, '사용자');
+  actor.prefs.fromNames['user@example.com'] = 'Bad\r\nBcc: injected@example.com';
+  actor.prefs.fromNames['team@example.com'] = '';
+  const items = (await service.identities(actor)).identities;
+  assert.equal(items.find(item => item.kind === 'self').name, '사용자');
+  assert.equal(items.find(item => item.kind === 'alias').name, '사용자');
+  assert.equal(items.some(item => item.address === 'revoked@example.com'), false);
+});

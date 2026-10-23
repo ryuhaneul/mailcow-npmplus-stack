@@ -53,8 +53,9 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     });
     await page.route('**/api/send',route=>{
       requests.push({path:'send',body:route.request().postDataJSON()});
-      return route.fulfill(options.sendError?{status:422,json:{error:{code:options.sendError,message:'technical signature error'}}}:{status:200,json:{ok:true,rejected:[],warnings:[]}});
+      return route.fulfill(options.sendError?{status:422,json:{error:{code:options.sendError,message:'technical signature error'}}}:{status:200,json:{status:'sent',ok:true,sentCopySavedTo:'sent',rejected:[],warnings:[]}});
     });
+    if(options.sendError)await page.route('**/api/send/*',route=>route.fulfill({json:{status:'not_sent',error:{code:options.sendError,message:'technical signature error'}}}));
     if(options.kind){
       await page.goto(origin);
       await expect(page.locator('.mailview')).toBeVisible();
@@ -69,7 +70,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     return {page,body,button,source,choose,html,recipient,requests,contents,errors,consoleErrors};
   }
   function payload(body,id=assetA){
-    assert.deepEqual(Object.keys(body).sort(),['from','to','cc','bcc','subject','html','signatureImages','attachmentIds',...(body.draftRef?['draftRef']:[])].sort());
+    assert.deepEqual(Object.keys(body).sort(),[...(body.composeId?['composeId']:[]),'from','to','cc','bcc','subject','html','signatureImages','attachmentIds',...(body.draftRef?['draftRef']:[])].sort());
     assert.equal(body.signatureImages.length,1);const [entry]=body.signatureImages;
     assert.deepEqual(Object.keys(entry).sort(),['assetId','token']);assert.equal(entry.assetId,id);
     assert.match(entry.token,new RegExp(`^cid:wm-compose-v1\\.[A-Za-z0-9_-]{32}\\.${id}@signature\\.invalid$`));
@@ -79,7 +80,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
   for(const width of [1280,390])await t.test(`initial image projection waits without broken frames or console errors at ${width}`,async()=>{
     let release;const imageGate=new Promise(resolve=>release=resolve),c=await open({width,imageGate,waitReady:false});
     try{
-      await expect.poll(()=>c.contents.length).toBe(1);
+      await expect.poll(()=>c.contents.filter(url=>url.includes(assetA)).length).toBe(1);
       await expect(c.page.locator('iframe.compose-editor')).toHaveCount(0);
       await expect(c.page.getByRole('status').filter({hasText:'보낼 주소를 불러오는 중…'})).toBeVisible();
       assert.deepEqual(c.consoleErrors,[]);assert.deepEqual(c.errors,[]);
@@ -170,7 +171,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
     const c=await open();try{
       await expect(c.button).toHaveText('서명: 외부 연락용');await expect(c.body.locator('img').first()).toHaveAttribute('src',/^blob:/);
       await expect(c.page.locator('.compose-grants[role=status]')).toContainText(`${bytes.length}B`);
-      assert.equal(c.contents.length,1);
+      assert.equal(c.contents.filter(url=>url.includes(assetA)).length,1);
       await c.body.evaluate(body=>{const p=body.ownerDocument.createElement('p');p.textContent='내 본문';body.prepend(p);body.dispatchEvent(new Event('input',{bubbles:true}));});
       const html=await c.html();assert.match(html,/<p>내 본문<\/p>/);assert.equal(html.includes('blob:'),false);assert.match(html,/cid:wm-compose-v1\./);
       await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();
@@ -258,7 +259,7 @@ await test('Composer signature menu, snapshots and token payloads',async t=>{
   for(const code of ['SIGNATURE_IMAGE_NOT_FOUND','SIGNATURE_INVALID'])await t.test(`422 ${code} explains failure and retains composition`,async()=>{
     const c=await open({sendError:code});try{
       const before=await c.html();await c.recipient();await c.page.getByRole('button',{name:'보내기',exact:true}).click();
-      await expect(c.page.getByRole('alert')).toHaveText(code==='SIGNATURE_IMAGE_NOT_FOUND'?'서명 이미지가 보관함에 없어요. 다시 넣어 주세요.':'서명 이름과 기본 서명 설정을 확인해 주세요.');assert.equal(await c.html(),before);await expect(c.button).toHaveText('서명: 외부 연락용');assert.deepEqual(c.errors,[]);
+      await expect(c.page.locator('.compose-result')).toContainText(code==='SIGNATURE_IMAGE_NOT_FOUND'?'서명 이미지가 보관함에 없어요. 다시 넣어 주세요.':'서명 이름과 기본 서명 설정을 확인해 주세요.');assert.equal(await c.html(),before);await expect(c.button).toHaveText('서명: 외부 연락용');assert.deepEqual(c.errors,[]);
     }finally{await c.page.close();}
   });
   for(const fail of ['failList','failImages'])await t.test(`${fail}: signature API failure still opens a usable empty composer`,async()=>{

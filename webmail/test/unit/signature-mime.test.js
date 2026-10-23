@@ -20,7 +20,7 @@ png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(1, 16); png.w
 const gif = Buffer.from('47494638396101000100000000', 'hex');
 const image = (bytes, name, contentType) => ({ name, contentType, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), base64: bytes.toString('base64') });
 const document = () => ({ version: 1, revision: 'R'.repeat(32), images: { [a]: image(png, 'synthetic.png', 'image/png'), [b]: image(gif, 'synthetic.gif', 'image/gif') } });
-const body = (extra = {}) => ({ from: 'sender@example.invalid', to: ['recipient@example.invalid'], subject: 'synthetic', html: `<p>signature<img src="${tokenFor(a)}"></p>`, signatureImages: [manifest(a)], ...extra });
+const body = (extra = {}) => ({ composeId: crypto.randomUUID(), from: 'sender@example.invalid', to: ['recipient@example.invalid'], subject: 'synthetic', html: `<p>signature<img src="${tokenFor(a)}"></p>`, signatureImages: [manifest(a)], ...extra });
 const original = encodeRef('INBOX', 123, 9), previous = encodeRef('Drafts', 123, 10);
 
 // Inspect the emitted wire structure, boundaries and decoded payloads, not composer options.

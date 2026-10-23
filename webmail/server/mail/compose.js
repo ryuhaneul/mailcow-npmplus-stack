@@ -106,10 +106,12 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
   function stateFor(session) {
     let state = states.get(session);
     if (!state) {
-      state = { attachments: new Map(), tail: Promise.resolve() }; states.set(session, state);
+      // Receipts live for this entire session, never expire independently: an
+      // evicted successful key could otherwise deliver the same mail twice.
+      state = { attachments: new Map(), sends: new Map(), tail: Promise.resolve() }; states.set(session, state);
       session.sweepAttachments = () => serial(session, () => {});
       session.scanAbort?.signal.addEventListener('abort', () => {
-        state.attachments.clear(); states.delete(session); delete session.sweepAttachments;
+        state.attachments.clear(); state.sends.clear(); states.delete(session); delete session.sweepAttachments;
       }, { once: true });
     }
     return state;
@@ -366,7 +368,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       if (!session.connection) await rm(sessionDir(session), { recursive: true, force: true });
     }
   }
-  async function write(session, body, sending) {
+  async function write(session, body, sending, receipt) {
     // A queued save owns its HTML and manifest, even if the caller edits the model.
     body = structuredClone(body);
     return serial(session, async state => {
@@ -396,6 +398,10 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
         const headers = raw.subarray(0, end).toString('utf8').replace(/^Bcc:[^\r\n]*(?:\r\n[ \t][^\r\n]*)*(?:\r\n|$)/gim, '');
         const delivery = Buffer.concat([Buffer.from(headers), raw.subarray(end)]);
         const result = await smtp.send(session, delivery, { from: mail.from.address, to: [...mail.to, ...mail.cc, ...mail.bcc].map(item => item.address) });
+        // Publish SMTP acceptance before IMAP work. A lost HTTP response or a
+        // slow/failed copy must never turn accepted delivery into a send failure.
+        receipt.value = { status: 'sent', ok: true, copyPending: true, ...(result?.rejected?.length ? { rejected: result.rejected } : {}) };
+        receipt.updatedAt = now();
         const warnings = [];
         async function afterSend(code, operation) {
           try { await operation(); return true; } catch {
@@ -403,13 +409,16 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             logger?.error({ code, email: session.email }, '발송된 메일의 후처리에 실패했습니다.');
           }
         }
-        let copySaved = false, sentCopySavedTo;
+        let copySaved = false, sentCopySavedTo = null, sentCopyRef;
         try {
           for (let attempt = 0; attempt < 2 && !copySaved; attempt++) {
             try {
               const path = await specialFolder(session, 'Sent');
-              if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Seen']))) throw unavailable();
+              const appended = await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Seen']));
+              if (!appended) throw unavailable();
               copySaved = true;
+              sentCopySavedTo = 'sent';
+              if (appended.uid && appended.uidValidity) sentCopyRef = encodeRef(path, appended.uidValidity, appended.uid);
             } catch {
               logger?.error({ code: 'SENT_COPY_FAILED', email: session.email }, '발송된 메일의 사본 저장에 실패했습니다.');
             }
@@ -420,9 +429,11 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             try {
               const path = await specialFolder(session, 'Drafts');
               // Preserve the exact completed message, including Bcc and newly uploaded parts.
-              if (!await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']))) throw unavailable();
+              const appended = await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']));
+              if (!appended) throw unavailable();
               copySaved = true;
               sentCopySavedTo = 'drafts';
+              if (appended.uid && appended.uidValidity) sentCopyRef = encodeRef(path, appended.uidValidity, appended.uid);
             } catch {
               logger?.error({ code: 'SENT_COPY_FAILED', email: session.email }, '발송된 메일의 대체 사본 저장에 실패했습니다.');
             }
@@ -432,7 +443,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             if (!await client.messageFlagsAdd(ref.uid, ['\\Answered'], { uid: true })) throw unavailable();
           }));
         } finally { if (copySaved) await cleanup(); }
-        return { ok: true, ...(result?.rejected?.length ? { rejected: result.rejected } : {}), ...(warnings.length ? { warnings } : {}), ...(sentCopySavedTo !== undefined ? { sentCopySavedTo } : {}) };
+        return { status: 'sent', ok: true, ...(result?.rejected?.length ? { rejected: result.rejected } : {}), ...(warnings.length ? { warnings } : {}), sentCopySavedTo, ...(sentCopyRef ? { sentCopyRef } : {}) };
       }
       const path = await specialFolder(session, 'Drafts');
       const appended = await imap.withMailbox(session, path, client => client.append(path, raw, ['\\Draft', '\\Seen']));
@@ -468,5 +479,47 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       return { draftRef, ...(forwardParts.length ? { forwardParts } : {}) };
     }).catch(error => { if (error instanceof AppError) throw error; throw unavailable(); });
   }
-  return { upload, remove, loadDraft, draft: (session, body) => write(session, body, false), send: (session, body) => write(session, body, true) };
+  function sendKey(value) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw invalid();
+    return value;
+  }
+  function sendStatus(session, composeId) {
+    active(session);
+    const receipt = stateFor(session).sends.get(sendKey(composeId));
+    if (!receipt) return { status: 'unknown', reason: 'NOT_FOUND' };
+    return { ...receipt.value, startedAt: receipt.startedAt, updatedAt: receipt.updatedAt };
+  }
+  async function send(session, body) {
+    active(session);
+    const key = sendKey(body?.composeId), sends = stateFor(session).sends, previous = sends.get(key);
+    if (previous && previous.value.status !== 'not_sent') return previous.value;
+    const receipt = { startedAt: now(), updatedAt: now(), value: { status: 'checking' } };
+    // Claim the key synchronously, before the session queue or any await.
+    sends.set(key, receipt);
+    try {
+      receipt.value = await write(session, body, true, receipt);
+      receipt.updatedAt = now();
+      return receipt.value;
+    } catch (error) {
+      receipt.updatedAt = now();
+      if (receipt.value.status === 'sent') return receipt.value;
+      if (error.code === 'SMTP_OUTCOME_UNKNOWN') {
+        receipt.value = { status: 'unknown', reason: error.code };
+        return receipt.value;
+      }
+      receipt.value = { status: 'not_sent', error: { code: error.code, message: error.message, ...(error.smtpMessage ? { smtpMessage: error.smtpMessage } : {}) } };
+      throw error;
+    }
+  }
+  async function draft(session, body) {
+    const key = body?.composeId === undefined ? null : sendKey(body.composeId);
+    const result = await write(session, body, false);
+    const receipt = key && states.get(session)?.sends.get(key);
+    if (receipt?.value.status === 'sent' && receipt.value.sentCopySavedTo === null) {
+      receipt.value = { ...receipt.value, sentCopySavedTo: 'drafts', sentCopyRef: result.draftRef, manualRecovery: true };
+      receipt.updatedAt = now();
+    }
+    return result;
+  }
+  return { upload, remove, loadDraft, sendStatus, draft, send };
 }

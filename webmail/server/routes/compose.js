@@ -10,6 +10,7 @@ export default async function composeRoutes(app, { service, config }) {
   });
   app.get('/api/drafts/:ref', async request => service.loadDraft(request.session, request.params.ref));
   app.put('/api/drafts', async request => service.draft(request.session, request.body));
+  app.get('/api/send/:composeId', async request => service.sendStatus(request.session, request.params.composeId));
   app.post('/api/send', async (request, reply) => {
     try { return await service.send(request.session, request.body); } catch (error) {
       if (error.code !== 'SMTP_REJECTED') throw error;

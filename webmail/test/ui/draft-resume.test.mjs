@@ -46,9 +46,11 @@ await test('draft resume browser flows with synthetic API only',async t=>{
         messages.delete(body.draftRef);messages.set(draftRef,saved);fake.state.mail=fake.state.mail.filter(item=>item.ref!==body.draftRef);fake.state.mail.push(row(saved));
         return route.fulfill({json:{draftRef,forwardParts}});
       });
+      const sendReceipts=new Map();
+      await page.route('**/api/send/*',route=>route.fulfill({json:sendReceipts.get(decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1)))||{status:'unknown',reason:'NOT_FOUND'}}));
       await page.route('**/api/send',route=>{
         const body=route.request().postDataJSON();requests.push({path:'send',body});
-        if(!messages.has(body.draftRef))return route.fulfill({status:404,json:{error:{code:'MESSAGE_NOT_FOUND',message:'technical missing ref'}}});
+        if(!messages.has(body.draftRef)){const error={code:'MESSAGE_NOT_FOUND',message:'technical missing ref'};sendReceipts.set(body.composeId,{status:'not_sent',error});return route.fulfill({status:404,json:{error}});}
         messages.delete(body.draftRef);fake.state.mail=fake.state.mail.filter(item=>item.ref!==body.draftRef);return route.fulfill({json:{ok:true}});
       });
       await page.goto(origin+'/#f/Drafts');await expect(page.locator('.m[data-ref]')).toHaveCount(1);
@@ -146,13 +148,13 @@ await test('draft resume browser flows with synthetic API only',async t=>{
       }finally{await page.close();}
     }
   });
-  await t.test('all copy failures continue autosave without another SMTP send',async()=>{
+  await t.test('all copy failures keep autosave stopped and permit manual recovery without another SMTP send',async()=>{
     const s=await scenario(),{page,body}=await s.open();let sends=0;
     try{
       await page.route('**/api/send',route=>{sends++;return route.fulfill({json:{ok:true,warnings:['SENT_COPY_FAILED'],sentCopySavedTo:null}});});
       await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toBeVisible();
       await body.evaluate(node=>{node.querySelector('p').textContent='자동 저장 복구 본문';node.dispatchEvent(new Event('input',{bubbles:true}));});
-      await expect(page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible({timeout:8000});await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);assert.equal(s.messages.size,1);assert.match([...s.messages.values()][0].html,/자동 저장 복구 본문/);assert.equal(sends,1);
+      await page.waitForTimeout(3500);assert.equal(s.requests.filter(item=>item.path==='save').length,0);await page.getByRole('button',{name:'임시 저장',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible();await expect(page.getByRole('button',{name:'임시 저장',exact:true})).toHaveCount(0);assert.equal(s.messages.size,1);assert.match([...s.messages.values()][0].html,/자동 저장 복구 본문/);await expect(page.locator('.delivery-sent')).toContainText('보낸 메일은 나갔어요. 작성 내용의 복구본을 임시보관함에 저장했어요');assert.equal(sends,1);
     }finally{await page.close();}
   });
   await t.test('confirmed close after all copy failures skips saving and retains temporary uploads',async()=>{
@@ -172,7 +174,7 @@ await test('draft resume browser flows with synthetic API only',async t=>{
         await expect(page.getByRole('button',{name:'보낸 사람 선택'})).toContainText(composeFrom);
         if(fallback)await expect(page.getByRole('status').filter({hasText:'보내는 주소를 기본 주소로 바꿨어요.'})).toBeVisible();
         else{await expect(page.getByRole('textbox',{name:'보낸 사람 직접 입력'})).toHaveValue(composeFrom);await expect(page.getByText('보내는 주소를 기본 주소로 바꿨어요.',{exact:true})).toHaveCount(0);}
-        await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.equal(s.requests.find(item=>item.path==='send').body.from,composeFrom);assert.deepEqual(s.errors,[]);
+        await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.locator('.delivery-sent')).toContainText('보냈어요');await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toHaveCount(0);assert.equal(s.requests.find(item=>item.path==='send').body.from,composeFrom);assert.deepEqual(s.errors,[]);
       }finally{await page.close();}
     }
   });
@@ -187,7 +189,7 @@ await test('draft resume browser flows with synthetic API only',async t=>{
         if(index===1)assert.equal(saved.draftRef,s.initial.draftRef);else assert.notEqual(saved.draftRef,s.initial.draftRef);
         await expect.poll(()=>body.locator('img').evaluateAll(imgs=>imgs.every(img=>img.complete&&img.naturalWidth>0))).toBe(true);
       }
-      await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.locator('.composer')).toHaveCount(0);
+      await page.getByRole('button',{name:'보내기',exact:true}).click();await expect(page.locator('.delivery-sent')).toContainText('보냈어요');await page.getByRole('button',{name:'쓰기 창 닫기'}).click();await expect(page.locator('.composer')).toHaveCount(0);
       const sent=s.requests.find(item=>item.path==='send').body;assert.equal(s.messages.size,0);assert.equal(sent.forwardParts.length,3);assert.ok(sent.forwardParts.every(part=>part.ref===sent.draftRef));assert.equal(sent.bcc[0].address,'hidden@example.com');assert.equal(sent.inReplyTo,s.initial.inReplyTo);assert.equal(sent.references,s.initial.references);assert.match(sent.html,/추가 작성 2/);assert.match(sent.html,/cid:logo@synthetic.invalid/);assert.doesNotMatch(sent.html,/blob:|새 기본 서명/);assert.deepEqual(s.errors,[]);
     }finally{await page.close();}
   });
@@ -197,7 +199,7 @@ await test('draft resume browser flows with synthetic API only',async t=>{
       await first.page.evaluate(async ref=>{const {startCompose}=await import('/src/state/compose.js');startCompose('draft',{ref});},s.initial.draftRef);
       await expect(first.page.locator('.composer')).toHaveCount(1);await expect(first.body).toHaveAttribute('contenteditable','true');assert.equal(s.requests.filter(item=>item.path==='load').length,2);
       await first.page.locator('#compose-subject').fill('첫 탭 변경');await expect.poll(()=>s.requests.filter(item=>item.path==='save').length,{timeout:8000}).toBe(1);await expect(first.page.getByRole('status').filter({hasText:'임시 저장됨'})).toBeVisible();
-      await second.page.getByRole('button',{name:'보내기',exact:true}).click();await expect(second.page.getByRole('alert')).toHaveText('임시 메일이 다른 창에서 변경되었거나 삭제됐어요. 임시보관함에서 다시 열어 주세요.');
+      await second.page.getByRole('button',{name:'보내기',exact:true}).click();await expect(second.page.locator('.delivery-not_sent')).toContainText('임시 메일이 다른 창에서 변경되었거나 삭제됐어요. 임시보관함에서 다시 열어 주세요.');
       await second.page.locator('#compose-subject').fill('두 번째 탭 변경');await expect.poll(()=>s.requests.filter(item=>item.path==='save').length,{timeout:8000}).toBe(2);await expect(second.page.getByRole('alert')).toContainText('임시보관함에서 다시 열어 주세요.');assert.equal(s.messages.size,1);assert.deepEqual(s.errors,[]);
     }finally{await first.page.close();await second.page.close();}
   });

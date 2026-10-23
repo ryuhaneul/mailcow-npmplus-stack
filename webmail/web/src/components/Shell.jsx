@@ -3,6 +3,7 @@ import { prefs } from '../state/prefs.js';
 import { folders } from '../state/folders.js';
 import { storage } from '../state/storage.js';
 import { toast } from '../state/toast.js';
+import { pendingSend, sendResultNotice } from '../state/compose.js';
 import { isListRoute, connectMailboxEvents, resetMailbox, deleteConfirmation } from '../state/list.js';
 import { initMailboxShortcuts } from '../shortcuts.js';
 import MailView from './MailView.jsx';
@@ -65,6 +66,7 @@ export default function Shell() {
       <main class="main">
         <TopBar mode={mode} navOpen={navOpen} toggleNav={()=>setNavOpen(!navOpen)}/>
         <MobileQuota/>
+        {pendingSend.value&&current.name!=='compose'&&<button class="pending-send-notice" type="button" onClick={()=>navigate('compose')}>발송 결과 확인 중인 메일이 있어요 <span>확인하기</span></button>}
         <div class="stage">{(isListRoute(current)||['read','compose'].includes(current.name))?<MailView/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'shared' ? <SharedSettingsPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
         <Composer/>
       </main>
@@ -72,6 +74,7 @@ export default function Shell() {
     {keysOpen.value && <KeysDialog onClose={()=>navigate(current.name+(current.value?'/'+encodeURIComponent(current.value):'')+(current.q?'?q='+encodeURIComponent(current.q):''))}/>}
     {deleteConfirmation.value && <DeleteMessagesDialog/>}
     {folderDialog.value && <FolderDialog folder={folderDialog.value.folder}/>}
-    {toast.value && <div class={`toast open${toast.value.kind === 'rule-apply-result' ? ' rule-result' : ''}`} role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
+    {toast.value&&!sendResultNotice.value && <div class={`toast open${toast.value.kind === 'rule-apply-result' ? ' rule-result' : ''}`} role="status"><span>{toast.value.message}</span><button type="button" onClick={()=>{toast.value=null;}}>닫기</button></div>}
+    {sendResultNotice.value&&<div class={`toast open send-result-notice${sendResultNotice.value.status==='not_sent'?' error':''}`} role={sendResultNotice.value.status==='not_sent'?'alert':'status'}><span>{sendResultNotice.value.message}</span><button type="button" onClick={()=>{const notice=sendResultNotice.value;sendResultNotice.value=null;notice.onView();}}>결과 보기</button><button type="button" onClick={()=>{const notice=sendResultNotice.value;sendResultNotice.value=null;notice.onClose();}}>닫기</button></div>}
   </>;
 }

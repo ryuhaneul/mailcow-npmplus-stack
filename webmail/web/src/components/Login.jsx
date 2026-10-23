@@ -3,6 +3,8 @@ import { loadSessionPrefs } from '../state/prefs.js';
 import { api } from '../api.js';
 import { navigate } from '../router.js';
 import { toast } from '../state/toast.js';
+import { session } from '../state/session.js';
+import { restoreSendAttempt } from '../state/compose.js';
 import Brand from './Brand.jsx';
 
 export default function Login() {
@@ -16,7 +18,9 @@ export default function Login() {
     setBusy(true); setError('');
     try {
       await api('/api/auth/login', { method: 'POST', body: { email, password } });
-      setPassword(''); await loadSessionPrefs(); toast.value = null; navigate('inbox');
+      setPassword(''); await restoreSendAttempt(session.value.user.email); await loadSessionPrefs();
+      if (toast.value?.kind !== 'send-unknown' || toast.value.ownerEmail !== session.value?.user?.email) toast.value = null;
+      navigate('inbox');
     } catch (failure) { setError(failure.message); setPassword(''); }
     finally { setBusy(false); }
   }

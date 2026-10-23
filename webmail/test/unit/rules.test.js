@@ -140,6 +140,39 @@ test('save order is GETSCRIPT, CHECKSCRIPT, previous PUT, new PUT; rev increment
   assert.equal(f.server.scripts.get(prev), f.good); assert.equal(parseScript(f.server.scripts.get(web)).doc.rev, 4); assert.equal(f.server.activeName, web);
 });
 
+test('500 diverse rules save and reload; 501 and scripts over 1MB are rejected before writing', async t => {
+  const f = await fixture(t);
+  const doc = document();
+  const actions = [{ read: true }, { star: true }, { move: 'Projects' }, { trash: true }, { forward: ['user@example.com'] }];
+  const fields = ['subject', 'from', 'to'];
+  const ops = ['has', 'not', 'eq', 'start'];
+  doc.rules = Array.from({ length: 500 }, (_, i) => ({ id: `r${String(i).padStart(7, '0')}`, enabled: true,
+    match: i % 2 ? 'all' : 'any', conditions: [{ field: fields[i % 3], op: ops[i % 4], value: `Synthetic ${i}` }],
+    actions: actions[i % actions.length], stop: i % 7 === 0 }));
+  const script = generateScript(doc, policy);
+  assert.ok(Buffer.byteLength(script) < 1024 * 1024);
+  const started = performance.now();
+  const saved = await f.request('PUT', '/api/rules', { baseRev: 3, doc }); status(saved, 200);
+  const savedAt = performance.now();
+  const loaded = await f.request('GET', '/api/rules'); status(loaded, 200);
+  assert.deepEqual(loaded.json().doc, { ...doc, rev: 4 });
+  t.diagnostic(`500 rules: script=${Buffer.byteLength(script)} bytes, save=${(savedAt - started).toFixed(1)}ms, load=${(performance.now() - savedAt).toFixed(1)}ms (local synthetic ManageSieve)`);
+  const before = f.server.scripts.get(web);
+  f.server.commands.length = 0;
+  const overflow = structuredClone(doc); overflow.rules.push({ ...overflow.rules[0], id: 'overflow' });
+  const rejected = await f.request('PUT', '/api/rules', { baseRev: 4, doc: overflow });
+  status(rejected, 422, 'RULES_INVALID');
+  assert.equal(rejected.json().error.path, '$.rules');
+  const large = structuredClone(doc);
+  large.rules.forEach(rule => { rule.conditions = Array.from({ length: 2 }, () => ({ field: 'subject', op: 'has', value: '가'.repeat(200) })); });
+  const tooLarge = await f.request('PUT', '/api/rules', { baseRev: 4, doc: large });
+  status(tooLarge, 422, 'RULES_INVALID');
+  assert.equal(tooLarge.json().error.reason, 'script_too_large');
+  assert.equal(tooLarge.json().error.message, '필터 스크립트는 1MB 이하여야 해요.');
+  assert.deepEqual(mutating(f.server.commands), []);
+  assert.equal(f.server.scripts.get(web), before);
+});
+
 test('first save uses baseRev zero and activates only after writing, without inventing a previous copy', async t => {
   const f = await fixture(t, 'none'); const response = await f.request('PUT', '/api/rules', { baseRev: 0, doc: document(0) }); status(response, 200);
   assert.deepEqual(useful(f.server.commands), ['LISTSCRIPTS', 'CHECKSCRIPT', `PUTSCRIPT ${web}`, `SETACTIVE ${web}`]);

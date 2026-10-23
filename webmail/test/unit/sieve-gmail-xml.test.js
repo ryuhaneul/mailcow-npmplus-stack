@@ -193,14 +193,14 @@ test('action omissions disclose names, archive availability and folder precedenc
   assert.equal(one([...props(valid), ['label', 'News'], ['label', 'Other']]).status, 'no');
 });
 
-test('append fills 100-rule limit in order, replace ignores old count; IDs never collide', () => {
-  const existingRules = convert(Array(95).fill(props(valid))).rules;
+test('append fills 500-rule limit in order, replace ignores old count; IDs never collide', () => {
+  const existingRules = convert(Array(495).fill(props(valid))).rules;
   const rows = Array(10).fill(props(valid));
   const result = convert(rows, { existingRules, mode: 'append' });
   assert.equal(result.rules.length, 5);
   assert.deepEqual(result.items.map(item => item.status), [...Array(5).fill('same'), ...Array(5).fill('no')]);
-  assert.ok(result.items.slice(5).every(item => item.reason === '규칙 100개 한도'));
-  assert.equal(new Set([...existingRules, ...result.rules].map(rule => rule.id)).size, 100);
+  assert.ok(result.items.slice(5).every(item => item.reason === '규칙 500개 한도'));
+  assert.equal(new Set([...existingRules, ...result.rules].map(rule => rule.id)).size, 500);
   assert.equal(convert(rows, { existingRules, mode: 'replace' }).rules.length, 10);
 });
 

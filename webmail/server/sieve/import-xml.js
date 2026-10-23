@@ -1,3 +1,4 @@
+import { MAX_RULES } from './limits.js';
 import { createHash } from 'node:crypto';
 import { parseGmailSearch } from './gmail-search.js';
 import { allowedMoveFolder, validateAddress, validateDocument } from './model.js';
@@ -204,8 +205,8 @@ export function convertGmailEntries(entries, { policy = {}, folders = [], existi
       const context = { ...policy, folders: proposedFolders, checkFolders: true };
       validateDocument(documentFor([rule]), { ...context, maxRedirects: Infinity });
       if (limitReason) fail(limitReason);
-      if (base.length + rules.length >= 100) {
-        limitReason = '규칙 100개 한도';
+      if (base.length + rules.length >= MAX_RULES) {
+        limitReason = `규칙 ${MAX_RULES}개 한도`;
         fail(limitReason);
       }
       try { generateScript(documentFor([...base, ...rules, rule]), context); }

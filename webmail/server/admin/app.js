@@ -1,3 +1,9 @@
+import { join } from 'node:path';
+import { createQuotaNotificationStore } from './quota-notification-state.js';
+import { createQuotaNotificationMailer } from './quota-notification-mail.js';
+import { createQuotaNotificationScheduler } from './quota-notification-scheduler.js';
+import { createQuotaNotificationsService } from './services/quota-notifications.js';
+import quotaNotificationRoutes from './routes/quota-notifications.js';
 import Fastify, { LogController } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { existsSync, statSync } from 'node:fs';
@@ -125,6 +131,16 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const accounts = createAccountsService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });
+  const quotaNotifications = createQuotaNotificationsService({
+    store: createQuotaNotificationStore({ dir: config.quotaNotificationDir ?? (config.auditDir ? join(config.auditDir, 'quota-notifications') : '/data/quota-notifications') }),
+    mailcow: app.mailcow, config, audit, lock: adminLock, history,
+    send: createQuotaNotificationMailer({ config }),
+  });
+  const quotaNotificationScheduler = createQuotaNotificationScheduler({ service: quotaNotifications, logger: app.log });
+  app.addHook('onReady', async () => quotaNotificationScheduler.start());
+  app.addHook('preClose', async () => quotaNotificationScheduler.stop());
+  await app.register(quotaNotificationRoutes, { service: quotaNotifications });
+
   const aliases = createAliasesService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('aliases', aliases);
   await app.register(aliasesRoutes, { service: aliases });

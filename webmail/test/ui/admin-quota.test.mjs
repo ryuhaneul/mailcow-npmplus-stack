@@ -13,7 +13,7 @@ await test('quota admin: dashboard, complete list, inline limits and conflict re
   const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}), args: ['--no-sandbox'] }); t.after(() => browser.close());
   await mkdir(captures, { recursive: true });
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
-  async function open(hash = 'quota', width = 1280) {
+  async function open(hash = 'quota', width = 1280, prepare = () => {}) {
     Object.assign(fake.state, structuredClone(initial));
     const base = fake.state.accounts.items[0];
     fake.state.accounts.items = [
@@ -25,6 +25,7 @@ await test('quota admin: dashboard, complete list, inline limits and conflict re
       { ...base, address: 'extra@example.com', name: '합성 추가', usedBytes: 12 * 1024 ** 3 },
       { ...base, address: 'small@example.com', name: '합성 보관', usedBytes: 1024 },
     ];
+    prepare(fake.state);
     const context = await browser.newContext({ viewport: { width, height: 1000 }, colorScheme: 'light' }), page = await context.newPage(), errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`${origin}/admin.html#${hash}`); await expect(page.locator(`[data-admin-page=${hash}]`)).toBeVisible();
@@ -87,6 +88,49 @@ await test('quota admin: dashboard, complete list, inline limits and conflict re
       await page.getByRole('button', { name: '새로고침', exact: true }).click(); await expect(page.locator('[data-error-code=SYNTHETIC_QUOTA_FAILED]')).toBeVisible();
       await page.unroute('**/api/admin/quota'); await page.getByRole('button', { name: '다시 시도', exact: true }).click(); await expect(page.locator('.quota-item')).toHaveCount(95); assert.deepEqual(errors, []);
     } finally { await context.close(); }
+  });
+  await t.test('notification settings save, blank sender disables, and native input validation blocks invalid addresses/ranges', async () => {
+    const { page, context, errors } = await open();
+    try {
+      const section = page.locator('.quota-notifications');
+      await expect(section).toContainText('알림 꺼짐'); await expect(page.getByLabel('보내는 주소', { exact: true })).toHaveValue('');
+      const bodies = [];
+      await page.route('**/api/admin/quota/notifications', route => { if (route.request().method() === 'PUT') bodies.push(route.request().postDataJSON()); return route.continue(); });
+      await page.getByLabel('위험 알림 보내기').check(); await page.getByRole('button', { name: '알림 설정 저장', exact: true }).click();
+      await expect(section).toContainText('알림 설정을 저장했습니다.'); await expect(section).toContainText('알림 꺼짐');
+      await page.getByLabel('보내는 주소', { exact: true }).fill('notice@example.com'); await page.getByLabel('기준 (%)', { exact: true }).fill('95'); await page.getByLabel('간격 (분)', { exact: true }).fill('30');
+      await page.getByRole('button', { name: '알림 설정 저장', exact: true }).click(); await expect(section).toContainText('알림 켜짐');
+      assert.deepEqual(bodies[1], { enabled: true, sender: 'notice@example.com', threshold: 95, intervalMinutes: 30, etag: 'synthetic-quota-1x' });
+      await page.reload(); await expect(page.getByLabel('기준 (%)', { exact: true })).toHaveValue('95'); await expect(page.getByLabel('간격 (분)', { exact: true })).toHaveValue('30');
+      await page.getByLabel('보내는 주소', { exact: true }).fill('invalid'); await page.getByRole('button', { name: '알림 설정 저장', exact: true }).click(); assert.equal(bodies.length, 2);
+      await page.getByLabel('보내는 주소', { exact: true }).fill('notice@example.com'); await page.getByLabel('기준 (%)', { exact: true }).fill('49'); await page.getByRole('button', { name: '알림 설정 저장', exact: true }).click(); assert.equal(bodies.length, 2); assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+  await t.test('notification conflict forces reread; per-account timestamps and safe failure reasons remain visible', async () => {
+    const { page, context, errors } = await open('quota', 1280, state => {
+      state.quotaNotifications.settings = { enabled: true, sender: 'notice@example.com', threshold: 90, intervalMinutes: 60 }; state.quotaNotifications.effectiveEnabled = true;
+      state.quotaNotifications.state.lastCheckAt = '2026-10-23T07:00:00Z';
+      state.quotaNotifications.state.accounts['person@example.com'] = { lastSentAt: '2026-10-23T06:00:00Z', pendingAt: null, lastFailure: { at: '2026-10-23T07:00:00Z', code: 'SMTP_REJECTED' } };
+      state.quotaNotifications.state.accounts['team@example.com'] = { lastSentAt: '2026-10-23T06:30:00Z', pendingAt: null, lastFailure: { at: '2026-10-23T07:00:00Z', code: 'UNCONFIRMED' } };
+    });
+    try {
+      const section = page.locator('.quota-notifications'); await expect(section).toContainText('알림 켜짐');
+      await expect(page.locator('[data-quota-address="person@example.com"]')).toContainText('마지막 알림: 10월 23일 금요일 · 15:00');
+      await expect(page.locator('[data-quota-address="person@example.com"]')).toContainText('메일 서버가 관리 앱의 발송을 허용하지 않아요');
+      await expect(page.locator('[data-quota-address="team@example.com"]')).toContainText('마지막 시도 결과 확인 안 됨');
+      fake.state.quotaNotifications.etag = 'changed'; fake.state.quotaNotifications.settings.threshold = 95;
+      await page.getByRole('button', { name: '알림 설정 저장', exact: true }).click(); await expect(section.getByRole('alert')).toContainText('다른 곳에서'); await expect(page.getByRole('button', { name: '알림 설정 저장', exact: true })).toBeDisabled();
+      await page.getByRole('button', { name: '알림 설정 다시 읽기' }).click(); await expect(page.getByLabel('기준 (%)', { exact: true })).toHaveValue('95'); assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+  for (const width of [1280, 768, 375]) await t.test(`notification configuration and account status capture ${width}`, async () => {
+    const { page, context, errors } = await open('quota', width, state => {
+      state.quotaNotifications.settings.sender = 'notice@example.com'; state.quotaNotifications.settings.enabled = true; state.quotaNotifications.effectiveEnabled = true;
+      state.quotaNotifications.state.accounts['person@example.com'] = { lastSentAt: '2026-10-23T06:00:00Z', pendingAt: null, lastFailure: { at: '2026-10-23T07:00:00Z', code: 'SMTP_REJECTED' } };
+      state.quotaNotifications.state.accounts['team@example.com'] = { lastSentAt: '2026-10-23T06:30:00Z', pendingAt: null, lastFailure: { at: '2026-10-23T07:00:00Z', code: 'UNCONFIRMED' } };
+    });
+    try { await expect(page.locator('.quota-item')).toHaveCount(7); await expect(page.locator('.quota-notifications')).toContainText('알림 켜짐'); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false); await page.screenshot({ path: `${captures}/quota-notifications-${width}.png`, fullPage: true }); assert.deepEqual(errors, []); }
+    finally { await context.close(); }
   });
   for (const width of [1280, 768, 375]) await t.test(`home, quota and inline edit captures ${width}`, async () => {
     const { page, context, errors } = await open('home', width);

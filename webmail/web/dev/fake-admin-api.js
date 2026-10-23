@@ -21,6 +21,7 @@ export function createFakeAdminApi() {
   state.historySkipped = ['없어진 폴더'];
   state.flow = { joinMode: 'ok', failedLine: null, partialLine: null, authLostAtBatch: 0, batches: [] };
   const accountProtocols = { imap: true, pop3: true, smtp: true, sieve: true, eas: true, dav: true };
+  state.quotaNotifications = { settings: { enabled: false, sender: '', threshold: 90, intervalMinutes: 60 }, etag: 'synthetic-quota-1', effectiveEnabled: false, state: { v: 1, accounts: {}, lastCheckAt: null, lastRunFailure: null }, warnings: [] };
   state.accounts = { patchError: null, result: 'ok', version: 1, revertible: false, items: [
     { address: 'person@example.com', name: '합성 구성원', kind: 'personal', active: 1, quotaGb: 20, usedBytes: 2147483648, messages: 123 },
     { address: 'team@example.com', name: '합성 팀', kind: 'team', active: 1, quotaGb: 50, usedBytes: 1073741824, messages: 20 },
@@ -198,6 +199,15 @@ export function createFakeAdminApi() {
       if(body.action==='unban'){if(data.permanentBans.some(row=>row.network===body.network))return fail({status:409,code:'PERM_BAN',message:'차단 목록(blacklist)에서 온 영구 차단이라 풀기로는 풀리지 않음'});const row=data.activeBans.find(row=>row.network===body.network);if(!row)return fail({status:404,code:'NOT_FOUND',message:'현재 차단 목록에 없는 주소예요.'});row.queuedForUnban=true;return response.end(JSON.stringify({notice:'해제 요청됨 — 몇 초 안에 풀려요',auditId:'77777777777777777777777777777777'}));}
       if(body.action==='unwhitelist'){if(!data.whitelist.includes(body.network))return fail({status:404,code:'NOT_FOUND',message:'차단 안 함 목록에 없는 주소예요.'});data.whitelist=data.whitelist.filter(value=>value!==body.network);return response.end(JSON.stringify({network:body.network,whitelist:false,blacklist:data.blacklist.includes(body.network),auditId:'77777777777777777777777777777777'}));}
       data.whitelist=data.whitelist.filter(value=>value!==body.network);data.blacklist=data.blacklist.filter(value=>value!==body.network);data[body.action].push(body.network);return response.end(JSON.stringify({auditId:'77777777777777777777777777777777'}));
+    }
+    if (url.pathname === '/api/admin/quota/notifications') {
+      if (request.method === 'PUT') {
+        let raw = ''; for await (const part of request) raw += part; const { etag, ...settings } = JSON.parse(raw);
+        if (etag !== state.quotaNotifications.etag) return fail({ status: 409, code: 'CHANGED_ELSEWHERE', message: '다른 곳에서 설정이 바뀌었어요.' });
+        state.quotaNotifications.settings = settings; state.quotaNotifications.etag += 'x';
+        state.quotaNotifications.effectiveEnabled = settings.enabled && Boolean(settings.sender);
+      }
+      return response.end(JSON.stringify(state.quotaNotifications));
     }
     if (url.pathname === '/api/admin/quota' && request.method === 'GET') {
       return response.end(JSON.stringify({ items: state.accounts.items.map(({ address, name, kind, usedBytes, quotaGb }) => ({ address, name, kind, usedBytes, quotaGb, etag: `synthetic-account-${state.accounts.version}` })) }));

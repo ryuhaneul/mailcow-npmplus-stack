@@ -129,7 +129,7 @@
 .sig-dialog.d-dialog .delete-users small{display:block;font-size:12px;color:var(--ink-3);margin-top:3px}
 .sig-dialog.d-dialog .dialog-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 /* Composer uses the same picker and replacement dialog as Signature D. */
-.composer .compose-signature-bar{display:flex;align-items:center;gap:12px;position:relative;font-size:12px;color:var(--ink-3);padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:19px;flex-wrap:wrap}
+.composer .compose-signature-bar{display:flex;align-items:center;gap:12px;position:relative;font-size:12px;color:var(--ink-3);padding:0 20px 14px;border-bottom:1px solid var(--line);margin-bottom:19px;flex-wrap:wrap}
 .composer .signature-picker{display:flex;align-items:center;gap:7px;max-width:100%;font-size:13px;font-weight:550;color:var(--ink-2);border:1px solid var(--line-2);border-radius:5px;padding:5px 9px;overflow-wrap:anywhere;text-align:left}
 .composer .signature-picker .i{flex:none}
 .composer .signature-picker:hover{background:var(--hover)}

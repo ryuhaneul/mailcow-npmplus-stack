@@ -1395,6 +1395,13 @@ else
     warn "apply-dovecot-dedupe.sh failed — check state with: scripts/apply-dovecot-dedupe.sh --check"
 fi
 
+# Serialize simultaneous LMTP deliveries to the same recipient before Sieve runs.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-serial.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "postfix per-recipient LMTP serialization applied (or already present)"
+else
+    warn "apply-postfix-lmtp-serial.sh failed — check state with: scripts/apply-postfix-lmtp-serial.sh --check"
+fi
+
 # Reload php-fpm + nginx so Twig picks up the patched base.twig (twig cache).
 if [ -f "$MAILCOW_DIR/docker-compose.yml" ]; then
     log "Restarting php-fpm + nginx to refresh Twig cache..."

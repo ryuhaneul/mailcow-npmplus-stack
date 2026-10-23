@@ -110,16 +110,19 @@ await test('real authentication cookies and cross-tab composition ownership',asy
   const temp=await mkdtemp(join(tmpdir(),'compose-auth-'));t.after(()=>rm(temp,{recursive:true,force:true}));
   const backend=Fastify({logger:false});installErrors(backend);backend.decorate('directory',{mailboxName:async email=>email});
   await installAuth(backend,{config:{publicHostnames:['127.0.0.1'],sessionIdleMin:480,sessionMaxHours:24},tempRoot:temp,verifyLogin:async()=>({connection:{logout:async()=>{}}})});
-  let sessionGate,sessionReads=0;
+  let sessionGate,sessionReads=0,delayed,draftSaves=0;
+  async function late(req,reply,kind){const entry=delayed;if(entry?.kind!==kind||entry.started)return false;entry.started=true;await entry.gate;if(req.session.connection===null){reply.code(403).send({error:{code:'SESSION_EXPIRED',message:'synthetic old credential lifetime'}});return true;}return false;}
   const snapshot=email=>({revision:'r-'+email,items:[{id:sig,name:'합성 서명',html:`<p>${email} 비공개 서명</p>`}],defaults:{[email]:{newDefault:sig,replyDefault:sig}},usedBytes:128,maxBytes:262144,notices:[]});
   backend.get('/api/compose/identities',async req=>({identities:[{address:req.session.email,name:req.session.email,kind:'self'}],defaultFrom:req.session.email,anyAtDomains:[],anyAddress:false}));
-  backend.get('/api/signatures',async req=>snapshot(req.session.email));
+  backend.get('/api/signatures',async(req,reply)=>{if(await late(req,reply,'signature'))return;return snapshot(req.session.email);});
   backend.post('/api/signatures/normalize',async req=>({html:req.body.html}));
   backend.get('/api/signature-images',async()=>({revision:'i1',images:[],usedBytes:0,maxBytes:1048576,maxFileBytes:204800,maxCount:20}));
   backend.post('/api/drafts',async()=>({draftRef:'synthetic'}));
+  backend.put('/api/drafts',async(req,reply)=>{if(await late(req,reply,'draft'))return;draftSaves++;return {draftRef:'synthetic'};});
+  backend.get('/api/signature-images/:id/content',async(req,reply)=>{if(await late(req,reply,'image'))return;return reply.type('image/png').send(bytes);});
   await backend.ready();t.after(()=>backend.close());
   const fake=createFakeApi({authenticated:true});t.after(()=>fake.close());
-  const paths=new Set(['/api/compose/identities','/api/signatures','/api/signatures/normalize','/api/signature-images','/api/drafts']);
+  const paths=new Set(['/api/compose/identities','/api/signatures','/api/signatures/normalize','/api/signature-images','/api/drafts',`/api/signature-images/${asset}/content`]);
   const root=process.env.COMPOSE_AUTH_ROOT||fileURLToPath(new URL('../../web',import.meta.url));
   const server=await createServer({configFile:false,root,logLevel:'error',plugins:[preact(),{name:'compose-real-auth',configureServer(server){server.middlewares.use(async(req,res,next)=>{
     const path=new URL(req.url,'http://127.0.0.1').pathname;
@@ -134,7 +137,7 @@ await test('real authentication cookies and cross-tab composition ownership',asy
   const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
   const login=async(page,email)=>{await page.getByLabel('메일 주소',{exact:true}).fill(email);await page.getByLabel('암호',{exact:true}).fill('synthetic-password');await page.getByRole('button',{name:'로그인',exact:true}).click();await expect(page.locator('.compose-btn')).toBeVisible();};
   async function openPair(fallback=false){
-    const context=await browser.newContext();if(fallback)await context.addInitScript(()=>{window.BroadcastChannel=undefined;});
+    const context=await browser.newContext();await context.addInitScript(()=>{const Native=window.EventSource;window.testStreams=[];window.EventSource=class extends Native{constructor(...args){super(...args);window.testStreams.push(this);}};});if(fallback)await context.addInitScript(()=>{window.BroadcastChannel=undefined;});
     const page=await context.newPage();page.setDefaultTimeout(8000);await page.goto(origin);await login(page,'a@example.com');
     await page.locator('.compose-btn').click();const body=page.frameLocator('iframe.compose-editor').locator('body');await expect(body).toContainText('a@example.com 비공개 서명');
     const tab=await context.newPage();tab.setDefaultTimeout(8000);await tab.goto(origin);await expect(tab.locator('.compose-btn')).toBeVisible();
@@ -184,4 +187,57 @@ await test('real authentication cookies and cross-tab composition ownership',asy
       await expect(c.body).toContainText('작성 중 본문');await expect(c.body).toContainText('a@example.com 비공개 서명');await expect(c.page.locator('.toast')).toHaveCount(0);
     }finally{release?.();sessionGate=null;await c.context.close();}
   });
+  for(const kind of ['signature','image','draft'])await t.test(`same-account relogin keeps editor after late old-session ${kind} failure`,async()=>{
+    const c=await openPair();let release;
+    try{
+      const entry={kind,gate:new Promise(resolve=>release=resolve),started:false};delayed=entry;
+      if(kind==='draft')await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('이전 저장 요청 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      else await c.page.evaluate(async kind=>{window.lateResult=null;window.oldRequest=(kind==='signature'?(await import('/src/state/signatures.js')).loadSignatures():(await import('/src/signature-images.js')).getSignatureImageContent('A'.repeat(32))).catch(error=>{window.lateResult=error.code;});},kind);
+      await expect.poll(()=>entry.started,{timeout:7000}).toBe(true);
+      const auth=await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(auth.csrf);
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('새 세션의 저장 전 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const successBefore=draftSaves;
+      const response=c.page.waitForResponse(response=>response.status()===403&&response.url().includes(kind==='draft'?'/api/drafts':kind==='signature'?'/api/signatures':'/content'));
+      release();delayed=null;await response;
+      if(kind!=='draft')await c.page.evaluate(()=>window.oldRequest);
+      else await expect(c.page.locator('.c-head .saved')).not.toContainText('임시 저장 중');
+      assert.equal(await c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email),'a@example.com');
+      await expect(c.body).toContainText('새 세션의 저장 전 본문');await expect(c.page.locator('#login-email')).toHaveCount(0);
+      await mkdir(captures,{recursive:true});await c.page.screenshot({path:`${captures}/late-${kind}.png`});
+      if(kind==='draft'){await expect.poll(()=>draftSaves,{timeout:7000}).toBeGreaterThan(successBefore);await expect(c.page.locator('.c-head .saved')).toContainText('임시 저장됨');}
+    }finally{release?.();delayed=null;await c.context.close();}
+  });
+  await t.test('late A autosave error preserves B editor and its next successful save',async()=>{
+    const c=await openPair();let release;
+    try{
+      const entry={kind:'draft',gate:new Promise(resolve=>release=resolve),started:false};delayed=entry;
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('A 저장 중 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await expect.poll(()=>entry.started,{timeout:7000}).toBe(true);
+      await c.context.request.post(origin+'/api/auth/login',{data:{email:'b@example.com',password:'synthetic-password'},headers:{origin:'https://127.0.0.1'}});
+      await c.page.evaluate(()=>{window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));});
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email)).toBe('b@example.com');
+      await expect(c.page.locator('.compose-btn')).toBeVisible();await c.page.locator('.compose-btn').click();await expect(c.body).toContainText('b@example.com 비공개 서명');
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('B 저장 전 중요한 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      const successBefore=draftSaves,response=c.page.waitForResponse(response=>response.status()===403&&response.url().includes('/api/drafts'));
+      release();delayed=null;await response;
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.user.email)).toBe('b@example.com');await expect(c.body).toContainText('B 저장 전 중요한 본문');
+      await expect.poll(()=>draftSaves,{timeout:7000}).toBeGreaterThan(successBefore);await expect(c.page.locator('.c-head .saved')).toContainText('임시 저장됨');
+      await c.page.screenshot({path:`${captures}/late-draft-account-switch.png`});
+    }finally{release?.();delayed=null;await c.context.close();}
+  });
+  await t.test('late SSE expiry reconnects after relogin without closing the editor; fresh expiry logs out',async()=>{
+    const c=await openPair();try{
+      await c.page.evaluate(()=>{window.oldStream=window.testStreams.at(-1);window.streamCount=window.testStreams.length;});
+      const auth=await c.tab.evaluate(async()=>(await import('/src/api.js')).api('/api/auth/login',{method:'POST',body:{email:'a@example.com',password:'synthetic-password'}}));
+      await expect.poll(()=>c.page.evaluate(async()=>(await import('/src/state/session.js')).session.value?.csrf)).toBe(auth.csrf);
+      await c.body.evaluate(node=>{node.prepend(node.ownerDocument.createTextNode('SSE 이후 유지할 본문 '));node.dispatchEvent(new Event('input',{bubbles:true}));});
+      await c.page.evaluate(()=>window.oldStream.dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})})));
+      assert.equal(await c.page.evaluate(()=>window.testStreams.length-window.streamCount),1);await expect(c.body).toContainText('SSE 이후 유지할 본문');
+      await c.page.screenshot({path:`${captures}/late-sse.png`});
+      await c.page.evaluate(()=>window.testStreams.at(-1).dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})})));
+      await expect(c.page.locator('#login-email')).toBeVisible();await expect(c.page.locator('.composer')).toHaveCount(0);
+    }finally{await c.context.close();}
+  });
+
 });

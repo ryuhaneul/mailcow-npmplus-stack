@@ -1,6 +1,6 @@
 import { effect } from '@preact/signals';
 import { endSession } from './api.js';
-import { session } from './state/session.js';
+import { session, authGeneration } from './state/session.js';
 import { signatureError, signatureRequest, signatureSessionChanged } from './signatures.js';
 
 const activeMaps = new Set();
@@ -26,13 +26,13 @@ export async function deleteSignatureImage(id, revision) {
   return value;
 }
 export async function getSignatureImageContent(id) {
-  const owner = session.value;
+  const owner = session.value, generation = authGeneration;
   try {
     const response = await fetch(`${assetPath(id)}/content`, { method: 'GET', credentials: 'same-origin' });
     if (!response.ok) {
       const { error } = await response.json();
       if (session.value !== owner) throw signatureSessionChanged();
-      if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code) && session.value === owner) endSession(error.code);
+      if (generation === authGeneration && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code) && session.value === owner) endSession(error.code);
       throw { ...error, status: response.status };
     }
     const blob = await response.blob();

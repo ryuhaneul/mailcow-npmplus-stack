@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { session, verifiedSession, invalidateSessionResources } from '../../web/src/state/session.js';
 import { checkServerSession, watchServerSession, api } from '../../web/src/api.js';
+import { signatureRequest } from '../../web/src/signatures.js';
+import { getSignatureImageContent } from '../../web/src/signature-images.js';
+import { toast } from '../../web/src/state/toast.js';
 import { signatures, signatureImages } from '../../web/src/state/signatures.js';
 import { composeIdentities, getComposeResources, preloadComposeResources, loadComposeIdentities, refreshComposeIdentities, prepareComposeSignature, composeImageContent, MAX_COMPOSE_IMAGE_BYTES, senderDomain } from '../../web/src/state/compose-resources.js';
 
@@ -136,4 +139,47 @@ test('cross-tab invalidation rejects late normalized HTML and image bytes before
   invalidateSessionResources();normalize();image();
   await assert.rejects(html);await assert.rejects(bytes);
   assert.equal(requests.filter(path=>path.endsWith('/content')).length,1);
+});
+
+
+for (const code of ['SESSION_EXPIRED','NO_SESSION']) for (const [name,request,path] of [
+  ['api',()=>api('/api/drafts',{method:'PUT',body:{}}),'/api/drafts'],
+  ['signature JSON',()=>signatureRequest('/api/signatures'),'/api/signatures'],
+  ['image content',()=>getSignatureImageContent(id),`/api/signature-images/${id}/content`],
+]) {
+  test(`${name}: late ${code} after same-account relogin cannot end the new session`,async t=>{
+    let release;
+    setup(t,p=>p===path?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code,message:'synthetic old session'}},{status:403}));}):p==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'new-csrf'}):undefined);
+    const owner=session.value,notice={kind:'test-notice',message:'keep'};toast.value=notice;
+    const old=request(),failed=assert.rejects(old);
+    await checkServerSession();release();await failed;
+    assert.equal(session.value,owner);assert.equal(owner.csrf,'new-csrf');assert.equal(toast.value,notice);
+    t.after(()=>{toast.value=null;});
+  });
+  test(`${name}: current-generation ${code} still ends the session`,async t=>{
+    setup(t,p=>p===path?Response.json({error:{code,message:'synthetic current session'}},{status:403}):undefined);
+    await assert.rejects(request());assert.equal(session.value,null);
+  });
+}
+test('late old-account draft auth failure cannot end a newly logged-in account',async t=>{
+  let release;
+  setup(t,p=>p==='/api/drafts'?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code:'SESSION_EXPIRED',message:'old draft'}},{status:403}));}):p==='/api/auth/login'?Response.json({user:{email:'next@another.example'},csrf:'next'}):undefined);
+  const old=api('/api/drafts',{method:'PUT',body:{}}),failed=assert.rejects(old);
+  await api('/api/auth/login',{method:'POST',body:{}});const next=session.value;
+  release();await failed;assert.equal(session.value,next);
+});
+
+
+test('old-generation SSE expiry reconnects quietly; current-generation expiry still logs out',async t=>{
+  const previous=globalThis.EventSource,connections=[];
+  globalThis.EventSource=class extends EventTarget{constructor(){super();connections.push(this);}close(){this.closed=true;}};
+  setup(t,path=>path==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'new-sse-csrf'}):undefined);
+  const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
+  const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stop=connectMailboxEvents();
+  t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
+  const owner=session.value;await checkServerSession();
+  const expire=source=>source.dispatchEvent(new MessageEvent('session',{data:JSON.stringify({state:'expired'})}));
+  expire(connections[0]);assert.equal(session.value,owner);assert.equal(connections[0].closed,true);assert.equal(connections.length,2);
+  expire(connections[0]);assert.equal(connections.length,2);
+  expire(connections[1]);assert.equal(session.value,null);
 });

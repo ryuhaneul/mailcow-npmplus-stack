@@ -2,7 +2,7 @@ import { effect, signal, untracked } from '@preact/signals';
 import { api, endSession } from '../api.js';
 import { selection, scopeSelection, selectionScopeKey, updateSelectionPage } from './selection.js';
 import { interruptScopedAction, resetScopedAction, scopedListFrozen } from './scoped-actions.js';
-import { session } from './session.js';
+import { session, authGeneration } from './session.js';
 import { folders } from './folders.js';
 import { storage } from './storage.js';
 import { toast } from './toast.js';
@@ -106,16 +106,25 @@ export async function runAction(action, refs = [...selection.value], target) {
   finally {if(generation===mailboxGeneration)acting.value=false;}
 }
 export function connectMailboxEvents() {
-  const source=new EventSource('/api/events');
-  source.addEventListener('mailbox',event=>{
-    const value=JSON.parse(event.data);
-    folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
-    const params=list.value.params;
-    if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
-  });
-  source.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
-  source.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired'){source.close();resetMailbox();endSession('SESSION_EXPIRED');}});
-  return ()=>source.close();
+  let source, stopped=false;
+  function connect() {
+    const generation=authGeneration, connection=new EventSource('/api/events');source=connection;
+    connection.addEventListener('mailbox',event=>{
+      const value=JSON.parse(event.data);
+      folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
+      const params=list.value.params;
+      if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
+    });
+    connection.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
+    connection.addEventListener('session',event=>{
+      if(stopped||source!==connection||JSON.parse(event.data).state!=='expired')return;
+      connection.close();
+      if(generation!==authGeneration){if(session.value)connect();return;}
+      resetMailbox();endSession('SESSION_EXPIRED');
+    });
+  }
+  connect();
+  return ()=>{stopped=true;source.close();};
 }
 
 export function resetMailbox() {

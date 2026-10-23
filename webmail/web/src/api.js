@@ -1,8 +1,8 @@
-import { session, sessionReady, verifiedSession, invalidateSessionResources } from './state/session.js';
+import { session, sessionReady, verifiedSession, invalidateSessionResources, authGeneration, advanceAuthGeneration } from './state/session.js';
 import { toast } from './state/toast.js';
 
 export async function api(path, { method = 'GET', body, silentSessionErrors = false, acceptSession = true, ...options } = {}) {
-  const headers = new Headers(options.headers);
+  const generation = authGeneration, headers = new Headers(options.headers);
   const multipart = body instanceof FormData;
   if (body !== undefined && !multipart) headers.set('Content-Type', 'application/json');
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.toUpperCase()) && session.value?.csrf) {
@@ -12,12 +12,13 @@ export async function api(path, { method = 'GET', body, silentSessionErrors = fa
   const payload = response.status === 204 ? null : await response.json();
   if (!response.ok) {
     const error = payload.error;
-    if (acceptSession && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
+    if (acceptSession && generation === authGeneration && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
       endSession(error.code, { notify: !silentSessionErrors });
     }
     throw error;
   }
   if (acceptSession && (path === '/api/auth/login' || path === '/api/auth/session')) {
+    if (path === '/api/auth/login' || session.value?.csrf !== payload.csrf || session.value?.user.email !== payload.user.email) advanceAuthGeneration();
     session.value = payload; verifiedSession.value = payload;
     if (path === '/api/auth/login') broadcastAuthChange();
   }
@@ -48,12 +49,12 @@ function broadcastAuthChange() {
 // A focus check preserves the object for the same server session, so open editors survive.
 export function checkServerSession() {
   if (sessionCheck) return sessionCheck;
-  const owner = session.value, version = checkVersion;
+  const owner = session.value, generation = authGeneration, version = checkVersion;
   const pending = (async () => {
     let value;
     try { value = await api('/api/auth/session', { silentSessionErrors: true, acceptSession: false }); }
     catch (error) {
-      if (version !== checkVersion || session.value !== owner) return;
+      if (version !== checkVersion || session.value !== owner || generation !== authGeneration) return;
       verifiedSession.value = null;
       if (['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) {
         if (globalThis.document?.querySelector('.composer')) closedComposerOwner = owner?.user.email;
@@ -61,14 +62,16 @@ export function checkServerSession() {
       }
       throw error;
     }
-    if (version !== checkVersion || session.value !== owner) return;
+    if (version !== checkVersion || session.value !== owner || generation !== authGeneration) return;
     const sameAccount = owner?.user.email === value.user.email;
     if (sameAccount) {
+      if (owner.csrf !== value.csrf) advanceAuthGeneration();
       owner.csrf = value.csrf; owner.expiresAt = value.expiresAt;
       verifiedSession.value = owner;
       return owner;
     }
     if (globalThis.document?.querySelector('.composer')) closedComposerOwner = owner?.user.email;
+    advanceAuthGeneration();
     invalidateSessionResources();
     sessionReady.value = false;
     session.value = value; verifiedSession.value = value;

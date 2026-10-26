@@ -20,6 +20,7 @@ async function fixture(t, source = script) {
     calls.push({ method, path, body });
     if (path === '/api/v1/get/domain/all') return options.domains ?? [{ domain_name: 'example.com', active: '1' }];
     if (path === '/api/v1/get/alias-domain/all') return [];
+    if (path === '/api/v1/get/alias/all') return structuredClone(options.aliases ?? []);
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/mailbox/all') return structuredClone(Object.hasOwn(options, 'mailboxes') ? options.mailboxes : boxes);
     if (path === '/api/v1/get/filters/all') { reads++; options.onRead?.(reads, rows); return structuredClone(Object.hasOwn(options, 'filters') ? options.filters : rows.length ? rows : {}); }
@@ -47,6 +48,52 @@ test('teams: list shows deduplicated members, copy/mixed modes and active mailbo
   const row = result.items[0]; assert.equal(row.distribution, 'mixed'); assert.equal(row.editable, true); assert.equal(row.filterId, 1);
   assert.deepEqual(row.members.map(member => member.address), [first, second]); assert.match(row.etag, /^[a-f0-9]{64}$/);
   assert.equal((await f.service.list({}, { q: 'missing' })).total, 0); assert.equal((await f.service.list({}, { page: '2' })).items.length, 0);
+});
+
+test('teams: marked active member alias expands targets before remaining Sieve links and contributes to etag', async t => {
+  const alias = 'team-members@example.com', linked = 'linked@example.com';
+  const f = await fixture(t, `require ["copy"];\nredirect :copy "${alias}";\nredirect :copy "${linked}";\n`);
+  f.options.aliases = [{ id: 7, address: alias, goto: `${first},${second},${first}`, active: '1', private_comment: 'mailadmin:team-members' }];
+  const row = await item(f);
+  assert.equal(row.mode, 'alias'); assert.equal(row.memberAlias, alias); assert.equal(row.convertible, false); assert.equal(row.editable, true);
+  assert.deepEqual(row.members, [
+    { address: first, name: first, via: 'alias' }, { address: second, name: second, via: 'alias' }, { address: linked, name: '', via: 'sieve' },
+  ]);
+  assert.equal(f.calls.filter(row => row.path === '/api/v1/get/alias/all').length, 1);
+  assert.equal((await f.service.list({}, { q: first })).total, 1);
+  f.options.aliases[0].goto = next;
+  const changed = await item(f); assert.notEqual(changed.etag, row.etag);
+  assert.deepEqual(changed.members.map(member => member.address), [next, linked]);
+});
+
+test('teams: unmarked and inactive aliases remain ordinary Sieve members', async t => {
+  const alias = 'ordinary@example.com', inactive = 'inactive@example.com';
+  const f = await fixture(t, `redirect :copy "${alias}";\nredirect :copy "${inactive}";\n`);
+  f.options.aliases = [
+    { address: alias, goto: first, active: '1', private_comment: '' },
+    { address: inactive, goto: second, active: '0', private_comment: 'mailadmin:team-members' },
+  ];
+  const row = await item(f);
+  assert.equal(row.mode, 'sieve'); assert.equal(row.memberAlias, null); assert.equal(row.convertible, false);
+  assert.deepEqual(row.members.map(({ address, via }) => ({ address, via })), [{ address: alias, via: 'sieve' }, { address: inactive, via: 'sieve' }]);
+});
+
+test('teams: multiple marked active member aliases make the team read-only', async t => {
+  const f = await fixture(t);
+  f.options.aliases = [first, second].map(address => ({ address, goto: next, active: '1', private_comment: 'mailadmin:team-members' }));
+  const row = await item(f); assert.equal(row.editable, false); assert.equal(row.reason, 'multiple_member_aliases'); assert.equal(row.convertible, false);
+});
+
+test('teams: conversion requires three active personal mailbox members and an editable filter', async t => {
+  const source = [first, second, next].map(address => `redirect :copy "${address}";\n`).join('');
+  const f = await fixture(t, source);
+  assert.equal((await item(f)).convertible, true);
+  f.rows.push({ id: 2, username: next, filter_type: 'prefilter', active: 1, script_data: `redirect :copy "${first}";\n` });
+  assert.equal((await item(f)).convertible, false);
+  f.rows.pop(); f.boxes.find(row => row.username === next).active = 0;
+  assert.equal((await item(f)).convertible, false);
+  f.boxes.find(row => row.username === next).active = 1; f.rows[0].script_data = 'stop;\n' + source;
+  assert.equal((await item(f)).convertible, false);
 });
 
 for (const [source, reason] of [

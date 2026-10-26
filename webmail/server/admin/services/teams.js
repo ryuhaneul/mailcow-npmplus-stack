@@ -20,6 +20,12 @@ function refused(error) {
   throw new AppError(error.code === 'invalid_address' ? 422 : error.code === 'self_check_failed' ? 500 : 409,
     error.code.toUpperCase(), '이 팀 분배 필터는 안전하게 바꿀 수 없어요. 읽기 전용 사유를 확인해 주세요.');
 }
+function memberAlias(filter, aliases) {
+  const matches = analyze(filter.script_data).members.map(member => aliases.find(row =>
+    String(row.active) === '1' && row.private_comment === 'mailadmin:team-members' && normalize(row.address) === normalize(member.address))).filter(Boolean);
+  if (matches.length > 1) throw new Refused('multiple_member_aliases');
+  return matches[0] ?? null;
+}
 export function createFilterBackups({ dir }) {
   const root = () => join(dir, 'filter-backups');
   const path = (id, phase) => {
@@ -59,6 +65,12 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '메일함 목록을 읽을 수 없어요.');
     return rows.filter(row => typeof row?.username === 'string' && String(row.active) === '1').map(row => ({ address: normalize(row.username), name: typeof row.name === 'string' ? row.name : '' }));
   }
+  async function aliases(session) {
+    let rows = await mailcow.call(session, 'GET', '/api/v1/get/alias/all');
+    if (rows && typeof rows === 'object' && !Object.keys(rows).length) rows = [];
+    if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '별칭 목록을 읽을 수 없어요.');
+    return rows.filter(row => row && typeof row === 'object');
+  }
   const prefilters = (rows, team) => rows.filter(row => normalize(row.username) === team && row.filter_type === 'prefilter' && String(row.active) === '1');
   function selected(rows, team) {
     const entries = prefilters(rows, team);
@@ -85,31 +97,43 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const checked = prefilters(await filters(session), team);
     if (checked.length !== 1 || checked[0].script_data !== next) throw verifyFailed();
   }
-  function teamEntry(team, entries, names) {
+  function teamEntry(team, entries, names, aliasRows, teams) {
     if (entries.length > 1) return groupMailboxAddresses(entries).size || entries.some(row => String(row.script_data ?? '').toLowerCase().includes('redirect')) ?
-      { mailbox: team, filterId: null, members: [], editable: false, reason: 'multiple_prefilters', distribution: 'unknown', etag: etag(entries) } : null;
+      { mailbox: team, filterId: null, members: [], editable: false, reason: 'multiple_prefilters', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: etag(entries) } : null;
     const filter = entries[0], a = analyze(filter.script_data);
     if (!a.parsed) return String(filter.script_data ?? '').toLowerCase().includes('redirect') ?
-      { mailbox: team, filterId: filter.id, members: [], editable: false, reason: 'unparseable', distribution: 'unknown', etag: revision(filter) } : null;
+      { mailbox: team, filterId: filter.id, members: [], editable: false, reason: 'unparseable', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: revision(filter) } : null;
     if (!a.members.length) return null;
-    const reason = a.stopperBeforeMember ? 'stopper_before_member' : !a.members.at(-1).simple ? 'line_not_simple' : '';
+    let alias = null, reason = '';
+    try { alias = memberAlias(filter, aliasRows); } catch (error) {
+      if (!(error instanceof Refused)) throw error;
+      reason = error.code;
+    }
+    reason ||= a.stopperBeforeMember ? 'stopper_before_member' : !a.members.at(-1).simple ? 'line_not_simple' : '';
     const unique = new Map();
-    for (const row of a.members) if (!unique.has(row.address.toLowerCase())) unique.set(row.address.toLowerCase(), { address: row.address, name: names.get(row.address.toLowerCase()) ?? '' });
+    const append = (address, via) => {
+      const key = normalize(address);
+      if (!unique.has(key)) unique.set(key, { address, name: names.get(key) ?? '', via });
+    };
+    if (alias) for (const address of String(alias.goto ?? '').split(/[\s,;]+/).map(normalize).filter(Boolean)) append(address, 'alias');
+    for (const row of a.members) if (!alias || normalize(row.address) !== normalize(alias.address)) append(row.address, 'sieve');
     const members = [...unique.values()];
+    const convertible = !alias && !reason && members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).length >= 3;
     return { mailbox: team, filterId: filter.id, members, editable: !reason, reason,
-      distribution: a.forwards.length ? 'mixed' : 'copy', etag: revision(filter) };
+      mode: alias ? 'alias' : 'sieve', memberAlias: alias ? normalize(alias.address) : null, convertible,
+      distribution: a.forwards.length ? 'mixed' : 'copy', etag: alias ? etag({ id: filter.id, source: filter.script_data, goto: alias.goto }) : revision(filter) };
   }
   async function list(session, { q = '', page = '1' } = {}) {
     if (typeof q !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
-    const boxes = await mailboxes(session), rows = await filters(session);
+    const boxes = await mailboxes(session), rows = await filters(session), aliasRows = await aliases(session);
     const names = new Map(boxes.map(row => [row.address, row.name]));
     const groups = new Map();
     for (const row of rows) if (typeof row.username === 'string' && row.filter_type === 'prefilter' && String(row.active) === '1') {
       const team = normalize(row.username); groups.set(team, [...groups.get(team) ?? [], row]);
     }
-    const items = [], forwards = [];
+    const items = [], forwards = [], teams = groupMailboxAddresses(rows);
     for (const [team, entries] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-      const item = teamEntry(team, entries, names);
+      const item = teamEntry(team, entries, names, aliasRows, teams);
       if (item) items.push(item);
       else if (entries.length === 1) for (const to of analyze(entries[0].script_data).forwards) forwards.push({ mailbox: team, to, distribution: 'move', editable: false });
     }

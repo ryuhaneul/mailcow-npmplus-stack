@@ -7,6 +7,7 @@ import { createApp } from '../../server/app.js';
 import { generateScript } from '../../server/sieve/generate.js';
 import { parseScript } from '../../server/sieve/parse.js';
 import { importName, undoActiveName } from '../../server/sieve/import-store.js';
+import { AppError } from '../../server/errors.js';
 
 const xml = await readFile(new URL('../fixtures/gmail-xml/basic.xml', import.meta.url), 'utf8');
 const web = 'webmail-rules', original = '# synthetic example.com\nkeep;\n';
@@ -21,7 +22,7 @@ async function fixture(t, { folderFailure, active = 'legacy' } = {}) {
       const [failure] = failures.splice(index, 1);
       if (failure.after) operation();
       failure.effect?.();
-      throw new Error('synthetic storage failure');
+      throw failure.error ?? new Error('synthetic storage failure');
     }
     return operation();
   };
@@ -282,4 +283,60 @@ for (const label of ['.hidden', 'A'.repeat(101), ' Work ', 'Parent/ Work ', 'Par
     const response = await f.apply(); status(response, 200);
     assert.equal(response.json().applied, 1); assert.deepEqual(response.json().createdFolders, []);
   });
+}
+
+function synthetic170(kind) {
+  if (kind === 'xml') return `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006">${Array.from({ length: 170 }, (_, i) =>
+    `<entry><apps:property name="subject" value="synthetic-${i}"/>${i < 157
+      ? `<apps:property name="${i < 156 ? 'forwardTo' : 'label'}" value="${i < 156 ? `target${i % 100}@example.com` : 'New/News'}"/>`
+      : `<apps:property name="${i % 2 ? 'size' : 'unknownAction'}" value="1"/><apps:property name="shouldMarkAsRead" value="true"/>`}</entry>`).join('')}</feed>`;
+  return '# RAINLOOP:SIEVE\nrequire ["fileinto", "imap4flags"];\n' + Array.from({ length: 170 }, (_, i) => {
+    const target = `target${i % 100}@example.com`;
+    const json = { ID: `synthetic${i}`, Enabled: true, Name: `Synthetic ${i}`,
+      Conditions: [{ Field: i >= 157 && i % 2 ? 'Body' : 'Subject', Type: 'Contains', Value: `synthetic-${i}`, ValueSecond: '' }],
+      ConditionsType: 'All', ActionType: i >= 157 && !(i % 2) ? 'Unsupported' : i < 156 ? 'Forward' : 'MoveTo',
+      ActionValue: i < 156 ? target : 'Archive', ActionValueSecond: '', ActionValueThird: '', ActionValueFourth: '', Keep: true, Stop: false, MarkAsRead: false };
+    return `/*\nBEGIN:FILTER:${json.ID}\nBEGIN:HEADER\n${Buffer.from(JSON.stringify(json)).toString('base64').match(/.{1,72}/g).join('\n')}\nEND:HEADER\n*/\nif header :contains ["Subject"] "synthetic-${i}" { ${i < 156 ? `fileinto "INBOX"; redirect "${target}";` : 'fileinto "Archive";'} }\n/* END:FILTER */\n`;
+  }).join('');
+}
+
+for (const kind of ['xml', 'rainloop']) {
+  for (const failure of [null, 'CHECKSCRIPT', 'PUTSCRIPT']) {
+    test(`170 ${kind} entries preview 157 and preserve safe rejection detail: ${failure ?? 'success'}`, async t => {
+      const f = await fixture(t, { active: kind === 'xml' ? null : 'rainloop.user' });
+      let apply;
+      if (kind === 'xml') {
+        f.body.xml = synthetic170(kind);
+        const p = await f.preview();
+        assert.equal(p.items.length, 170); assert.equal(p.counts.no, 13); assert.equal(p.plan.applied, 157);
+        assert.deepEqual(p.plan.newFolders, ['New', 'New/News']);
+        assert.equal(p.expect.planSha256, (await f.preview()).expect.planSha256);
+        apply = () => f.request('/xml', { ...f.body, confirm: true, expect: p.expect });
+      } else {
+        f.scripts.set('rainloop.user', synthetic170(kind));
+        const p = (await f.get()).importReport;
+        assert.equal(p.items.length, 170); assert.equal(p.rules.length, 157);
+        assert.equal(p.items.filter(item => item.status === 'unconvertible').length, 13);
+        assert.equal(p.planSha256, (await f.get()).importReport.planSha256);
+        apply = () => f.request('', { confirm: true, sourceName: p.sourceName, sourceSha256: p.sourceSha256, planSha256: p.planSha256 });
+      }
+      if (failure) {
+        const error = new AppError(502, 'SIEVE_REJECTED', 'synthetic-private-server-message');
+        error.command = failure;
+        if (failure === 'PUTSCRIPT') error.responseCode = 'QUOTA/MAXSIZE';
+        f.failures.push({ command: failure, ...(failure === 'PUTSCRIPT' ? { name: web } : {}), error });
+        const response = await apply(); status(response, 502, 'IMPORT_WRITE_FAILED');
+        assert.deepEqual(response.json().error.detail, { restored: true, command: failure, ...(failure === 'PUTSCRIPT' ? { responseCode: 'QUOTA/MAXSIZE' } : {}) });
+        assert.equal(response.body.includes('synthetic-private'), false);
+        assert.equal(f.activeName, kind === 'xml' ? null : 'rainloop.user');
+        assert.equal(f.scripts.has(web), false);
+      } else {
+        const response = await apply(); status(response, 200);
+        assert.equal(response.json().applied, 157); assert.equal(response.json().dropped, 13);
+        assert.equal(parseScript(f.scripts.get(web)).doc.rules.length, 157);
+        assert.equal(f.activeName, web);
+        if (kind === 'xml') assert.deepEqual(response.json().createdFolders, ['New', 'New/News']);
+      }
+    });
+  }
 }

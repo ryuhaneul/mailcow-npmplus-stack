@@ -290,7 +290,7 @@ export function createRulesService({ config, imap, directory, connect = connectM
       if (current.script !== null) await client.putScript(previousName, current.script);
       await client.putScript(SCRIPT_NAME, script);
       await client.setActive(SCRIPT_NAME);
-    } catch {
+    } catch (cause) {
       let restored = false;
       // A timed-out connection may already have stored bytes. Verify on a fresh
       // connection, and never infer success just from a command rejection.
@@ -315,7 +315,13 @@ export function createRulesService({ config, imap, directory, connect = connectM
         } catch { /* Report uncertainty; the archive remains available for recovery. */ }
       }
       const error = new AppError(502, 'IMPORT_WRITE_FAILED', restored ? '적용하지 못했어요. 필터는 그대로예요.' : '적용을 마치지 못했어요. 현재 필터 상태를 다시 확인해 주세요.');
-      error.detail = { restored }; throw error;
+      error.detail = { restored };
+      // Keep only protocol metadata; server text can contain imported mail data.
+      if (cause instanceof AppError && cause.code === 'SIEVE_REJECTED' && ['CHECKSCRIPT', 'PUTSCRIPT'].includes(cause.command)) {
+        error.detail.command = cause.command;
+        if (/^[A-Z0-9/-]+$/.test(cause.responseCode ?? '')) error.detail.responseCode = cause.responseCode;
+      }
+      throw error;
     }
     return { rev: doc.rev, applied: rules.length, dropped: record.dropped.length + (record.droppedTruncated ?? 0), createdFolders,
       ...(current.activeName && current.activeName !== SCRIPT_NAME ? { deactivated: current.activeName } : {}) };

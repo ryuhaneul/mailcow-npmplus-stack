@@ -24,6 +24,18 @@ async function fixture(t, source = script) {
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
     if (path === '/api/v1/get/mailbox/all') return structuredClone(Object.hasOwn(options, 'mailboxes') ? options.mailboxes : boxes);
     if (path === '/api/v1/get/filters/all') { reads++; options.onRead?.(reads, rows); return structuredClone(Object.hasOwn(options, 'filters') ? options.filters : rows.length ? rows : {}); }
+    if (path === '/api/v1/add/alias') {
+      if (!options.ignoreAliasWrites) (options.aliases ??= []).push({ id: 70, ...body });
+      return [{ type: 'success' }];
+    }
+    if (path === '/api/v1/edit/alias') {
+      if (!options.ignoreAliasWrites) Object.assign(options.aliases.find(row => String(row.id) === body.items[0]), body.attr);
+      return [{ type: 'success' }];
+    }
+    if (path === '/api/v1/delete/alias') {
+      options.aliases = options.aliases.filter(row => !body.includes(String(row.id)));
+      return [{ type: 'success' }];
+    }
     if (path === '/api/v1/edit/filter') {
       if (!options.ignoreWrites) Object.assign(rows.find(row => String(row.id) === body.items[0]), body.attr);
       return [{ type: 'success', msg: 'filter_modified' }];
@@ -216,7 +228,9 @@ test('teams: initial filter creation has required copy extension, one active pre
   const f = await fixture(t, null);
   const response = await f.service.create({ session: {}, actor: 'admin', ip: '198.51.100.9', teamAddress: team, members: [first, second] });
   assert.deepEqual(response.members, [first, second]); assert.equal(f.rows.length, 1);
-  assert.deepEqual(writes(f)[0].body, { username: team, filter_type: 'prefilter', active: '1', script_desc: '팀 분배', script_data: `require ["copy"];\nredirect :copy "${first}";\nredirect :copy "${second}";\n` });
+  assert.deepEqual(writes(f)[0].body, { address: 'team-members@example.com', goto: `${first},${second}`, active: '1', internal: '1', private_comment: 'mailadmin:team-members', sogo_visible: '0' });
+  assert.deepEqual(writes(f)[1].body, { username: team, filter_type: 'prefilter', active: '1', script_desc: '팀 분배', script_data: 'require ["copy"];\nredirect :copy "team-members@example.com";\n' });
+  assert.equal(response.etag, (await item(f)).etag);
   const record = (await f.history.list()).items[0]; assert.equal(record.revertible, false); assert.equal(record.canRevert, false);
   assert.equal(await fs.readFile(join(f.dir, 'filter-backups', `${record.id}.before.sieve`), 'utf8'), '');
   await assert.rejects(f.history.revert(record.id, { confirm: true }), { code: 'NOT_REVERTIBLE' });
@@ -304,4 +318,75 @@ test('teams: guarded external forwarding permits internal membership changes and
   assert.equal(writes(f).length, 1);
   await f.history.revert(changed.auditId, { confirm: true, session: {}, actor: 'admin', ip: '203.0.113.7' });
   assert.equal(writes(f).length, 2);
+});
+
+const memberAliasAddress = 'team-members@example.com', linkedTeam = 'linked@example.com';
+async function aliasFixture(t, goto = `${first},${second}`) {
+  const f = await fixture(t, `require ["copy"];\nredirect :copy "${memberAliasAddress}";\nredirect :copy "${linkedTeam}";\n`);
+  f.options.aliases = [{ id: 7, address: memberAliasAddress, goto, active: '1', internal: '1', private_comment: 'mailadmin:team-members' }];
+  return f;
+}
+test('teams alias: add edits only goto and audits the combined members', async t => {
+  const f = await aliasFixture(t), source = f.rows[0].script_data;
+  const result = await change(f, (await item(f)).etag);
+  assert.deepEqual(result.members, [first, second, next, linkedTeam]);
+  assert.deepEqual(writes(f).map(row => row.path), ['/api/v1/edit/alias']);
+  assert.deepEqual(writes(f)[0].body, { items: ['7'], attr: { goto: `${first},${second},${next}` } });
+  assert.equal(f.rows[0].script_data, source); assert.equal(result.etag, (await item(f)).etag);
+  const record = await f.history.detail(result.auditId);
+  assert.deepEqual(record.before.members, [first, second, linkedTeam]);
+  assert.deepEqual(record.after.members, result.members);
+  assert.equal(record.before.aliasGoto, `${first},${second}`); assert.equal(record.after.aliasGoto, `${first},${second},${next}`);
+});
+test('teams alias: removal after account disable active=2 still edits goto', async t => {
+  const f = await aliasFixture(t); f.boxes.find(row => row.username === first).active = 2;
+  const result = await change(f, (await item(f)).etag, false, first);
+  assert.deepEqual(result.members, [second, linkedTeam]); assert.equal(f.options.aliases[0].goto, second);
+  assert.equal(writes(f)[0].path, '/api/v1/edit/alias');
+});
+test('teams alias: last alias target is protected even with a remaining Sieve link', async t => {
+  const f = await aliasFixture(t, first);
+  await assert.rejects(change(f, (await item(f)).etag, false, first), { code: 'LAST_MEMBER', statusCode: 409 });
+  assert.equal(writes(f).length, 0);
+});
+test('teams alias: changed goto invalidates etag and a verification mismatch audits failure', async t => {
+  const f = await aliasFixture(t); const expected = (await item(f)).etag;
+  f.options.aliases[0].goto = first;
+  await assert.rejects(change(f, expected), { code: 'CHANGED_ELSEWHERE' }); assert.equal(writes(f).length, 0);
+  f.options.ignoreAliasWrites = true;
+  await assert.rejects(change(f, (await item(f)).etag), { code: 'WRITE_VERIFY_FAILED', statusCode: 502 });
+  assert.equal((await f.history.list()).items[0].result, 'failed');
+});
+test('teams alias: undo and redo restore goto without editing the filter; outside changes block undo', async t => {
+  const f = await aliasFixture(t), source = f.rows[0].script_data;
+  const result = await change(f, (await item(f)).etag);
+  const reverse = await f.history.revert(result.auditId, { confirm: true, session: {}, actor: 'admin' });
+  assert.equal(f.options.aliases[0].goto, `${first},${second}`);
+  await f.history.revert(reverse.id, { confirm: true, session: {}, actor: 'admin' });
+  assert.equal(f.options.aliases[0].goto, `${first},${second},${next}`);
+  f.options.aliases[0].goto = second;
+  await assert.rejects(f.history.revert(result.auditId, { confirm: true, session: {} }), { code: 'CHANGED_ELSEWHERE' });
+  assert.equal(f.rows[0].script_data, source); assert.ok(writes(f).every(row => row.path === '/api/v1/edit/alias'));
+});
+test('teams create: new E team keeps linked teams in Sieve and creates no alias for links alone', async t => {
+  const f = await fixture(t, null);
+  f.rows.push({ id: 2, username: second, filter_type: 'prefilter', active: 1, script_data: `redirect :copy "${first}";\n` });
+  await f.service.create({ session: {}, teamAddress: team, members: [first, second] });
+  assert.equal(f.options.aliases[0].goto, first);
+  assert.equal(f.rows.find(row => row.username === team).script_data, `require ["copy"];\nredirect :copy "${memberAliasAddress}";\nredirect :copy "${second}";\n`);
+  const links = await fixture(t, null);
+  links.rows.push({ id: 2, username: second, filter_type: 'prefilter', active: 1, script_data: `redirect :copy "${first}";\n` });
+  await links.service.create({ session: {}, teamAddress: team, members: [second] });
+  assert.ok(!writes(links).some(row => row.path === '/api/v1/add/alias'));
+});
+test('teams create: failed filter verification deletes unused alias but preserves one referenced by an applied filter', async t => {
+  const f = await fixture(t, null); f.options.ignoreWrites = true;
+  await assert.rejects(f.service.create({ session: {}, teamAddress: team, members: [first] }), { code: 'WRITE_VERIFY_FAILED' });
+  assert.deepEqual(f.options.aliases, []); assert.equal(writes(f).at(-1).path, '/api/v1/delete/alias');
+  const applied = await fixture(t, null);
+  applied.options.onRead = (_count, rows) => { if (rows.length) rows[0].script_data += '# outside edit\n'; };
+  await assert.rejects(applied.service.create({ session: {}, teamAddress: team, members: [first] }), error => {
+    assert.equal(error.code, 'WRITE_VERIFY_FAILED'); assert.ok(error.message.includes(memberAliasAddress)); return true;
+  });
+  assert.equal(applied.options.aliases.length, 1); assert.ok(!writes(applied).some(row => row.path === '/api/v1/delete/alias'));
 });

@@ -54,6 +54,7 @@ async function fixture(t) {
     } else if (path === '/api/v1/edit/filter') Object.assign(filters.find(row => String(row.id) === body.items[0]), body.attr);
     else if (path === '/api/v1/add/filter') filters.push({ id: filters.length + 1, ...body });
     else if (path === '/api/v1/add/alias') aliases.push({ id: aliases.length + 1, ...body });
+    else if (path === '/api/v1/edit/alias') Object.assign(aliases.find(row => String(row.id) === body.items[0]), body.attr);
     else assert.fail(path);
     return [{ type: 'success' }];
   } };

@@ -1395,6 +1395,13 @@ else
     warn "apply-dovecot-dedupe.sh failed — check state with: scripts/apply-dovecot-dedupe.sh --check"
 fi
 
+# Persist four Rspamd normal workers; the script reports any required manual restart.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-rspamd-worker-normal.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "rspamd normal worker config applied (or already present); see restart notice above"
+else
+    warn "apply-rspamd-worker-normal.sh failed — check state with: scripts/apply-rspamd-worker-normal.sh --check"
+fi
+
 # Serialize simultaneous LMTP deliveries to the same recipient before Sieve runs.
 if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-serial.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
     log "postfix per-recipient LMTP serialization applied (or already present)"

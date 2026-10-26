@@ -1158,3 +1158,22 @@ docker compose exec -T dovecot-mailcow doveadm quota get -u user@example.test
 ### 같은 수신자 LMTP 배달 직렬화
 
 설치·업데이트는 `scripts/apply-postfix-lmtp-serial.sh apply -y`로 `extra.cf`의 관리 블록과 실행 중인 Postfix에 `lmtp_destination_concurrency_limit = 1`, `lmtp_destination_recipient_limit = 1`을 설정합니다. 같은 메일이 여러 팀 주소를 거쳐 동시에 도착해 Sieve의 중복 기록 전에 둘 다 통과하는 경쟁을 줄입니다. 같은 수신자에게는 한 번에 한 배달만 진행하고 다른 수신자 배달은 병렬로 유지하므로, 특정 수신자에게 몰린 메일은 차례로 기다릴 수 있습니다. 적용은 `postfix check` 후 reload만 수행합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-serial.sh --check`로 파일과 실제 값을 확인하고, `--revert -y`로 관리 블록을 제거하고 최초 적용 전 두 키의 명시 여부·값을 복원합니다. 복원 정보는 블록 안 주석에 보관하며 적용 실패 시에는 해당 실행 직전 상태로 복원합니다. 마커 밖에 같은 키가 있으면 줄 번호와 함께 무변경 중단합니다. 다음 설치·업데이트에서는 다시 적용됩니다.
+
+### Rspamd 일반 검사 프로세스 4개
+
+설치·업데이트는 `scripts/apply-rspamd-worker-normal.sh apply -y`로 `data/conf/rspamd/override.d/worker-normal.custom.inc`에 `count = 4;` 관리 블록을 유지합니다. 파일이 없으면 만들고, 기존 파일의 다른 내용·소유자·권한은 보존합니다. hcmail의 수동 적용 두 줄(`# 2026-10-26 장애 대응: 검사 프로세스 1 -> 4`와 바로 다음 `count = 4;`)만 블록으로 흡수합니다. 다른 값, 여러 count, 수정된 마커가 있으면 변경 없이 중단합니다. 변경 전 파일은 같은 디렉터리의 `.bak-worker-normal-*`로 백업합니다. 최초 생성 시 백업은 빈 파일입니다.
+
+```bash
+sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-worker-normal.sh apply -y
+sudo env MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-rspamd-worker-normal.sh --check
+# 아래 일회성 정리도 필요하면 먼저 수행한 뒤 한 번만 재시작합니다.
+cd /home/mailcow-dockerized && sudo docker compose restart rspamd-mailcow
+```
+
+스크립트는 재시작을 실행하지 않고 변경 시 재시작 필요 안내만 출력합니다. `--check`와 verify는 **파일의 관리 블록만** 확인하며 실행 중인 프로세스 수는 확인하지 않습니다. `--revert -y`는 관리 블록만 제거하고 백업을 남깁니다(생성된 빈 파일은 유지). 되돌린 설정 반영에도 Rspamd 재시작이 필요하며 다음 설치·업데이트는 다시 적용합니다.
+
+hcmail에만 한때 추가한 백신 검사 생략 줄은 레포에서 관리하지 않습니다(시험 VM·122에는 없음). 다음 일회성 명령은 `local.d/antivirus.conf`의 clamav 블록에서 `max_size = 20971520;` 다음에 넣었던 주석·whitelist 두 줄과, `local.d/external_services.conf`의 oletools 블록에서 `retransmits = 1;` 다음에 넣었던 주석·whitelist 두 줄만 제거합니다. 두 원문이 각각 한 번 있는지 먼저 확인하고 `.bak-remove-skipsieve` 백업을 남깁니다. 두 파일이 추가 뒤 바뀌지 않았다면 같은 폴더의 원본 `*.bak-skipsieve-20261026`으로 각각 덮어써도 결과는 같습니다. **제거 후 `docker compose restart rspamd-mailcow`가 필요하며 HUP으로는 반영되지 않습니다.** 이 정리는 setup·update에서 자동 실행하지 않습니다.
+
+```bash
+sudo python3 -c 'from pathlib import Path; import shutil; root=Path("/home/mailcow-dockerized/data/conf/rspamd/local.d"); pairs=[("antivirus.conf", "  # 2026-10-26 Dovecot Sieve 재발송 사본(172.22.1.250)은 원본 수신 때 검사됨 - 건너뜀\n"), ("external_services.conf", "  # 2026-10-26 Dovecot Sieve 재발송 사본은 건너뜀\n")]; rows=[(root/name, (comment + "  whitelist = \"/etc/rspamd/custom/dovecot_trusted.map\";\n").encode()) for name,comment in pairs]; data=[(p,block,p.read_bytes()) for p,block in rows]; assert all(raw.count(block)==1 and not Path(str(p)+".bak-remove-skipsieve").exists() for p,block,raw in data), "원문/백업 확인 필요: 변경하지 않음"; [(shutil.copy2(p,str(p)+".bak-remove-skipsieve"),p.write_bytes(raw.replace(block,b"",1))) for p,block,raw in data]'
+```

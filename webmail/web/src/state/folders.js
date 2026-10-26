@@ -108,7 +108,7 @@ export function pinnedFoldersAfterChange({from, to, created, deleted} = {}) {
   if (created || from && !deleted) {
     const target = created ?? to;
     // A reused name belongs to a new folder, not the earlier rename source.
-    const retained = pinRenames.value.filter(alias => target !== alias.from && !target.startsWith(`${alias.from}/`));
+    const retained = pinRenames.value.filter(alias => target !== alias.from && !target.startsWith(`${alias.from}/`) && !alias.from.startsWith(`${target}/`));
     pinRenames.value = from ? [...retained, {from, to}] : retained;
   }
   // Do not compare new paths against the pre-refresh folder list here.

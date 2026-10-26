@@ -139,6 +139,19 @@ await test('folder pin UI and sidebar regressions',async t=>{
       assert.deepEqual(await c.page.evaluate(async()=>{const f=await import('/src/state/folders.js'),p=await import('/src/state/prefs.js');return [p.prefs.value.pinnedFolders,f.pinnedFolderPaths()];}),[['AB','A'],['AB','A']]);
     }finally{await c.close();}
   });
+  await t.test('D2: reused parent discards old child aliases and preserves all four pins',async()=>{
+    const initial=['A','A/child','AB','AB/child'];reset({pins:initial});fake.state.folders.push(...['A/child','AB/child','Free'].map(path=>personal(path)));const c=await open();
+    let release,started,held=false;const gate=new Promise(resolve=>{release=resolve;}),began=new Promise(resolve=>{started=resolve;});
+    const observed=()=>c.page.evaluate(async()=>{const f=await import('/src/state/folders.js'),p=await import('/src/state/prefs.js');return {raw:p.prefs.value.pinnedFolders,resolved:f.pinnedFolderPaths(),visible:f.visiblePinnedFolders().map(row=>row.path),saving:p.prefsSaving.value};});
+    try{
+      await c.page.route('**/api/prefs',async request=>{if(request.request().method()==='PUT'&&!held){held=true;started();await gate;}await request.fallback();});
+      await manage(c.page,'A/child');await c.page.getByLabel('폴더 이름',{exact:true}).fill('renamed');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);await began;
+      await manage(c.page,'A');await c.page.getByLabel('폴더 이름',{exact:true}).fill('Z');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);
+      await manage(c.page,'AB');await c.page.getByLabel('폴더 이름',{exact:true}).fill('A');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);
+      release();const paths=['Z','Z/renamed','A','A/child'];await waitSaved(paths);await expect.poll(observed).toEqual({raw:paths,resolved:paths,visible:paths,saving:false});
+      await mine(c.page,'Free').getByRole('button',{name:'Free 상단 고정',exact:true}).click();const next=[...paths,'Free'];await waitSaved(next);await expect.poll(observed).toEqual({raw:next,resolved:next,visible:next,saving:false});
+    }finally{release();await c.close();}
+  });
   for(const foldersFirst of [true,false])await t.test(`D1: rename failure notice remains once, foldersFirst=${foldersFirst}`,async()=>{
     reset({pins:['A','A/하위','AB']});const c=await open();let releaseFolders,releasePrefs,delayFolders=true,fail=true;
     const folderGate=new Promise(resolve=>{releaseFolders=resolve;}),prefsGate=new Promise(resolve=>{releasePrefs=resolve;});

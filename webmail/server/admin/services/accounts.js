@@ -330,6 +330,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (mode === 'disable' && !cleanRefs) return { state: { account, ownFilters, operation }, account, filters, forward,
       refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
+    if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map();
     const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');

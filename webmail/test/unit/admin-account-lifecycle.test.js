@@ -488,3 +488,16 @@ test('lifecycle: last bundled member blocks leave and deletion before writes eve
   await assert.rejects(leave(f, { action: 'preview', cleanRefs: true }), { statusCode: 409, code: 'LAST_MEMBER' });
   assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, user);
 });
+
+test('lifecycle: alias-mode team deletion preview and execution refuse before any writes', async t => {
+  const f = await fixture(t, false), bundle = 'team-members@example.com';
+  const initial = await f.service.deletePreview({}, team);
+  f.filters.push({ id: 10, username: team, filter_type: 'prefilter', active: 1,
+    script_data: `redirect :copy "${bundle}";\n` });
+  f.aliases.push({ id: 1, address: bundle, goto: `${user},${other}`, active: 1, private_comment: 'mailadmin:team-members' });
+  await assert.rejects(f.service.deletePreview({}, team), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
+  assert.equal(writes(f).length, 0);
+  await assert.rejects(f.service.remove({ ...context, addr: team,
+    data: { etag: initial.etag, confirmAddress: team, cleanRefs: true } }), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
+  assert.equal(writes(f).length, 0);
+});

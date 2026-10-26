@@ -195,7 +195,7 @@ echo ""
 # --- Mail protocols ---
 echo "[Mail Protocols]"
 check "Rspamd normal worker count (file only)" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-rspamd-worker-normal.sh" --check
-check "Postfix per-recipient LMTP serialization" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-serial.sh" --check
+check "Postfix LMTP concurrency 50" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-concurrency.sh" --check
 check "SMTP (465 SSL)" sh -c "echo 'QUIT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:465 -quiet 2>/dev/null | grep -q '220'"
 check "IMAP (993 SSL)" sh -c "echo '1 LOGOUT' | timeout 10 openssl s_client -connect mail.${DOMAIN}:993 -quiet 2>/dev/null | grep -q 'OK'"
 

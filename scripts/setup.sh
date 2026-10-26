@@ -1402,11 +1402,11 @@ else
     warn "apply-rspamd-worker-normal.sh failed — check state with: scripts/apply-rspamd-worker-normal.sh --check"
 fi
 
-# Serialize simultaneous LMTP deliveries to the same recipient before Sieve runs.
-if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-serial.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
-    log "postfix per-recipient LMTP serialization applied (or already present)"
+# Keep LMTP delivery concurrency at 50 to avoid serialized queue congestion.
+if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-concurrency.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
+    log "postfix LMTP concurrency 50 applied (or already present)"
 else
-    warn "apply-postfix-lmtp-serial.sh failed — check state with: scripts/apply-postfix-lmtp-serial.sh --check"
+    warn "apply-postfix-lmtp-concurrency.sh failed — check state with: scripts/apply-postfix-lmtp-concurrency.sh --check"
 fi
 
 # Reload php-fpm + nginx so Twig picks up the patched base.twig (twig cache).

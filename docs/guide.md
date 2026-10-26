@@ -1155,9 +1155,9 @@ docker compose exec -T dovecot-mailcow doveadm quota get -u user@example.test
 
 설치·업데이트는 `scripts/apply-dovecot-dedupe.sh apply -y`로 mailcow의 기본 Message-ID 중복 검사를 `global_sieve_before`로 옮기고 `global_sieve_after`의 기존 검사는 마커 안에서 주석 처리합니다. 관리·개인 필터의 `stop`, `fileinto`, `redirect`보다 먼저 검사하여 같은 수신자에게 복제된 메일을 걸러냅니다. 첫 사본은 다음 필터로 통과하며 키·기간은 바꾸지 않습니다(기본 mailcow 기간 1분). 두 호스트 파일을 백업한 뒤 실행 파일에 복사·`sievec`하며 reload·재시작은 하지 않습니다. 기존 before에 명령이 있거나 after의 upstream 중복 블록이 예상과 다르면 무변경 중단합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-dovecot-dedupe.sh --check`로 호스트·컨테이너 일치를 확인하고, `--revert -y`로 before 블록 제거와 after 원문 복원을 합니다(다음 설치·업데이트 시 다시 적용). 실제 배달 검증은 고유 Message-ID의 합성 메일로 첫 사본 보존과 후속 중복 제거를 확인합니다.
 
-### 같은 수신자 LMTP 배달 직렬화
+### LMTP 동시 배달 50
 
-설치·업데이트는 `scripts/apply-postfix-lmtp-serial.sh apply -y`로 `extra.cf`의 관리 블록과 실행 중인 Postfix에 `lmtp_destination_concurrency_limit = 1`, `lmtp_destination_recipient_limit = 1`을 설정합니다. 같은 메일이 여러 팀 주소를 거쳐 동시에 도착해 Sieve의 중복 기록 전에 둘 다 통과하는 경쟁을 줄입니다. 같은 수신자에게는 한 번에 한 배달만 진행하고 다른 수신자 배달은 병렬로 유지하므로, 특정 수신자에게 몰린 메일은 차례로 기다릴 수 있습니다. 적용은 `postfix check` 후 reload만 수행합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-serial.sh --check`로 파일과 실제 값을 확인하고, `--revert -y`로 관리 블록을 제거하고 최초 적용 전 두 키의 명시 여부·값을 복원합니다. 복원 정보는 블록 안 주석에 보관하며 적용 실패 시에는 해당 실행 직전 상태로 복원합니다. 마커 밖에 같은 키가 있으면 줄 번호와 함께 무변경 중단합니다. 다음 설치·업데이트에서는 다시 적용됩니다.
+설치·업데이트는 `scripts/apply-postfix-lmtp-concurrency.sh apply -y`로 `extra.cf`의 관리 블록과 실행 중인 Postfix에 `lmtp_destination_concurrency_limit = 50`을 설정합니다. `lmtp_destination_recipient_limit`은 변경하지 않습니다(mailcow 기본값 1 유지). 기존 직렬화 설정은 2026-10-26 대기열 정체 장애 원인이므로 다시 적용하지 말고, 남은 `lmtp-serial` 블록은 먼저 `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-serial.sh --revert -y`로 제거해야 합니다. 새 스크립트는 해당 블록이 남아 있으면 무변경 중단하며, hcmail의 정확한 세 줄(`# BEGIN mailstack lmtp-concurrency (2026-10-26 장애 대응)`, `lmtp_destination_concurrency_limit = 50`, `# END mailstack lmtp-concurrency`)만 관리 블록으로 흡수합니다. 다른 값·수정된 마커·블록 밖 같은 키는 무변경 중단합니다. 파일과 적용 직전 명시 설정을 백업하고 `postfix check` 후 reload만 수행하며, 실패하면 실행 직전 상태로 복원합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-concurrency.sh --check`로 파일·실제 값을 확인하고 `--revert -y`로 관리 블록 제거와 최초 적용 전 런타임 설정을 복원합니다(수동 50을 흡수했다면 런타임 복원값도 50). 다음 설치·업데이트에서는 동시 배달 50을 다시 적용합니다.
 
 ### Rspamd 일반 검사 프로세스 4개
 

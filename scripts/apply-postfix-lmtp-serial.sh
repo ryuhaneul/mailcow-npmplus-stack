@@ -2,6 +2,7 @@
 set +x
 # Serialize LMTP deliveries per recipient, retaining parallelism between recipients.
 # Persistent extra.cf + live postconf; postfix check/reload, never restart/recreate.
+# 장애 원인(2026-10-26 대기열 정체): apply 사용 금지. 기존 설정 제거(--revert)용으로만 보관.
 # Usage: apply-postfix-lmtp-serial.sh [apply|--check|--revert] [-y]
 set -euo pipefail
 usage() { echo "Usage: $0 [apply|--check|--revert] [-y]"; }

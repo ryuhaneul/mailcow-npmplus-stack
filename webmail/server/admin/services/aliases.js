@@ -113,7 +113,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     return state(addr, aliases, boxes, participants);
   }
   const dto = (addr, value) => ({ address: addr, targets: split(value.alias.goto), discard: value.alias.goto === 'null@localhost',
-    sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag({ ...value, senders: value.senders.filter(row => row.senderAcl?.includes(addr)) }),
+    team: value.alias.private_comment === 'mailadmin:team-members', sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag({ ...value, senders: value.senders.filter(row => row.senderAcl?.includes(addr)) }),
     metadata: { sogoVisible: value.alias.sogo_visible === '1', internal: value.alias.internal === '1', publicComment: value.alias.public_comment, privateComment: value.alias.private_comment } });
   async function list(session, { q = '', target = '', page = '1' } = {}) {
     if (typeof q !== 'string' || typeof target !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
@@ -195,6 +195,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
       const before = await read(session, addr), aliases = await rows(session, 'alias/all'), context = await domains(session);
       if (operation === 'create' && (before.alias || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr))) throw new AppError(409, 'ADDRESS_IN_USE', '이미 별칭이 있는 주소예요.');
       if (operation !== 'create' && !before.alias) throw new AppError(404, 'NOT_FOUND', '별칭을 찾을 수 없어요.');
+      if (operation !== 'create' && before.alias.private_comment === 'mailadmin:team-members') throw new AppError(409, 'TEAM_MEMBER_ALIAS', '팀 분배 화면에서 바꿔 주세요.');
       if (operation !== 'create') assertUnchanged(data.etag, before);
       let after, allowDiscard = false;
       if (operation === 'delete') {

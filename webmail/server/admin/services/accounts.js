@@ -18,6 +18,15 @@ const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 �
 const safeCode = error => error instanceof AppError && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'INTERNAL_ERROR';
 const sieveWarning = () => ({ ...sieveDisabledWarning });
 const targets = value => (Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/)).map(normalize).filter(Boolean);
+const isMemberAlias = row => row.private_comment === 'mailadmin:team-members';
+const memberAliases = (filter, aliases) => analyze(filter.script_data).members.map(member => aliases.find(row =>
+  isMemberAlias(row) && String(row.active) === '1' && normalize(row.address) === normalize(member.address))).filter(Boolean);
+function teamMembers(filter, aliases) {
+  const bundles = memberAliases(filter, aliases), addresses = new Set(bundles.map(row => normalize(row.address)));
+  return [...new Set([...bundles.flatMap(row => targets(row.goto)),
+    ...analyze(filter.script_data).members.map(member => normalize(member.address)).filter(addr => !addresses.has(addr))])];
+}
+
 function address(value) {
   const result = normalize(value);
   if (result.length > 254 || !addressPattern.test(result)) throw invalid();
@@ -137,9 +146,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const state = snapshot(row);
     return { ...summary(row, groups), appPasswordCount: appPasswords.length, etag: etag(state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
       refs: {
-        aliases: aliases.filter(alias => targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
+        aliases: aliases.filter(alias => !isMemberAlias(alias) && targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
-          const members = analyze(filter.script_data).members.map(member => normalize(member.address));
+          const members = teamMembers(filter, aliases);
           return members.includes(addr) ? [{ mailbox: normalize(filter.username), filterId: filter.id, members }] : [];
         }),
         senders, shares: [...shares.values()].sort((a, b) => `${a.owner} ${a.grantee} ${a.mailbox}`.localeCompare(`${b.owner} ${b.grantee} ${b.mailbox}`)),
@@ -285,22 +294,29 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     { code: 'REMOVE_DEVICE_ACCOUNT', message: '퇴사자 기기의 메일 계정 설정을 지워 주세요' },
   ];
   const prefilters = (filters, addr) => filters.filter(filter => normalize(filter.username) === addr && filter.filter_type === 'prefilter' && String(filter.active) === '1');
-  function protectTeams(filters, addr) {
+  function protectTeams(filters, aliases, addr) {
     const involved = [];
     for (const filter of filters.filter(row => row.filter_type === 'prefilter' && String(row.active) === '1')) {
       const parsed = analyze(filter.script_data), owner = normalize(filter.username);
       if (!parsed.parsed && String(filter.script_data ?? '').toLowerCase().includes('redirect')) {
         throw new AppError(409, 'UNPARSEABLE', `${owner}의 분배 필터를 해석할 수 없어요. 필터 화면에서 먼저 확인해 주세요.`);
       }
-      if (!parsed.members.some(member => normalize(member.address) === addr)) continue;
+      if (!teamMembers(filter, aliases).includes(addr)) continue;
+      const bundles = memberAliases(filter, aliases), alias = bundles[0];
+      if (bundles.length > 1) throw new AppError(409, 'MULTIPLE_MEMBER_ALIASES', `${owner}의 묶음 별칭이 여러 개예요. 팀 분배에서 먼저 정리해 주세요.`);
       if (prefilters(filters, owner).length > 1) throw new AppError(409, 'MULTIPLE_PREFILTERS', `${owner}의 사전 필터가 여러 개예요. 필터 화면에서 먼저 정리해 주세요.`);
-      try { removeMember(filter.script_data, addr); }
+      try {
+        if (alias && targets(alias.goto).includes(addr)) {
+          if (targets(alias.goto).every(target => target === addr)) throw new Refused('last_member');
+          if (parsed.stopperBeforeMember || !parsed.members.at(-1).simple) throw new Refused(parsed.stopperBeforeMember ? 'stopper_before_member' : 'line_not_simple');
+        } else removeMember(filter.script_data, addr);
+      }
       catch (error) {
         if (!(error instanceof Refused)) throw error;
         throw new AppError(409, error.code.toUpperCase(), error.code === 'last_member' ?
           `${owner}에서 이 사람이 마지막 구성원이에요. 팀 분배에서 다른 구성원을 먼저 넣어 주세요.` : `${owner}의 분배 필터를 안전하게 바꿀 수 없어요. 팀 분배에서 먼저 정리해 주세요.`);
       }
-      involved.push(filter);
+      involved.push({ ...filter, teamEtag: etag({ id: filter.id, source: filter.script_data, ...(alias ? { goto: alias.goto } : {}) }) });
     }
     return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
   }
@@ -313,17 +329,18 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const operation = { mode, cleanRefs, forwardTo };
     if (mode === 'disable' && !cleanRefs) return { state: { account, ownFilters, operation }, account, filters, forward,
       refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
-    const teamsToClean = protectTeams(filters, addr), aclByOwner = new Map();
+    const aliases = await rows(session, 'alias/all');
+    const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map();
     const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
-    const [aliases, boxes, jobs] = await Promise.all([rows(session, 'alias/all'), rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
-    const aliasRows = aliases.filter(row => targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
+    const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
+    const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(row => normalize(row.username) === addr && targets(row.sender_acl).length || targets(row.sender_acl).includes(addr)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
     const refs = { ...info.refs, aliases: info.refs.aliases.map(alias => ({ ...alias, effect: mode === 'disable' ? 'kept' : alias.targets.every(target => target === addr) ? 'deleted' : 'target_removed' })) };
     const versions = {
       aliases: aliasRows.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
-      teams: teamsToClean.map(row => ({ mailbox: normalize(row.username), id: row.id, sha256: scriptHash(row.script_data) })),
+      teams: teamsToClean.map(row => ({ mailbox: normalize(row.username), id: row.id, sha256: scriptHash(row.script_data), etag: row.teamEtag })),
       senders: senderRows.map(row => ({ mailbox: normalize(row.username), sha256: etag(row.sender_acl) })),
       shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
@@ -387,7 +404,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             }
             for (const filter of plan.teamsToClean) {
               stage = 'teams'; const owner = normalize(filter.username);
-              const applied = await teams.change({ session, actor, ip, team: owner, member: addr, add: false, irreversible: mode === 'delete', etag: etag({ id: filter.id, source: filter.script_data }) });
+              const applied = await teams.change({ session, actor, ip, team: owner, member: addr, add: false, irreversible: mode === 'delete', etag: filter.teamEtag });
               cleaned.teams.push(owner); success(stage, owner, applied.auditId);
             }
             for (const sender of plan.senderRows) {
@@ -437,7 +454,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               if (Object.values(current.refs).some(refs => refs.length)) throw new AppError(409, 'REFERENCES_REMAIN', '연결이 남아 있어 메일함을 지우지 않았어요. 다시 미리보기를 확인해 주세요.');
               assertUnchanged(etag(expectedAccount), snapshot(await box(session, addr)));
               const checkedFilters = await rows(session, 'filters/all');
-              protectTeams(checkedFilters, addr);
+              protectTeams(checkedFilters, await rows(session, 'alias/all'), addr);
               const ownFilters = prefilters(checkedFilters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
               assertUnchanged(etag(plan.state.ownFilters), ownFilters);
               await mailcow.call(session, 'POST', '/api/v1/delete/mailbox', [addr]);
@@ -670,6 +687,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       if (boxes.some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '이미 메일함이 있는 주소예요.');
       const alias = aliases.find(row => normalize(row.address) === addr);
       if (!alias) throw new AppError(404, 'NOT_FOUND', '전환할 별칭을 찾을 수 없어요.');
+      if (isMemberAlias(alias)) throw new AppError(409, 'TEAM_MEMBER_ALIAS', '팀 분배 화면에서 바꿔 주세요.');
       const ownFilters = filters.filter(row => normalize(row.username) === addr);
       return { state: { direction, addr, options, alias: etag(alias), senders: senderVersions,
         destinations: boxes.filter(row => destinations.includes(normalize(row.username))).map(snapshot).sort((a, b) => a.address.localeCompare(b.address)),
@@ -678,6 +696,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           mailbox: { address: addr, name: addr.split('@')[0], kind: options.kind, quotaGb: options.quotaGb }, copyTo: options.copyTo, sendGrantTo: options.sendGrantTo,
           senderRestore: senderRestore.map(row => ({ mailbox: normalize(row.username), senderAcl: snapshot(row).senderAcl })) } };
     }
+    if (prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const mailbox = await box(session, addr);
     if (Number(mailbox.messages) !== 0) throw notEmpty();
     const relatedFilters = [];

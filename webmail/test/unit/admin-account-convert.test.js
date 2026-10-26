@@ -323,3 +323,17 @@ for (const direction of ['mailbox-to-alias', 'alias-to-mailbox']) test(`account 
   const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
   assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
 });
+
+test('convert: alias-mode team mailbox must restore its team distribution before conversion', async t => {
+  const f = await fixture(t), bundle = 'service-members@example.com';
+  f.filters.find(row => row.username === addr && row.filter_type === 'prefilter').script_data = `redirect :copy "${bundle}";\n`;
+  f.aliases.push({ ...makeAlias(9, bundle, `${team},${other}`), private_comment: 'mailadmin:team-members' });
+  await assert.rejects(preview(f), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
+  assert.equal(writes(f).length, 0);
+});
+
+test('convert: bundled team alias cannot be converted into a mailbox', async t => {
+  const f = await fixture(t, 'alias-to-mailbox'); f.aliases[0].private_comment = 'mailadmin:team-members';
+  await assert.rejects(preview(f), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
+  assert.equal(writes(f).length, 0);
+});

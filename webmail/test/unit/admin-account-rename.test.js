@@ -287,3 +287,14 @@ test('account folder ACL: rename disabled doveadm warns and only migrates INBOX'
   assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
   assert.ok(f.acl.get(team).some(row => row.mailbox === 'Sent' && row.id === old));
 });
+
+test('rename: updates bundled team alias targets through the existing alias path', async t => {
+  const f = await fixture(t, false), bundle = 'team-members@example.com';
+  const script = `redirect :copy "${bundle}";\n`;
+  f.filters.push({ id: 1, username: team, filter_type: 'prefilter', active: 1, script_data: script });
+  f.aliases.push({ id: 1, address: bundle, goto: `${old},${other}`, active: 1, internal: '1', private_comment: 'mailadmin:team-members' });
+  const result = await run(f, (await preview(f)).etag);
+  assert.equal(result.result, 'ok'); assert.deepEqual(f.aliases[0].goto.split(','), [next, other]);
+  assert.equal(f.aliases[0].private_comment, 'mailadmin:team-members'); assert.equal(f.aliases[0].internal, '1');
+  assert.equal(f.filters[0].script_data, script);
+});

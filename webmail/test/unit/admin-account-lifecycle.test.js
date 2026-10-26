@@ -456,3 +456,35 @@ test('account folder ACL: disabled doveadm retains INBOX behavior and warns on d
   assert.equal(result.result, 'ok'); assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
   assert.deepEqual(f.acl.get(team).map(row => row.mailbox), ['Sent']);
 });
+
+for (const mode of ['disable', 'delete']) test(`lifecycle: ${mode} removes only the bundled team member and retains the alias and filter`, async t => {
+  const f = await fixture(t, false), bundle = 'team-members@example.com';
+  const script = `require ["copy"];\nredirect :copy "${bundle}";\n`;
+  f.filters.push({ id: 10, username: team, filter_type: 'prefilter', active: 1, script_data: script });
+  f.aliases.push({ id: 1, address: bundle, goto: `${user},${other}`, active: 1, internal: '1', private_comment: 'mailadmin:team-members' });
+  const info = await f.service.detail({}, user);
+  assert.deepEqual(info.refs.aliases, []);
+  assert.deepEqual(info.refs.teams, [{ mailbox: team, filterId: 10, members: [user, other] }]);
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  const result = await f.service.remove({ ...context, addr: user, mode, data: confirmed(initial.etag) });
+  assert.equal(result.result, 'ok');
+  assert.equal(f.aliases.length, 1); assert.equal(f.aliases[0].goto, other);
+  assert.equal(f.filters[0].script_data, script);
+  assert.equal(writes(f).filter(row => row.path === '/api/v1/delete/alias').length, 0);
+  assert.equal(writes(f).filter(row => row.path === '/api/v1/edit/alias').length, 1);
+  assert.deepEqual(result.detail.cleaned.teams, [team]); assert.deepEqual(result.detail.cleaned.aliases, []);
+  if (mode === 'disable') {
+    assert.equal(f.boxes.find(row => row.username === user).active, 2);
+    assert.ok(writes(f).findIndex(row => row.path === '/api/v1/edit/mailbox') < writes(f).findIndex(row => row.path === '/api/v1/edit/alias'));
+  } else assert.ok(!f.boxes.some(row => row.username === user));
+});
+
+test('lifecycle: last bundled member blocks leave and deletion before writes even with a Sieve team link', async t => {
+  const f = await fixture(t, false), bundle = 'team-members@example.com';
+  f.filters.push({ id: 10, username: team, filter_type: 'prefilter', active: 1,
+    script_data: `redirect :copy "${bundle}";\nredirect :copy "${other}";\n` });
+  f.aliases.push({ id: 1, address: bundle, goto: user, active: 1, private_comment: 'mailadmin:team-members' });
+  await assert.rejects(preview(f), { statusCode: 409, code: 'LAST_MEMBER' });
+  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true }), { statusCode: 409, code: 'LAST_MEMBER' });
+  assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, user);
+});

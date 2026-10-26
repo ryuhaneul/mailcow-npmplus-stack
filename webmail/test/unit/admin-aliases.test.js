@@ -295,3 +295,11 @@ test('aliases: edit and history undo share graph then target locks and reject th
   assert.deepEqual((await f.service.checks({})).cycles, []);
   assert.equal(f.aliases[0].goto, first); assert.equal(f.aliases[1].goto, alias);
 });
+
+test('aliases: bundled team alias is marked and rejects direct edit and deletion', async t => {
+  const f = await fixture(t); f.aliases[0].private_comment = 'mailadmin:team-members';
+  const bundle = await item(f); assert.equal(bundle.team, true);
+  await assert.rejects(edit(f, bundle.etag, { targets: [second], mode: 'move' }), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
+  await assert.rejects(remove(f, bundle.etag), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
+  assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, first);
+});

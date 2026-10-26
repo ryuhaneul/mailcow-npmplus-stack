@@ -365,6 +365,35 @@ await test('Gmail import preview and explicit partial apply', async t => {
       assert.deepEqual(errors,[]);await context.close();
     }
   });
+  await t.test('long XML preview brings apply errors into view and focuses the alert',async()=>{
+    const failures=[
+      {code:'FOLDER_CREATE_FAILED',message:'Synthetic folder failure',detail:{folder:'Synthetic/New',created:[]},text:'폴더를 만들지 못해'},
+      {code:'IMPORT_WRITE_FAILED',message:'Synthetic inspection failure',detail:{restored:true,command:'CHECKSCRIPT'},text:'서버 검사 실패'},
+      {code:'IMPORT_WRITE_FAILED',message:'Synthetic quota failure',detail:{restored:true,command:'PUTSCRIPT',responseCode:'QUOTA/MAXSIZE'},text:'보관 공간 부족'},
+      {code:'IMPORT_PREVIEW_CHANGED',message:'Synthetic state conflict',text:'미리보기 뒤 필터 상태가 바뀌었어요'},
+    ];
+    for(const width of [1280,768,375])for(const [index,failure] of failures.entries()) {
+      const {page,context,errors}=await pageFor({width,state:'import_pending'});
+      fake.state.rules.activeName='gmail';fake.state.rules.activeScript='gmail';await page.reload();
+      const samples=gmailImportFixture();
+      const items=Array.from({length:170},(_,i)=>i<157?{...structuredClone(samples[0]),n:i+1,rule:{...structuredClone(samples[0].rule),id:`s${String(i).padStart(7,'0')}`}}:{...structuredClone(samples[2]),n:i+1});
+      fake.state.importPreview={items,counts:{same:157,changed:0,no:13},plan:{mode:'new',existing:0,applied:157,total:157,newFolders:[],deactivates:'gmail',replacesUndo:false},expect:{xmlSha256:'a'.repeat(64),mode:'new',activeName:'gmail',activeSha256:'b'.repeat(64),planSha256:'c'.repeat(64)}};
+      await pick(page);await expect(page.locator('.gi-tr')).toHaveCount(170);
+      await expect(page.locator('.gi-confirm')).toContainText('157');await expect(page.locator('.gi-confirm')).toContainText('‘gmail’');
+      await page.locator('.gi-confirm input').check();
+      const {text,...error}=failure;fake.state.rulesError=error;
+      await page.getByRole('button',{name:'157개 적용',exact:true}).click();
+      const alert=page.getByRole('alert');await expect(alert).toContainText(text);
+      await expect(alert).toBeFocused();
+      assert.equal(await alert.evaluate(el=>{const a=el.getBoundingClientRect(),scroll=el.closest('.scroll').getBoundingClientRect();return a.top>=scroll.top&&a.bottom<=scroll.bottom;}),true);
+      await expect(page.getByRole('button',{name:'미리보기 다시 불러오기',exact:true})).toBeEnabled();
+      if(error.code==='IMPORT_PREVIEW_CHANGED')await expect(page.locator('.gi-confirm')).toHaveCount(0);
+      else {await expect(page.locator('.gi-confirm input')).not.toBeChecked();await expect(page.getByRole('button',{name:'157개 적용',exact:true})).toBeDisabled();}
+      assert.equal(recorded(paths.apply).length,1);assert.deepEqual(errors,[]);
+      await page.screenshot({path:`${captures}/long-preview-error-${width}-${index}.png`,fullPage:true});
+      await context.close();
+    }
+  });
   await t.test('folder failure names the failed folder and any created folders',async()=>{
     for(const created of [[],['부모 폴더']]) {
       const {page,context}=await pageFor();await pick(page);await page.locator('.gi-confirm input').check();

@@ -1,4 +1,10 @@
 import { isIP } from 'node:net';
+import { createFaviconService } from '../../server/admin/services/favicon.js';
+import { createResourceLock } from '../../server/admin/lock.js';
+import { faviconCsp, readFaviconState, readFaviconFile } from '../../server/favicon-store.js';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { sieveDisabledWarning } from '../../server/admin/messages.js';
 import { mergeSenderAcl } from '../../server/admin/services/senders.js';
 import { parseCsv } from '../../server/admin/services/batch.js';
@@ -100,7 +106,38 @@ export function createFakeAdminApi() {
     });
     return { kind, rows: items, normal: items.filter(row => row.valid).length, errors: items.filter(row => !row.valid).length };
   }
+  let faviconFixture;
+  async function faviconResources() {
+    faviconFixture ??= mkdtemp(join(tmpdir(), 'synthetic-admin-favicon-')).then(dir => ({ dir, service: createFaviconService({ dir, lock: createResourceLock(), history: { register() {} }, audit: { run: async (_record, operation) => operation({ id: 'ffffffffffffffffffffffffffffffff' }) } }) }));
+    return faviconFixture;
+  }
   async function middleware(request, response, next) {
+    const faviconUrl = new URL(request.url, 'http://localhost');
+    if (faviconUrl.pathname === '/favicon.ico' || /^\/api\/admin\/favicon(?:\/|$)/.test(faviconUrl.pathname)) {
+      const publicRead = faviconUrl.pathname === '/favicon.ico';
+      const failFavicon = error => { response.statusCode = error.statusCode || 500; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ error: { code: error.code || 'FAILED', message: error.message } })); };
+      if (!publicRead && (state.failure || !state.session || state.session.step !== 'done')) return failFavicon({ statusCode: 403, code: state.failure?.code || 'NO_SESSION', message: state.failure?.message || '로그인이 필요해요.' });
+      if (!publicRead && !['GET', 'HEAD'].includes(request.method) && request.headers['x-mailadmin-csrf'] !== state.session.csrf) return failFavicon({ statusCode: 403, code: 'CSRF', message: '요청을 확인할 수 없어요.' });
+      state.requests.push({ path: faviconUrl.pathname, method: request.method, csrf: request.headers['x-mailadmin-csrf'] });
+      try {
+        const { dir, service } = await faviconResources();
+        if (publicRead || faviconUrl.pathname.startsWith('/api/admin/favicon/file/')) {
+          let value;
+          if (publicRead) { const entry = await readFaviconState(dir); if (!entry) return failFavicon({ statusCode: 404, code: 'NOT_FOUND', message: '등록된 탭 아이콘 없음' }); value = await readFaviconFile(dir, entry); response.setHeader('etag', `"${entry.version}"`); }
+          else value = await service.file(faviconUrl.pathname.split('/').pop(), state.session);
+          response.setHeader('content-type', value.mime); response.setHeader('content-security-policy', faviconCsp); response.setHeader('x-content-type-options', 'nosniff'); response.setHeader('cache-control', 'no-cache'); return response.end(value.data);
+        }
+        let value;
+        if (request.method === 'GET') value = await service.get();
+        else {
+          let raw = ''; for await (const part of request) raw += part;
+          const args = { owner: state.session, actor: state.session.user.username, ip: '192.0.2.1', data: JSON.parse(raw) };
+          value = await (faviconUrl.pathname.endsWith('/preview') ? service.preview(args) : faviconUrl.pathname.endsWith('/revert') ? service.revert(args) : request.method === 'DELETE' ? service.remove(args) : service.put(args));
+        }
+        response.setHeader('content-type', 'application/json'); return response.end(JSON.stringify(value));
+      } catch (error) { return failFavicon(error); }
+    }
+
     const url = new URL(request.url, 'http://localhost'); if (!url.pathname.startsWith('/api/admin/')) return next();
     state.requests.push({ path: url.pathname, method: request.method, csrf: request.headers['x-mailadmin-csrf'] }); response.setHeader('content-type', 'application/json');
     const fail = error => { response.statusCode = error.status ?? 403; response.end(JSON.stringify({ error })); };

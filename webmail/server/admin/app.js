@@ -55,6 +55,9 @@ import { createLogsService } from './services/logs.js';
 import logsRoutes from './routes/logs.js';
 import { createLogoService } from './services/logo.js';
 import logoRoutes from './routes/logo.js';
+import { createFaviconService } from './services/favicon.js';
+import faviconAdminRoutes from './routes/favicon.js';
+import faviconRoutes from '../routes/favicon.js';
 import { createRelayService } from './services/relay.js';
 import relayRoutes from './routes/relay.js';
 import { createTrustedService } from './services/trusted.js';
@@ -184,6 +187,10 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const logo = createLogoService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });
   app.decorate('logo', logo);
   await app.register(logoRoutes, { service: logo });
+  const favicon = createFaviconService({ dir: config.logoDir, audit, lock: adminLock, history, logger: app.log });
+  app.decorate('favicon', favicon);
+  await app.register(faviconAdminRoutes, { service: favicon });
+  await app.register(faviconRoutes, { config });
   const relay = createRelayService({ config, mailcow: app.mailcow, dockerapi, audit, lock: adminLock, logs, history });
   app.decorate('relay', relay);
   await app.register(relayRoutes, { service: relay });
@@ -201,7 +208,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   if (hasStatic) await app.register(fastifyStatic, { root, wildcard: false, index: ['admin.html'] });
   app.setNotFoundHandler((request, reply) => {
     const pathname = request.url.split('?')[0];
-    const isApi = pathname === '/api' || pathname.startsWith('/api/');
+    const isApi = pathname === '/favicon.ico' || pathname === '/api' || pathname.startsWith('/api/');
     if (hasStatic && !isApi && ['GET', 'HEAD'].includes(request.method) && existsSync(resolve(root, 'admin.html'))) {
       return reply.sendFile('admin.html');
     }

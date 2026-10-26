@@ -19,3 +19,11 @@
 .logo-page .ac-aside-note .logo-preview-section h2{font-size:15px}.logo-page .ac-result{margin-bottom:24px}
 .logo-page :disabled{cursor:default;opacity:.55}
 @media(max-width:1050px){.logo-settings-grid{grid-template-columns:minmax(0,1fr)}.logo-preview-section{min-width:0}}
+
+.favicon-settings{margin-top:36px;padding-top:28px;border-top:1px solid var(--line)}
+.favicon-settings>.section-title{margin-bottom:16px}
+.favicon-settings .logo-file-name{overflow-wrap:anywhere}
+.favicon-previews{display:flex;flex-wrap:wrap;gap:16px;margin:22px 0}.favicon-tab{display:flex;align-items:center;gap:20px;border:1px solid var(--line-2);border-radius:10px;padding:16px;min-height:100px}
+.favicon-tab-light{background:#f4f4f5;color:#141416}.favicon-tab-dark{background:#1c1c1f;color:#ededf0}
+.favicon-tab figure{margin:0;text-align:center}.favicon-tab img{display:block;object-fit:contain;margin:auto}.favicon-tab figcaption{font-size:12px;margin-top:6px}
+.favicon-empty{display:block;margin:auto;border:1px dashed currentColor;opacity:.5}.favicon-settings .footer-actions{flex-wrap:wrap}

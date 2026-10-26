@@ -28,6 +28,7 @@ export default function FolderDialog({folder}) {
   }
   async function submit(event) {
     event.preventDefault();if(busy)return;if(folder&&!deleting&&name===folder.name){close();return;}setBusy(true);setError(null);
+    const previousToast=toast.peek();
     try {
       const path=folder?`/api/folders/${encodeURIComponent(folder.path)}`:'/api/folders';
       const result=await api(path,{method:deleting?'DELETE':folder?'PATCH':'POST',...(deleting?{}:{body:{name}})});
@@ -35,7 +36,8 @@ export default function FolderDialog({folder}) {
       updatePrefs({folderColors:folderColorsAfterChange(change),pinnedFolders:pinnedFoldersAfterChange(change)});
       folders.value=await api('/api/folders');
       if(folder && route.value.name==='f' && route.value.value===folder.path)navigate(deleting?'inbox':`f/${encodeURIComponent(result.folder.path)}`);
-      toast.value={kind:'success',message:deleting?'폴더를 지웠어요.':folder?'폴더 이름을 바꿨어요.':'폴더를 만들었어요.'};close();
+      if(toast.peek()?.kind!=='error'||toast.peek()===previousToast)toast.value={kind:'success',message:deleting?'폴더를 지웠어요.':folder?'폴더 이름을 바꿨어요.':'폴더를 만들었어요.'};
+      close();
     } catch(failure){setError(failure);setBusy(false);}
   }
   const text=error?.code==='FOLDER_NOT_EMPTY'?'메일이 있는 폴더는 지울 수 없어요. 먼저 메일을 옮기거나 비워 주세요.':error?.code==='FOLDER_IN_RULES'?`이 폴더를 쓰는 필터가 ${error.rules?.length||0}개 있어요. 필터에서 폴더를 바꾼 뒤 지워 주세요.`:error?.code==='RULES_LOCKED'?'필터가 정상 상태가 아니라 지금은 이름을 바꿀 수 없어요. 필터 화면을 확인해 주세요.':error?.message||'요청을 처리하지 못했어요.';

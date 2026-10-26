@@ -73,7 +73,7 @@ effect(() => {
   if (!prefsSaving.value && pinSaveStarted) {
     pinSaveStarted = false;
     const paths = prefs.value.pinnedFolders ?? [];
-    if (paths.some(path => resolvePinnedPath(path, renames) !== path) && toast.peek()?.kind === 'error') toast.value = {...toast.peek(), message: `${toast.peek().message} 고정 폴더 설정을 다시 저장해 주세요.`};
+    if (paths.some(path => resolvePinnedPath(path, renames) !== path) && toast.peek()?.kind === 'error' && !toast.peek().message.includes('고정 폴더 설정을 다시 저장해 주세요.')) toast.value = {...toast.peek(), message: `${toast.peek().message} 고정 폴더 설정을 다시 저장해 주세요.`};
   }
 });
 effect(() => {
@@ -100,12 +100,17 @@ export function savePinnedFolders(paths) {
   updatePrefs({pinnedFolders: next});
   return true;
 }
-export function pinnedFoldersAfterChange({from, to, deleted} = {}) {
+export function pinnedFoldersAfterChange({from, to, created, deleted} = {}) {
   const paths = pinnedFolderPaths().flatMap(path => {
     if (from && (path === from || path.startsWith(`${from}/`))) return deleted ? [] : [to + path.slice(from.length)];
     return [path];
   });
-  if (from && !deleted) pinRenames.value = [...pinRenames.value, {from, to}];
+  if (created || from && !deleted) {
+    const target = created ?? to;
+    // A reused name belongs to a new folder, not the earlier rename source.
+    const retained = pinRenames.value.filter(alias => target !== alias.from && !target.startsWith(`${alias.from}/`));
+    pinRenames.value = from ? [...retained, {from, to}] : retained;
+  }
   // Do not compare new paths against the pre-refresh folder list here.
   return [...new Set(paths)];
 }

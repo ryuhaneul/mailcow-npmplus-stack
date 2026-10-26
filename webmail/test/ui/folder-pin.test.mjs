@@ -115,6 +115,50 @@ await test('folder pin UI and sidebar regressions',async t=>{
       assert.deepEqual(await order(first.page),['A']);await first.page.reload();await expect(pinned(first.page)).toHaveCount(1);await sidebar(first.page);assert.deepEqual(await order(first.page),['AB']);
     }finally{await first.close();await second.close();}
   });
+  await t.test('D2: held first save, A to Z then AB to A preserves both pins and next addition',async()=>{
+    reset({pins:['A','AB']});fake.state.folders.push(personal('Free'));const c=await open();
+    let release,started,held=false;const gate=new Promise(resolve=>{release=resolve;}),began=new Promise(resolve=>{started=resolve;});
+    const observed=()=>c.page.evaluate(async()=>{const f=await import('/src/state/folders.js'),p=await import('/src/state/prefs.js');return {raw:p.prefs.value.pinnedFolders,resolved:f.pinnedFolderPaths(),visible:f.visiblePinnedFolders().map(row=>row.path),saving:p.prefsSaving.value};});
+    try{
+      await c.page.route('**/api/prefs',async request=>{if(request.request().method()==='PUT'&&!held){held=true;started();await gate;}await request.fallback();});
+      await manage(c.page,'A');await c.page.getByLabel('폴더 이름',{exact:true}).fill('Z');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);await began;
+      await manage(c.page,'AB');await c.page.getByLabel('폴더 이름',{exact:true}).fill('A');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);
+      release();await waitSaved(['Z','A']);await expect.poll(observed).toEqual({raw:['Z','A'],resolved:['Z','A'],visible:['Z','A'],saving:false});
+      await mine(c.page,'Free').getByRole('button',{name:'Free 상단 고정',exact:true}).click();await waitSaved(['Z','A','Free']);await expect.poll(observed).toEqual({raw:['Z','A','Free'],resolved:['Z','A','Free'],visible:['Z','A','Free'],saving:false});
+    }finally{release();await c.close();}
+  });
+  await t.test('D2: failed rename preference save then recreated A can be pinned independently',async()=>{
+    reset({pins:['A','AB']});const c=await open();let fail=true,failures=0;
+    try{
+      await c.page.route('**/api/prefs',request=>{if(request.request().method()==='PUT'&&fail){failures++;return request.fulfill({status:503,json:{error:{code:'SYNTHETIC',message:'합성 저장 실패'}}});}return request.fallback();});
+      await manage(c.page,'A');await c.page.getByLabel('폴더 이름',{exact:true}).fill('Z');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);await expect(c.page.locator('.toast')).toContainText('고정 폴더 설정을 다시 저장해 주세요.');
+      await c.page.getByRole('button',{name:'폴더 만들기',exact:true}).click();await c.page.getByLabel('폴더 이름',{exact:true}).fill('A');await c.page.getByRole('button',{name:'만들기',exact:true}).click();await expect(c.page.getByRole('dialog')).toHaveCount(0);
+      await expect.poll(()=>failures).toBe(2);await expect.poll(()=>c.page.evaluate(async()=>{const p=await import('/src/state/prefs.js');return p.prefsSaving.value;})).toBe(false);
+      fail=false;await manage(c.page,'A');await c.page.getByLabel('상단 고정',{exact:true}).uncheck();await waitSaved(['AB']);await c.page.getByLabel('상단 고정',{exact:true}).check();await waitSaved(['AB','A']);
+      await expect.poll(()=>order(c.page)).toEqual(['AB','A']);
+      assert.deepEqual(await c.page.evaluate(async()=>{const f=await import('/src/state/folders.js'),p=await import('/src/state/prefs.js');return [p.prefs.value.pinnedFolders,f.pinnedFolderPaths()];}),[['AB','A'],['AB','A']]);
+    }finally{await c.close();}
+  });
+  for(const foldersFirst of [true,false])await t.test(`D1: rename failure notice remains once, foldersFirst=${foldersFirst}`,async()=>{
+    reset({pins:['A','A/하위','AB']});const c=await open();let releaseFolders,releasePrefs,delayFolders=true,fail=true;
+    const folderGate=new Promise(resolve=>{releaseFolders=resolve;}),prefsGate=new Promise(resolve=>{releasePrefs=resolve;});
+    const notice='합성 저장 실패 고정 폴더 설정을 다시 저장해 주세요.';
+    try{
+      await c.page.route('**/api/folders',async request=>{if(delayFolders&&request.request().method()==='GET')await folderGate;await request.fallback();});
+      await c.page.route('**/api/prefs',async request=>{if(request.request().method()==='PUT'&&fail){await prefsGate;return request.fulfill({status:503,json:{error:{code:'SYNTHETIC',message:'합성 저장 실패'}}});}return request.fallback();});
+      await manage(c.page,'A');await c.page.getByLabel('폴더 이름',{exact:true}).fill('Z');await c.page.getByRole('button',{name:'이름 바꾸기',exact:true}).click();
+      if(foldersFirst){releaseFolders();await expect(c.page.getByRole('dialog')).toHaveCount(0);releasePrefs();}
+      else{releasePrefs();await expect(c.page.locator('.toast')).toHaveText(notice+'닫기');releaseFolders();}
+      await expect(c.page.getByRole('dialog')).toHaveCount(0);await expect(c.page.locator('.toast')).toHaveText(notice+'닫기');
+      assert.deepEqual(await c.page.evaluate(async()=>{const {toast}=await import('/src/state/toast.js');return toast.value;}),{kind:'error',message:notice});
+      assert.deepEqual(await order(c.page),['Z','Z/하위','AB']);
+      fail=false;delayFolders=false;
+      await c.page.evaluate(async()=>{const {updatePrefs}=await import('/src/state/prefs.js');updatePrefs({mode:'dark'});});
+      await expect.poll(()=>fake.state.prefs.mode).toBe('dark');await expect.poll(()=>c.page.evaluate(async()=>{const p=await import('/src/state/prefs.js');return p.prefsSaving.value;})).toBe(false);
+      await expect(c.page.locator('.toast')).toHaveText(notice+'닫기');
+      assert.equal((await c.page.locator('.toast').textContent()).split('고정 폴더 설정을 다시 저장해 주세요.').length-1,1);
+    }finally{releaseFolders();releasePrefs();await c.close();}
+  });
   for(const width of [1280,768,375])for(const mode of ['light','dark'])for(const position of ['mine','inbox'])await t.test(`capture ${width} ${mode} ${position}`,async()=>{
     reset({pins:['거래처','A/하위','AB'],position,mode});const c=await open(width,mode);try{
       await expect(c.page.locator('html')).toHaveAttribute('data-mode',mode);

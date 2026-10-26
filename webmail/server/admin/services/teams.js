@@ -79,17 +79,20 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     return entries[0];
   }
   const revision = filter => etag({ id: filter.id, source: filter.script_data });
-  async function save(session, team, original, next) {
-    const freshRows = await filters(session);
-    const entries = prefilters(freshRows, team);
-    if (entries.length !== 1 || String(entries[0].id) !== String(original.id) || entries[0].script_data !== original.script_data) throw conflict();
-    const domainRows = await Promise.all(['domain/all', 'alias-domain/all'].map(async path => {
+  async function internalDomains(session) {
+    const rows = await Promise.all(['domain/all', 'alias-domain/all'].map(async path => {
       const value = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
       if (Array.isArray(value)) return value;
       if (value && typeof value === 'object' && !Object.keys(value).length) return [];
       throw new AppError(502, 'MAILCOW_REJECTED', '도메인 정보를 읽을 수 없어요.');
     }));
-    if (externalRedirectPreview(next, [...internalDomainSet(...domainRows)]).needsSpamGuard) throw new AppError(422, 'EXTERNAL_SPAM_GUARD', '이 메일함 관리자 필터에 스팸 제외 줄을 먼저 넣어 주세요.');
+    return [...internalDomainSet(...rows)];
+  }
+  async function save(session, team, original, next) {
+    const freshRows = await filters(session);
+    const entries = prefilters(freshRows, team);
+    if (entries.length !== 1 || String(entries[0].id) !== String(original.id) || entries[0].script_data !== original.script_data) throw conflict();
+    if (externalRedirectPreview(next, await internalDomains(session)).needsSpamGuard) throw new AppError(422, 'EXTERNAL_SPAM_GUARD', '이 메일함 관리자 필터에 스팸 제외 줄을 먼저 넣어 주세요.');
     const current = entries[0];
     const attr = { script_data: next };
     for (const key of ['script_desc', 'active', 'filter_type']) if (current[key] !== undefined && current[key] !== null) attr[key] = String(current[key]);
@@ -97,7 +100,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const checked = prefilters(await filters(session), team);
     if (checked.length !== 1 || checked[0].script_data !== next) throw verifyFailed();
   }
-  function teamEntry(team, entries, names, aliasRows, teams) {
+  function teamEntry(team, entries, names, aliasRows, teams, domains) {
     if (entries.length > 1) return groupMailboxAddresses(entries).size || entries.some(row => String(row.script_data ?? '').toLowerCase().includes('redirect')) ?
       { mailbox: team, filterId: null, members: [], editable: false, reason: 'multiple_prefilters', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: etag(entries) } : null;
     const filter = entries[0], a = analyze(filter.script_data);
@@ -118,8 +121,10 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     if (alias) for (const address of String(alias.goto ?? '').split(/[\s,;]+/).map(normalize).filter(Boolean)) append(address, 'alias');
     for (const row of a.members) if (!alias || normalize(row.address) !== normalize(alias.address)) append(row.address, 'sieve');
     const members = [...unique.values()];
-    const convertible = !alias && !reason && members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).length >= 3;
-    return { mailbox: team, filterId: filter.id, members, editable: !reason, reason,
+    const eligible = !alias && !reason && members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).length >= 3;
+    const conversionReason = eligible && externalRedirectPreview(filter.script_data, domains).needsSpamGuard ? 'external_spam_guard' : '';
+    const convertible = eligible && !conversionReason;
+    return { mailbox: team, filterId: filter.id, members, editable: !reason, reason, conversionReason,
       mode: alias ? 'alias' : 'sieve', memberAlias: alias ? normalize(alias.address) : null, convertible,
       distribution: a.forwards.length ? 'mixed' : 'copy', etag: alias ? etag({ id: filter.id, source: filter.script_data, goto: alias.goto }) : revision(filter) };
   }
@@ -131,9 +136,9 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     for (const row of rows) if (typeof row.username === 'string' && row.filter_type === 'prefilter' && String(row.active) === '1') {
       const team = normalize(row.username); groups.set(team, [...groups.get(team) ?? [], row]);
     }
-    const items = [], forwards = [], teams = groupMailboxAddresses(rows);
+    const items = [], forwards = [], teams = groupMailboxAddresses(rows), domains = await internalDomains(session);
     for (const [team, entries] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-      const item = teamEntry(team, entries, names, aliasRows, teams);
+      const item = teamEntry(team, entries, names, aliasRows, teams, domains);
       if (item) items.push(item);
       else if (entries.length === 1) for (const to of analyze(entries[0].script_data).forwards) forwards.push({ mailbox: team, to, distribution: 'move', editable: false });
     }
@@ -269,7 +274,8 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       try { alias = memberAlias(filter, aliasRows); } catch (error) { refused(error); }
       assertUnchanged(expected, combinedRevision(filter, alias));
     }
-    const entry = teamEntry(team, [filter], names, aliasRows, teams);
+    const entry = teamEntry(team, [filter], names, aliasRows, teams, await internalDomains(session));
+    if (entry?.conversionReason === 'external_spam_guard') throw new AppError(422, 'EXTERNAL_SPAM_GUARD', '외부 전달이 있어 맨 앞에 스팸 멈춤 줄이 필요해요.');
     if (!entry?.convertible) throw new AppError(409, 'NOT_CONVERTIBLE', '편집 가능한 개인 구성원 3명 이상의 복사 분배 팀만 전환할 수 있어요.');
     const personal = entry.members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).map(row => normalize(row.address));
     const aliasAddress = team.replace('@', '-members@');

@@ -426,6 +426,28 @@ test('teams convert: preview is read-only; success creates and verifies the inte
   assert.equal(await fs.readFile(join(f.dir, 'filter-backups', `${record.id}.after.sieve`), 'utf8'), preview.after);
 });
 
+test('teams convert: external redirects without a leading spam guard block list, preview and execution before writes', async t => {
+  const f = await fixture(t, convertibleScript + 'redirect :copy "outside@external.test";\r\n');
+  const row = await item(f);
+  assert.equal(row.convertible, false); assert.equal(row.conversionReason, 'external_spam_guard');
+  assert.equal(row.editable, true); assert.equal(row.reason, '');
+  for (const operation of [() => f.service.previewConvert({}, team), () => convertTeam(f, row.etag)]) {
+    await assert.rejects(operation, { statusCode: 422, code: 'EXTERNAL_SPAM_GUARD', message: '외부 전달이 있어 맨 앞에 스팸 멈춤 줄이 필요해요.' });
+  }
+  assert.equal(writes(f).length, 0); assert.equal((await f.history.list()).items.length, 0);
+});
+
+test('teams convert: leading spam guard allows external redirects through preview and execution', async t => {
+  const source = convertibleScript.replace('require ["copy"];', 'require ["copy"];\r\nif header :contains "X-Spam-Flag" "YES" { stop; }') + 'redirect :copy "outside@external.test";\r\n';
+  const f = await fixture(t, source), row = await item(f);
+  assert.equal(row.convertible, true); assert.equal(row.conversionReason, '');
+  const preview = await f.service.previewConvert({}, team);
+  const result = await convertTeam(f, preview.etag);
+  assert.equal(result.memberAlias, memberAliasAddress);
+  assert.ok(f.rows[0].script_data.includes('if header :contains "X-Spam-Flag" "YES" { stop; }'));
+  assert.ok(f.rows[0].script_data.includes('redirect :copy "outside@external.test";'));
+});
+
 test('teams convert: stale etag, occupied addresses, and ineligible teams refuse conversion without writes', async t => {
   const f = await fixture(t, convertibleScript), preview = await f.service.previewConvert({}, team);
   f.rows[0].script_data += '# outside\n';

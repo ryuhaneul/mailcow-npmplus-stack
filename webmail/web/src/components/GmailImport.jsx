@@ -20,8 +20,10 @@ export default function GmailImport({ data, onApplied, onBusyChange }) {
   const [error, setError] = useState(null);
   const live = useRef(true);
   const generation = useRef(0);
+  const errorNotice = useRef(null);
   useEffect(() => () => {live.current = false; generation.current++; onBusyChange(false);}, []);
   useEffect(() => {onBusyChange(busy);}, [busy]);
+  useEffect(() => {if (error) {errorNotice.current?.scrollIntoView({block:'nearest'});errorNotice.current?.focus({preventScroll:true});}}, [error]);
   const existing = data.doc?.rules.length ?? 0;
   async function review(nextFile, mode = existing ? 'append' : undefined, keepPreview = false) {
     const request = ++generation.current;
@@ -60,7 +62,7 @@ export default function GmailImport({ data, onApplied, onBusyChange }) {
     {!preview && <><div class="lead"><p>Gmail에서 내보낸 필터 파일을 올리면 규칙마다 새 웹메일에서 어떻게 동작할지 먼저 보여 드려요. 반영할 수 없는 규칙은 이유와 함께 표시하고, 확인한 뒤에 적용해요.</p></div>
     <div class="gi-pick"><span class="gi-pick-i"><Icon name="file"/></span><div><b>Gmail 필터 파일 올리기</b><small>Gmail 설정 → 필터 및 차단된 주소 → 내보내기에서 받은 mailFilters.xml · UTF-8 · 512KiB까지</small></div><label class="btn gi-file">파일 고르기<input type="file" accept=".xml,text/xml,application/xml" aria-label="Gmail 필터 파일 고르기" disabled={busy} onChange={pick}/></label></div></>}
     {busy && <p role="status">필터 처리 중이에요. 잠시만 기다려 주세요.</p>}
-    {error && <div class="banner rules-error" role="alert"><div>{errorMessage(error)}</div>{file && <button type="button" class="btn" disabled={busy} onClick={() => review(file, preview?.plan.mode === 'new' ? undefined : preview?.plan.mode)}>미리보기 다시 불러오기</button>}</div>}
+    {error && <div ref={errorNotice} class="banner rules-error" role="alert" tabIndex={-1}><div>{errorMessage(error)}</div>{file && <button type="button" class="btn" disabled={busy} onClick={() => review(file, preview?.plan.mode === 'new' ? undefined : preview?.plan.mode)}>미리보기 다시 불러오기</button>}</div>}
     {preview && <>
       <p class="gi-count" role="status"><span class="gi-fname"><Icon name="file" size="s"/>{file.fileName}</span>Gmail 필터 <b>{preview.items.length}</b>개를 읽었어요 — 그대로 <b>{preview.counts.same}</b> · 달라짐 <b>{preview.counts.changed}</b> · 반영 안 됨 <b>{preview.counts.no}</b></p>
       <ImportTable key={`${file.fileName}-${preview.expect.planSha256}`} items={preview.items}/>

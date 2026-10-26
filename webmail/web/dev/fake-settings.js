@@ -18,7 +18,7 @@ export async function fakeSettings(request,response,state,send,recorded) {
     const rules=state.rules.doc.rules.filter(rule=>rule.actions.move===folder.path).map(rule=>rule.id);
     if(rules.length)return fail(409,'FOLDER_IN_RULES',undefined,{rules});
     if(state.mail.some(item=>item.folder===folder.path))return fail(409,'FOLDER_NOT_EMPTY','메일이 있는 폴더는 지울 수 없어요.');
-    state.folders=state.folders.filter(item=>item!==folder);send(response,204);return true;
+    state.folders=state.folders.filter(item=>item.path!==folder.path&&!item.path.startsWith(`${folder.path}/`));send(response,204);return true;
   }
   const name=body?.name;
   if(typeof name!=='string'||!name.trim()||name.length>100||name.includes('/')||name.includes('${')||name.startsWith('.')||/^(Shared|WebmailVirtual)/.test(name))return fail(422,'INVALID_NAME','폴더 이름을 확인해 주세요.');
@@ -26,7 +26,8 @@ export async function fakeSettings(request,response,state,send,recorded) {
   if(method==='PATCH') {
     if(state.rules.state!=='ok')return fail(409,'RULES_LOCKED','필터 상태를 확인해 주세요.');
     const previous=folder.path;folder.name=name;folder.path=folder.parent?`${folder.parent}/${name}`:name;
-    for(const item of state.mail)if(item.folder===previous)item.folder=folder.path;
+    for(const item of state.folders)if(item!==folder&&item.path.startsWith(`${previous}/`)){item.path=folder.path+item.path.slice(previous.length);item.parent=item.path.slice(0,item.path.lastIndexOf('/'));}
+    for(const item of state.mail)if(item.folder===previous||item.folder.startsWith(`${previous}/`))item.folder=folder.path+item.folder.slice(previous.length);
     for(const rule of state.rules.doc.rules)if(rule.actions.move===previous)rule.actions.move=folder.path;
     send(response,200,{folder});return true;
   }

@@ -16,7 +16,7 @@ const config = {
   imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com',
   defaultTheme: 'olive', defaultMode: 'dark',
 };
-const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null });
+const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, pinnedFolders: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null });
 class PrefsImap extends EventEmitter {
   constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.metadata = new Map(); this.calls = []; }
   async connect() { this.usable = true; }

@@ -8,7 +8,9 @@ export async function fakeReader(request,response,state,send) {
     let raw='';for await(const chunk of request)raw+=chunk;
     const body=JSON.parse(raw);state.requests.at(-1).body=body;
     if(Object.values(body?.fromNames??{}).some(name=>typeof name==='string'&&name.includes('=?'))){send(response,422,{error:{code:'PREFS_FROM_NAME_INVALID',message:'이름에 =? 문자 조합은 쓸 수 없어요'}});return true;}
-    if(!body||!Object.keys(body).length||Object.keys(body).some(key=>!Object.hasOwn(state.prefs,key)&&key!=='imageAllowAdd')){send(response,422,{error:{code:'PREFS_INVALID',message:'설정 형식을 확인해 주세요.'}});return true;}
+    if(!body||!Object.keys(body).length||Object.keys(body).some(key=>!Object.hasOwn(state.prefs,key)&&!['imageAllowAdd','pinnedFolders','pinPosition'].includes(key))){send(response,422,{error:{code:'PREFS_INVALID',message:'설정 형식을 확인해 주세요.'}});return true;}
+    if(Buffer.byteLength(raw)>65536){send(response,413,{error:{code:'PREFS_TOO_LARGE',message:'설정은 64KB까지 저장할 수 있어요.'}});return true;}
+    if(Object.hasOwn(body,'pinnedFolders')&&(!Array.isArray(body.pinnedFolders)||body.pinnedFolders.length>50||new Set(body.pinnedFolders).size!==body.pinnedFolders.length||body.pinnedFolders.some(path=>typeof path!=='string'||!path.trim()||/[\0\r\n]/.test(path)))||Object.hasOwn(body,'pinPosition')&&!['mine','inbox'].includes(body.pinPosition)){send(response,422,{error:{code:'PREFS_INVALID',message:'설정 형식을 확인해 주세요.'}});return true;}
     const {imageAllowAdd,...patch}=body,names={...state.prefs.fromNames,...patch.fromNames},allowed=new Set(state.identities.identities.map(item=>item.address));
     state.prefs={...state.prefs,...patch,fromNames:Object.fromEntries(Object.entries(names).filter(([address,name])=>allowed.has(address)&&name))};
     if(imageAllowAdd)state.prefs.imageAllow=[...new Set([...state.prefs.imageAllow,...imageAllowAdd.map(address=>address.trim().toLowerCase())])];

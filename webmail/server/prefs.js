@@ -47,6 +47,11 @@ const fields = {
     if (!key || /[\0\r\n]/.test(key) || !Number.isInteger(item) || item < 0 || item > 7) throw invalid();
     return [key, item];
   }),
+  pinnedFolders: value => {
+    if (!Array.isArray(value) || value.length > 50 || new Set(value).size !== value.length || value.some(path => typeof path !== 'string' || !path.trim() || /[\0\r\n]/.test(path))) throw invalid();
+    return [...value];
+  },
+  pinPosition: value => choice(value, ['mine', 'inbox']),
   sharedView: value => {
     if (!object(value) || Object.keys(value).length > 100) throw invalid();
     return map(value, (key, item) => {
@@ -76,7 +81,7 @@ const fields = {
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
-  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
+  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, pinnedFolders: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
   if (!object(doc) || !Object.keys(doc).length || Object.keys(doc).some(key => !Object.hasOwn(fields, key) && key !== 'imageAllowAdd')) throw invalid();

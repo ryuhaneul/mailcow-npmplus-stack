@@ -1,5 +1,7 @@
-import { computed, signal } from '@preact/signals';
-import { prefs } from './prefs.js';
+import { computed, effect, signal } from '@preact/signals';
+import { prefs, prefsSaving, prefsSaved, updatePrefs } from './prefs.js';
+import { session } from './session.js';
+import { toast } from './toast.js';
 export const folders = signal({ folders: [], virtualAllMail: null });
 
 const personal = folder => !folder.specialUse && !folder.shared;
@@ -56,4 +58,54 @@ export function folderColorsAfterChange({ from, to, created, deleted } = {}) {
     }
   }
   return colors;
+}
+
+// Successful renames survive a preference rollback until the next pin save.
+const pinRenames = signal([]);
+let pinSaveStarted = false, pinOwner;
+effect(() => {
+  const owner = session.value?.user?.email;
+  if (owner !== pinOwner) { pinOwner = owner; pinRenames.value = []; pinSaveStarted = false; }
+});
+effect(() => {
+  const renames = pinRenames.value;
+  if (prefsSaving.value && renames.length) pinSaveStarted = true;
+  if (!prefsSaving.value && pinSaveStarted) {
+    pinSaveStarted = false;
+    const paths = prefs.value.pinnedFolders ?? [];
+    if (paths.some(path => resolvePinnedPath(path, renames) !== path) && toast.peek()?.kind === 'error') toast.value = {...toast.peek(), message: `${toast.peek().message} 고정 폴더 설정을 다시 저장해 주세요.`};
+  }
+});
+effect(() => {
+  const event = prefsSaved.value, renames = pinRenames.peek();
+  if (event && Object.hasOwn(event.patch, 'pinnedFolders') && renames.length && event.saved.pinnedFolders.every(path => resolvePinnedPath(path, renames) === path)) pinRenames.value = [];
+});
+function resolvePinnedPath(path, renames = pinRenames.value) {
+  for (const {from, to} of renames) {
+    if (path === from || path.startsWith(`${from}/`)) path = to + path.slice(from.length);
+  }
+  return path;
+}
+export function pinnedFolderPaths() {
+  return [...new Set((prefs.value.pinnedFolders ?? []).map(path => resolvePinnedPath(path)))];
+}
+export function visiblePinnedFolders() {
+  const byPath = new Map(folders.value.folders.filter(personal).map(folder => [folder.path, folder]));
+  return pinnedFolderPaths().map(path => byPath.get(path)).filter(Boolean);
+}
+export function savePinnedFolders(paths) {
+  const existing = new Set(folders.value.folders.filter(personal).map(folder => folder.path));
+  const next = [...new Set(paths)].filter(path => existing.has(path));
+  if (next.length > 50) return false;
+  updatePrefs({pinnedFolders: next});
+  return true;
+}
+export function pinnedFoldersAfterChange({from, to, deleted} = {}) {
+  const paths = pinnedFolderPaths().flatMap(path => {
+    if (from && (path === from || path.startsWith(`${from}/`))) return deleted ? [] : [to + path.slice(from.length)];
+    return [path];
+  });
+  if (from && !deleted) pinRenames.value = [...pinRenames.value, {from, to}];
+  // Do not compare new paths against the pre-refresh folder list here.
+  return [...new Set(paths)];
 }

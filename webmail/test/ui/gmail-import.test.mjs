@@ -348,6 +348,23 @@ await test('Gmail import preview and explicit partial apply', async t => {
       await expect(page.locator('.gi-confirm input')).not.toBeChecked();await context.close();
     }
   });
+  await t.test('both import screens explain server inspection and quota rejections at 1280/768/375',async()=>{
+    for(const width of [1280,768,375])for(const active of [false,true])for(const quota of [false,true]) {
+      const {page,context,errors}=await pageFor({width,state:active?'import_pending':'ok',route:active?'filters':'filters/import'});
+      if(!active)await pick(page);
+      await page.locator('.gi-confirm input').check();
+      fake.state.rulesError={code:'IMPORT_WRITE_FAILED',message:'synthetic write failure',detail:{restored:true,command:quota?'PUTSCRIPT':'CHECKSCRIPT',...(quota?{responseCode:'QUOTA/MAXSIZE'}:{})}};
+      await page.getByRole('button',{name:/\d+개 적용/,exact:true}).click();
+      const alert=page.getByRole('alert');
+      await expect(alert).toContainText(quota?'보관 공간 부족':'서버 검사 실패');
+      await expect(alert).toContainText('필터는 그대로예요');
+      await expect(page.locator('.gi-result')).toHaveCount(0);
+      await alert.scrollIntoViewIfNeeded();
+      assert.equal(await alert.evaluate(el=>el.scrollWidth-el.clientWidth),0);
+      await page.screenshot({path:`${captures}/server-rejected-${active?'active':'xml'}-${quota?'quota':'check'}-${width}.png`,fullPage:true});
+      assert.deepEqual(errors,[]);await context.close();
+    }
+  });
   await t.test('folder failure names the failed folder and any created folders',async()=>{
     for(const created of [[],['부모 폴더']]) {
       const {page,context}=await pageFor();await pick(page);await page.locator('.gi-confirm input').check();

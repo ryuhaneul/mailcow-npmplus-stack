@@ -27,6 +27,7 @@ function png(data) {
     const length = data.readUInt32BE(offset), end = offset + 12 + length;
     if (end > data.length || crc32(data.subarray(offset + 4, end - 4)) !== data.readUInt32BE(end - 4)) throw bad();
     const type = data.toString('ascii', offset + 4, offset + 8);
+    if (/^[A-Z]/.test(type) && !['IHDR', 'PLTE', 'IDAT', 'IEND'].includes(type)) throw bad();
     if (type === 'IDAT') compressed.push(data.subarray(offset + 8, end - 4));
     if (type === 'IEND') { if (length || end !== data.length) throw bad(); ended = true; }
     offset = end;
@@ -58,6 +59,8 @@ function image(mime, dataBase64) {
       const offset = 6 + index * 16, length = data.readUInt32LE(offset + 8), start = data.readUInt32LE(offset + 12);
       if (!length || start < header || start + length > data.length || (index === 0 && (data[offset] || 256) !== (data[offset + 1] || 256))) throw bad();
     }
+    const first = data.subarray(data.readUInt32LE(18), data.readUInt32LE(18) + data.readUInt32LE(14));
+    if (first.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) png(first);
     type = 'image/vnd.microsoft.icon'; ext = 'ico';
   } else {
     let source, dom;
@@ -66,7 +69,7 @@ function image(mime, dataBase64) {
       if (/<!DOCTYPE/i.test(source)) throw bad();
       dom = new JSDOM(source, { contentType: 'image/svg+xml' });
       const root = dom.window.document.documentElement;
-      if (root.localName !== 'svg' || (root.namespaceURI && root.namespaceURI !== 'http://www.w3.org/2000/svg')) throw bad();
+      if (root.localName !== 'svg' || root.namespaceURI !== 'http://www.w3.org/2000/svg' || root.getAttribute('xmlns') !== 'http://www.w3.org/2000/svg') throw bad();
       const viewBox = root.getAttribute('viewBox');
       if (!viewBox || /,\s*,/.test(viewBox)) throw bad();
       const parts = viewBox.trim().split(/[\s,]+/);
@@ -92,22 +95,42 @@ export function createFaviconService({ dir, audit, lock, history, logger, now = 
     return { id, mime: value.mime, size: value.size, expiresAt: new Date(now() + ttl).toISOString(), url: `/api/admin/favicon/file/${id}` };
   }
   async function file(id, owner) { enabled(); const value = previewItem(id, owner); return { data: value.data, mime: value.mime }; }
-  async function replace(path, bytes) {
+  async function stage(path, bytes) {
     const temp = `${path}.tmp`; await io.writeFile(temp, bytes, { mode: 0o644 });
     if (!(await io.readFile(temp)).equals(Buffer.from(bytes))) throw failed();
-    await io.rename(temp, path);
+    const handle = await io.open(temp, 'r+');
+    try { await handle.sync(); } finally { await handle.close(); }
   }
-  async function commit(current, previous) {
+  async function commit(current, previous, item = null) {
     await io.mkdir(dir, { recursive: true });
-    const previousPath = join(dir, 'favicon.previous.json'), currentPath = join(dir, 'favicon.json');
-    let savedPrevious;
-    try { savedPrevious = await io.readFile(previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    await replace(previousPath, JSON.stringify(previous) + '\n');
-    try { await replace(currentPath, JSON.stringify(current) + '\n'); }
-    catch (error) {
-      try { if (savedPrevious === undefined) await io.unlink(previousPath); else await replace(previousPath, savedPrevious); }
-      catch { logger?.warn({ code: 'FAVICON_PREVIOUS_RESTORE_FAILED' }, '이전 탭 아이콘 정보를 복원하지 못했습니다.'); throw failed(); }
+    const changes = [
+      { path: join(dir, 'favicon.previous.json'), bytes: JSON.stringify(previous) + '\n' },
+      { path: join(dir, 'favicon.json'), bytes: JSON.stringify(current) + '\n' },
+    ];
+    if (item) {
+      const path = resolveFaviconFile(dir, current);
+      let existing;
+      try { existing = await io.readFile(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (existing !== undefined) await readFaviconFile(dir, current, io);
+      else changes.unshift({ path, bytes: item.data });
+    }
+    for (const change of changes) {
+      try { change.before = await io.readFile(change.path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const renamed = [];
+    try {
+      for (const change of changes) await stage(change.path, change.bytes);
+      for (const change of changes) { await io.rename(`${change.path}.tmp`, change.path); renamed.push(change); }
+    } catch (error) {
+      try {
+        for (const change of renamed.reverse()) {
+          if (change.before === undefined) await io.unlink(change.path);
+          else { await stage(change.path, change.before); await io.rename(`${change.path}.tmp`, change.path); }
+        }
+      } catch { logger?.warn({ code: 'FAVICON_PREVIOUS_RESTORE_FAILED' }, '이전 탭 아이콘 정보를 복원하지 못했습니다.'); throw failed(); }
       throw error;
+    } finally {
+      for (const change of changes) try { await io.unlink(`${change.path}.tmp`); } catch {}
     }
     const keep = new Set([current?.file, previous?.file]);
     try { for (const entry of await io.readdir(dir, { withFileTypes: true })) if (entry.isFile() && faviconFilePattern.test(entry.name) && !keep.has(entry.name)) await io.unlink(join(dir, entry.name)); }
@@ -123,13 +146,7 @@ export function createFaviconService({ dir, audit, lock, history, logger, now = 
       if ((next?.version ?? null) === (before?.version ?? null)) return { current: before, etag: etag(before?.version ?? null), unchanged: true };
       if (next && !item) await readFaviconFile(dir, next, io);
       return audit.run({ actor: args.actor, ip: args.ip, action: 'favicon.change', target, kind: 'config', revertible: true, before: state(before), after: state(next) }, async intent => {
-        if (item) {
-          await io.mkdir(dir, { recursive: true }); const path = resolveFaviconFile(dir, next);
-          try { await io.readFile(path); }
-          catch (error) { if (error.code !== 'ENOENT') throw error; await replace(path, item.data); }
-          await readFaviconFile(dir, next, io);
-        }
-        const cleanupPending = await commit(next, before); if (item) previews.delete(args.data.previewId);
+        const cleanupPending = await commit(next, before, item); if (item) previews.delete(args.data.previewId);
         return { current: next, etag: etag(next?.version ?? null), auditId: intent.id, detail: { before: state(before), after: state(next), ...(cleanupPending ? { cleanupPending: true } : {}) } };
       });
     });

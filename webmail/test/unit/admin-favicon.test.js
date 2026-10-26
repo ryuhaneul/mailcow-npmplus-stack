@@ -16,12 +16,12 @@ function png(width = 32, height = width, rows = height) {
   const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc((width * 4 + 1) * rows))), chunk('IEND', Buffer.alloc(0))]);
 }
-function ico() { const bytes = png(), data = Buffer.alloc(22); data.writeUInt16LE(1, 2); data.writeUInt16LE(1, 4); data[6] = data[7] = 32; data.writeUInt16LE(1, 10); data.writeUInt16LE(32, 12); data.writeUInt32LE(bytes.length, 14); data.writeUInt32LE(22, 18); return Buffer.concat([data, bytes]); }
+function ico(bytes = png()) { const data = Buffer.alloc(22); data.writeUInt16LE(1, 2); data.writeUInt16LE(1, 4); data[6] = data[7] = 32; data.writeUInt16LE(1, 10); data.writeUInt16LE(32, 12); data.writeUInt32LE(bytes.length, 14); data.writeUInt32LE(22, 18); return Buffer.concat([data, bytes]); }
 async function fixture(t) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'synthetic-favicon-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
   let time = 0; const logs = [], hooks = {}, audit = createAudit({ dir: join(dir, 'audit'), logger: { info() {} } }), baseLock = createResourceLock(), targets = [];
   const lock = { run(target, operation) { targets.push(target); return baseLock.run(target, operation); } }, history = createHistoryService({ audit, lock });
-  const io = { ...fs, async rename(from, to) { await hooks.rename?.(from, to); return fs.rename(from, to); }, async writeFile(path, ...args) { await hooks.write?.(path); return fs.writeFile(path, ...args); }, async unlink(path) { await hooks.unlink?.(path); return fs.unlink(path); } };
+  const io = { ...fs, async rename(from, to) { await hooks.rename?.(from, to); return fs.rename(from, to); }, async writeFile(path, ...args) { await hooks.write?.(path); return fs.writeFile(path, ...args); }, async unlink(path) { await hooks.unlink?.(path); return fs.unlink(path); }, async readFile(path, ...args) { const bytes = await fs.readFile(path, ...args); return hooks.read ? hooks.read(path, bytes) : bytes; }, async open(path, ...args) { const handle = await fs.open(path, ...args), sync = handle.sync.bind(handle); handle.sync = async () => { await hooks.sync?.(path); return sync(); }; return handle; } };
   const service = createFaviconService({ dir, audit, lock, history, io, now: () => time, logger: { warn(value) { logs.push(value); } } });
   return { dir, service, history, audit, hooks, logs, targets, advance: value => { time += value; } };
 }
@@ -35,15 +35,15 @@ for (const [mime, bytes] of [['image/png', png(16)], ['image/png', png(512)], ['
   assert.equal(result.current.mime, mime === 'image/x-icon' ? 'image/vnd.microsoft.icon' : mime);
 });
 const icoBad = field => { const data = ico(); if (field === 'count') data.writeUInt16LE(0, 4); if (field === 'directory') data.writeUInt16LE(65535, 4); if (field === 'offset') data.writeUInt32LE(1, 18); if (field === 'length') data.writeUInt32LE(data.length, 14); if (field === 'zero') data.writeUInt32LE(0, 14); if (field === 'square') data[7] = 16; return data; };
-const invalids = [['empty', 'image/png', Buffer.alloc(0)], ['oversize', 'image/png', Buffer.alloc(262145)], ['truncated PNG signature', 'image/png', png().subarray(0, 24)], ['truncated PNG body', 'image/png', png().subarray(0, -8)], ['truncated PNG scanlines', 'image/png', png(32, 32, 1)], ['PNG rectangular', 'image/png', png(32, 16)], ['PNG small', 'image/png', png(15)], ['PNG large', 'image/png', png(513)], ['MIME mismatch', 'image/svg+xml', png()], ...['count','directory','offset','length','zero','square'].map(field => [`ICO ${field}`, 'image/x-icon', icoBad(field)]), ...['', '0 0 32', '0 0 32 16', '0 0 -1 -1', '0 0 NaN NaN', '0 0 Infinity Infinity', '0 0 1e999 1e999', '0,0,,32,32', '0 0 0 0'].map(viewBox => [`viewBox ${viewBox}`, 'image/svg+xml', Buffer.from(`<svg viewBox="${viewBox}"/>`)]), ['SVG non-root', 'image/svg+xml', Buffer.from('<html><svg viewBox="0 0 32 32"/></html>')], ['SVG malformed', 'image/svg+xml', Buffer.from('<svg viewBox="0 0 32 32">')], ['SVG doctype', 'image/svg+xml', Buffer.from('<!DOCTYPE svg><svg viewBox="0 0 32 32"/>')]];
+const invalids = [['empty', 'image/png', Buffer.alloc(0)], ['oversize', 'image/png', Buffer.alloc(262145)], ['truncated PNG signature', 'image/png', png().subarray(0, 24)], ['truncated PNG body', 'image/png', png().subarray(0, -8)], ['truncated PNG scanlines', 'image/png', png(32, 32, 1)], ['PNG rectangular', 'image/png', png(32, 16)], ['PNG small', 'image/png', png(15)], ['PNG large', 'image/png', png(513)], ['MIME mismatch', 'image/svg+xml', png()], ['ICO embedded truncated PNG', 'image/x-icon', ico(png().subarray(0, 40))], ['ICO embedded unknown critical PNG', 'image/x-icon', ico(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAA0FBQUFiYWSARdYyAAAAGklEQVR4nO3BAQEAAACCIP+vbkhAAQAAAO8GECAAARlDNO4AAAAASUVORK5CYII=', 'base64'))], ...['count','directory','offset','length','zero','square'].map(field => [`ICO ${field}`, 'image/x-icon', icoBad(field)]), ...['', '0 0 32', '0 0 32 16', '0 0 -1 -1', '0 0 NaN NaN', '0 0 Infinity Infinity', '0 0 1e999 1e999', '0,0,,32,32', '0 0 0 0'].map(viewBox => [`viewBox ${viewBox}`, 'image/svg+xml', Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"/>`)]), ['SVG non-root', 'image/svg+xml', Buffer.from('<html><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"/></html>')], ['SVG malformed', 'image/svg+xml', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">')], ['SVG doctype', 'image/svg+xml', Buffer.from('<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"/>')]];
 for (const [name, mime, bytes] of invalids) test(`favicon rejects ${name} with 422`, async t => { const f = await fixture(t); await assert.rejects(preview(f, bytes, mime), { statusCode: 422 }); });
 test('favicon exact 256KiB SVG preserved, malformed base64 rejected', async t => {
-  const f = await fixture(t), bytes = Buffer.from('<svg viewBox="0 0 32 32"><!--' + ' '.repeat(262144 - 38) + '--></svg>');
+  const f = await fixture(t), bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><!--' + ' '.repeat(262144 - 73) + '--></svg>');
   assert.equal(bytes.length, 262144); const p = await preview(f, bytes); assert.deepEqual((await f.service.file(p.id, ctx.owner)).data, bytes);
   for (const dataBase64 of ['@===', 'a===', 'Zg=', 'Zh==']) await assert.rejects(f.service.preview({ owner: ctx.owner, data: { mime: 'image/png', dataBase64 } }), { statusCode: 422 });
 });
 test('favicon original malicious SVG is retained byte for byte; owner isolation and TTL', async t => {
-  const f = await fixture(t), bytes = Buffer.from('<svg viewBox="0 0 32 32" onload="alert(1)"><script>alert(2)</script><image href="https://outside.example.test/pixel"/></svg>'), p = await preview(f, bytes);
+  const f = await fixture(t), bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" onload="alert(1)"><script>alert(2)</script><image href="https://outside.example.test/pixel"/></svg>'), p = await preview(f, bytes);
   await assert.rejects(f.service.file(p.id, 'other'), { statusCode: 404 }); await assert.rejects(f.service.put({ ...ctx, owner: 'other', data: { etag: (await f.service.get()).etag, previewId: p.id } }), { statusCode: 404 });
   assert.deepEqual((await f.service.file(p.id, ctx.owner)).data, bytes); f.advance(600000); await assert.rejects(put(f, p.id), { statusCode: 404 });
   const next = await put(f, (await preview(f, bytes)).id); assert.deepEqual(await fs.readFile(resolveFaviconFile(f.dir, next.current)), bytes);
@@ -99,4 +99,38 @@ for (const mode of ['remove','revert','history']) test(`favicon ${mode} failed c
   f.hooks.rename = (_from, to) => { if (to.endsWith('/favicon.json')) throw new Error('synthetic-current-rename-failure'); };
   await assert.rejects(mode === 'history' ? f.history.revert(saved.auditId, { ...ctx, confirm: true }) : mutate(f, mode), /synthetic-current-rename-failure/);
   assert.deepEqual(await f.service.get(), before);
+});
+
+for (const mode of ['put','remove','revert','history']) for (const fault of ['current-write-once','current-verify-once','current-rename-once','persistent-ENOSPC']) test(`favicon evaluator storage ${mode} ${fault} preserves exact state bytes and recovery`, async t => {
+  const f = await fixture(t), first = await save(f, 'A'), second = await save(f, 'B');
+  const paths = ['favicon.json', 'favicon.previous.json'].map(name => join(f.dir, name)), before = await Promise.all(paths.map(path => fs.readFile(path)));
+  let fired = false; const renames = [];
+  f.hooks.write = path => {
+    if (fault === 'persistent-ENOSPC' && (fired || path.endsWith('/favicon.json.tmp'))) { fired = true; throw Object.assign(new Error('synthetic ENOSPC'), { code: 'ENOSPC' }); }
+    if (!fired && fault === 'current-write-once' && path.endsWith('/favicon.json.tmp')) { fired = true; throw new Error('synthetic write failure'); }
+  };
+  f.hooks.read = (path, bytes) => { if (!fired && fault === 'current-verify-once' && path.endsWith('/favicon.json.tmp')) { fired = true; return Buffer.from('synthetic corrupt read'); } return bytes; };
+  f.hooks.rename = (_from, to) => { renames.push(to); if (!fired && fault === 'current-rename-once' && to.endsWith('/favicon.json')) { fired = true; throw new Error('synthetic rename failure'); } };
+  await assert.rejects(mode === 'put' ? save(f, 'C') : mode === 'history' ? f.history.revert(second.auditId, { ...ctx, confirm: true }) : mutate(f, mode));
+  assert.equal(fired, true); assert.deepEqual(await Promise.all(paths.map(path => fs.readFile(path))), before);
+  if (fault !== 'current-rename-once') assert.deepEqual(renames, []);
+  assert.deepEqual((await fs.readdir(f.dir)).filter(name => name.endsWith('.tmp')), []);
+  f.hooks.write = f.hooks.read = f.hooks.rename = null;
+  assert.equal((await mutate(f, 'revert')).current.version, first.current.version);
+  assert.deepEqual(await fs.readFile(resolveFaviconFile(f.dir, first.current)), svg('A'));
+});
+
+test('favicon stages and fsyncs new icon and both states before rename; fsync failure preserves bytes', async t => {
+  const f = await fixture(t); await save(f, 'A'); await save(f, 'B');
+  const paths = ['favicon.json','favicon.previous.json'].map(name => join(f.dir, name)), before = await Promise.all(paths.map(path => fs.readFile(path)));
+  let renames = 0;
+  f.hooks.sync = path => { if (path.endsWith('/favicon.json.tmp')) throw Object.assign(new Error('synthetic fsync ENOSPC'), { code: 'ENOSPC' }); };
+  f.hooks.rename = () => { renames++; };
+  await assert.rejects(save(f, 'C'), { code: 'ENOSPC' }); assert.equal(renames, 0);
+  assert.deepEqual(await Promise.all(paths.map(path => fs.readFile(path))), before);
+  assert.deepEqual((await fs.readdir(f.dir)).filter(name => name.endsWith('.tmp')), []);
+  const written = new Set(), synced = new Set();
+  f.hooks.write = path => { written.add(path); }; f.hooks.sync = path => { synced.add(path); };
+  f.hooks.rename = () => { assert.equal(written.size, 3); assert.deepEqual(synced, written); };
+  await save(f, 'C');
 });

@@ -85,11 +85,29 @@ test('favicon audit result append failure returns500 AUDIT_RESULT_UNAVAILABLE an
     handle.writeFile = async data => { if (String(data).includes('"phase":"result"')) throw new Error('synthetic-audit-result-failure'); return writeFile(data); };
     return handle;
   } };
-  const f = await fixture(t, auditFs), headers = await f.login(), bytes = Buffer.from('<svg viewBox="0 0 32 32"><rect width="32" height="32"/></svg>');
+  const f = await fixture(t, auditFs), headers = await f.login(), bytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32"/></svg>');
   const before = (await f.admin.inject({ url: '/api/admin/favicon', headers })).json();
   const pre = await f.admin.inject({ method: 'POST', url: '/api/admin/favicon/preview', headers, payload: { mime: 'image/svg+xml', dataBase64: bytes.toString('base64') } }); assert.equal(pre.statusCode, 200);
   const response = await f.admin.inject({ method: 'PUT', url: '/api/admin/favicon', headers, payload: { etag: before.etag, previewId: pre.json().id } });
   assert.equal(response.statusCode, 500); assert.equal(response.json().error.code, 'AUDIT_RESULT_UNAVAILABLE');
   for (const app of [f.web, f.admin]) { const icon = await app.inject('/favicon.ico'); assert.equal(icon.statusCode, 200); assert.deepEqual(icon.rawPayload, bytes); }
   assert.equal((await readFaviconState(f.dir)).version, faviconHash(bytes));
+});
+
+for (const [name, mime, dataBase64] of [
+  ['SVG no namespace', 'image/svg+xml', 'PHN2ZyB2aWV3Qm94PSIwIDAgMzIgMzIiPjxyZWN0IHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgZmlsbD0icmVkIi8+PC9zdmc+'],
+  ['PNG unknown critical chunk', 'image/png', 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAA0FBQUFiYWSARdYyAAAAGklEQVR4nO3BAQEAAACCIP+vbkhAAQAAAO8GECAAARlDNO4AAAAASUVORK5CYII='],
+]) test(`favicon evaluator ${name}: preview422 preserves state and public bytes`, async t => {
+  const f = await fixture(t), headers = await f.login();
+  for (const marker of ['A','B']) {
+    const data = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><text>${marker}</text></svg>`), pre = await f.admin.inject({ method: 'POST', url: '/api/admin/favicon/preview', headers, payload: { mime: 'image/svg+xml', dataBase64: data.toString('base64') } });
+    assert.equal(pre.statusCode, 200);
+    const current = (await f.admin.inject({ url: '/api/admin/favicon', headers })).json();
+    assert.equal((await f.admin.inject({ method: 'PUT', url: '/api/admin/favicon', headers, payload: { etag: current.etag, previewId: pre.json().id } })).statusCode, 200);
+  }
+  const paths = ['favicon.json','favicon.previous.json'].map(name => join(f.dir, name)), before = await Promise.all(paths.map(path => fs.readFile(path))), bytes = (await f.web.inject('/favicon.ico')).rawPayload;
+  const response = await f.admin.inject({ method: 'POST', url: '/api/admin/favicon/preview', headers, payload: { mime, dataBase64 } });
+  assert.equal(response.statusCode, 422); assert.equal(response.json().error.code, 'FAVICON_TYPE');
+  assert.deepEqual(await Promise.all(paths.map(path => fs.readFile(path))), before);
+  for (const app of [f.web, f.admin]) assert.deepEqual((await app.inject('/favicon.ico')).rawPayload, bytes);
 });

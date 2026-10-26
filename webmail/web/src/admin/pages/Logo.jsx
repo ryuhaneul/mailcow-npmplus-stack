@@ -12,7 +12,7 @@ import FaviconSettings from '../components/FaviconSettings.jsx';
 import './logo.css';
 
 const fileTypes = 'image/png,image/jpeg,image/webp,image/svg+xml';
-const nameOf = entry => entry ? `${entry.file} · ${(entry.size / 1024).toFixed(1)} KB` : '등록된 로고 없음';
+const nameOf = entry => entry ? `${({ 'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/webp': 'WebP', 'image/svg+xml': 'SVG' })[entry.mime]} · ${(entry.size / 1024).toFixed(1)} KB` : '등록된 로고 없음';
 function readFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

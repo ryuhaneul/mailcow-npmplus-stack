@@ -16,7 +16,7 @@ function png(width = 32, height = width, rows = height) {
   const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc((width * 4 + 1) * rows))), chunk('IEND', Buffer.alloc(0))]);
 }
-function ico(bytes = png()) { const data = Buffer.alloc(22); data.writeUInt16LE(1, 2); data.writeUInt16LE(1, 4); data[6] = data[7] = 32; data.writeUInt16LE(1, 10); data.writeUInt16LE(32, 12); data.writeUInt32LE(bytes.length, 14); data.writeUInt32LE(22, 18); return Buffer.concat([data, bytes]); }
+function ico(bytes = png(), size = 32) { const data = Buffer.alloc(22); data.writeUInt16LE(1, 2); data.writeUInt16LE(1, 4); data[6] = data[7] = size === 256 ? 0 : size; data.writeUInt16LE(1, 10); data.writeUInt16LE(32, 12); data.writeUInt32LE(bytes.length, 14); data.writeUInt32LE(22, 18); return Buffer.concat([data, bytes]); }
 async function fixture(t) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'synthetic-favicon-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
   let time = 0; const logs = [], hooks = {}, audit = createAudit({ dir: join(dir, 'audit'), logger: { info() {} } }), baseLock = createResourceLock(), targets = [];
@@ -133,4 +133,22 @@ test('favicon stages and fsyncs new icon and both states before rename; fsync fa
   f.hooks.write = path => { written.add(path); }; f.hooks.sync = path => { synced.add(path); };
   f.hooks.rename = () => { assert.equal(written.size, 3); assert.deepEqual(synced, written); };
   await save(f, 'C');
+});
+
+function dibIco(size) {
+  const stride = size * 4, mask = Math.ceil(size / 32) * 4, data = Buffer.alloc(40 + stride * size + mask * size);
+  data.writeUInt32LE(40); data.writeInt32LE(size, 4); data.writeInt32LE(size * 2, 8); data.writeUInt16LE(1, 12); data.writeUInt16LE(32, 14); data.writeUInt32LE(stride * size, 20);
+  for (let offset = 40; offset < 40 + stride * size; offset += 4) { data[offset + 2] = 255; data[offset + 3] = 255; }
+  return ico(data, size);
+}
+const normalFormats = [
+  ['PNG16', 'image/png', png(16)], ['PNG32', 'image/png', png(32)], ['PNG512', 'image/png', png(512)],
+  ['SVG default xmlns', 'image/svg+xml', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="red"/></svg>')],
+  ['SVG prefixed namespace', 'image/svg+xml', Buffer.from('<s:svg xmlns:s="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><s:rect width="32" height="32" fill="red"/></s:svg>')],
+  ...[8,16,32,256].map(size => [`ICO PNG${size}`, size === 256 ? 'image/x-icon' : 'image/vnd.microsoft.icon', ico(png(size), size)]),
+  ...[8,32].map(size => [`ICO DIB${size}`, 'image/vnd.microsoft.icon', dibIco(size)]),
+];
+for (const [name, mime, bytes] of normalFormats) test(`favicon evaluator normal format ${name} accepts and preserves original`, async t => {
+  const f = await fixture(t), result = await put(f, (await preview(f, bytes, mime)).id);
+  assert.deepEqual(await fs.readFile(resolveFaviconFile(f.dir, result.current)), bytes);
 });

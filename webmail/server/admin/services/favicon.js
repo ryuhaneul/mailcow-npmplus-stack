@@ -14,10 +14,10 @@ const missing = () => new AppError(404, 'NOT_FOUND', '탭 아이콘 미리보기
 const failed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '탭 아이콘을 저장하지 못했어요. 다시 확인해 주세요.');
 const state = value => ({ version: value?.version ?? null });
 function input(data, keys) { if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !keys.includes(key))) throw invalid(); }
-function png(data) {
+function png(data, standalone = true) {
   if (data.length < 45 || data.readUInt32BE(8) !== 13 || data.toString('ascii', 12, 16) !== 'IHDR') throw bad();
   const width = data.readUInt32BE(16), height = data.readUInt32BE(20);
-  if (width !== height || width < 16 || width > 512) throw bad();
+  if (width !== height || width === 0 || standalone && (width < 16 || width > 512)) throw bad();
   const depth = data[24], color = data[25], channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
   const depths = { 0: [1,2,4,8,16], 2: [8,16], 3: [1,2,4,8], 4: [8,16], 6: [8,16] };
   if (!depths[color]?.includes(depth) || data[26] || data[27] || data[28] > 1) throw bad();
@@ -60,7 +60,7 @@ function image(mime, dataBase64) {
       if (!length || start < header || start + length > data.length || (index === 0 && (data[offset] || 256) !== (data[offset + 1] || 256))) throw bad();
     }
     const first = data.subarray(data.readUInt32LE(18), data.readUInt32LE(18) + data.readUInt32LE(14));
-    if (first.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) png(first);
+    if (first.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) png(first, false);
     type = 'image/vnd.microsoft.icon'; ext = 'ico';
   } else {
     let source, dom;
@@ -69,7 +69,7 @@ function image(mime, dataBase64) {
       if (/<!DOCTYPE/i.test(source)) throw bad();
       dom = new JSDOM(source, { contentType: 'image/svg+xml' });
       const root = dom.window.document.documentElement;
-      if (root.localName !== 'svg' || root.namespaceURI !== 'http://www.w3.org/2000/svg' || root.getAttribute('xmlns') !== 'http://www.w3.org/2000/svg') throw bad();
+      if (root.localName !== 'svg' || root.namespaceURI !== 'http://www.w3.org/2000/svg') throw bad();
       const viewBox = root.getAttribute('viewBox');
       if (!viewBox || /,\s*,/.test(viewBox)) throw bad();
       const parts = viewBox.trim().split(/[\s,]+/);

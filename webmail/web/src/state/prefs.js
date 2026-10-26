@@ -4,13 +4,13 @@ import { signal } from '@preact/signals';
 import { toast } from './toast.js';
 import { WM_THEMES } from '../theme/themes.js';
 
-export const prefs = signal({ theme: 'ink', mode: 'system', accent: {}, layout: null, sharedView: {} });
+export const prefs = signal({ theme: 'ink', mode: 'system', accent: {}, layout: null, pinnedFolders: [], pinPosition: 'mine', sharedView: {} });
 
 // This is a first-paint copy. Server preferences remain authoritative.
 export function loadPrefs(config) {
   let copy = {};
   try { copy = JSON.parse(localStorage.getItem('webmail-prefs') || '{}') || {}; } catch {}
-  const next = { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, sharedView: {}, ...copy };
+  const next = { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, pinnedFolders: [], pinPosition: 'mine', sharedView: {}, ...copy };
   if (!WM_THEMES[next.theme]) next.theme = config.defaultTheme;
   if (!['light', 'dark', 'system'].includes(next.mode)) next.mode = config.defaultMode;
   prefs.value = next;
@@ -34,6 +34,7 @@ export async function loadSessionPrefs() {
 // Coalesce changed fields only; unrelated server preferences remain authoritative.
 let confirmed, saveTimer, saving = false, pending = {}, inFlight = {}, prefsOwner;
 export const prefsSaving = signal(false);
+export const prefsSaved = signal(null);
 export function updatePrefs(patch) {
   if (!confirmed) confirmed = structuredClone(prefs.value);
   prefs.value = { ...prefs.value, ...patch };
@@ -54,6 +55,7 @@ async function savePrefs() {
     const saved = await api('/api/prefs');
     if (session.value !== owner) return;
     confirmed = saved; inFlight = {};
+    prefsSaved.value = { patch, saved };
     prefs.value = { ...saved, ...pending };
     try { localStorage.setItem('webmail-prefs', JSON.stringify(saved)); } catch {}
   } catch (error) {

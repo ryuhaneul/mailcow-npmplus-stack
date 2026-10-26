@@ -18,3 +18,27 @@
 @media(max-width:760px){.folder-row>.ib{opacity:1}}
 .common-dialog{grid-template-columns:minmax(0,1fr);justify-items:center}
 .common-dialog .dlg{min-width:0}
+
+/* Folder pinning follows the existing sidebar tokens. */
+.pinned-row .nv-title{display:flex;align-items:baseline;gap:6px;min-width:0}
+.pinned-row .fpn,.pinned-row .fpp{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pinned-row .fpp{font-size:12px;color:var(--ink-3);font-weight:400}
+.nv .pin-mark{color:var(--ink-3);flex:none;display:flex}
+.nv .pin-mark svg{width:12px;height:12px}
+.folder-row>.folder-pin{position:relative;width:28px;height:30px;flex:none;cursor:pointer}
+.folder-pin[aria-pressed=true]{color:var(--ink)}
+.folder-pin[aria-pressed=true] svg{fill:currentColor;fill-opacity:.12}
+.pin-tip{position:absolute;bottom:calc(100% + 6px);right:0;background:var(--ink);color:var(--surface);font-size:12px;font-weight:600;line-height:1;padding:6px 8px;border-radius:6px;white-space:nowrap;pointer-events:none;opacity:0;z-index:20}
+.folder-pin:hover .pin-tip,.folder-pin:focus-visible .pin-tip{opacity:1}
+.pin-grip{width:16px;height:32px;display:grid;place-items:center;color:var(--ink-3);cursor:grab;flex:none;margin:0 -4px 0 -2px;opacity:0}
+.pinned-row:hover .pin-grip,.pinned-row:focus-within .pin-grip{opacity:1}
+.pinned-row.drag{opacity:.45}
+.pinned-row.over{box-shadow:inset 0 2px 0 var(--accent-ui)}
+.nav .pin-heading{justify-content:flex-start}
+.pin-heading .num{font-weight:500;margin-left:6px;color:var(--ink-3)}
+.folder-row>.pin-manage{display:none}
+.common-dialog .pin-check{display:flex;align-items:center;gap:8px;cursor:pointer}
+.common-dialog .pin-order{display:flex;gap:8px;margin-top:8px}
+.common-dialog .folder-settings hr{border:0;border-top:1px solid var(--line);margin:20px 0}
+.common-dialog .folder-settings{max-height:calc(100dvh - 40px);overflow-y:auto}
+@media(max-width:760px){.folder-row>.folder-pin,.pin-grip{display:none}.folder-row>.pin-manage{display:flex}.common-dialog .folder-settings{max-height:calc(100dvh - 24px)}}

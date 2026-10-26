@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { externalRedirectPreview, internalDomainSet } from '../filter-script.js';
 import { AppError } from '../../errors.js';
-import { analyze, addMember, removeMember, renameMember, addressPattern, Refused } from '../sieve-team.js';
+import { analyze, addMember, removeMember, collapseMembers, renameMember, addressPattern, Refused } from '../sieve-team.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
 
@@ -259,6 +259,78 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       }, { prepare: ({ id }) => backups.write(id, '', source) });
     }));
   }
+  async function convertPlan(session, team, expected) {
+    if (!addressPattern.test(team)) throw invalid();
+    const boxes = await mailboxes(session), rows = await filters(session), aliasRows = await aliases(session);
+    if (!boxes.some(row => row.address === team)) throw invalid();
+    const filter = selected(rows, team), names = new Map(boxes.map(row => [row.address, row.name])), teams = groupMailboxAddresses(rows);
+    if (expected !== undefined) {
+      let alias;
+      try { alias = memberAlias(filter, aliasRows); } catch (error) { refused(error); }
+      assertUnchanged(expected, combinedRevision(filter, alias));
+    }
+    const entry = teamEntry(team, [filter], names, aliasRows, teams);
+    if (!entry?.convertible) throw new AppError(409, 'NOT_CONVERTIBLE', '편집 가능한 개인 구성원 3명 이상의 복사 분배 팀만 전환할 수 있어요.');
+    const personal = entry.members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).map(row => normalize(row.address));
+    const aliasAddress = team.replace('@', '-members@');
+    if (aliasAddress.length > 254 || !addressPattern.test(aliasAddress)) throw invalid();
+    let edited;
+    try { edited = collapseMembers(filter.script_data, personal, aliasAddress); } catch (error) { refused(error); }
+    const alias = { address: aliasAddress, goto: personal.join(','), active: '1', internal: '1', private_comment: 'mailadmin:team-members', sogo_visible: '0' };
+    const remaining = analyze(filter.script_data).members.filter(row => !personal.includes(normalize(row.address))).map(row => row.address);
+    return { filter, alias, members: personal, remaining, next: edited.script, etag: entry.etag };
+  }
+  async function assertAliasAbsent(session, address) {
+    if ((await aliases(session)).some(row => normalize(row.address) === address) ||
+      (await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all')).some(row => normalize(row.username) === address)) {
+      throw new AppError(409, 'ADDRESS_IN_USE', '이미 사용 중인 묶음 별칭 주소예요.');
+    }
+  }
+  async function previewConvert(session, rawTeam) {
+    const team = normalize(rawTeam), plan = await convertPlan(session, team);
+    await assertAliasAbsent(session, plan.alias.address);
+    return { mailbox: team, members: plan.members, remaining: plan.remaining, memberAlias: plan.alias.address,
+      before: plan.filter.script_data, after: plan.next, etag: plan.etag };
+  }
+  const remainingAlias = (error, address) => new AppError(error.statusCode ?? 502, error.code ?? 'WRITE_VERIFY_FAILED',
+    `${error.message} 적용 여부 확인 필요 — 남은 별칭: ${address}`);
+  async function convert({ session, actor, ip, team: rawTeam, etag: expected }) {
+    const team = normalize(rawTeam);
+    return lock.run('alias-graph', () => lock.run(team, async () => {
+      const plan = await convertPlan(session, team, expected ?? ''), { filter, alias, next } = plan;
+      await assertAliasAbsent(session, alias.address);
+      return audit.run({ actor, ip, action: 'team.convert', target: team, kind: 'config', revertible: true,
+        before: state(filter.script_data), after: memberState({ ...filter, script_data: next }, alias), ...hashFields(filter.script_data, next) }, async intent => {
+        // Recheck address ownership after the durable backup and intent, before creation.
+        await assertAliasAbsent(session, alias.address);
+        let created = false;
+        try {
+          await mailcow.call(session, 'POST', '/api/v1/add/alias', alias);
+          created = true;
+          const checked = (await aliases(session)).find(row => normalize(row.address) === alias.address);
+          if (!checked || checked.goto !== alias.goto || String(checked.internal) !== '1' ||
+            String(checked.active) !== '1' || checked.private_comment !== alias.private_comment) throw verifyFailed();
+          await save(session, team, filter, next);
+          return { mailbox: team, members: memberState({ ...filter, script_data: next }, checked).members,
+            memberAlias: alias.address, etag: etag(combinedRevision({ ...filter, script_data: next }, checked)), auditId: intent.id };
+        } catch (error) {
+          let remaining = true;
+          try {
+            const current = selected(await filters(session), team);
+            // An edit can commit even when save's verification read fails. Delete only with proof it never applied.
+            if (created && String(current.id) === String(filter.id) && current.script_data === filter.script_data &&
+              !current.script_data.toLowerCase().includes(alias.address)) {
+              const unused = (await aliases(session)).find(row => normalize(row.address) === alias.address);
+              if (unused) await mailcow.call(session, 'POST', '/api/v1/delete/alias', [String(unused.id)]);
+              remaining = (await aliases(session)).some(row => normalize(row.address) === alias.address);
+            }
+          } catch { /* Preserve the alias when application or cleanup cannot be confirmed. */ }
+          if (remaining) throw remainingAlias(error, alias.address);
+          throw error;
+        }
+      }, { prepare: ({ id }) => backups.write(id, filter.script_data, next) });
+    }));
+  }
   async function deleteFilter({ session, actor, ip, filter }) {
     const owner = normalize(filter.username);
     return lock.run(owner, async () => {
@@ -354,5 +426,29 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     },
   };
   history.register('team.member.add', adapter); history.register('team.member.remove', adapter); history.register('team.forward', adapter);
-  return { list, change, create, previewForward, forward, renameFilter, deleteFilter };
+  history.register('team.convert', {
+    ...adapter,
+    label: '팀 분배를 묶음 별칭으로 전환했어요',
+    async prepareRevert({ record }) {
+      if (record.revertOf) throw new AppError(409, 'NOT_REVERTIBLE', '다시 전환하려면 팀 분배의 전환 기능을 실행해 주세요.');
+    },
+    async read({ session, target }) {
+      const entries = prefilters(await filters(session), target);
+      if (entries.length !== 1 || typeof entries[0].script_data !== 'string') return { members: [], sha256: etag(entries), bytes: 0 };
+      return memberState(entries[0], memberAlias(entries[0], await aliases(session)));
+    },
+    async write({ session, target, expected, value, record }) {
+      const filter = selected(await filters(session), target), alias = memberAlias(filter, await aliases(session));
+      if (!alias || !isDeepStrictEqual(memberState(filter, alias), expected)) throw conflict();
+      const original = await backups.read(record, 'before');
+      if (sha256(original) !== value.sha256) throw new AppError(409, 'NOT_REVERTIBLE', '백업 내용이 기록과 달라 되돌릴 수 없어요.');
+      // save verifies restoration before the alias is removed, so no filter points to a deleted destination.
+      await save(session, target, filter, original);
+      try {
+        await mailcow.call(session, 'POST', '/api/v1/delete/alias', [String(alias.id)]);
+        if ((await aliases(session)).some(row => normalize(row.address) === normalize(alias.address))) throw verifyFailed();
+      } catch (error) { throw remainingAlias(error, alias.address); }
+    },
+  });
+  return { list, change, create, previewConvert, convert, previewForward, forward, renameFilter, deleteFilter };
 }

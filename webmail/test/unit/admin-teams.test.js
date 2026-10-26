@@ -33,6 +33,7 @@ async function fixture(t, source = script) {
       return [{ type: 'success' }];
     }
     if (path === '/api/v1/delete/alias') {
+      if (options.failAliasDelete) throw new Error('synthetic delete failure');
       options.aliases = options.aliases.filter(row => !body.includes(String(row.id)));
       return [{ type: 'success' }];
     }
@@ -272,6 +273,15 @@ test('teams HTTP: authentication, CSRF, list and member editing use the existing
   assert.equal(edited.headers['www-authenticate'], undefined); assert.equal(edited.headers['cache-control'], 'no-store');
   const removed = await app.inject({ method: 'DELETE', url, headers, payload: { member: next, etag: edited.json().etag } }); assert.equal(removed.statusCode, 200, removed.body);
   const history = await app.inject({ url: '/api/admin/history', headers }); assert.equal(history.json().total, 2); assert.ok(!history.body.includes('redirect :copy'));
+  const added = await app.inject({ method: 'POST', url, headers, payload: { member: next, etag: removed.json().etag } });
+  assert.equal(added.statusCode, 200, added.body);
+  const convertUrl = `/api/admin/teams/${team}/convert`;
+  assert.equal((await app.inject(convertUrl)).statusCode, 403);
+  const preview = await app.inject({ url: convertUrl, headers }); assert.equal(preview.statusCode, 200, preview.body);
+  const deniedConvert = await app.inject({ method: 'POST', url: convertUrl, headers: { ...headers, 'x-mailadmin-csrf': 'bad' }, payload: { etag: preview.json().etag } });
+  assert.equal(deniedConvert.statusCode, 403);
+  const converted = await app.inject({ method: 'POST', url: convertUrl, headers, payload: { etag: preview.json().etag } });
+  assert.equal(converted.statusCode, 200, converted.body); assert.equal(converted.json().memberAlias, 'team-members@example.com');
 });
 
 
@@ -389,4 +399,92 @@ test('teams create: failed filter verification deletes unused alias but preserve
     assert.equal(error.code, 'WRITE_VERIFY_FAILED'); assert.ok(error.message.includes(memberAliasAddress)); return true;
   });
   assert.equal(applied.options.aliases.length, 1); assert.ok(!writes(applied).some(row => row.path === '/api/v1/delete/alias'));
+});
+
+const convertibleScript = `require ["copy"];\r\nif header :contains "Subject" "AuthCode" { redirect :copy "notice@example.com"; }\r\n` +
+  [first, second, next, linkedTeam].map(address => `  redirect :copy "${address}";\r\n`).join('');
+const convertTeam = (f, expected) => f.service.convert({ session: {}, actor: 'admin', ip: '198.51.100.9', team, etag: expected });
+
+test('teams convert: preview is read-only; success creates and verifies the internal alias before the single filter edit', async t => {
+  const f = await fixture(t, convertibleScript);
+  const preview = await f.service.previewConvert({}, team);
+  assert.deepEqual(preview.members, [first, second, next]); assert.deepEqual(preview.remaining, [linkedTeam]);
+  assert.equal(preview.memberAlias, memberAliasAddress); assert.equal(preview.before, convertibleScript);
+  assert.equal(preview.after, convertibleScript.replace([first, second, next].map(address => `  redirect :copy "${address}";\r\n`).join(''), `  redirect :copy "${memberAliasAddress}";\r\n`));
+  assert.equal(writes(f).length, 0);
+  const result = await convertTeam(f, preview.etag);
+  assert.deepEqual(writes(f).map(row => row.path), ['/api/v1/add/alias', '/api/v1/edit/filter']);
+  const createIndex = f.calls.findIndex(row => row.path === '/api/v1/add/alias'), editIndex = f.calls.findIndex(row => row.path === '/api/v1/edit/filter');
+  assert.ok(f.calls.slice(createIndex + 1, editIndex).some(row => row.path === '/api/v1/get/alias/all'));
+  assert.deepEqual(f.options.aliases[0], { id: 70, address: memberAliasAddress, goto: `${first},${second},${next}`, active: '1', internal: '1', private_comment: 'mailadmin:team-members', sogo_visible: '0' });
+  assert.equal(f.rows[0].script_data, preview.after); assert.equal(result.etag, (await item(f)).etag);
+  assert.deepEqual(result.members, [first, second, next, linkedTeam]);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.action, 'team.convert'); assert.equal(record.canRevert, true);
+  assert.equal(record.after.memberAlias, memberAliasAddress); assert.equal(record.after.aliasGoto, `${first},${second},${next}`);
+  assert.equal(await fs.readFile(join(f.dir, 'filter-backups', `${record.id}.before.sieve`), 'utf8'), convertibleScript);
+  assert.equal(await fs.readFile(join(f.dir, 'filter-backups', `${record.id}.after.sieve`), 'utf8'), preview.after);
+});
+
+test('teams convert: stale etag, occupied addresses, and ineligible teams refuse conversion without writes', async t => {
+  const f = await fixture(t, convertibleScript), preview = await f.service.previewConvert({}, team);
+  f.rows[0].script_data += '# outside\n';
+  await assert.rejects(convertTeam(f, preview.etag), { code: 'CHANGED_ELSEWHERE' });
+  f.rows[0].script_data = `redirect :copy "${first}";\n`;
+  await assert.rejects(convertTeam(f, preview.etag), { code: 'CHANGED_ELSEWHERE' });
+  f.rows[0].script_data = convertibleScript;
+  f.options.aliases = [{ id: 9, address: memberAliasAddress, active: 0, goto: first }];
+  await assert.rejects(convertTeam(f, preview.etag), { code: 'ADDRESS_IN_USE' });
+  f.options.aliases = []; f.boxes.push({ username: memberAliasAddress, active: 0 });
+  await assert.rejects(convertTeam(f, preview.etag), { code: 'ADDRESS_IN_USE' });
+  assert.equal(writes(f).length, 0);
+  const small = await fixture(t);
+  await assert.rejects(small.service.previewConvert({}, team), { statusCode: 409, code: 'NOT_CONVERTIBLE' });
+  const alias = await aliasFixture(t);
+  await assert.rejects(alias.service.previewConvert({}, team), { statusCode: 409, code: 'NOT_CONVERTIBLE' });
+});
+
+for (const scenario of ['unchanged', 'applied-read-fails', 'unchanged-reads-fail', 'cleanup-fails']) {
+  test(`teams convert: filter save failure alias handling — ${scenario}`, async t => {
+    const f = await fixture(t, convertibleScript), preview = await f.service.previewConvert({}, team);
+    f.options.ignoreWrites = scenario !== 'applied-read-fails';
+    f.options.failAliasDelete = scenario === 'cleanup-fails';
+    f.options.onRead = () => {
+      if (scenario.includes('read') && writes(f).some(row => row.path === '/api/v1/edit/filter')) throw new Error('synthetic read failure');
+    };
+    await assert.rejects(convertTeam(f, preview.etag), error => {
+      if (scenario === 'unchanged') assert.equal(error.code, 'WRITE_VERIFY_FAILED');
+      else { assert.ok(error.message.includes('적용 여부 확인 필요')); assert.ok(error.message.includes(memberAliasAddress)); }
+      return true;
+    });
+    assert.equal(f.options.aliases.length, scenario === 'unchanged' ? 0 : 1);
+    if (scenario.includes('read')) assert.ok(!writes(f).some(row => row.path === '/api/v1/delete/alias'));
+    assert.equal(f.rows[0].script_data, scenario === 'applied-read-fails' ? preview.after : convertibleScript);
+    assert.equal((await f.history.list()).items[0].result, 'failed');
+  });
+}
+
+test('teams convert: undo verifies original filter restoration before deleting the alias; changed members refuse undo', async t => {
+  const f = await fixture(t, convertibleScript), preview = await f.service.previewConvert({}, team);
+  const result = await convertTeam(f, preview.etag), callCount = f.calls.length;
+  f.options.aliases[0].goto = first;
+  await assert.rejects(f.history.revert(result.auditId, { confirm: true, session: {} }), { code: 'CHANGED_ELSEWHERE' });
+  assert.equal(writes(f).length, 2);
+  f.options.aliases[0].goto = `${first},${second},${next}`;
+  const reversed = await f.history.revert(result.auditId, { confirm: true, session: {}, actor: 'admin' });
+  assert.equal(f.rows[0].script_data, convertibleScript); assert.deepEqual(f.options.aliases, []);
+  const undoCalls = f.calls.slice(callCount), restore = undoCalls.findIndex(row => row.path === '/api/v1/edit/filter'), remove = undoCalls.findIndex(row => row.path === '/api/v1/delete/alias');
+  assert.ok(restore >= 0 && remove > restore);
+  assert.ok(undoCalls.slice(restore + 1, remove).some(row => row.path === '/api/v1/get/filters/all'));
+  assert.equal(await fs.readFile(join(f.dir, 'filter-backups', `${reversed.id}.after.sieve`), 'utf8'), convertibleScript);
+  await assert.rejects(f.history.revert(reversed.id, { confirm: true, session: {} }), { code: 'NOT_REVERTIBLE' });
+});
+
+test('teams convert: undo preserves alias when filter restoration cannot be verified', async t => {
+  const f = await fixture(t, convertibleScript), preview = await f.service.previewConvert({}, team);
+  const result = await convertTeam(f, preview.etag);
+  f.options.ignoreWrites = true;
+  await assert.rejects(f.history.revert(result.auditId, { confirm: true, session: {} }), { code: 'WRITE_VERIFY_FAILED' });
+  assert.equal(f.options.aliases.length, 1); assert.equal(f.rows[0].script_data, preview.after);
+  assert.ok(!writes(f).some(row => row.path === '/api/v1/delete/alias'));
 });

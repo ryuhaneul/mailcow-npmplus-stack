@@ -153,6 +153,25 @@ export function removeMember(script, address) {
   return { script: next, changed: true };
 }
 
+export function collapseMembers(script, addresses, aliasAddress) {
+  if (!Array.isArray(addresses) || !addresses.length || addresses.some(address => typeof address !== 'string' || !addressPattern.test(address)) ||
+    typeof aliasAddress !== 'string' || !addressPattern.test(aliasAddress)) throw new Refused('invalid_address');
+  const analysis = analyze(script); writable(analysis);
+  if (analysis.stopperBeforeMember) throw new Refused('stopper_before_member');
+  const targets = new Set(addresses.map(address => address.toLowerCase()));
+  const hits = analysis.members.filter(row => targets.has(row.address.toLowerCase()));
+  if (new Set(hits.map(row => row.address.toLowerCase())).size !== targets.size) throw new Refused('not_member');
+  if (hits.some(row => !row.simple)) throw new Refused('line_not_simple');
+  const first = hits[0], indent = script.slice(first.lineStart, first.start);
+  let next = script;
+  for (const row of [...hits].reverse()) {
+    const replacement = row === first ? `${indent}redirect :copy "${aliasAddress}";${first.term}` : '';
+    next = next.slice(0, row.lineStart) + replacement + next.slice(row.termEnd);
+  }
+  check(next, analysis.members.flatMap(row => row === first ? [aliasAddress.toLowerCase()] : targets.has(row.address.toLowerCase()) ? [] : [row.address.toLowerCase()]));
+  return { script: next, changed: true };
+}
+
 // Rename only exact, top-level copy-redirect string tokens; comments and all other bytes stay intact.
 export function renameMember(script, oldAddress, newAddress) {
   if (!addressPattern.test(oldAddress) || !addressPattern.test(newAddress)) throw new Refused('invalid_address');

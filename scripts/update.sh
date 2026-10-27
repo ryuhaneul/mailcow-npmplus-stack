@@ -409,9 +409,9 @@ else
     warn "apply-rspamd-worker-normal.sh failed — check state with: scripts/apply-rspamd-worker-normal.sh --check"
 fi
 
-# Keep LMTP delivery concurrency at 50 to avoid serialized queue congestion.
+# Serialize LMTP deliveries to the same recipient (concurrency 1).
 if MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-postfix-lmtp-concurrency.sh" apply -y 2>&1 | tee -a "$LOGFILE"; then
-    log "postfix LMTP concurrency 50 applied (or already present)"
+    log "postfix LMTP concurrency 1 applied (or already present)"
 else
     warn "apply-postfix-lmtp-concurrency.sh failed — check state with: scripts/apply-postfix-lmtp-concurrency.sh --check"
 fi

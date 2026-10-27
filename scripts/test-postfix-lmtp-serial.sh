@@ -31,8 +31,8 @@ def save(): (p/'main.json').write_text(json.dumps(state,sort_keys=True))
 if args[0]=='postconf':
     option=args[1]
     if option=='-n':
-        assert tuple(args[2:])==keys
-        for k in keys:
+        assert tuple(args[2:]) in (keys, keys[:1])
+        for k in args[2:]:
             if k in state: print(f'{k} = {state[k]}')
     elif option=='-h':
         k=args[2]; assert k in keys
@@ -241,15 +241,15 @@ from pathlib import Path
 import sys
 for name in ('setup','update'):
     s=(Path(sys.argv[1])/'scripts'/f'{name}.sh').read_text()
-    start=s.index('    warn "apply-dovecot-dedupe.sh failed')
+    start=s.index('    warn "apply-rspamd-worker-normal.sh failed')
     end=s.index('\nfi\n',start)+4
     tail=s[end:]
-    assert tail.startswith('\n# Serialize simultaneous LMTP')
+    assert tail.startswith('\n# Serialize LMTP deliveries to the same recipient')
     block=tail.split('\nfi\n',1)[0]
-    assert 'apply-postfix-lmtp-serial.sh" apply -y' in block
-    assert 'warn "apply-postfix-lmtp-serial.sh failed' in block
+    assert 'apply-postfix-lmtp-concurrency.sh" apply -y' in block
+    assert 'warn "apply-postfix-lmtp-concurrency.sh failed' in block
 PY
-pass 'setup/update invoke serialization immediately after dedupe and warn on failure'
+pass 'setup/update invoke concurrency after Rspamd worker configuration and warn on failure'
 # Bootstrap each block layout once; only actual edge configuration creation may
 # restart. Once both blocks exist, every subsequent order must preserve bytes.
 printf 'IPV4_NETWORK=172.22.1\nIPV6_NETWORK=fd4d:6169:6c63:6f77::/64\n' > "$MAILCOW_DIR/mailcow.conf"
@@ -305,8 +305,8 @@ import sys
 s=Path(sys.argv[1]).read_text()
 start=s.index('check() {')
 end=s.index('\ncheck_http() {',start)
-checks=[line for line in s.splitlines() if line.startswith('check "Postfix per-recipient LMTP serialization" ')]
-assert len(checks)==1 and 'apply-postfix-lmtp-serial.sh" --check' in checks[0]
+checks=[line for line in s.splitlines() if line.startswith('check "Postfix LMTP concurrency 1" ')]
+assert len(checks)==1 and 'apply-postfix-lmtp-concurrency.sh" --check' in checks[0]
 Path(sys.argv[2]).write_text(s[start:end]+'\n'+checks[0]+'\n')
 PYVERIFY
 verify_lmtp() (
@@ -316,13 +316,13 @@ verify_lmtp() (
     [ "$PASS/$FAIL" = "$1" ]
 )
 reset_case
-run -y || fail 'verify applied baseline'
+bash "$ROOT/scripts/apply-postfix-lmtp-concurrency.sh" -y > "$TMP/result" 2>&1 || fail 'verify applied baseline'
 verify_lmtp 1/0 > "$TMP/verify.result" || fail 'verify applied count'
-grep -q 'PASS.*Postfix per-recipient LMTP serialization' "$TMP/verify.result" || fail 'verify missing PASS'
+grep -q 'PASS.*Postfix LMTP concurrency 1' "$TMP/verify.result" || fail 'verify missing PASS'
 pass 'verify reports PASS when managed block and live LMTP values match'
 reset_case
 verify_lmtp 0/1 > "$TMP/verify.result" || fail 'verify unapplied count'
-grep -q 'FAIL.*Postfix per-recipient LMTP serialization' "$TMP/verify.result" || fail 'verify missing FAIL'
+grep -q 'FAIL.*Postfix LMTP concurrency 1' "$TMP/verify.result" || fail 'verify missing FAIL'
 pass 'verify reports FAIL when LMTP serialization is not applied'
 printf '\nlmtp_destination_concurrency_limit = 1\n' >> "$CONF/extra.cf"
 verify_lmtp 0/1 > "$TMP/verify.result" || fail 'verify conflicting manual line count'

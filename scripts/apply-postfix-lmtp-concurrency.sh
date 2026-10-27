@@ -1,6 +1,6 @@
 #!/bin/bash
 set +x
-# Allow 50 concurrent LMTP deliveries; leave recipient_limit unchanged.
+# Allow 1 concurrent LMTP delivery per recipient; leave recipient_limit unchanged.
 # Persistent extra.cf + live postconf; postfix check/reload, never restart/recreate.
 # Usage: apply-postfix-lmtp-concurrency.sh [apply|--check|--revert] [-y]
 set -euo pipefail
@@ -50,7 +50,7 @@ verify_values() {
     local key value rc=0
     for key in "${KEYS[@]}"; do
         value=$(post postconf -h "$key") || { rc=1; continue; }
-        if [ "$value" != 50 ]; then log "live $key differs (expected 50)"; rc=1; fi
+        if [ "$value" != 1 ]; then log "live $key differs (expected 1)"; rc=1; fi
     done
     return "$rc"
 }
@@ -123,10 +123,10 @@ if numbers:
 begin = b'# BEGIN mailstack lmtp-concurrency\n'
 end = b'# END mailstack lmtp-concurrency\n'
 prefix = b'# original-main.cf (base64 JSON): '
-settings = b''.join(f'{key} = 50\n'.encode() for key in keys)
+settings = b''.join(f'{key} = 1\n'.encode() for key in keys)
 # Include one injected separator newline in the owned block. Removing it restores
 # all original bytes, including an absent EOF newline or an empty original file.
-pattern = rb'\n' + re.escape(begin) + re.escape(prefix) + rb'([A-Za-z0-9+/=]+)\n' + re.escape(settings + end)
+pattern = rb'\n' + re.escape(begin) + re.escape(prefix) + rb'([A-Za-z0-9+/=]+)\n' + rb'lmtp_destination_concurrency_limit = (?:50|1)\n' + re.escape(end)
 match = re.search(pattern, data)
 has_markers = b'BEGIN mailstack lmtp-concurrency' in data or b'END mailstack lmtp-concurrency' in data
 legacy = ('# BEGIN mailstack lmtp-concurrency (2026-10-26 장애 대응)\n'
@@ -165,10 +165,10 @@ if mode == 'revert':
     target = state['runtime'] if has_markers else runtime
     remove = has_markers and not state['had_extra'] and not clean
 else:
-    encoded = base64.b64encode(json.dumps(state, sort_keys=True, separators=(',', ':')).encode())
+    encoded = match[1] if has_markers and not adopt_legacy else base64.b64encode(json.dumps(state, sort_keys=True, separators=(',', ':')).encode())
     block = b'\n' + begin + prefix + encoded + b'\n' + settings + end
-    next_data = data if has_markers and not adopt_legacy else clean + block
-    target = dict.fromkeys(keys, '50')
+    next_data = data[:match.start()] + block + data[match.end():] if has_markers and not adopt_legacy else clean + block
+    target = dict.fromkeys(keys, '1')
     remove = False
 (work / 'next').write_bytes(next_data)
 (work / 'remove').write_text('1' if remove else '0')

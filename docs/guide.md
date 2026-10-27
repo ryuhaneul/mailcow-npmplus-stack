@@ -1155,9 +1155,12 @@ docker compose exec -T dovecot-mailcow doveadm quota get -u user@example.test
 
 설치·업데이트는 `scripts/apply-dovecot-dedupe.sh apply -y`로 mailcow의 기본 Message-ID 중복 검사를 `global_sieve_before`로 옮기고 `global_sieve_after`의 기존 검사는 마커 안에서 주석 처리합니다. 관리·개인 필터의 `stop`, `fileinto`, `redirect`보다 먼저 검사하여 같은 수신자에게 복제된 메일을 걸러냅니다. 첫 사본은 다음 필터로 통과하며 키·기간은 바꾸지 않습니다(기본 mailcow 기간 1분). 두 호스트 파일을 백업한 뒤 실행 파일에 복사·`sievec`하며 reload·재시작은 하지 않습니다. 기존 before에 명령이 있거나 after의 upstream 중복 블록이 예상과 다르면 무변경 중단합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-dovecot-dedupe.sh --check`로 호스트·컨테이너 일치를 확인하고, `--revert -y`로 before 블록 제거와 after 원문 복원을 합니다(다음 설치·업데이트 시 다시 적용). 실제 배달 검증은 고유 Message-ID의 합성 메일로 첫 사본 보존과 후속 중복 제거를 확인합니다.
 
-### LMTP 동시 배달 50
+### LMTP 같은 수신자 순차 배달 (동시 1)
 
-설치·업데이트는 `scripts/apply-postfix-lmtp-concurrency.sh apply -y`로 `extra.cf`의 관리 블록과 실행 중인 Postfix에 `lmtp_destination_concurrency_limit = 50`을 설정합니다. `lmtp_destination_recipient_limit`은 변경하지 않습니다(mailcow 기본값 1 유지). 기존 직렬화 설정은 2026-10-26 대기열 정체 장애 원인이므로 다시 적용하지 말고, 남은 `lmtp-serial` 블록은 먼저 `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-serial.sh --revert -y`로 제거해야 합니다. 새 스크립트는 해당 블록이 남아 있으면 무변경 중단하며, hcmail의 정확한 세 줄(`# BEGIN mailstack lmtp-concurrency (2026-10-26 장애 대응)`, `lmtp_destination_concurrency_limit = 50`, `# END mailstack lmtp-concurrency`)만 관리 블록으로 흡수합니다. 다른 값·수정된 마커·블록 밖 같은 키는 무변경 중단합니다. 파일과 적용 직전 명시 설정을 백업하고 `postfix check` 후 reload만 수행하며, 실패하면 실행 직전 상태로 복원합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-concurrency.sh --check`로 파일·실제 값을 확인하고 `--revert -y`로 관리 블록 제거와 최초 적용 전 런타임 설정을 복원합니다(수동 50을 흡수했다면 런타임 복원값도 50). 다음 설치·업데이트에서는 동시 배달 50을 다시 적용합니다.
+설치·업데이트는 `scripts/apply-postfix-lmtp-concurrency.sh apply -y`로 `extra.cf`의 관리 블록과 실행 중인 Postfix에 `lmtp_destination_concurrency_limit = 1`을 설정합니다. `lmtp_destination_recipient_limit`은 변경하지 않습니다(mailcow 기본값 1 유지).
+같은 수신자에게 병렬 배달하면 `global_before` 중복 검사가 서로의 배달을 확인하지 못하므로 동시 1을 기본으로 사용합니다. 2026-10-26 정체 원인은 팀 Sieve 재발송이었으며 팀 별칭 전환으로 해소됐습니다.
+
+남은 `lmtp-serial` 블록은 먼저 `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-serial.sh --revert -y`로 제거해야 합니다. 새 스크립트는 해당 블록이 남아 있으면 무변경 중단하며, hcmail의 정확한 세 줄(`# BEGIN mailstack lmtp-concurrency (2026-10-26 장애 대응)`, `lmtp_destination_concurrency_limit = 50`, `# END mailstack lmtp-concurrency`)과 기존 관리 블록의 값 50·1을 흡수해 동시 1로 맞춥니다. 다른 값·수정된 마커·블록 밖 같은 키는 무변경 중단합니다. 파일과 적용 직전 명시 설정을 백업하고 `postfix check` 후 reload만 수행하며, 실패하면 실행 직전 상태로 복원합니다. `MAILCOW_DIR=/home/mailcow-dockerized bash scripts/apply-postfix-lmtp-concurrency.sh --check`는 파일·실제 값이 모두 1인지 확인합니다. `--revert -y`는 관리 블록을 제거하고 최초 적용 전 런타임 설정을 복원합니다(수동 50을 흡수했다면 런타임 복원값도 50). 기존 관리 블록의 `original-main.cf` 주석은 그대로 유지합니다. 다음 설치·업데이트에서도 동시 1을 다시 적용합니다.
 
 ### Rspamd 일반 검사 프로세스 4개
 

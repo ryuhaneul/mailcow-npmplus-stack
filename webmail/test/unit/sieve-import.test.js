@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import { importScript, importPolicy, rulesDocument } from '../../server/sieve/import.js';
 import { parseScript } from '../../server/sieve/parse.js';
-import { generateScript } from '../../server/sieve/generate.js';
+import { generateScript, hashBody } from '../../server/sieve/generate.js';
 import { validateDocument } from '../../server/sieve/model.js';
 import { classifyState } from '../../server/sieve/state.js';
 
@@ -284,5 +284,46 @@ test('all pattern and validation failures in server import reports use Korean re
     assert.equal(report.items[0].status, 'unconvertible');
     assert.match(report.items[0].reason, /[가-힣]/);
     assert.doesNotMatch(report.items[0].reason, /\b[a-z]+_[a-z_]+\b/);
+  }
+});
+
+
+test('CLI regen preserves exact metadata bytes and regenerates first-match body and hash', async () => {
+  const doc = JSON.parse(await read('import-rules.json'));
+  doc.v = 2; doc.rev = 17;
+  doc.rules[0].stop = false;
+  const current = generateScript(doc, importPolicy(policy));
+  // A valid old generator body, with deliberately noncanonical v2 metadata.
+  const body = current.slice(current.indexOf('require [')).replace('    set "wm_stop" "1";\n', '');
+  const encoded = Buffer.from(JSON.stringify(doc, null, 2)).toString('base64url');
+  const metadata = encoded.match(/.{1,73}/g).map(chunk => `# WEBMAIL-DATA ${chunk}`).join('\n');
+  const source = `${current.split('\n')[0]}\n${metadata}\n# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+  assert.equal(parseScript(source).state, 'ok');
+  const input = join(temp, 'existing.sieve'); await writeFile(input, source);
+  const result = cli(['regen', input, '--policy', path('import-policy.json')]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(parseScript(result.stdout).state, 'ok');
+  assert.deepEqual(parseScript(result.stdout).doc, doc);
+  assert.equal(result.stdout.slice(0, result.stdout.indexOf('# WEBMAIL-HASH ')), source.slice(0, source.indexOf('# WEBMAIL-HASH ')));
+  assert.equal(result.stdout.slice(result.stdout.indexOf('require [')), current.slice(current.indexOf('require [')));
+  assert.notEqual(result.stdout.match(/# WEBMAIL-HASH (.+)/)[1], hashBody(body));
+  assert.equal(await readFile(input, 'utf8'), source);
+});
+
+test('CLI regen rejects modified, damaged and newer scripts without stdout', async () => {
+  const doc = JSON.parse(await read('import-rules.json'));
+  const generated = generateScript(doc, importPolicy(policy));
+  const newer = {...doc, v:3};
+  const encoded = Buffer.from(JSON.stringify(newer)).toString('base64url');
+  const sources = {
+    modified_externally: `${generated}# external edit\n`,
+    damaged: 'invalid script',
+    newer_version: generated.replace(/(?:# WEBMAIL-DATA [^\n]+\n)+/, encoded.match(/.{1,120}/g).map(chunk => `# WEBMAIL-DATA ${chunk}\n`).join('')),
+  };
+  for (const [state, source] of Object.entries(sources)) {
+    const input = join(temp, `${state}.sieve`); await writeFile(input, source);
+    const result = cli(['regen', input, '--policy', path('import-policy.json')]);
+    assert.equal(result.status, 2); assert.equal(result.stdout, '');
+    assert.ok(JSON.parse(result.stderr).error.message.includes(state));
   }
 });

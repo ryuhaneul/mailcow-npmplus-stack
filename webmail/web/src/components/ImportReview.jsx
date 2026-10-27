@@ -29,6 +29,7 @@ export function ImportTable({ items }) {
       {item.newFolder && <span class="chip plain gi-tag">폴더 새로 만듦</span>}</td>
   </tr>;
   return <>
+    <p class="rule-note">가져온 뒤에는 위에서부터 처음 맞는 규칙 하나만 적용해요. 뒤에 있는 규칙의 동작은 실행하지 않아요.</p>
     <div class="gi-bar"><div class="seg gi-seg" role="group" aria-label="상태로 거르기">{[['all','전체'],...Object.entries(statuses)].map(([key, label]) => <button type="button" key={key} aria-pressed={filter === key} onClick={() => setFilter(key)}>{label} <b class="num">{items.filter(item => key === 'all' || item.status === key).length}</b></button>)}</div></div>
     <div class="gi-tablewrap"><table class="gi-table"><caption class="sr">Gmail 필터와 반영 결과</caption>
       <thead><tr><th scope="col">#</th><th scope="col">Gmail 원문</th><th aria-hidden="true"></th><th scope="col">새 웹메일 반영 결과</th><th scope="col">상태</th></tr></thead>

@@ -64,6 +64,15 @@ await test('condition group editor',async t=>{
     await expect(page.getByLabel('1번 조건 값',{exact:true})).toHaveValue('견적');
     assert.deepEqual((await save(page)).conditions,[leaf('견적')]);assert.deepEqual(errors,[]);await context.close();
   });
+  await t.test('first-match policy has no stop checkbox for either stored stop value',async()=>{
+    for (const stop of [false,true]) {
+      const {page,context}=await open({...base([leaf('견적')]),stop});
+      await expect(page.getByRole('checkbox',{name:'이후 규칙 멈춤'})).toHaveCount(0);
+      await expect(page.locator('.rule-note').filter({hasText:'위에서부터 처음 맞는 규칙 하나만 적용'})).toBeVisible();
+      assert.equal((await save(page)).stop,stop);
+      await context.close();
+    }
+  });
   await t.test('create group and save canonical nested request also used for preview',async()=>{
     const {page,context}=await open();await page.getByRole('button',{name:'묶음 추가',exact:true}).click();
     await expect(page.getByRole('group',{name:'묶음 1',exact:true})).toBeVisible();

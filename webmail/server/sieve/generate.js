@@ -77,7 +77,7 @@ export function generateScript(doc, { addresses = [], trashPath = 'Trash', ...po
       const index = forwardIndex.get(target);
       lines.push(`    if not string :is "${'${wm_forward_'}${index}}" "1" {`, `      redirect :copy ${quote(target)};`, `      set "wm_forward_${index}" "1";`, '    }');
     }
-    if (rule.stop) lines.push('    set "wm_stop" "1";');
+    lines.push('    set "wm_stop" "1";');
     lines.push('  }');
   }
   lines.push(`  if string :is "${'${wm_trash}'}" "1" { fileinto ${quote(trashPath)}; }`, `  elsif not string :is "${'${wm_folder}'}" "" { fileinto "${'${wm_folder}'}"; }`, '}');

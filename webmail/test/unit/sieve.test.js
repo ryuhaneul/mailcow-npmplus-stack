@@ -178,7 +178,7 @@ test('blocked address/domain action precedes vacation and stops processing', () 
   assert.ok(script.indexOf(block) < script.indexOf('vacation :days 1'));
 });
 
-test('rules accumulate flags, keep the first folder, prefer trash and guard deduplicated redirects', () => {
+test('every enabled rule guards all actions and unconditionally stops later rules', () => {
   const doc = empty();
   doc.rules = [rule(1, { move: 'Archive', read: true, forward: ['USER@example.com'] }), rule(2, { move: 'Projects/팀', star: true, forward: ['user@EXAMPLE.COM'] }), rule(3, { trash: true })];
   doc.rules[1].stop = true;
@@ -189,7 +189,16 @@ test('rules accumulate flags, keep the first folder, prefer trash and guard dedu
   assert.equal(script.includes('wm_forward_1'), false);
   assert.equal((script.match(/if string :is "\$\{wm_folder\}" "" \{ set "wm_folder"/g) ?? []).length, 2);
   assert.equal((script.match(/if allof\(not string :is "\$\{wm_stop\}" "1"/g) ?? []).length, 3);
-  assert.ok(script.includes('set "wm_stop" "1";'));
+  const blocks = [...script.matchAll(/  # 규칙 \d+:[^\n]*\n  if allof\(not string :is "\$\{wm_stop\}" "1",[^\n]*\n([\s\S]*?)\n  }/g)];
+  assert.equal(blocks.length, 3);
+  for (const block of blocks) assert.ok(block[1].endsWith('    set "wm_stop" "1";'));
+  const body = script.slice(script.indexOf('require ['));
+  for (const stop of [false, true]) {
+    doc.rules.forEach(rule => { rule.stop = stop; });
+    const generated = generateScript(doc, context);
+    assert.equal(generated.slice(generated.indexOf('require [')), body);
+    assert.deepEqual(parseScript(generated).doc, doc);
+  }
   assert.ok(script.includes('if string :is "${wm_trash}" "1" { fileinto "Trash"; }\n  elsif'));
 });
 

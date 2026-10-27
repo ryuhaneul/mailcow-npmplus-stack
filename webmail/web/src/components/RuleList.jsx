@@ -22,7 +22,6 @@ export function RuleSummary({ rule }) {
   if (a.read) actions.push('읽음으로 표시');
   if (a.star) actions.push('별표');
   if (a.forward?.length) actions.push(`${a.forward.join(', ')}로 전달`);
-  if (rule.stop) actions.push('이후 규칙 멈춤');
   return <>{rule.conditions.map((c, i) => <span key={i}>{i > 0 && (rule.match === 'all' ? ' 그리고 ' : ' 또는 ')}<Condition condition={c}/></span>)}<span class="arrow" aria-hidden="true"> → </span><span class="to">{actions.map((action, i) => <span key={i}>{i > 0 && ' · '}{action}</span>)}</span></>;
 }
 function Arrow({ down = false }) {

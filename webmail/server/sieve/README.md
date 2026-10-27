@@ -6,6 +6,7 @@
 node bin/webmail-rules.js import original.sieve --policy policy.json > report.json
 node bin/webmail-rules.js import original.sieve --name rainloop.user --policy policy.json > report.json
 node bin/webmail-rules.js gen rules.json --policy policy.json > webmail-rules.sieve
+node bin/webmail-rules.js regen existing-webmail-rules.sieve --policy policy.json > regenerated.sieve
 ```
 
 관리자가 서버에서 `doveadm mailbox list -u <주소>` 결과와 mailcow의 활성 도메인·활성 별칭 도메인 목록으로 `policy.json`을 만듭니다. 문서에 적힌 전달 주소나 이동 폴더를 허용 목록으로 추출하지 않습니다.
@@ -24,7 +25,11 @@ node bin/webmail-rules.js gen rules.json --policy policy.json > webmail-rules.si
 
 `import`는 모든 원본 블록의 `items`와 변환된 `rules`를 JSON으로 출력합니다. `changed`의 변경점을 확인하고, `unconvertible`이 있으면 관리자가 해당 내용을 해결해야 합니다. 변환 불가 블록을 버린 채 자동 활성화하면 안 됩니다. 관리자는 보고서를 확인한 뒤 W10 형식의 규칙 문서를 완성해 `gen`에 전달합니다.
 
-`gen`의 stdout에는 생성된 Sieve만 출력합니다. 폴더 경고와 미확인 개수는 stderr에 출력합니다. 입출력·정책·문서 오류의 종료 코드는 2입니다.
+`regen`은 해시가 정상인 기존 WEBMAIL-RULES 스크립트만 받아 원본 WEBMAIL-DATA 주석 블록(문서·버전·rev·인코딩)을 그대로 두고 본문과 해시를 다시 만듭니다. 외부 수정·손상·더 새로운 버전은 거부합니다.
+
+사용자 필터는 위에서부터 처음 맞는 규칙 하나만 적용하며, 뒤 규칙의 어떤 동작도 실행하지 않습니다. 저장된 `stop` 값은 읽기 호환을 위해 유지하지만 실행 여부에는 영향을 주지 않습니다.
+
+`gen`·`regen`의 stdout에는 생성된 Sieve만 출력합니다. 폴더 경고와 미확인 개수는 stderr에 출력합니다. 입출력·정책·문서 오류의 종료 코드는 2입니다.
 
 실제 저장·활성화는 계획 8-4의 관리자 `doveadm sieve put`·`doveadm sieve activate` 절차로 별도 수행합니다. 기존 스크립트는 삭제하지 않습니다. 원복할 때는 기존 스크립트를 다시 활성화합니다.
 

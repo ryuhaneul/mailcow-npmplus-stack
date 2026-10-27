@@ -134,7 +134,7 @@ export default function RuleBuilder({ id, query }) {
       if (applyOld) {
         try {
           const result = await api('/api/rules/apply-existing', {method:'POST',body:{rule}});
-          toast.value = {kind:'rule-apply-result',message:`규칙을 저장했어요. 기존 메일 ${result.matched.toLocaleString()}통 일치 · 이동 ${result.moved}통 · 휴지통 ${result.trashed}통 · 표시 ${result.flagged}통 · 실패 ${result.failed.length}통. 전달은 앞으로 오는 메일에만 해요.`};
+          toast.value = {kind:'rule-apply-result',message:`규칙을 저장했어요. 기존 메일 ${result.matched.toLocaleString()}통 일치 · 이동 ${result.moved}통 · 휴지통 ${result.trashed}통 · 표시 ${result.flagged}통 · 실패 ${result.failed.length}통.${result.skipped ? ` 위 규칙에 먼저 해당돼 ${result.skipped.toLocaleString()}통은 건너뛰었어요.` : ''} 전달은 앞으로 오는 메일에만 해요.`};
         } catch (e) {toast.value = {kind:'rule-apply-result',message:`규칙은 저장했어요. 기존 메일 적용에 실패했어요. ${e.message}`};}
       } else toast.value = {kind:'success',message:'규칙을 저장했어요.'};
       if (live.current) navigate('filters');

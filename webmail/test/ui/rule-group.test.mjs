@@ -64,6 +64,21 @@ await test('condition group editor',async t=>{
     await expect(page.getByLabel('1번 조건 값',{exact:true})).toHaveValue('견적');
     assert.deepEqual((await save(page)).conditions,[leaf('견적')]);assert.deepEqual(errors,[]);await context.close();
   });
+  await t.test('existing-mail result reports skipped priority matches only when present',async()=>{
+    for (const [width,skipped] of [[1280,2],[768,2],[375,2],[375,0]]) {
+      const {page,context,errors}=await open(base([leaf('견적')]),width);
+      await page.route('**/api/rules/apply-existing',route=>route.fulfill({json:{matched:3,moved:0,trashed:0,flagged:3-skipped,failed:[],...(skipped?{skipped}:{})}}));
+      await expect(page.getByRole('button',{name:'규칙 저장',exact:true})).toBeEnabled();
+      await expect(page.getByRole('checkbox',{name:/이미 받은 메일/})).toBeChecked();
+      await page.getByRole('button',{name:'규칙 저장',exact:true}).click();
+      await expect(page.locator('.toast.rule-result')).toContainText('기존 메일 3통 일치');
+      if(skipped) await expect(page.locator('.toast.rule-result')).toContainText('위 규칙에 먼저 해당돼 2통은 건너뛰었어요');
+      else await expect(page.locator('.toast.rule-result')).not.toContainText('건너뛰었어요');
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+      if(skipped) await page.screenshot({path:`${captures}/existing-priority-skipped-${width}.png`,fullPage:true});
+      assert.deepEqual(errors,[]);await context.close();
+    }
+  });
   await t.test('first-match policy has no stop checkbox for either stored stop value',async()=>{
     for (const stop of [false,true]) {
       const {page,context}=await open({...base([leaf('견적')]),stop});

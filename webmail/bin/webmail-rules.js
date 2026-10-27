@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { generateScript } from '../server/sieve/generate.js';
-import { parseScript } from '../server/sieve/parse.js';
+import { parseScript, regenerateScript } from '../server/sieve/parse.js';
 import { folderWarnings, importPolicy, importScript } from '../server/sieve/import.js';
 
 const help = `사용법:
@@ -48,12 +48,7 @@ async function main(args) {
       if (parsed.state !== 'ok') throw new Error(`재생성할 수 없는 스크립트예요: ${parsed.state}`);
       doc = parsed.doc;
     } else doc = await jsonFile(file);
-    let script = generateScript(doc, policy);
-    if (command === 'regen') {
-      // Keep the original metadata bytes, including its stored wire version.
-      script = source.slice(0, source.indexOf('# WEBMAIL-HASH ')) + script.slice(script.indexOf('# WEBMAIL-HASH '));
-      if (parseScript(script).state !== 'ok') throw new Error('재생성된 스크립트의 형식이나 크기를 확인해 주세요.');
-    }
+    const script = command === 'regen' ? regenerateScript(source, policy) : generateScript(doc, policy);
     const items = folderWarnings(doc.rules, policy.checkFolders).filter(item => item.warnings.length);
     if (items.length) process.stderr.write(`${JSON.stringify({ items, uncheckedFolders: items.length })}\n`);
     process.stderr.write(`폴더 존재 미확인: ${items.length}개\n`);

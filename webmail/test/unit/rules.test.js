@@ -531,7 +531,8 @@ test('replace keeps blocking/vacation; edits to either require explicit undo con
     await assert.rejects(f.service.undoImport(f.session, body), { code: 'UNDO_EDITED' });
     assert.equal(storageWrites(f.commands).length, writes);
     await f.service.undoImport(f.session, { ...body, acceptEdits: true });
-    assert.equal(f.scripts.get(web), original);
+    assert.deepEqual(parseScript(f.scripts.get(web)).doc, beforeDoc);
+    assert.equal(f.scripts.get(web), generateScript(beforeDoc, { ...policy, addresses: ['user@example.com'] }));
   }
 });
 
@@ -601,12 +602,18 @@ for (const stage of [
   { command: 'PUTSCRIPT', name: web }, { command: 'SETACTIVE', name: 'legacy' },
   { command: 'DELETESCRIPT', name: undoWebmailName }, { command: 'DELETESCRIPT', name: undoActiveName }, { command: 'DELETESCRIPT', name: importName },
 ]) {
-  test(`undo retry completes after ${stage.command} ${stage.name} failure without acceptEdits`, async () => {
+  test(`undo completes after ${stage.command} ${stage.name} failure without acceptEdits`, async () => {
     const f = importFixture({ active: 'legacy' }); await f.apply(); const body = await undoBody(f);
     f.failures.push(stage);
-    await assert.rejects(f.service.undoImport(f.session, body), { code: 'IMPORT_WRITE_FAILED' });
-    assert.ok(f.scripts.has(importName));
-    await f.service.undoImport(f.session, body);
+    if ([undoWebmailName, undoActiveName].includes(stage.name)) {
+      await f.service.undoImport(f.session, body);
+      assert.equal((await f.service.get(f.session)).importInfo, undefined);
+      await assert.rejects(f.service.undoImport(f.session, body), { code: 'UNDO_UNAVAILABLE' });
+    } else {
+      await assert.rejects(f.service.undoImport(f.session, body), { code: 'IMPORT_WRITE_FAILED' });
+      assert.ok(f.scripts.has(importName));
+      await f.service.undoImport(f.session, body);
+    }
     assert.equal(f.scripts.get(web), f.original); assert.equal(f.activeName, 'legacy'); assert.equal(f.scripts.has(importName), false);
   });
 }

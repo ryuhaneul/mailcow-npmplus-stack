@@ -1,5 +1,5 @@
 import { MAX_SCRIPT_BYTES, validateDocument } from './model.js';
-import { hashBody, MAGIC } from './generate.js';
+import { generateScript, hashBody, MAGIC } from './generate.js';
 
 /** Decode only our metadata envelope, never arbitrary Sieve or an import source. */
 export function parseScript(script) {
@@ -31,4 +31,15 @@ export function parseScript(script) {
     return { state: 'newer_version', doc, rev: doc.rev };
   }
   return { state: hash && hashBody(body) === hash ? 'ok' : 'modified_externally', doc, rev: doc.rev };
+}
+
+
+/** Regenerate executable code without changing the stored document bytes. */
+export function regenerateScript(source, policy) {
+  const parsed = parseScript(source);
+  if (parsed.state !== 'ok') throw new Error(`재생성할 수 없는 스크립트예요: ${parsed.state}`);
+  const generated = generateScript(parsed.doc, policy);
+  const script = source.slice(0, source.indexOf('# WEBMAIL-HASH ')) + generated.slice(generated.indexOf('# WEBMAIL-HASH '));
+  if (parseScript(script).state !== 'ok') throw new Error('재생성된 스크립트의 형식이나 크기를 확인해 주세요.');
+  return script;
 }

@@ -3,7 +3,7 @@ import { AppError } from '../errors.js';
 import { connectManageSieve } from './managesieve.js';
 import { SCRIPT_NAME, canonicalJSON, allowedMoveFolder, validateText, validateDocument } from './model.js';
 import { generateScript } from './generate.js';
-import { parseScript } from './parse.js';
+import { parseScript, regenerateScript } from './parse.js';
 import { readGmailXml as readXml } from './gmail-xml.js';
 import { convertGmailEntries as convertEntries } from './import-xml.js';
 import { classifyState } from './state.js';
@@ -12,7 +12,7 @@ import { invalidateInboxHeaders, loadInboxHeaders, matches, preview as previewMa
 import { assertUidValidity, decodeRef } from '../mail/ref.js';
 import { createActionService } from '../mail/actions.js';
 import { createFolderService } from '../mail/folders.js';
-import { importName, undoWebmailName, undoActiveName, importRecord, encodeImportRecord, readImportRecord, importInfo, droppedItems } from './import-store.js';
+import { importName, undoWebmailName, undoActiveName, importRecord, encodeImportRecord, readImportRecord, importInfo, droppedItems, isRestoredWebmail } from './import-store.js';
 
 const previousName = `${SCRIPT_NAME}.prev`;
 const stateError = () => new AppError(409, 'RULES_STATE', '현재 필터 상태에서는 이 작업을 할 수 없어요.');
@@ -27,7 +27,7 @@ function object(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))) invalid('$', 'request');
 }
 
-export function createRulesService({ config, imap, directory, connect = connectManageSieve, now = Date.now, readGmailXml = readXml, convertGmailEntries = convertEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }) }) {
+export function createRulesService({ config, imap, directory, logger, connect = connectManageSieve, now = Date.now, readGmailXml = readXml, convertGmailEntries = convertEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }) }) {
   const locks = new Map();
   function serial(session, operation) {
     const key = session.email.toLowerCase();
@@ -112,7 +112,7 @@ export function createRulesService({ config, imap, directory, connect = connectM
       const { state, rev, doc, activeName, missingFolders, importReport } = current;
       const prevAvailable = current.state !== 'newer_version' && current.scripts.some(script => script.name === previousName)
         && parseScript(await client.getScript(previousName)).state === 'ok';
-      const info = await importInfo(client, current);
+      const info = await importInfo(client, current, policy);
       return { state, rev, doc, activeName, activeScript: activeName, missingFolders, prevAvailable, internalDomains: policy.internalDomains, ...(importReport ? { importReport } : {}), ...(info ? { importInfo: info } : {}) };
     });
   }
@@ -358,27 +358,34 @@ export function createRulesService({ config, imap, directory, connect = connectM
     object(body, ['at', 'acceptEdits']);
     if (typeof body.at !== 'string' || !Number.isFinite(Date.parse(body.at))) invalid('at', 'timestamp');
     if (Object.hasOwn(body, 'acceptEdits') && body.acceptEdits !== true) invalid('acceptEdits', 'confirmation_required');
-    return perform(session, null, async (client, current) => {
+    return perform(session, null, async (client, current, policy) => {
       if (current.state === 'newer_version') throw stateError();
       const record = await readImportRecord(client, current.scripts);
       if (!record || record.at !== body.at) throw undoError('UNDO_UNAVAILABLE');
       const before = record.undo.webmail;
-      const alreadyRestored = (current.script === null ? null : sha256(current.script)) === (before.present ? before.sha256 : null);
+      const archive = before.present && current.scripts.some(script => script.name === undoWebmailName) ? await client.getScript(undoWebmailName) : undefined;
+      const alreadyRestored = isRestoredWebmail(current.script, before, archive, policy);
       if (!alreadyRestored && (current.script === null || sha256(current.script) !== record.undo.afterSha256) && body.acceptEdits !== true) throw undoError('UNDO_EDITED');
       const active = record.undo.active;
       let webmailCopy, activeCopy;
       if (before.present && !alreadyRestored) {
         if (!current.scripts.some(script => script.name === undoWebmailName)) throw undoError('UNDO_UNAVAILABLE');
-        webmailCopy = await client.getScript(undoWebmailName);
+        webmailCopy = archive;
         if (sha256(webmailCopy) !== before.sha256) throw undoError('UNDO_UNAVAILABLE');
       }
+      if (before.present) {
+        const source = webmailCopy ?? current.script;
+        if (parseScript(source).state === 'ok') webmailCopy = regenerateScript(source, policy);
+      }
       if (active.name && active.name !== SCRIPT_NAME) {
+        const activeArchive = current.scripts.some(script => script.name === undoActiveName) ? await client.getScript(undoActiveName) : undefined;
         if (current.scripts.some(script => script.name === active.name)) {
-          if (sha256(await client.getScript(active.name)) !== active.sha256) throw undoError('UNDO_SOURCE_CHANGED');
+          const source = await client.getScript(active.name);
+          if (!isRestoredWebmail(source, { present: true, sha256: active.sha256 }, activeArchive, policy)) throw undoError('UNDO_SOURCE_CHANGED');
+          if (parseScript(source).state === 'ok') activeCopy = regenerateScript(source, policy);
         } else {
-          if (!current.scripts.some(script => script.name === undoActiveName)) throw undoError('UNDO_UNAVAILABLE');
-          activeCopy = await client.getScript(undoActiveName);
-          if (sha256(activeCopy) !== active.sha256) throw undoError('UNDO_UNAVAILABLE');
+          if (activeArchive === undefined || sha256(activeArchive) !== active.sha256) throw undoError('UNDO_UNAVAILABLE');
+          activeCopy = parseScript(activeArchive).state === 'ok' ? regenerateScript(activeArchive, policy) : activeArchive;
         }
       }
       try {
@@ -389,13 +396,19 @@ export function createRulesService({ config, imap, directory, connect = connectM
           await client.setActive(active.name ?? '');
           await removeScript(client, SCRIPT_NAME);
         } else await client.setActive(active.name ?? '');
-        await removeScript(client, undoWebmailName);
-        await removeScript(client, undoActiveName);
+        // Keep the archives until the import record is gone, so a failed
+        // record deletion can still recognize and retry regenerated restores.
         await removeScript(client, importName);
       } catch {
         const error = new AppError(502, 'IMPORT_WRITE_FAILED', '되돌리기를 마치지 못했어요. 다시 시도해 주세요.');
         error.detail = { restored: false }; throw error;
       }
+      let cleanupCode;
+      for (const name of [undoWebmailName, undoActiveName]) {
+        try { await removeScript(client, name); }
+        catch (error) { cleanupCode ??= error instanceof AppError ? error.code : 'SIEVE_UNAVAILABLE'; }
+      }
+      if (cleanupCode) logger?.warn({ stage: 'undo_archive_cleanup', code: cleanupCode }, 'Undo archive cleanup failed');
       const parsed = before.present ? parseScript(webmailCopy ?? current.script) : null;
       return { ...(parsed?.rev !== null && parsed?.rev !== undefined ? { rev: parsed.rev } : {}), restored: before.present ? 'webmail' : 'none', ...(active.name ? { activeName: active.name } : {}) };
     });
@@ -443,6 +456,12 @@ export function createRulesService({ config, imap, directory, connect = connectM
     const snapshot = await loadInboxHeaders(imap, session, { now, budgetMs: 0 });
     if (snapshot.partial) throw new AppError(409, 'PREVIEW_NOT_READY', '받은 메일 확인이 끝난 뒤 적용해 주세요.');
     const rule = await validateRule(session, body);
+    const priority = await perform(session, null, async (_client, current) => {
+      allowed(current, ['ok']);
+      const index = current.doc.rules.findIndex(item => item.id === rule.id);
+      if (index < 0) throw conflict();
+      return { earlierRules: current.doc.rules.slice(0, index).filter(item => item.enabled), hash: sha256(current.script) };
+    });
     try {
       const candidates = snapshot.items.filter(record => matches(rule, record.headers));
       const found = [];
@@ -457,19 +476,27 @@ export function createRulesService({ config, imap, directory, connect = connectM
           found.push(...batch.filter(record => existing.has(record.uid)));
         }
       });
-      const result = { matched: found.length, moved: 0, trashed: 0, flagged: 0, failed: [] };
+      const eligible = found.filter(record => !priority.earlierRules.some(earlier => {
+        try { return matches(earlier, record.headers); }
+        catch { return true; } // Unknown priority must never allow a lower rule to act.
+      }));
+      const skipped = found.length - eligible.length;
+      const result = { matched: found.length, moved: 0, trashed: 0, flagged: 0, failed: [], ...(skipped ? { skipped } : {}) };
       const actions = [];
       if (rule.actions.read) actions.push(['seen', 'flagged']);
       if (rule.actions.star) actions.push(['flag', 'flagged']);
       if (rule.actions.trash) actions.push(['trash', 'trashed']);
       else if (rule.actions.move) actions.push(['move', 'moved']);
       // Forwarding is deliberately absent for mail already received.
-      let pending = found.map(record => record.ref);
+      let pending = eligible.map(record => record.ref);
       const flagged = new Set();
       for (const [action, counter] of actions) {
         const next = [];
         for (let start = 0; start < pending.length; start += 1000) {
           const refs = pending.slice(start, start + 1000);
+          await perform(session, null, async (_client, current) => {
+            if (current.state !== 'ok' || sha256(current.script) !== priority.hash) throw conflict();
+          });
           try {
             const outcome = await mailActions.run(session, { refs, action, ...(action === 'move' ? { target: rule.actions.move } : {}) });
             const vanished = outcome.failed.filter(item => item.code === 'MESSAGE_NOT_FOUND');

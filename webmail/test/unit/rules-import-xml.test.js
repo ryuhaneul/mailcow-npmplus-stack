@@ -4,9 +4,9 @@ import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
-import { generateScript } from '../../server/sieve/generate.js';
+import { generateScript, hashBody } from '../../server/sieve/generate.js';
 import { parseScript } from '../../server/sieve/parse.js';
-import { importName, undoActiveName } from '../../server/sieve/import-store.js';
+import { importName, undoActiveName, undoWebmailName } from '../../server/sieve/import-store.js';
 import { AppError } from '../../server/errors.js';
 
 const xml = await readFile(new URL('../fixtures/gmail-xml/basic.xml', import.meta.url), 'utf8');
@@ -340,3 +340,144 @@ for (const kind of ['xml', 'rainloop']) {
     });
   }
 }
+
+
+for (const failActivation of [false, true]) test(`undo regenerates legacy webmail bodies and preserves metadata; activation failure=${failActivation}`, async t => {
+  const f = await fixture(t);
+  const before = { v: 2, rev: 7, rules: [1, 2].map(n => ({ id: `old0000${n}`, enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'synthetic' }], actions: { read: true }, stop: false })),
+    blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+  const generated = generateScript(before);
+  const body = generated.slice(generated.indexOf('require [')).replaceAll('    set "wm_stop" "1";\n', '');
+  const encoded = Buffer.from(JSON.stringify(before, null, 2)).toString('base64url');
+  const metadata = `${generated.split('\n')[0]}\n${encoded.match(/.{1,73}/g).map(chunk => `# WEBMAIL-DATA ${chunk}\n`).join('')}`;
+  const old = `${metadata}# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+  assert.equal(parseScript(old).state, 'ok');
+  f.scripts.set(web, old); f.body.mode = 'append';
+  status(await f.apply(), 200);
+  const at = (await f.get()).importInfo.at;
+  if (failActivation) f.failures.push({ command: 'SETACTIVE', name: 'legacy' });
+  status(await f.request('/undo', { at }), failActivation ? 502 : 200, failActivation ? 'IMPORT_WRITE_FAILED' : undefined);
+  const restored = f.scripts.get(web);
+  assert.notEqual(restored, old);
+  assert.equal(parseScript(restored).state, 'ok');
+  assert.deepEqual(parseScript(restored).doc, before);
+  assert.equal(restored.slice(0, restored.indexOf('# WEBMAIL-HASH ')), metadata);
+  assert.equal((restored.match(/    set "wm_stop" "1";/g) ?? []).length, 2);
+  if (failActivation) {
+    assert.deepEqual((await f.get()).importInfo.undo, { available: true, edited: false });
+    // A third hash, even with identical metadata, is never a restored body.
+    f.scripts.set(web, `${restored}# synthetic external edit\n`);
+    assert.equal((await f.get()).importInfo.undo.edited, true);
+    status(await f.request('/undo', { at }), 409, 'UNDO_EDITED');
+    f.scripts.set(web, restored);
+    status(await f.request('/undo', { at }), 200);
+    assert.equal(f.scripts.get(web), restored);
+  }
+  assert.equal(f.activeName, 'legacy');
+  assert.equal(f.scripts.get('legacy'), original);
+});
+
+
+for (const removeOriginal of [false, true]) test(`undo regenerates a valid webmail-format active source under its original name; missing=${removeOriginal}`, async t => {
+  const f = await fixture(t);
+  const doc = { v: 1, rev: 4, rules: [{ id: 'active01', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'synthetic' }], actions: { read: true }, stop: false }],
+    blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+  const generated = generateScript(doc);
+  const body = generated.slice(generated.indexOf('require [')).replaceAll('    set "wm_stop" "1";\n', '');
+  const old = generated.slice(0, generated.indexOf('# WEBMAIL-HASH ')) + `# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+  f.scripts.set('legacy', old);
+  status(await f.apply(), 200);
+  const at = (await f.get()).importInfo.at;
+  if (removeOriginal) f.scripts.delete('legacy');
+  f.failures.push({ command: 'SETACTIVE', name: 'legacy' });
+  status(await f.request('/undo', { at }), 502, 'IMPORT_WRITE_FAILED');
+  assert.equal(f.scripts.get('legacy'), generated);
+  assert.deepEqual((await f.get()).importInfo.undo, { available: true, edited: false });
+  status(await f.request('/undo', { at }), 200);
+  assert.equal(f.activeName, 'legacy');
+  assert.equal(f.scripts.get('legacy'), generated);
+  assert.deepEqual(parseScript(f.scripts.get('legacy')).doc, doc);
+});
+
+
+for (const target of [web, 'legacy']) for (const failure of ['put-after', 'activate-before', 'activate-after', 'cleanup-import']) {
+  test(`Gate D: regenerated ${target} retries ${failure} without losing its archive`, async t => {
+    const f = await fixture(t);
+    const doc = { v: 1, rev: 7, rules: [{ id: 'gate0001', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'synthetic' }], actions: { read: true }, stop: false }],
+      blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+    const generated = generateScript(doc);
+    const metadata = generated.slice(0, generated.indexOf('# WEBMAIL-HASH '));
+    const body = generated.slice(generated.indexOf('require [')).replaceAll('    set "wm_stop" "1";\n', '');
+    const old = `${metadata}# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+    f.scripts.set(target, old);
+    if (target === web) f.body.mode = 'append';
+    status(await f.apply(), 200);
+    const at = (await f.get()).importInfo.at;
+    f.failures.push(failure === 'put-after' ? { command: 'PUTSCRIPT', name: target, after: true }
+      : failure === 'cleanup-import' ? { command: 'DELETESCRIPT', name: importName }
+      : { command: 'SETACTIVE', name: 'legacy', after: failure === 'activate-after' });
+    status(await f.request('/undo', { at }), 502, 'IMPORT_WRITE_FAILED');
+    assert.equal((await f.get()).importInfo.undo.edited, false);
+    if (failure === 'cleanup-import') {
+      assert.equal(f.scripts.get(target), generated);
+      assert.equal(f.scripts.has(target === web ? undoWebmailName : undoActiveName), true);
+      const thirdBody = 'keep;\n';
+      f.scripts.set(target, `${metadata}# WEBMAIL-HASH ${hashBody(thirdBody)}\n${thirdBody}`);
+      assert.equal(parseScript(f.scripts.get(target)).state, 'ok');
+      status(await f.request('/undo', { at }), 409, target === web ? 'UNDO_EDITED' : 'UNDO_SOURCE_CHANGED');
+      f.scripts.set(target, generated);
+    }
+    status(await f.request('/undo', { at }), 200);
+    assert.equal(f.activeName, 'legacy');
+    assert.equal(f.scripts.get(target), generated);
+    assert.deepEqual(parseScript(f.scripts.get(target)).doc, doc);
+    assert.equal(f.scripts.has(importName), false);
+  });
+}
+
+
+for (const name of [undoWebmailName, undoActiveName]) test(`Gate D: orphan ${name} cleanup is best effort after record removal`, async t => {
+  const f = await fixture(t);
+  const doc = { v: 1, rev: 3, rules: [], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+  f.scripts.set(web, generateScript(doc));
+  status(await f.apply(), 200);
+  const at = (await f.get()).importInfo.at;
+  const warnings = [];
+  t.mock.method(f.app.log, 'warn', (...args) => warnings.push(args));
+  f.failures.push({ command: 'DELETESCRIPT', name, error: new AppError(502, 'SIEVE_REJECTED', 'synthetic-private-content') });
+  status(await f.request('/undo', { at }), 200);
+  assert.equal(f.scripts.has(name), true);
+  assert.equal(f.scripts.has(importName), false);
+  assert.equal((await f.get()).importInfo, undefined);
+  status(await f.request('/undo', { at }), 409, 'UNDO_UNAVAILABLE');
+  assert.deepEqual(warnings, [[{ stage: 'undo_archive_cleanup', code: 'SIEVE_REJECTED' }, 'Undo archive cleanup failed']]);
+  assert.equal(JSON.stringify(warnings).includes('synthetic-private'), false);
+  status(await f.apply(), 200);
+  assert.equal((await f.get()).importInfo.undo.available, true);
+});
+
+
+for (const target of [web, 'legacy']) test(`Gate D: pending import-record cleanup for ${target} shows no edit warning and permits the next import`, async t => {
+  const f = await fixture(t);
+  const doc = { v: 1, rev: 7, rules: [{ id: 'gate0002', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'synthetic' }], actions: { read: true }, stop: false }],
+    blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+  const generated = generateScript(doc);
+  const body = generated.slice(generated.indexOf('require [')).replaceAll('    set "wm_stop" "1";\n', '');
+  const old = generated.slice(0, generated.indexOf('# WEBMAIL-HASH ')) + `# WEBMAIL-HASH ${hashBody(body)}\n${body}`;
+  f.scripts.set(target, old);
+  if (target === web) f.body.mode = 'append';
+  const originalState = (await f.get()).state;
+  status(await f.apply(), 200);
+  const at = (await f.get()).importInfo.at;
+  f.failures.push({ command: 'DELETESCRIPT', name: importName });
+  status(await f.request('/undo', { at }), 502, 'IMPORT_WRITE_FAILED');
+  const restored = await f.get();
+  assert.equal(restored.state, originalState);
+  assert.notEqual(restored.state, 'modified_externally');
+  assert.equal(restored.importInfo.undo.edited, false);
+  status(await f.apply(), 200);
+  const next = await f.get();
+  assert.notEqual(next.importInfo.at, at);
+  assert.equal(next.importInfo.undo.available, true);
+  assert.equal(next.importInfo.undo.edited, false);
+});

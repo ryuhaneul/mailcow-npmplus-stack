@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalJSON, MAX_SCRIPT_BYTES, SCRIPT_NAME } from './model.js';
+import { parseScript, regenerateScript } from './parse.js';
 
 export const importName = `${SCRIPT_NAME}.import`;
 export const undoWebmailName = `${SCRIPT_NAME}.undo-webmail`;
@@ -60,17 +61,27 @@ export async function readImportRecord(client, scripts) {
   return scripts.some(script => script.name === importName) ? parseImportRecord(await client.getScript(importName)) : null;
 }
 
-export async function importInfo(client, current) {
+/** Accept only the archived original or that archive's current generated body. */
+export function isRestoredWebmail(script, before, archive, policy) {
+  const currentHash = script === null ? null : scriptHash(script);
+  if (currentHash === (before.present ? before.sha256 : null)) return true;
+  if (!before.present || typeof archive !== 'string' || scriptHash(archive) !== before.sha256 || parseScript(archive).state !== 'ok') return false;
+  try { return currentHash === scriptHash(regenerateScript(archive, policy)); }
+  catch { return false; }
+}
+
+export async function importInfo(client, current, policy) {
   const record = await readImportRecord(client, current.scripts);
   if (!record) return undefined;
   const has = name => current.scripts.some(script => script.name === name);
   const before = record.undo.webmail;
   const currentHash = current.script === null ? null : scriptHash(current.script);
-  const beforeBytes = currentHash === (before.present ? before.sha256 : null);
+  const archive = before.present && has(undoWebmailName) ? await client.getScript(undoWebmailName) : undefined;
+  const beforeBytes = isRestoredWebmail(current.script, before, archive, policy);
   const unapplied = currentHash !== record.undo.afterSha256 && beforeBytes
     && current.activeName === (record.undo.active.name ?? null);
   let available = !unapplied && current.state !== 'newer_version';
-  if (available && before.present) available = has(undoWebmailName) && scriptHash(await client.getScript(undoWebmailName)) === before.sha256;
+  if (available && before.present) available = typeof archive === 'string' && scriptHash(archive) === before.sha256;
   const active = record.undo.active;
   if (available && active.name && active.name !== SCRIPT_NAME) available = has(undoActiveName) && scriptHash(await client.getScript(undoActiveName)) === active.sha256;
   return { at: record.at, source: { kind: record.source.kind, name: record.source.name }, mode: record.mode, dropped: record.dropped,

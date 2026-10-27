@@ -7,6 +7,7 @@ import { createApp } from '../../server/app.js';
 import { createActionService } from '../../server/mail/actions.js';
 import { loadInboxHeaders } from '../../server/sieve/match.js';
 import { AppError } from '../../server/errors.js';
+import { generateScript } from '../../server/sieve/generate.js';
 import { decodeRef, assertUidValidity } from '../../server/mail/ref.js';
 
 const rule = (actions = { move: 'Projects' }) => ({ id: 'rule0001', enabled: false, match: 'all', conditions: [{ field: 'subject', op: 'has', value: '회의' }], actions, stop: true });
@@ -15,10 +16,17 @@ function message(uid, date = new Date(Date.UTC(2026, 9, 1) + uid * 1000)) {
     envelope: { subject: '회의', from: [{ address: 'sender@example.com' }], to: [{ address: 'user@example.com' }] }, flags: new Set(), size: 100 };
 }
 async function fixture(t, count = 2, mailActions) {
+  const doc = { v: 1, rev: 0, rules: [rule()], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } };
+  const scripts = new Map([['webmail-rules', generateScript(doc, { checkPolicy: false })]]);
+  const connect = async () => ({
+    listScripts: async () => [...scripts.keys()].map(name => ({ name, active: name === 'webmail-rules' })),
+    getScript: async name => scripts.get(name),
+    putScript: async (name, bytes) => scripts.set(name, bytes), checkScript: async () => {}, setActive: async () => {}, logout: async () => {}, close() {},
+  });
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w13b-'));
   const app = await createApp({ config: { publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
     dbHost: '127.0.0.1', dbName: 'mailcow', dbUser: 'webmail_ro', dbPassword: 'synthetic', internalDomains: [] }, logger: false,
-    staticDir: '/nonexistent-webmail-w13b', auth: { tempRoot }, rules: { now: () => Date.UTC(2026, 9, 15), ...(mailActions ? { mailActions } : {}) } });
+    staticDir: '/nonexistent-webmail-w13b', auth: { tempRoot }, rules: { connect, now: () => Date.UTC(2026, 9, 15), ...(mailActions ? { mailActions } : {}) } });
   t.after(async () => { await app.close(); await rm(tempRoot, { recursive: true, force: true }); });
   app.directory.internalDomains = async () => ['example.com'];
   app.directory.identities = async () => ({ identities: [{ address: 'user@example.com' }] });
@@ -59,7 +67,7 @@ async function fixture(t, count = 2, mailActions) {
   const created = app.sessions.create({ email: 'user@example.com', name: '합성 사용자', password: Buffer.from('synthetic'), connection: { logout: async () => {} }, ip: '198.51.100.9' });
   const headers = { cookie: `webmail_sid=${created.token}`, origin: 'https://newmail.example.com', 'x-webmail-csrf': created.session.csrf };
   const request = (action, value = rule(), customHeaders = headers) => app.inject({ method: 'POST', url: `/api/rules/${action}`, payload: { rule: value }, headers: customHeaders });
-  return { app, client, commands, request, headers, session: created.session };
+  return { app, client, commands, request, headers, doc, scripts, session: created.session };
 }
 function ok(response) { assert.equal(response.statusCode, 200, response.body); assert.equal(response.headers['cache-control'], 'no-store'); return response.json(); }
 function rejected(response, status, code) { assert.equal(response.statusCode, status, response.body); assert.equal(response.json().error.code, code); assert.equal(response.headers['www-authenticate'], undefined); }
@@ -267,4 +275,52 @@ test('rules scan logout immediately cancels the producer and clears cached heade
   assert.equal(closed, 1); assert.equal(partial.items.length, 0); assert.equal(partial.scanned, 0);
   await rejectedLoading;
   rejected(await f.request('preview'), 403, 'SESSION_EXPIRED');
+});
+
+
+for (const enabled of [true, false]) test(`existing mail respects earlier enabled=${enabled} rule priority`, async t => {
+  const f = await fixture(t);
+  const earlier = { ...rule({ star: true }), id: 'early001', enabled, conditions: [{ field: 'from', op: 'has', value: 'sender@example.com' }] };
+  f.doc.rules.unshift(earlier);
+  f.scripts.set('webmail-rules', generateScript(f.doc, { checkPolicy: false }));
+  f.client.rows[1].headers = Buffer.from('Subject: 회의\r\nFrom: other@example.com\r\n');
+  const result = ok(await f.request('apply-existing', rule({ read: true, move: 'Projects' })));
+  assert.equal(result.matched, 2);
+  assert.equal(result.moved, enabled ? 1 : 2);
+  assert.equal(result.flagged, enabled ? 1 : 2);
+  assert.equal(result.skipped, enabled ? 1 : undefined);
+  assert.deepEqual(f.client.rows.map(row => row.uid), enabled ? [1] : []);
+  assert.equal(f.commands.some(row => row[0] === 'STORE' && row.includes('\\Flagged')), false);
+});
+
+for (const state of ['missing_rule', 'damaged', 'none']) test(`existing mail refuses unknown saved priority: ${state}`, async t => {
+  const f = await fixture(t);
+  if (state === 'missing_rule') { f.doc.rules = []; f.scripts.set('webmail-rules', generateScript(f.doc)); }
+  else if (state === 'damaged') f.scripts.set('webmail-rules', 'damaged');
+  else f.scripts.clear();
+  rejected(await f.request('apply-existing'), 409, state === 'missing_rule' ? 'RULES_CONFLICT' : 'RULES_STATE');
+  assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
+});
+
+
+for (const actions of [{ move: 'Projects' }, { read: true }]) test(`Gate D: changed priority before ${actions.move ? 'MOVE' : 'STORE'} refuses all actions`, async t => {
+  const f = await fixture(t);
+  const earlier = { ...rule({ star: true }), id: 'early001', enabled: false };
+  f.doc.rules.unshift(earlier);
+  f.scripts.set('webmail-rules', generateScript(f.doc, { checkPolicy: false }));
+  await loadInboxHeaders(f.app.imap, f.session);
+  const other = f.app.sessions.create({ email: 'user@example.com', name: '다른 합성 세션', password: Buffer.from('synthetic'), connection: { logout: async () => {} }, ip: '198.51.100.10' });
+  const fetch = f.client.fetch.bind(f.client); let changed = false;
+  f.client.fetch = async function* (range, query, options) {
+    if (!query.headers && !query.internalDate && !changed) {
+      changed = true; earlier.enabled = true;
+      const response = await f.app.rules.save(other.session, { baseRev: 0, doc: f.doc });
+      assert.equal(response.rev, 1);
+    }
+    yield* fetch(range, query, options);
+  };
+  rejected(await f.request('apply-existing', rule(actions)), 409, 'RULES_CONFLICT');
+  assert.equal(changed, true);
+  assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
+  assert.equal(f.client.rows.length, 2);
 });

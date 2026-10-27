@@ -42,7 +42,7 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   await installDirectory(app, { config });
   const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
   await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now }) });
-  const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory });
+  const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory, logger: app.log });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
   const folderService = createFolderService({ rulesService, ...folders, imap: app.imap, logger: app.log });

@@ -349,7 +349,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             existingCids.push(node.id);
             if (templateParts) templateCids.set(`/api/messages/${encodeURIComponent(part.ref)}/parts/${encodeURIComponent(part.partId)}?inline=1`, node.id.trim().replace(/^<|>$/g, ''));
           }
-          if (body.draftRef === part.ref || templateParts) {
+          if ((body.draftRef === part.ref || templateParts) && (!templateParts || ['base64', 'quoted-printable'].includes((node.encoding || '7bit').toLowerCase()))) {
             const verified = await rawPart(client, ref.uid, node, path);
             total += verified.size; if (total > maxBytes) throw tooLarge();
             const headers = attachmentHeaders(node, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
@@ -362,7 +362,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           await pipeline(download.content, limiter(bytes => { total += bytes; if (total > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           const headers = attachmentHeaders(node, false);
           const encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
-          const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'] };
+          const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'], ...(templateParts ? { ...(node.id ? { cid: node.id.trim().replace(/^<|>$/g, '') } : {}), contentDisposition: node.disposition || 'attachment' } : {}) };
           return metadata;
         });
         attachments.push({ ...metadata, path });
@@ -378,9 +378,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       mail.html = sanitizeComposeHtml(inline.html, { publicHostnames: config.publicHostnames });
       active(session);
       // Explicit streams prevent nodemailer from treating user content as a URL/path.
-      const compiled = new MailComposer({ ...mail, ...(alternative ? { text: templateParts ? alternativeText(mail.html).replace(/\r\n|\r|\n/g, '\r\n') : alternativeText(mail.html) } : {}), attachments: attachments.map(file => {
+      const compiled = new MailComposer({ ...mail, ...(alternative ? { text: alternativeText(mail.html) } : {}), attachments: attachments.map(file => {
         const content = createReadStream(file.path); streams.push(content);
-        return { filename: file.filename, contentType: file.contentType, ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), ...(file.raw ? { raw: content } : { content }) };
+        return { filename: file.filename, contentType: file.contentType, ...(templateParts && !file.raw ? { contentTransferEncoding: 'base64' } : {}), ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), ...(file.raw ? { raw: content } : { content }) };
       }).concat(inline.parts), disableFileAccess: true, disableUrlAccess: true }).compile();
       compiled.keepBcc = true;
       return { raw: await compiled.build(), resumedParts };
@@ -565,7 +565,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           body.forwardParts.push({ ref: part.templateRef, partId: part.part });
         }
       }
-      return (await build(session, state, body, { subject: data.subject ?? '', html: data.html }, true, true)).raw;
+      const { raw } = await build(session, state, body, { subject: data.subject ?? '', html: data.html }, true, true);
+      // Raw base64/QP parts are ASCII; other retained parts are rebuilt as base64.
+      return Buffer.from(raw.toString('latin1').replace(/\r\n|\r|\n/g, '\r\n'), 'latin1');
     }).catch(error => { if (error instanceof AppError) throw error; throw unavailable(); });
   }
   async function templateAttachments(session, token, input, html) {

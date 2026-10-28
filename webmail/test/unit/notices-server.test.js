@@ -84,7 +84,7 @@ function database() {
       if (sql.startsWith('UPDATE mailstack_webmail.notices')) {
         const row = data.rows.find(item => item.id === Number(args.at(-1))); assert.ok(row);
         if (sql.includes('title = ?')) Object.assign(row, { title: args[0], body_html: args[1], category: args[2], audience_all: args[3], pinned: args[4], updated_by: args[5] });
-        else if (sql.includes('publish_seq = ?')) { row.publish_seq = Number(args[0]); row.published_at = '2026-10-28 05:00:00'; }
+        else if (sql.includes('publish_seq = ?')) { row.publish_seq = Number(args[0]); row.published_at = connection.timeZone === '+00:00' ? '2026-10-28 06:00:00' : '2026-10-28 15:00:00'; }
         else {
           if (sql.includes("state = 'published'")) row.state = 'published';
           if (sql.includes("state = 'hidden'")) row.state = 'hidden';
@@ -101,8 +101,14 @@ function database() {
       async getConnection() {
         let unlock, local, begun = false;
         const connection = {
-          lastId: 0,
+          lastId: 0, timeZone: 'Asia/Seoul',
+          async query(sql) {
+            check(sql); assert.equal(sql, "SET time_zone = '+00:00'");
+            this.timeZone = '+00:00'; events.push({ sql, role });
+            return [[], []];
+          },
           async beginTransaction() {
+            assert.equal(this.timeZone, '+00:00', 'server timezone must be UTC before reading or writing timestamps');
             const previous = queue; queue = new Promise(resolve => { unlock = resolve; }); await previous;
             local = structuredClone(state); begun = true; events.push({ transaction: 'begin', role });
           },
@@ -198,6 +204,20 @@ test('notices store: first publish serializes counter, edit/hide/republish prese
   assert.equal((await f.save({publish:true})).seq,11);
   const lockAt=f.events.findIndex(event=>event.sql?.endsWith('WHERE id = ? FOR UPDATE'));
   assert.ok(lockAt>=0); assert.ok(f.events.some(event=>event.sql==='SELECT LAST_INSERT_ID() AS seq'));
+});
+
+test('notices UTC session: 15:00 Asia/Seoul publication is 06:00Z for admin and webmail', async () => {
+  const f=database(); const row=await f.save({publish:true});
+  assert.equal(row.publishedAt,'2026-10-28T06:00:00Z');
+  assert.equal((await f.admin.adminGet(row.id)).publishedAt,row.publishedAt);
+  assert.equal((await f.user.list('reader@example.test')).items[0].publishedAt,row.publishedAt);
+  for(const role of ['admin','webmail']) {
+    const events=f.events.filter(event=>event.role===role);
+    const begins=events.filter(event=>event.transaction==='begin');
+    assert.ok(begins.length>0);
+    assert.equal(events.filter(event=>event.sql==="SET time_zone = '+00:00'").length,begins.length);
+    for(const [index,event] of events.entries())if(event.transaction==='begin')assert.equal(events[index-1].sql,"SET time_zone = '+00:00'");
+  }
 });
 
 test('notices optimistic lock preserves microseconds and rejects a stale second edit within one second', async () => {
@@ -304,6 +324,21 @@ test('notices HTTP: web session/CSRF, ignored Authorization and client audience/
   assert.equal((await f.webRequest('POST','/api/notices/seen',{upTo:Number.MAX_SAFE_INTEGER})).statusCode,200);
   assert.deepEqual(f.db.state.reads,{'reader@example.test':0});
 });
+for(const [raw,canonical] of [
+  ['2026-10-28 06:00:00','2026-10-28T06:00:00.000000Z'],
+  ['2026-10-28 06:00:00.000000','2026-10-28T06:00:00.000000Z'],
+  ['2026-10-28 06:00:00.123456','2026-10-28T06:00:00.123456Z'],
+])test(`notices HTTP: binary DATETIME ${raw} version round-trips unchanged`,async t=>{
+  const f=await httpFixture(t); const created=await f.save();
+  f.db.state.rows.find(row=>row.id===created.id).updated_at=raw;
+  const read=await f.adminRequest('GET',`${adminRoot}/${created.id}`);assert.equal(read.statusCode,200,read.body);
+  assert.equal(read.json().updatedAt,canonical);
+  const list=await f.adminRequest('GET',adminRoot);assert.equal(list.json().items[0].updatedAt,canonical);
+  const change=await f.adminRequest('PUT',`${adminRoot}/${created.id}`,draft({updatedAt:read.json().updatedAt,title:'changed'}));
+  assert.equal(change.statusCode,200,change.body);assert.match(change.json().updatedAt,/\.\d{6}Z$/);
+  failure(await f.adminRequest('PUT',`${adminRoot}/${created.id}`,draft({updatedAt:read.json().updatedAt,title:'stale'})),409,'CONFLICT');
+});
+
 test('notices HTTP: complete admin CRUD, publish/hide/pin states, contract and audit; web enabled/unread/seen',async t=>{
   const f=await httpFixture(t);
   const preview=await f.adminRequest('POST',`${adminRoot}/preview`,{bodyHtml:'<p onclick="bad()">preview<img src=x></p>'});

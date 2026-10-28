@@ -8,13 +8,14 @@ const missing = () => new AppError(404, 'NOT_FOUND', '공지를 찾을 수 없�
 const conflict = () => new AppError(409, 'CONFLICT', '다른 변경이 있어요. 공지를 다시 불러와 주세요.');
 const storageErrors = new Set(['ER_BAD_DB_ERROR', 'ER_BAD_FIELD_ERROR', 'ER_NO_SUCH_TABLE', 'ER_TABLEACCESS_DENIED_ERROR', 'ER_COLUMNACCESS_DENIED_ERROR', 'ER_DBACCESS_DENIED_ERROR', 'ER_ACCESS_DENIED_ERROR', 'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'PROTOCOL_CONNECTION_LOST']);
 const timestamp = value => value == null ? null : value instanceof Date ? value.toISOString() : String(value).replace(' ', 'T').replace(/Z?$/, 'Z');
+const versionTimestamp = value => timestamp(value)?.replace(/(?:\.(\d{1,6}))?Z$/, (_, fraction = '') => `.${fraction.padEnd(6, '0')}Z`);
 const number = value => Number(value);
 const userNotice = (row, watermark) => ({ id: number(row.id), seq: number(row.publish_seq), title: row.title, category: row.category,
   pinned: Boolean(number(row.pinned)), publishedAt: timestamp(row.published_at), bodyHtml: sanitizeNotice(row.body_html).bodyHtml,
   unread: number(row.publish_seq) > watermark });
 const adminNotice = (row, domains, detail = true) => ({ id: number(row.id), title: row.title, category: row.category,
   pinned: Boolean(number(row.pinned)), state: row.state, audienceAll: Boolean(number(row.audience_all)), domains,
-  publishedAt: timestamp(row.published_at), updatedAt: timestamp(row.updated_at),
+  publishedAt: timestamp(row.published_at), updatedAt: versionTimestamp(row.updated_at),
   ...(detail ? { bodyHtml: sanitizeNotice(row.body_html).bodyHtml, seq: row.publish_seq == null ? null : number(row.publish_seq) } : {}) });
 const visible = "n.state = 'published' AND (n.audience_all = 1 OR EXISTS (SELECT 1 FROM mailstack_webmail.notice_domains d WHERE d.notice_id = n.id AND d.domain = ?))";
 
@@ -33,6 +34,8 @@ export function createNoticesStore({ config = {}, db, mode = 'webmail' } = {}) {
     return run(async () => {
       const connection = await db.getConnection();
       try {
+        // dateStrings bypasses driver timezone conversion; normalize server time on every checkout.
+        await connection.query("SET time_zone = '+00:00'");
         await connection.beginTransaction();
         const value = await operation(connection);
         await connection.commit();
@@ -140,7 +143,7 @@ export function createNoticesStore({ config = {}, db, mode = 'webmail' } = {}) {
       if (id !== undefined) {
         [[current]] = await connection.execute(`SELECT * FROM ${schema}.notices WHERE id = ? FOR UPDATE`, [id]);
         if (!current) throw missing();
-        if (timestamp(current.updated_at) !== updatedAt) throw conflict();
+        if (versionTimestamp(current.updated_at) !== updatedAt) throw conflict();
       }
       if (action === 'delete') {
         await connection.execute(`DELETE FROM ${schema}.notices WHERE id = ?`, [id]);

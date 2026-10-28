@@ -840,7 +840,7 @@ mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다.
 
 공지 저장소는 mailcow MariaDB의 별도 `mailstack_webmail` 스키마(utf8mb4)에 둡니다. mailcow의 기존 테이블은 바꾸지 않습니다. `notices`는 본문·상태·최초 게시 번호/시각, `notice_domains`는 대상 도메인, `notice_reads`는 소문자 이메일별 마지막 읽음 번호, `notice_counter`는 한 행의 게시 번호 카운터를 저장합니다. 대상 도메인은 전체 공개 공지에는 저장하지 않습니다. 계정을 삭제해도 읽음 행은 남으며, 같은 이메일을 다시 만들면 이전 읽음 상태를 이어받습니다.
 
-관리자가 처음 게시할 때 트랜잭션 안에서 `UPDATE notice_counter SET next_seq = LAST_INSERT_ID(next_seq + 1) WHERE id = 1`을 실행한 뒤 같은 연결의 `SELECT LAST_INSERT_ID()`로 게시 번호를 받습니다. 행 잠금으로 동시 게시 번호가 겹치지 않습니다. 일부 또는 전체 공지를 삭제해도 카운터를 줄이지 않으며, 수정·숨김 후 재게시에서도 최초 번호와 게시 시각을 유지합니다. 이 배포 단계는 저장소와 권한을 준비하며, 공지 API와 화면은 후속 단계에서 연결합니다.
+관리자가 처음 게시할 때 트랜잭션 안에서 `UPDATE notice_counter SET next_seq = LAST_INSERT_ID(next_seq + 1) WHERE id = 1`을 실행한 뒤 같은 연결의 `SELECT LAST_INSERT_ID()`로 게시 번호를 받습니다. 행 잠금으로 동시 게시 번호가 겹치지 않습니다. 일부 또는 전체 공지를 삭제해도 카운터를 줄이지 않으며, 수정·숨김 후 재게시에서도 최초 번호와 게시 시각을 유지합니다. 관리 화면의 웹메일 공지에서 작성·게시하며, 대상 사용자는 웹메일 상단 종에서 공지를 확인합니다.
 
 `scripts/apply-webmail-notices-db.sh apply`는 root의 Docker 접근과 MariaDB root 인증으로 스키마·네 테이블을 `IF NOT EXISTS`로 생성하고 카운터가 없을 때만 `(1,0)`을 넣습니다. 재실행해도 기존 데이터와 카운터를 보존하며 삭제·되돌리기 모드는 없습니다. `--check`는 필요한 열과 카운터 준비 상태를 읽기만 합니다.
 
@@ -855,7 +855,7 @@ mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다.
 
 관리 DB 비밀번호는 `webmail_ensure_admin_db_password`가 처음 한 번 스택 `.env`에 생성·저장합니다(0600). 기존 값은 보존하며 `webmail_generate_admin_env`는 DB_HOST=`mysql-mailcow`, DB_NAME=`mailstack_webmail`, DB_USER=`webmail_notices_admin`, DB_PASSWORD를 `webmail-admin.env`(0600)에 쓰기만 합니다. 관리 env나 컨테이너를 재생성해도 DB 비밀번호는 바뀌지 않습니다. root·mailcow 본계정은 앱에서 사용하지 않습니다.
 
-setup·update 순서는 주소 사전 검사 → 비밀번호 확보 → 공지 스키마 생성 → 두 계정 권한 적용 → env·override 생성 → `edge_up_apps`입니다. 기존 `edge_apply_trust`의 계정 재적용도 멱등 재확인으로 남습니다. 주소·DB 준비 실패 시 새 앱을 기동하지 않으며, 원인을 해결한 뒤 같은 update를 재실행합니다. `verify.sh`는 스키마·카운터와 웹메일/활성 관리 계정의 정확한 권한을 검사합니다. 후속 앱 단계는 저장소·권한이 준비되지 않으면 공지 기능만 끄고 나머지 앱 기능은 유지하도록 연결합니다.
+setup·update 순서는 주소 사전 검사 → 비밀번호 확보 → 공지 스키마 생성 → 두 계정 권한 적용 → env·override 생성 → `edge_up_apps`입니다. 기존 `edge_apply_trust`의 계정 재적용도 멱등 재확인으로 남습니다. 주소·DB 준비 실패 시 새 앱을 기동하지 않으며, 원인을 해결한 뒤 같은 update를 재실행합니다. `verify.sh`는 스키마·카운터와 웹메일/활성 관리 계정의 정확한 권한을 검사합니다. 앱은 저장소·권한이 준비되지 않으면 공지 기능만 끄고 나머지 앱 기능은 유지합니다.
 
 ### 공지 백업·복원
 

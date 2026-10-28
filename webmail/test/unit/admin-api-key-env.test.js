@@ -43,7 +43,7 @@ test('admin proxy env: only the dedicated NPM /32 is trusted; generated networks
   assert.match(await f.admin(), /^TRUST_PROXY="172\.23\.12\.130\/32"$/m);
   assert.match(await f.public(), /^TRUST_PROXY="172\.22\.10\.2\/32,172\.22\.1\.0\/24,192\.0\.2\.0\/24"$/m);
   const override = await readFile(join(f.dir, 'docker-compose.override.yml'), 'utf8');
-  assert.match(override, /webmail-admin:\n    networks:\n      mailstack-admin-edge:\n        ipv4_address: 172\.23\.12\.131\n        aliases: \[webmail-admin-edge\]/);
+  assert.match(override, /webmail-admin:\n    networks:\n      mailcow-network:\n        ipv4_address: 172\.22\.1\.241\n      mailstack-admin-edge:\n        ipv4_address: 172\.23\.12\.131\n        aliases: \[webmail-admin-edge\]/);
   assert.match(override, /\n  mailstack-admin-edge:\n    external: true\n    name: mailstack-admin-edge/);
   assert.ok(!override.split('  webmail-admin:')[0].includes('mailstack-admin-edge'));
   await writeFile(join(f.dir, 'stack.env'), 'DOMAIN=example.test\nWEBMAIL_ENABLE=true\nWEBMAIL_ADMIN_ENABLE=false\nWEBMAIL_DB_PASSWORD=synthetic-db-only\n');

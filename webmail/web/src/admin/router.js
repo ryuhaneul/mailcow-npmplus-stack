@@ -6,5 +6,23 @@ export function parseAdminRoute(hash = '') {
   catch { return { name: 'home', parts: [] }; }
 }
 export const adminRoute = signal(parseAdminRoute());
-export function initAdminRouter() { const update = () => { adminRoute.value = parseAdminRoute(location.hash); }; addEventListener('hashchange', update); update(); return () => removeEventListener('hashchange', update); }
+let leaveGuard;
+export function registerAdminLeaveGuard(guard) {
+  leaveGuard = guard;
+  return () => { if (leaveGuard === guard) leaveGuard = undefined; };
+}
+export function initAdminRouter() {
+  let accepted = location.hash;
+  const update = () => {
+    const next = location.hash;
+    if (next !== accepted && leaveGuard && leaveGuard(parseAdminRoute(next)) === false) {
+      history.replaceState(history.state, '', accepted || '#home');
+      return;
+    }
+    accepted = next;
+    adminRoute.value = parseAdminRoute(next);
+  };
+  addEventListener('hashchange', update); update();
+  return () => removeEventListener('hashchange', update);
+}
 export function navigateAdmin(hash) { location.hash = hash; }

@@ -1,4 +1,7 @@
 import { join } from 'node:path';
+import { createNoticesStore } from '../notices/store.js';
+import { createNoticesService } from './services/notices.js';
+import noticesRoutes from './routes/notices.js';
 import { createQuotaNotificationStore } from './quota-notification-state.js';
 import { createQuotaNotificationMailer } from './quota-notification-mail.js';
 import { createQuotaNotificationScheduler } from './quota-notification-scheduler.js';
@@ -78,7 +81,7 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {} } = {}) {
   if (logger !== false) {
     const base = logOptions(config.logLevel);
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
@@ -150,6 +153,11 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const domains = createDomainsService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('domains', domains);
   await app.register(domainsRoutes, { service: domains });
+  const noticesStore = notices.store ?? createNoticesStore({ ...notices, config, mode: 'admin' });
+  const noticesService = createNoticesService({ store: noticesStore, domains, audit });
+  app.decorate('notices', noticesService);
+  app.addHook('onClose', async () => { await noticesStore.close?.(); });
+  await app.register(noticesRoutes, { service: noticesService });
   const senders = createSendersService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('senders', senders);
   await app.register(sendersRoutes, { service: senders });

@@ -136,6 +136,13 @@ export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 source "$SCRIPT_DIR/lib/admin-access.sh"
 admin_access preflight >/dev/null || die "Invalid ADMIN_ACCESS_LIST; update stopped before changes"
 
+# Refuse an invalid/occupied admin DB address before the upstream updater or
+# log-archive preparation can recreate any containers. Recheck at app startup.
+if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Invalid admin DB configuration; update stopped before container changes"
+    edge_check_admin_db_address || die "Admin DB address conflict; update stopped before container changes"
+fi
+
 # Existing installations must be fully backfilled before any replacement path,
 # including the upstream updater (which owns its own container recreation).
 WEBMAIL_STACK_ENV="$ENV_FILE"
@@ -523,6 +530,14 @@ fi
 # Phase 5b: Webmail edge migration
 # ============================================================
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+edge_check_admin_db_address || die "Admin DB address preflight failed before app changes"
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    webmail_ensure_db_password && webmail_ensure_admin_db_password || die "Webmail DB password preparation failed"
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" apply \
+        || die "Webmail notices schema preparation failed"
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply \
+        || die "Webmail DB grants preparation failed"
+fi
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"

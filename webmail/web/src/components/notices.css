@@ -1,0 +1,81 @@
+.top .r{position:relative}
+.bell{position:relative}
+.bell-mark{display:none;position:absolute;pointer-events:none;top:6px;right:7px;width:8px;height:8px;border-radius:50%;background:var(--danger);box-shadow:0 0 0 2px var(--surface)}
+.bell.has-new .bell-mark{display:block}
+.bell[aria-expanded=true]{background:var(--sel)}
+/* 공통 창 */
+.ntc-pop{position:absolute;z-index:40;right:0;top:calc(100% + 8px);background:var(--surface);border-radius:var(--r-pop);box-shadow:var(--float);color:var(--ink);display:flex;flex-direction:column;overflow:hidden;transform-origin:top right;animation:ntc-in .14s ease-out}
+@keyframes ntc-in{from{opacity:0;transform:translateY(-4px) scale(.98)}to{opacity:1;transform:none}}
+.ntc-head{display:flex;align-items:center;gap:8px;padding:14px 16px 10px;flex:none}
+.ntc-head h2{margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em}
+.ntc-head .sub{font-size:12px;color:var(--ink-3)}
+.ntc-head .x{margin-left:auto}
+.ntc-x{display:none}
+.ntc-body{overflow-y:auto;overscroll-behavior:contain;flex:1;min-height:0}
+.ntc-foot{flex:none;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 8px 0 16px;height:44px;font-size:12.5px;color:var(--ink-3)}
+.ntc-foot button{height:30px;padding:0 10px;border-radius:var(--r-ctl);font-size:13px;font-weight:600;color:var(--ink);cursor:pointer}
+.ntc-foot button:hover{background:var(--hover)}
+
+/* 분류 표시 */
+.ncat{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:var(--r-chip);font-size:11.5px;font-weight:600;flex:none;white-space:nowrap}
+.ncat.c-up{background:var(--l2-bg);color:var(--l2-ink)}
+.ncat.c-fix{background:var(--l3-bg);color:var(--l3-ink)}
+.ncat.c-info{background:var(--l0-bg);color:var(--l0-ink)}
+.npin{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;color:var(--ink-3);flex:none}
+
+/* 본문 서식 */
+.nbody{font-size:14px;line-height:1.7;color:var(--ink-2);word-break:keep-all;overflow-wrap:anywhere}
+.nbody p{margin:0 0 8px}.nbody p:last-child{margin-bottom:0}
+.nbody ul{margin:0 0 8px;padding-left:18px}.nbody li{margin:2px 0}.nbody li::marker{color:var(--ink-3)}
+.nbody strong{color:var(--ink);font-weight:700}
+.nbody a{color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line-2)}
+.nbody a:hover{text-decoration-color:currentColor}
+
+/* 빈 상태 */
+.ntc-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:44px 24px;color:var(--ink-3);font-size:13px;gap:6px}
+.ntc-empty svg{width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;margin-bottom:4px;opacity:.7}
+.ntc-empty b{color:var(--ink-2);font-size:14px}
+
+/* ===== A: 펼쳐 읽기 ===== */
+.ntc-pop{width:384px;max-height:min(560px,calc(100dvh - 90px))}
+.na-item{border-top:1px solid var(--line)}
+.na-item:first-child{border-top:0}
+.na-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:4px 10px;align-items:start;width:100%;text-align:left;padding:12px 16px 12px 12px;cursor:pointer;color:inherit}
+.na-row:hover{background:var(--hover)}
+.na-row .u{width:6px;height:6px;border-radius:50%;margin-top:7px;justify-self:center}
+.na-item.unread .na-row .u{background:var(--danger)}
+.na-row .t{font-size:14px;line-height:1.45;color:var(--ink-2);word-break:keep-all}
+.na-item.unread .na-row .t{color:var(--ink);font-weight:700}
+.na-row .meta{grid-column:2;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-3)}
+.na-row .chev{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;color:var(--ink-3);margin-top:2px;transition:transform .15s}
+.na-item.open .na-row .chev{transform:rotate(180deg)}
+.na-item.pinned{background:color-mix(in srgb,var(--sunken) 60%,transparent)}
+.na-open{padding:0 16px 14px 32px}
+.na-item:not(.open) .na-open{display:none}
+.na-open .when{font-size:12px;color:var(--ink-3);margin-top:10px}
+
+@media(max-width:760px){
+  .ntc-pop{position:fixed;inset:0;width:auto;height:auto;max-height:none;border-radius:0;box-shadow:none;animation:ntc-sheet .2s ease-out}
+  @keyframes ntc-sheet{from{transform:translateY(16px);opacity:0}to{transform:none;opacity:1}}
+  .ntc-head{height:56px;padding:0 8px 0 16px;border-bottom:1px solid var(--line)}
+  .ntc-head h2{font-size:17px}
+  .ntc-x{display:grid;place-items:center;width:44px;height:44px;margin-left:auto;border-radius:var(--r-ctl);cursor:pointer;color:var(--ink-2)}
+  .ntc-x svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7}
+  .ntc-foot{height:52px;padding-bottom:env(safe-area-inset-bottom)}
+  .na-row{padding:14px 16px 14px 12px}
+  .na-row .t{font-size:15px}
+  .nbody{font-size:15px}
+}
+
+/* Reset native dialog defaults while keeping the approved sheet geometry. */
+.ntc-pop{margin:0;padding:0;border:0;max-width:none;text-align:left}
+.ntc-pop::backdrop{background:transparent}
+.ntc-head h2:focus{outline:none}
+.ntc-foot{justify-content:flex-end}
+.ntc-loading{padding:18px 16px;display:grid;gap:18px}
+.ntc-skeleton{height:14px;border-radius:4px;background:var(--line)}
+.ntc-skeleton:nth-child(3){width:80%}
+.ntc-skeleton:nth-child(4){width:60%}
+.ntc-error .btn{margin-top:6px}
+.ntc-pop button:focus-visible,.ntc-pop a:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+@media(prefers-reduced-motion:reduce){.ntc-pop{animation:none}.na-row .chev{transition:none}}

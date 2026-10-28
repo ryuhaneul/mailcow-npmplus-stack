@@ -118,19 +118,22 @@ edge_load_config() {
     local network
     network=$(webmail_mailcow_value IPV4_NETWORK)
     WEBMAIL_RELAY_IPV4=${WEBMAIL_RELAY_IPV4:-$network.240}
+    WEBMAIL_ADMIN_DB_IPV4=${WEBMAIL_ADMIN_DB_IPV4:-$network.241}
     WEBMAIL_EDGE_SUBNET=${WEBMAIL_EDGE_SUBNET:-172.22.10.0/24}
     ADMIN_EDGE_SUBNET=${ADMIN_EDGE_SUBNET:-172.22.12.0/24}
     python3 - "$network" "$WEBMAIL_RELAY_IPV4" \
-        "$WEBMAIL_EDGE_SUBNET" "$ADMIN_EDGE_SUBNET" <<'PY' || return 1
+        "$WEBMAIL_ADMIN_DB_IPV4" "${WEBMAIL_ADMIN_ENABLE:-false}" "$WEBMAIL_EDGE_SUBNET" "$ADMIN_EDGE_SUBNET" <<'PY' || return 1
 import ipaddress, sys
 try:
     network = ipaddress.IPv4Network(sys.argv[1] + '.0/24')
-    relays = [ipaddress.IPv4Address(value) for value in sys.argv[2:3]]
+    relays = [ipaddress.IPv4Address(value) for value in (sys.argv[2:4] if sys.argv[4] == 'true' else sys.argv[2:3])]
     for relay in relays:
         if relay not in network or not 2 <= int(relay) - int(network.network_address) <= 247:
             raise ValueError('relay must be in the mailcow /24, excluding gateway, network, broadcast and .248-.254')
+    if len(relays) == 2 and relays[0] == relays[1]:
+        raise ValueError('admin DB address must differ from relay address')
     private = [ipaddress.IPv4Network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
-    for value in sys.argv[3:]:
+    for value in sys.argv[5:]:
         if '/' not in value:
             raise ValueError('edge subnet must have a CIDR prefix')
         subnet = ipaddress.IPv4Network(value)
@@ -144,6 +147,30 @@ PY
         echo '[edge] WARNING: WEBMAIL_IPV4 더 이상 쓰지 않음 — 웹메일은 mailcow 망에서 빠짐, 중계 주소는 WEBMAIL_RELAY_IPV4' >&2
     fi
 }
+
+# Read-only preflight before any app container changes. The existing admin
+# container may retain its address on an idempotent update.
+edge_check_admin_db_address() (
+    [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] || return 0
+    local work
+    work=$(mktemp) || return 1
+    trap 'rm -f "$work"' EXIT
+    docker network inspect mailcowdockerized_mailcow-network > "$work" \
+        || { edge_error 'cannot inspect mailcow network for admin DB address'; return 1; }
+    python3 - "$work" "$WEBMAIL_ADMIN_DB_IPV4" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    networks = json.loads(Path(sys.argv[1]).read_text())
+    if len(networks) != 1:
+        raise ValueError('expected one mailcow network')
+    for container in (networks[0].get('Containers') or {}).values():
+        if container.get('Name') != 'webmail-admin' and container.get('IPv4Address', '').split('/')[0] == sys.argv[2]:
+            raise ValueError('admin DB address is already used by another container')
+except (ValueError, KeyError, TypeError) as exc:
+    sys.exit('[edge] ERROR: ' + str(exc))
+PY
+)
 
 # Network offsets also work for /25-/29 subnets whose last octet is not zero.
 edge_address() {
@@ -316,6 +343,7 @@ edge_log() { echo "[edge] $*" >&2; }
 edge_prepare_apps() {
     local project="$1" webdir="$2" before="" after
     EDGE_WEBMAIL_PIN_CHANGED=false
+    edge_check_admin_db_address || return 1
     if [ "$WEBMAIL_ENABLE" = true ]; then
         edge_log 'step 1: checking Docker/subnets and preparing app files'
         edge_check_docker_version && edge_check_overlap || return 1
@@ -326,7 +354,7 @@ edge_prepare_apps() {
         rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
             --exclude=.env --exclude=log-archiver/ --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then before=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || true; fi
-        webmail_ensure_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" && webmail_generate_admin_env "$webdir" \
+        webmail_ensure_db_password && webmail_ensure_admin_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" && webmail_generate_admin_env "$webdir" \
             && edge_generate_relay webmail "$webdir" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then
             after=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || return 1

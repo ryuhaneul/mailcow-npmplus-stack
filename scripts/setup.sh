@@ -846,6 +846,14 @@ fi
 
 # Edge stages 1/2 run before NPMplus is attached to the app networks.
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
+edge_check_admin_db_address || die "Admin DB address preflight failed before app changes"
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    webmail_ensure_db_password && webmail_ensure_admin_db_password || die "Webmail DB password preparation failed"
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" apply \
+        || die "Webmail notices schema preparation failed"
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply \
+        || die "Webmail DB grants preparation failed"
+fi
 setup_archive_sync || die "Log archive readiness failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"

@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef } from 'preact/hooks';
-export default function ComposeEditor({signatureNonce,html,onChange,disabled,editor}) {
+export default function ComposeEditor({signatureNonce,html,onChange,disabled,editor,paragraphSeparator,stylesheetUrl}) {
   const frame=useRef(null),latest=useRef({html,onChange,disabled}),reported=useRef(html),range=useRef(null),composing=useRef(false),idle=useRef(new Set());latest.current={html,onChange,disabled};
   useLayoutEffect(()=>{
     const element=frame.current;let detach;
     const theme=()=>{const root=element.contentDocument?.documentElement;if(!root)return;const source=getComputedStyle(document.documentElement);for(const key of ['--font','--ink','--ink-2','--line-2','--surface','--accent-ink'])root.style.setProperty(key,source.getPropertyValue(key));root.style.colorScheme=document.documentElement.dataset.mode;};
     const loaded=()=>{
       detach?.();const doc=element.contentDocument;doc.body.innerHTML=latest.current.html;reported.current=latest.current.html;doc.body.contentEditable=String(!latest.current.disabled);doc.body.setAttribute('role','textbox');doc.body.setAttribute('aria-label','본문');doc.body.setAttribute('aria-multiline','true');theme();
+      if(paragraphSeparator!==undefined)doc.execCommand('defaultParagraphSeparator',false,paragraphSeparator);
       const remember=()=>{const selection=doc.getSelection();if(selection?.rangeCount)range.current=selection.getRangeAt(0).cloneRange();};
       const changed=()=>{reported.current=doc.body.innerHTML;latest.current.onChange(reported.current);remember();};
       const start=()=>{composing.current=true;};
@@ -59,6 +60,6 @@ export default function ComposeEditor({signatureNonce,html,onChange,disabled,edi
   }
   // Reconcile external HTML in the same commit, before another native input can arrive.
   useLayoutEffect(()=>{const body=frame.current.contentDocument?.body;if(body){body.contentEditable=String(!disabled);if(!composing.current&&html!==reported.current){if(!replaceSignature(body,html)){body.innerHTML=html;range.current=null;}reported.current=html;}}},[html,disabled]);
-  const source='<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>@font-face{font-family:Pretendard;src:url(/fonts/PretendardVariable.woff2) format("woff2");font-weight:45 920;font-display:swap}*{box-sizing:border-box}html,body{margin:0;min-height:100%}body{padding:18px 22px 10px;font-family:var(--font);font-size:15px;line-height:1.75;color:var(--ink);background:var(--surface);outline:0;overflow-wrap:anywhere}p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:22px}img{max-width:100%;height:auto}blockquote{margin:18px 0;padding-left:14px;border-left:2px solid var(--line-2);color:var(--ink-2)}.sig{margin-top:18px;padding-top:12px;border-top:1px dashed var(--line-2);font-size:13.5px;line-height:1.6;color:var(--ink-2)}.sig b{color:var(--ink)}a{color:var(--accent-ink)}</style></head><body></body></html>';
+  const source=stylesheetUrl?`<!doctype html><html lang="ko"><head><meta charset="utf-8"><link rel="stylesheet" href="${String(stylesheetUrl).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}"></head><body></body></html>`:'<!doctype html><html lang="ko"><head><meta charset="utf-8"><style>@font-face{font-family:Pretendard;src:url(/fonts/PretendardVariable.woff2) format("woff2");font-weight:45 920;font-display:swap}*{box-sizing:border-box}html,body{margin:0;min-height:100%}body{padding:18px 22px 10px;font-family:var(--font);font-size:15px;line-height:1.75;color:var(--ink);background:var(--surface);outline:0;overflow-wrap:anywhere}p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:22px}img{max-width:100%;height:auto}blockquote{margin:18px 0;padding-left:14px;border-left:2px solid var(--line-2);color:var(--ink-2)}.sig{margin-top:18px;padding-top:12px;border-top:1px dashed var(--line-2);font-size:13.5px;line-height:1.6;color:var(--ink-2)}.sig b{color:var(--ink)}a{color:var(--accent-ink)}</style></head><body></body></html>';
   return <div class="c-body compose-editor-wrap"><iframe ref={frame} class="compose-editor" title="서식 편집기" sandbox="allow-same-origin" srcDoc={source}/></div>;
 }

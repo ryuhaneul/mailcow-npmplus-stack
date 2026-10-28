@@ -5,6 +5,7 @@ import { updatePrefs } from '../state/prefs.js';
 import Icon from './Icon.jsx';
 import SearchBar from './SearchBar.jsx';
 import OooBadge from './OooBadge.jsx';
+import NoticeBell from './NoticeBell.jsx';
 export default function TopBar({ mode, navOpen, toggleNav }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const account = useRef(null), trigger = useRef(null), exit = useRef(null);
@@ -22,7 +23,7 @@ export default function TopBar({ mode, navOpen, toggleNav }) {
   return <header class="top">
     <button class="ib menu-btn" type="button" aria-label="메일함 열기" aria-controls="mail-sidebar" aria-expanded={navOpen} onClick={toggleNav}><Icon name="menu"/></button>
     <SearchBar/>
-    <div class="r"><OooBadge/>
+    <div class="r"><OooBadge/><NoticeBell/>
       <button class="ib" type="button" aria-label={mode === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} onClick={() => {updatePrefs({mode:mode === 'dark' ? 'light' : 'dark'});}}><Icon name={mode === 'dark' ? 'sun' : 'moon'}/></button>
       <a class="ib" href="#settings" title="설정" aria-label="설정"><Icon name="settings"/></a>
       <div class="account" ref={account}>

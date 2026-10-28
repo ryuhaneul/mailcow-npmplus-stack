@@ -80,6 +80,7 @@ export function createFakeApi({ variant = 'a', authenticated = false, contrastMe
     }
     if(await fakeSettings(request,response,state,send,recorded))return;
     if(path==='/api/prefs'&&request.method==='GET')return send(response,200,state.prefs);
+    if(path==='/api/notices/unread'&&request.method==='GET')return send(response,200,{enabled:false,unreadCount:0});
     if(path==='/api/signatures'&&request.method==='GET')return send(response,200,{revision:'S'.repeat(32),items:[],defaults:{},usedBytes:0,maxBytes:262144,notices:[]});
     if(path==='/api/signature-images'&&request.method==='GET')return send(response,200,{revision:'I'.repeat(32),images:[],usedBytes:0,maxBytes:1048576,maxFileBytes:204800,maxCount:20});
     if(path==='/api/events'){

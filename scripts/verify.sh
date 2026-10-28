@@ -215,7 +215,8 @@ fi
 if [ "$WEBMAIL_ENABLE" = true ]; then
     echo "[Webmail]"
     check "Dovecot Webmail blocks" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" --check
-    check "Webmail DB column grants" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" --check
+    check "Webmail notices schema and counter" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" --check
+    check "Webmail directory/notices and enabled admin DB grants" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" --check
     check "Unauthenticated logout: 403, no WWW-Authenticate" webmail_logout_unauthenticated
     if [ "${WEBMAIL_MAIL_TLS_MODE:-verify}" = pin ]; then
         if webmail_load_config "$ENV_FILE" "$MAILCOW_DIR"; then

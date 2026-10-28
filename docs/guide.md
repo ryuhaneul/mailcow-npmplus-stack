@@ -826,6 +826,8 @@ mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다.
 | 변수 | 기본값 | 의미 |
 |---|---|---|
 | `WEBMAIL_ADMIN_ENABLE` | `false` | 관리 기능 선택. `WEBMAIL_ENABLE=true`가 필수 |
+| `WEBMAIL_ADMIN_DB_IPV4` | `<IPV4_NETWORK>.241` | 관리 DB 접속용 고정 IP. 같은 /24의 .2~.247, relay와 중복 불가. 다른 컨테이너가 사용 중이면 앱 변경 전 중단 |
+| `WEBMAIL_ADMIN_DB_PASSWORD` | 자동 생성 | 최초 한 번 생성해 스택 `.env`에 저장하고 관리 env 재생성 시 재사용. 출력·로그·공개 백업 금지 |
 | `WEBMAIL_ADMIN_HOSTNAME` | `mailadmin.${DOMAIN}` | 관리 주소 한 개. mail/mailcow/mail-npm 및 공개 웹메일 주소와 중복 불가 |
 | `WEBMAIL_ADMIN_SESSION_IDLE_MIN` | `60` | 유휴 만료, 1~180분 |
 | `WEBMAIL_ADMIN_SESSION_MAX_HOURS` | `8` | 최대 시간. 유휴 만료보다 짧을 수 없음 |
@@ -833,6 +835,45 @@ mailcow의 전체 관리자(superadmin) 아이디·암호로 로그인합니다.
 | `TOOLKIT_ENABLE` | `true` | Toolkit 설치·갱신. false는 자동 제거를 뜻하지 않음 |
 
 관리 주소의 DNS A 레코드를 서버 IP로 만듭니다. `sudo bash scripts/dns-records.sh`가 주소와 확인 표시를 출력합니다. 인증서는 NPMplus가 발급합니다. 다른 대상으로 향하는 기존 프록시는 덮어쓰지 않고 경고합니다. 관리 프록시는 `http://webmail-admin:8080`, HTTP/2 켬, 웹소켓·block_exploits 끔, 요청 크기 4m입니다.
+
+### 웹메일 공지 저장소·권한
+
+공지 저장소는 mailcow MariaDB의 별도 `mailstack_webmail` 스키마(utf8mb4)에 둡니다. mailcow의 기존 테이블은 바꾸지 않습니다. `notices`는 본문·상태·최초 게시 번호/시각, `notice_domains`는 대상 도메인, `notice_reads`는 소문자 이메일별 마지막 읽음 번호, `notice_counter`는 한 행의 게시 번호 카운터를 저장합니다. 대상 도메인은 전체 공개 공지에는 저장하지 않습니다. 계정을 삭제해도 읽음 행은 남으며, 같은 이메일을 다시 만들면 이전 읽음 상태를 이어받습니다.
+
+관리자가 처음 게시할 때 트랜잭션 안에서 `UPDATE notice_counter SET next_seq = LAST_INSERT_ID(next_seq + 1) WHERE id = 1`을 실행한 뒤 같은 연결의 `SELECT LAST_INSERT_ID()`로 게시 번호를 받습니다. 행 잠금으로 동시 게시 번호가 겹치지 않습니다. 일부 또는 전체 공지를 삭제해도 카운터를 줄이지 않으며, 수정·숨김 후 재게시에서도 최초 번호와 게시 시각을 유지합니다. 이 배포 단계는 저장소와 권한을 준비하며, 공지 API와 화면은 후속 단계에서 연결합니다.
+
+`scripts/apply-webmail-notices-db.sh apply`는 root의 Docker 접근과 MariaDB root 인증으로 스키마·네 테이블을 `IF NOT EXISTS`로 생성하고 카운터가 없을 때만 `(1,0)`을 넣습니다. 재실행해도 기존 데이터와 카운터를 보존하며 삭제·되돌리기 모드는 없습니다. `--check`는 필요한 열과 카운터 준비 상태를 읽기만 합니다.
+
+`apply-webmail-dbuser.sh apply`는 다음 정확한 목록으로 두 계정의 권한을 재조정합니다. `--check`는 다른 호스트의 같은 계정, 스키마 전체 권한, GRANT OPTION, 불필요한 DELETE 등도 실패로 처리합니다.
+
+| 계정·접속 주소 | 권한 |
+|---|---|
+| `webmail_ro`@웹메일 relay IPv4 | 기존 mailcow 디렉터리 5개 테이블의 지정 열 SELECT 유지. 공지 `notices`·`notice_domains` SELECT, `notice_reads` SELECT/INSERT/UPDATE |
+| `webmail_notices_admin`@관리 DB IPv4 (관리 화면을 켠 경우) | `notices`·`notice_domains` SELECT/INSERT/UPDATE/DELETE, `notice_counter` SELECT/UPDATE. `notice_reads`와 mailcow 테이블 접근 없음 |
+
+관리 DB 주소는 스택 `.env`의 `WEBMAIL_ADMIN_DB_IPV4`이며 비면 mailcow /24의 `.241`입니다. 관리 화면을 켰을 때 같은 /24의 .2~.247인지, relay와 다른지 검사하고 `docker network inspect`로 다른 컨테이너와의 충돌을 거부합니다. 이미 해당 주소를 사용하는 `webmail-admin` 자신은 재실행을 위해 허용합니다. override의 기존 관리 서비스에만 고정 IP를 넣습니다.
+
+관리 DB 비밀번호는 `webmail_ensure_admin_db_password`가 처음 한 번 스택 `.env`에 생성·저장합니다(0600). 기존 값은 보존하며 `webmail_generate_admin_env`는 DB_HOST=`mysql-mailcow`, DB_NAME=`mailstack_webmail`, DB_USER=`webmail_notices_admin`, DB_PASSWORD를 `webmail-admin.env`(0600)에 쓰기만 합니다. 관리 env나 컨테이너를 재생성해도 DB 비밀번호는 바뀌지 않습니다. root·mailcow 본계정은 앱에서 사용하지 않습니다.
+
+setup·update 순서는 주소 사전 검사 → 비밀번호 확보 → 공지 스키마 생성 → 두 계정 권한 적용 → env·override 생성 → `edge_up_apps`입니다. 기존 `edge_apply_trust`의 계정 재적용도 멱등 재확인으로 남습니다. 주소·DB 준비 실패 시 새 앱을 기동하지 않으며, 원인을 해결한 뒤 같은 update를 재실행합니다. `verify.sh`는 스키마·카운터와 웹메일/활성 관리 계정의 정확한 권한을 검사합니다. 후속 앱 단계는 저장소·권한이 준비되지 않으면 공지 기능만 끄고 나머지 앱 기능은 유지하도록 연결합니다.
+
+### 공지 백업·복원
+
+mailcow `helper-scripts/backup_and_restore.sh`의 mysql 볼륨 전체 백업에는 공지 스키마도 포함됩니다. `${DBNAME}` 하나만 덤프하는 수동 백업에는 빠지므로, 수동 덤프는 `mysqldump --databases "${DBNAME}" mailstack_webmail`처럼 두 스키마를 함께 지정합니다. root 인증은 `MYSQL_PWD` 전달 등 기존 비공개 방식으로 처리하고 명령 인자·로그에 암호를 넣지 않습니다. 스택 `.env`와 관리 env도 0600으로 비공개 보관합니다.
+
+mysql 볼륨 전체 복원은 공지 데이터와 두 DB 계정도 백업 시점으로 되돌립니다. 복원 뒤 현재 스택의 `update.sh --skip-mailcow-update`를 한 번 실행해 주소·비밀번호·권한을 다시 맞추고 `verify.sh`로 검사합니다. 격리된 복원 환경에서 데이터와 계정 권한을 확인한 뒤 운영 복원합니다.
+
+### 공지 변경 이전 버전으로 되돌리기
+
+반영 전에 스택 snapshot, `/home/webmail` 소스 tar, `mailstack-webmail:before-<HEAD>` 이미지 tag, 스택 `.env`·`webmail-admin.env`·edge override 사본(0600), mailcow DB와 `mailstack_webmail`을 포함한 mysql 덤프를 보관합니다. 당시 HEAD와 실제 관리 DB IPv4도 비공개 작업 기록에 남깁니다. 시험 VM에서 아래 순서와 서비스 상태를 확인한 뒤 운영에 적용합니다.
+
+1. 스택 레포를 기록한 이전 HEAD로 checkout합니다(운영 detached 허용). 이전 스크립트가 사용되는지 확인합니다.
+2. `/home/webmail`을 소스 tar로 복원하고 `mailstack-webmail:before-<HEAD>`를 `mailstack-webmail:local`로 다시 tag합니다.
+3. 백업한 `webmail-admin.env`·edge override를 복원해 관리 DB 고정 IP가 없던 상태로 돌립니다. 이전 라이브러리와 설정을 불러온 root 셸에서 `edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up up -d --no-deps --no-build webmail`을 실행합니다. 관리 화면을 켰었다면 같은 방식으로 `edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --no-deps --no-build webmail-admin`도 실행해 재생성합니다.
+4. 이전 `apply-webmail-dbuser.sh apply`로 `webmail_ro`를 기존 5개 테이블 지정 열 SELECT만으로 되돌립니다. 이전 스크립트가 모르는 관리 계정은 MariaDB root로 `DROP USER IF EXISTS 'webmail_notices_admin'@'<기록한 관리 DB IPv4>';`를 실행해 제거합니다. 공지 스키마와 데이터는 보존합니다.
+5. 웹메일·관리 컨테이너 healthy, 로그인·메일 목록·합성 메일 발송 1통, 이전 `verify.sh` 통과, `SHOW GRANTS`가 이전 상태와 같은지 확인합니다. SHOW GRANTS의 인증 해시를 로그·대화에 노출하지 않습니다.
+
+이전 앱은 공지 권한을 사용하지 않으므로 권한 회수 뒤에도 동작합니다. 다시 올리면 update가 공지 권한을 재부여하고 보존된 데이터·카운터를 이어갑니다. 새 update가 중간에 실패하면 원인을 해결한 뒤 같은 HEAD에서 재실행합니다. 주소·권한 준비 단계에서 멈췄다면 새 앱 컨테이너는 기동되지 않습니다.
 
 ### 기존 서버에서 켜기
 
@@ -849,6 +890,10 @@ sudo rsync -a --delete --exclude=node_modules --exclude=webmail.env \
   --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
   --exclude=docker-compose.override.yml --exclude=haproxy.cfg \
   "$STACK_DIR/webmail/" "$WEBMAIL_DIR/"
+sudo env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$STACK_DIR/.env" \
+  bash "$STACK_DIR/scripts/apply-webmail-notices-db.sh" apply
+sudo env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$STACK_DIR/.env" \
+  bash "$STACK_DIR/scripts/apply-webmail-dbuser.sh" apply
 sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" "$2" "$3"' \
   bash "$STACK_DIR" "$MAILCOW_DIR" "$WEBMAIL_DIR"
 (cd "$WEBMAIL_DIR" && sudo docker compose build && sudo docker compose --profile admin up -d)

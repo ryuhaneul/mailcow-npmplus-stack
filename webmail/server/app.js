@@ -1,4 +1,6 @@
 import Fastify, { LogController } from 'fastify';
+import { createNoticesStore } from './notices/store.js';
+import noticesRoutes from './routes/notices.js';
 import fastifyStatic from '@fastify/static';
 import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -33,13 +35,17 @@ import { createSmtpService } from './mail/smtp.js';
 import rulesRoutes from './routes/rules.js';
 import { createRulesService } from './sieve/service.js';
 
-export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {} } = {}) {
+export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
   installClientIp(app);
   await installAuth(app, { ...auth, config });
   await installDirectory(app, { config });
+  const noticesStore = notices.store ?? createNoticesStore({ ...notices, config });
+  app.decorate('notices', noticesStore);
+  app.addHook('onClose', async () => { await noticesStore.close?.(); });
+  await app.register(noticesRoutes, { service: noticesStore });
   const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
   await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now }) });
   const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory, logger: app.log });

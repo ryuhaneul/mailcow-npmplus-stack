@@ -866,3 +866,61 @@ for (const feature of ['group', 'matches']) {
     assert.deepEqual(restoredData.doc.rules, doc.rules); assert.deepEqual(restoredData.doc.blocked, []);
   });
 }
+
+
+async function freshBody(f) {
+  const { importReport: report } = await f.service.get(f.session);
+  return { confirm: true, startFresh: true, sourceName: report.sourceName, sourceSha256: report.sourceSha256, planSha256: report.planSha256 };
+}
+
+test('start fresh archives both unknown and convertible active scripts and undo restores originals', async () => {
+  for (const convertible of [false, true]) {
+    const f = importFixture({ present: false, active: 'legacy' });
+    if (convertible) f.scripts.set('legacy', await readFile(new URL('../fixtures/sieve/gmail-mixed.sieve', import.meta.url), 'utf8'));
+    const original = f.scripts.get('legacy');
+    const before = await f.service.get(f.session);
+    const result = await f.service.importRules(f.session, await freshBody(f));
+    assert.equal(result.applied, 0); assert.equal(result.dropped, before.importReport.items.length);
+    assert.equal(f.activeName, web);
+    const state = await f.service.get(f.session);
+    assert.equal(state.state, 'ok'); assert.deepEqual(state.doc.rules, []);
+    assert.deepEqual(state.doc.blocked, []); assert.equal(state.doc.vacation.enabled, false);
+    assert.equal(state.importInfo.undo.available, true);
+    assert.equal(f.scripts.get('legacy'), original); assert.equal(f.scripts.get(undoActiveName), original);
+    await f.service.undoImport(f.session, await undoBody(f));
+    assert.equal(f.activeName, 'legacy'); assert.equal(f.scripts.has(web), false);
+    assert.equal(f.scripts.get('legacy'), original);
+  }
+});
+
+test('start fresh requires explicit confirmation and unchanged source and plan, without writes', async () => {
+  const f = importFixture({ present: false, active: 'legacy' });
+  const body = await freshBody(f);
+  for (const patch of [{ confirm: false }, { startFresh: false }, { startFresh: 'true' }]) {
+    await assert.rejects(f.service.importRules(f.session, { ...body, ...patch }), { code: 'RULES_INVALID' });
+  }
+  for (const patch of [{ sourceName: 'other' }, { sourceSha256: '0'.repeat(64) }, { planSha256: '0'.repeat(64) }]) {
+    await assert.rejects(f.service.importRules(f.session, { ...body, ...patch }), { code: 'IMPORT_PREVIEW_CHANGED' });
+  }
+  f.scripts.set('legacy', 'discard;\n');
+  await assert.rejects(f.service.importRules(f.session, body), { code: 'IMPORT_PREVIEW_CHANGED' });
+  assert.deepEqual(storageWrites(f.commands), []);
+});
+
+for (const stage of [{ command: 'PUTSCRIPT', name: undoActiveName }, { command: 'PUTSCRIPT', name: importName }, { command: 'CHECKSCRIPT' }, { command: 'PUTSCRIPT', name: web }, { command: 'SETACTIVE', name: web }]) {
+  for (const after of [false, true]) {
+    test(`start fresh retries safely after ${stage.command} ${stage.name ?? ''}, appliedBeforeError=${after}`, async () => {
+      const f = importFixture({ present: false, active: 'legacy' });
+      const original = f.scripts.get('legacy');
+      const body = await freshBody(f);
+      f.failures.push({ ...stage, after });
+      await assert.rejects(f.service.importRules(f.session, body), { code: 'IMPORT_WRITE_FAILED' });
+      assert.equal(f.activeName, 'legacy'); assert.equal(f.scripts.has(web), false);
+      assert.equal(f.scripts.get('legacy'), original);
+      await f.service.importRules(f.session, body);
+      assert.equal(f.activeName, web); assert.deepEqual(parseScript(f.scripts.get(web)).doc.rules, []);
+      await f.service.undoImport(f.session, await undoBody(f));
+      assert.equal(f.activeName, 'legacy'); assert.equal(f.scripts.has(web), false);
+    });
+  }
+}

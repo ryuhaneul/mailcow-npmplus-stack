@@ -136,8 +136,8 @@ test('approved SnappyMail Keep and Flag handling relies only on header metadata'
   assert.equal(foreignFlag.rules.length, 0);
 });
 
-test('format detection requires the exact Gmail first line and SnappyMail source name', async () => {
-  assert.equal(importScript(`# other\n${await read('gmail-basic.sieve')}`, { policy }).format, 'unknown');
+test('format detection accepts Gmail after hash comments and requires SnappyMail source name', async () => {
+  assert.equal(importScript(`# other\n${await read('gmail-basic.sieve')}`, { policy }).format, 'gmail2sieve');
   assert.equal(importScript(await read('rainloop-move.sieve'), { name: 'different', policy }).format, 'unknown');
   assert.equal(importScript((await read('rainloop-move.sieve')).replace(/\n/g, '\r\n'), { name: 'rainloop.user', policy }).format, 'rainloop');
 });
@@ -398,4 +398,20 @@ test('synthetic XML produced by repository gmail2sieve imports include and exclu
     assert.equal(report.rules.length, 1); assert.equal(report.items[0].status, 'same');
     assert.deepEqual(report.rules[0].conditions, [wordGroup('견적'), ...wordGroup('광고', true).conditions]);
   } finally { dom.window.close(); }
+});
+
+
+test('gmail2sieve header allows preceding blank and hash-comment lines only', async () => {
+  const source = await read('gmail-basic.sieve');
+  const expected = importScript(source, { name: 'legacy', policy }).rules.map(({ id, ...rule }) => rule);
+  for (const prefix of ['', '\n\n', '# synthetic comment\n\n  # another comment\n', '# [1] 메모\n']) {
+    const report = importScript(prefix + source, { name: 'legacy', policy });
+    assert.equal(report.format, 'gmail2sieve');
+    assert.equal(report.rules.length, 2);
+    assert.deepEqual(report.items.map(item => item.status), ['same', 'same']);
+    assert.deepEqual(report.rules.map(({ id, ...rule }) => rule), expected);
+  }
+  for (const prefix of ['keep;\n', '# comment\nrequire ["fileinto"];\n', 'sieve script: legacy\n']) {
+    assert.equal(importScript(prefix + source, { name: 'legacy', policy }).format, 'unknown');
+  }
 });

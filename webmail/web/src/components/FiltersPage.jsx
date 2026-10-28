@@ -8,7 +8,8 @@ import ImportReview from './ImportReview.jsx';
 import GmailImport from './GmailImport.jsx';
 import ImportResult, { ImportDropped, importErrorMessage } from './ImportResult.jsx';
 import './filters.css';
-import { route } from '../router.js';
+import { route, navigate } from '../router.js';
+import { searchRuleSeed } from '../state/list.js';
 import { config } from '../state/config.js';
 import { vacation } from './OooBadge.jsx';
 import VacationTab from './VacationTab.jsx';
@@ -44,6 +45,7 @@ export default function FiltersPage() {
       const result = await api(`/api/rules${path}`, {method, ...(body === undefined ? {} : {body})});
       if (live.current && path === '/import') setImportResult(result);
       const value = await api('/api/rules'); if (live.current) {setData(value);vacation.value=value.doc?.vacation ?? null;setSaved(true);}
+      if (live.current && path === '/import' && searchRuleSeed.value?.conditions?.length) navigate('rule');
       return true;
     } catch (e) {if (live.current) setError(e);return false;}
     finally {if (live.current) setBusy(false);}
@@ -67,6 +69,7 @@ export default function FiltersPage() {
       {!identityTab && !data && !error && <p role="status">필터를 불러오는 중이에요.</p>}
       {importing && data && !sieveDisabled && (['none','ok','import_pending','import_blocked','inactive_other'].includes(data.state) ? <GmailImport data={data} onApplied={importApplied} onBusyChange={setImportBusy}/> : <RulesBanner data={data} busy={busy || reloadNeeded} onAction={setConfirmation}/>)}
       {!tab && !importing && data && !sieveDisabled && <>
+        {['import_pending','import_blocked'].includes(data.state) && searchRuleSeed.value?.conditions?.length > 0 && <p role="status">새 규칙을 만들려면 먼저 기존 필터를 가져오거나 끄고 새로 시작해야 해요</p>}
         <ImportResult result={importResult} info={data.importInfo} readOnly={data.state === 'newer_version' || !!error} busy={busy} onBusyChange={setBusy} onUndone={async () => {if (!live.current) return;setImportResult({undone:true});await load();}}/>
         <RulesBanner data={data} busy={busy || reloadNeeded} onAction={setConfirmation}/>
         {data.state === 'newer_version' && <p>이 버전에서는 규칙 조건을 표시할 수 없어요.</p>}
@@ -74,7 +77,7 @@ export default function FiltersPage() {
         {!busy && ['import_pending','import_blocked','inactive_other'].includes(data.state) && <a class="gi-entry" href="#filters/import"><span class="gi-entry-i"><Icon name="file"/></span><span><b>Gmail 필터 파일 올리기</b><small>mailFilters.xml을 올리고 반영할 규칙을 확인해요.</small></span><Icon name="right" size="s"/></a>}
         <ImportDropped info={data.importInfo}/>
         {data.doc && data.state !== 'newer_version' && <>{data.doc.rules.length ? <RuleList rules={data.doc.rules} editable={editable} busy={busy} missingFolders={data.missingFolders} onChange={rules => mutate('', {baseRev: data.rev, doc: {...data.doc, rules}}, 'PUT')}/> : <p>아직 규칙이 없어요.</p>}</>}
-        {['import_pending','import_blocked'].includes(data.state) && data.importReport && <ImportReview key={data.importReport.planSha256 ?? data.importReport.sourceSha256} report={data.importReport} pending={data.state === 'import_pending'} busy={busy || reloadNeeded} onConfirm={() => mutate('/import', {confirm: true, sourceName: data.importReport.sourceName, sourceSha256: data.importReport.sourceSha256, planSha256: data.importReport.planSha256})}/>}
+        {['import_pending','import_blocked'].includes(data.state) && data.importReport && <ImportReview key={data.importReport.planSha256 ?? data.importReport.sourceSha256} report={data.importReport} pending={data.state === 'import_pending'} busy={busy || reloadNeeded} onStartFresh={() => setConfirmation({label: '기존 필터 끄고 새로 시작', detail: `기존 필터 ‘${data.importReport.sourceName}’은 꺼지고 보관돼요. 그 안의 규칙은 새 필터로 옮겨지지 않아요. 나중에 '가져오기 되돌리기'로 다시 켤 수 있어요.`, path: 'import', body: {confirm: true, startFresh: true, sourceName: data.importReport.sourceName, sourceSha256: data.importReport.sourceSha256, planSha256: data.importReport.planSha256}})} onConfirm={() => mutate('/import', {confirm: true, sourceName: data.importReport.sourceName, sourceSha256: data.importReport.sourceSha256, planSha256: data.importReport.planSha256})}/>}
         <div class="hint"><Icon name="funnel" size="s"/>외부로 전달하면 스팸으로 판정된 메일은 전달하지 않아요. 전달은 앞으로 오는 메일에만 해요.</div>
       </>}
       {identityTab && <IdentityTabs key={tab} tab={tab}/>}

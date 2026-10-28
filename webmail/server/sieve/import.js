@@ -50,10 +50,12 @@ export function importScript(source, { name = '', policy } = {}) {
   const context = importPolicy(policy);
   if (typeof source !== 'string' || !source.isWellFormed() || Buffer.byteLength(source) > MAX_SCRIPT_BYTES) throw new AppError(422, 'RULES_INVALID', '가져올 스크립트는 UTF-8, 1MB 이하여야 해요.');
   source = source.replace(/\r\n/g, '\n');
-  const format = source.split('\n')[0] === GMAIL_HEADER ? 'gmail2sieve'
+  const lines = source.split('\n');
+  const firstLine = lines.findIndex(line => line === GMAIL_HEADER || (line.trim() && !line.trimStart().startsWith('#')));
+  const format = lines[firstLine] === GMAIL_HEADER ? 'gmail2sieve'
     : name === 'rainloop.user' && /^# RAINLOOP:SIEVE$/m.test(source) ? 'rainloop' : 'unknown';
   if (format === 'unknown') return { format, rules: [], items: unknownItems(source), uncheckedFolders: 0 };
-  const entries = format === 'gmail2sieve' ? gmailBlocks(source) : rainloopBlocks(source);
+  const entries = format === 'gmail2sieve' ? gmailBlocks(lines.slice(firstLine).join('\n')) : rainloopBlocks(source);
   const moves = new Set(entries.map(entry => entry.rule?.actions.move).filter(Boolean));
   for (const [index, entry] of entries.entries()) {
     entry.item.n = index + 1;

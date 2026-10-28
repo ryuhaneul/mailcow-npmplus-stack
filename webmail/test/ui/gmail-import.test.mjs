@@ -83,6 +83,66 @@ await test('Gmail import preview and explicit partial apply', async t => {
     const get = async () => (await app.inject({ method: 'GET', url: '/api/rules', headers })).json();
     const original = { v: 1, rev: 1, rules: [], blocked: ['blocked@example.com'],
       vacation: { enabled: true, start: null, end: null, subject: '합성 부재중', body: '합성 안내' } };
+    await st.test('legacy start fresh preserves reader/search seeds and uses real import undo', async () => {
+      const legacy = 'require ["fileinto"];\nif header :contains "subject" "synthetic" { fileinto "Archive"; }\n';
+      const label = '기존 필터 끄고 새로 시작';
+      const unauthenticated = await app.inject({ method: 'POST', url: '/api/rules/import', payload: { confirm: true, startFresh: true } });
+      assert.equal(unauthenticated.statusCode, 403); assert.equal(unauthenticated.headers['www-authenticate'], undefined);
+      for (const width of [1280, 768, 375]) for (const entry of ['filters', 'reader', 'search']) {
+        scripts.clear(); failures.length = 0; scripts.set('legacy', legacy); active = 'legacy';
+        const { page, context, errors } = await pageFor({ width, route: 'filters' });
+        const calls = [];
+        await page.route('**/api/rules**', async route => {
+          const request = route.request();
+          const payload = request.postData() ? request.postDataJSON() : undefined;
+          const response = await app.inject({ method: request.method(), url: new URL(request.url()).pathname, payload, headers });
+          calls.push({ path: new URL(request.url()).pathname, payload, status: response.statusCode });
+          await route.fulfill({ status: response.statusCode, contentType: 'application/json', body: response.body });
+        });
+        let expected;
+        if (entry === 'reader') {
+          const message = fake.state.mail.find(item => item.folder === 'INBOX' && item.hasAttachment);
+          await page.goto(`${origin}/#read/${encodeURIComponent(message.ref)}`);
+          await expect(page.locator('.reader h1')).toHaveText(message.subject);
+          await page.getByRole('button', { name: '이 메일로 규칙 만들기', exact: true }).click();
+          expected = message.from.address;
+        } else if (entry === 'search') {
+          await page.goto(`${origin}/#search/${encodeURIComponent('from:synthetic@example.com')}`);
+          await page.getByRole('button', { name: '이 검색 조건으로 규칙 만들기', exact: true }).click();
+          expected = 'synthetic@example.com';
+        } else await page.reload();
+        await expect(page.locator('#import-title')).toBeVisible();
+        if (entry !== 'filters') await expect(page.locator('.filters-view')).toContainText('새 규칙을 만들려면 먼저 기존 필터를 가져오거나 끄고 새로 시작해야 해요');
+        await expect(page.getByRole('button', { name: label, exact: true })).toBeEnabled();
+        await page.evaluate(() => document.fonts.ready);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+        await page.screenshot({ path: `${captures}/legacy-${entry}-${width}.png` });
+        await page.getByRole('button', { name: label, exact: true }).click();
+        const dialog = page.locator('.rules-confirm[open]');
+        await expect(dialog).toContainText('기존 필터 ‘legacy’은 꺼지고 보관돼요.');
+        await expect(dialog).toContainText('그 안의 규칙은 새 필터로 옮겨지지 않아요.');
+        await page.screenshot({ path: `${captures}/legacy-confirm-${entry}-${width}.png` });
+        await dialog.getByRole('button', { name: '취소', exact: true }).click();
+        assert.equal(calls.filter(call => call.payload?.startFresh).length, 0);
+        await page.getByRole('button', { name: label, exact: true }).click();
+        await dialog.getByRole('button', { name: label, exact: true }).click();
+        if (entry !== 'filters') {
+          await expect(page.getByRole('heading', { name: '규칙 만들기', exact: true })).toBeVisible();
+          await expect(page.getByRole('textbox', { name: '1번 조건 값', exact: true })).toHaveValue(expected);
+          await page.screenshot({ path: `${captures}/legacy-seed-${entry}-${width}.png` });
+          await page.goto(`${origin}/#filters`);
+        }
+        await expect(page.locator('.gi-result')).toBeVisible();
+        assert.equal(active, web); assert.deepEqual(parseScript(scripts.get(web)).doc.rules, []);
+        assert.equal(scripts.get('legacy'), legacy);
+        assert.equal(calls.find(call => call.payload?.startFresh).status, 200);
+        await page.locator('.gi-result button').click();
+        await page.locator('.gi-undo button.pri').click();
+        await expect(page.locator('.gi-result')).toContainText('되돌렸어요.');
+        assert.equal(active, 'legacy'); assert.equal(scripts.has(web), false); assert.equal(scripts.get('legacy'), legacy);
+        assert.deepEqual(errors, []); await context.close();
+      }
+    });
     const input = { ...file, buffer: Buffer.from(xml.replace('name="label" value="거래처"', 'name="shouldMarkAsRead" value="true"')) };
     for (const scenario of ['zero-ok', 'zero-inactive', 'undo', 'apply']) {
       scripts.clear(); failures.length = 0;

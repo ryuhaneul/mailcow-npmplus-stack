@@ -59,13 +59,14 @@ export function ImportConsent({ plan, dropped, confirmed, onChange, busy, onConf
   </div>;
 }
 
-export default function ImportReview({ report, pending, busy, onConfirm }) {
+export default function ImportReview({ report, pending, busy, onConfirm, onStartFresh }) {
   const [confirmed, setConfirmed] = useState(false);
   let index = 0;
   const items = report.items.map(item => ({...item, status: item.status === 'unconvertible' ? 'no' : item.status, rule: item.rule ?? (item.status !== 'unconvertible' && item.status !== 'no' ? report.rules?.[index++] : undefined)}));
   const applied = items.filter(item => item.status !== 'no').length;
   return <section class="import-review gi-body" aria-labelledby="import-title"><h2 id="import-title">기존 필터 가져오기</h2>
     <p>아래 규칙과 달라지는 동작을 확인해 주세요. 가져와서 켜면 기존 필터는 꺼지고 원본은 보관돼요.</p>
+    <button class="btn" type="button" disabled={busy} onClick={onStartFresh}>기존 필터 끄고 새로 시작</button>
     <ImportTable items={items}/>
     {pending && <ImportConsent plan={report.plan ?? {mode:'new',existing:0,applied,total:applied,deactivates:report.sourceName}} dropped={items.length - applied} confirmed={confirmed} onChange={setConfirmed} busy={busy} onConfirm={onConfirm}/>}
   </section>;

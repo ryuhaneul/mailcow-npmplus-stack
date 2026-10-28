@@ -270,8 +270,8 @@ export function createRulesService({ config, imap, directory, logger, connect = 
   async function removeScript(client, name) {
     if ((await client.listScripts()).some(script => script.name === name)) await client.deleteScript(name);
   }
-  async function applyImport(session, client, current, policy, { rules, items, mode, source, createdFolders = [] }) {
-    if (!rules.length) throw nothing();
+  async function applyImport(session, client, current, policy, { rules, items, mode, source, createdFolders = [], startFresh = false }) {
+    if (!rules.length && !startFresh) throw nothing();
     const previousImport = await readImportRecord(client, current.scripts);
     const at = new Date(Math.max(now(), previousImport ? Date.parse(previousImport.at) + 1 : 0)).toISOString();
     const doc = importDocument(current, rules, mode, source, at);
@@ -344,14 +344,17 @@ export function createRulesService({ config, imap, directory, logger, connect = 
     });
   }
   async function importRules(session, body) {
-    object(body, ['confirm', 'sourceName', 'sourceSha256', 'planSha256']);
+    object(body, ['confirm', 'sourceName', 'sourceSha256', 'planSha256', 'startFresh']);
+    if (Object.hasOwn(body, 'startFresh') && body.startFresh !== true) invalid('startFresh', 'confirmation_required');
     if (body.confirm !== true) invalid('confirm', 'confirmation_required');
     if (typeof body.sourceName !== 'string' || typeof body.sourceSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(body.sourceSha256) || typeof body.planSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(body.planSha256)) invalid('sourceSha256', 'source');
     return perform(session, null, async (client, current, policy) => {
       allowed(current, ['import_pending', 'import_blocked']);
       if (body.sourceName !== current.activeName || body.sourceSha256 !== sha256(current.source)
         || body.planSha256 !== current.importReport.planSha256) throw previewChanged();
-      return applyImport(session, client, current, policy, { rules: current.importReport.rules, items: current.importReport.items, mode: 'new', source: { kind: 'active-script', name: current.activeName, sha256: sha256(current.source) } });
+      return applyImport(session, client, current, policy, { rules: body.startFresh ? [] : current.importReport.rules,
+        items: body.startFresh ? current.importReport.items.map(item => ['same', 'changed'].includes(item.status) ? { ...item, status: 'unconvertible', reason: '기존 필터를 끄고 새로 시작하면서 옮기지 않았어요.' } : item) : current.importReport.items,
+        startFresh: body.startFresh === true, mode: 'new', source: { kind: 'active-script', name: current.activeName, sha256: sha256(current.source) } });
     });
   }
   async function undoImport(session, body) {

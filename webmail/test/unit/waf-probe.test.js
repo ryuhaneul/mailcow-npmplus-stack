@@ -229,3 +229,41 @@ test('CLI table and exit status are correct for app, upstream HTML block and unr
   const closed = await fakeServer(); const url = closed.url; await closed.close();
   const result = await cli(url); assert.equal(result.code, 1); assert.ok(result.output.includes('연결 실패'));
 });
+
+test('template and notice HTML WAF exemptions keep exact hosts, methods and JSON fields in both bands', () => {
+  const cwd = fileURLToPath(new URL('../../../', import.meta.url));
+  const rows = [
+    ['POST', '/api/templates', 'html,subject'],
+    ['PUT', '^/api/templates/[A-Za-z0-9_-]{20,}$', 'html,subject'],
+    ['POST', '/api/admin/notices', 'bodyHtml,title'],
+    ['PUT', '^/api/admin/notices/[1-9][0-9]*$', 'bodyHtml,title'],
+    ['POST', '/api/admin/notices/preview', 'bodyHtml'],
+    ['POST', '/api/admin/public-templates', 'html,subject'],
+    ['PUT', '^/api/admin/public-templates/[1-9][0-9]*$', 'html,subject'],
+  ];
+  for (const [mode, band] of [['block', 'In'], ['detect', 'Out']]) {
+    const env = { ...process.env, DOMAIN: 'example.com', WEBMAIL_ENABLE: 'true', WEBMAIL_HOSTNAMES: 'newmail.example.com', WEBMAIL_ADMIN_ENABLE: 'true', WEBMAIL_ADMIN_HOSTNAME: 'admin.example.com', WAF_MODE: mode, WAF_ALLOWLIST: '' };
+    const render = name => execFileSync('bash', ['-c', `source scripts/lib/webmail-env.sh; source scripts/lib/waf.sh; ${name}`], { cwd, env, encoding: 'utf8' });
+    const conf = render('waf_render_crs_after_conf'), yaml = render('waf_render_appsec_config');
+    const rules = conf.match(/SecRule REQUEST_HEADERS:Host[^\n]+\n[^\n]+\n[^\n]+/g);
+    const ids = [...conf.matchAll(/id:(\d+),/g)].map(match => match[1]);
+    assert.equal(new Set(ids).size, ids.length);
+    for (const [method, path, fields] of rows) {
+      const matches = rules.filter(rule => rule.includes(`@streq ${method}"`) && rule.includes(`@${path.startsWith('^') ? 'rx' : 'streq'} ${path}"`));
+      assert.equal(matches.length, path.includes('/admin/') ? 1 : 2);
+      for (const rule of matches) {
+        assert.equal(rule.split('\n')[0].includes(path.includes('/admin/') ? 'admin\\.example\\.com' : 'mail\\.example\\.com'), true);
+        assert.equal(rule.split('t:none,').at(-1), fields.split(',').map(field => `ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.${field}`).join(',') + '"');
+      }
+    }
+    const blocks = yaml.split(/(?=^  - filter:)/m), htmlBlocks = blocks.filter(block => block.includes('/api/templates') || block.includes('/api/admin/notices'));
+    assert.equal(htmlBlocks.length, 3);
+    for (const block of htmlBlocks) {
+      assert.ok(block.includes(`Is${band}Band == true`));
+      assert.equal(block.split('    apply:')[1], `\n      - Remove${band}BandRuleByID(930120)\n`);
+      assert.equal(block.includes('DisableBodyInspection'), false);
+    }
+    assert.equal(new RegExp(rows[1][1]).test('/api/templates/share'), false);
+    assert.equal(new RegExp(rows[3][1]).test('/api/admin/notices/1/publish'), false);
+  }
+});

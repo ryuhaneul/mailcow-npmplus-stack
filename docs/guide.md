@@ -1289,9 +1289,9 @@ plugin {
 템플릿 설정을 되돌릴 때는 다음 순서를 지킵니다.
 
 1. 반영 전 스택 snapshot, `/home/webmail` 소스 tar, `before-<HEAD>` 이미지 tag와 Dovecot `extra.conf` 사본을 확보합니다.
-2. **현재 HEAD의 새 스크립트가 있는 상태에서 먼저** `bash scripts/apply-dovecot-template-groups.sh --revert -y`로 관리 블록을 제거하고 reload합니다.
+2. **스택을 이전 HEAD로 되돌리기 전에, 현재 HEAD의 새 스크립트가 있는 상태에서 먼저** `bash scripts/apply-dovecot-template-groups.sh --revert -y`로 관리 블록을 제거하고 reload합니다.
 3. 스택을 이전 HEAD로 되돌립니다.
-4. 이전 HEAD의 `bash scripts/apply-dovecot-webmail.sh apply -y`로 AllMail 정의를 원복합니다.
-5. 웹메일·관리 이미지를 이전 tag로 재생성합니다.
+4. 이전 HEAD의 `bash scripts/apply-dovecot-webmail.sh apply -y`로 AllMail 정의를 원복하고, 이전 HEAD의 `bash scripts/apply-webmail-dbuser.sh apply`로 회사 공용 템플릿 DB 권한을 회수합니다. 공지 권한은 이전 HEAD의 구성대로 유지하며 표·데이터는 삭제하지 않습니다.
+5. `$WEBMAIL_DIR`을 반영 전 소스 tar로 복원하고 `mailstack-webmail:before-<반영할 HEAD>` 이미지를 `mailstack-webmail:local`로 다시 tag합니다. 이전 HEAD의 스택 저장소 루트에서 위 **「공지 변경 이전 버전으로 되돌리기」 3단계의 명령 블록 전체**를 실행합니다. 그 블록으로 경로 변수·스택 환경과 `webmail-env.sh`·edge/log-archive 함수를 준비한 뒤, 이미지 빌드 없이 웹메일·켜져 있던 관리 컨테이너를 재생성합니다.
 
 사용자 `Templates` 폴더·메일·ACL은 삭제하지 않고 일반 폴더로 남깁니다. `acl_groups` 제거 후 도메인 그룹 ACL은 어느 사용자에게도 맞지 않아 효력이 없어집니다. 복원 뒤 `verify.sh`, 웹메일 로그인·메일 발송 1통, 공유 메일함 보기를 확인합니다. 중간 실패는 원인을 해결한 뒤 같은 HEAD의 update를 재실행합니다. 운영 반영은 별도 승인 후 수행합니다.

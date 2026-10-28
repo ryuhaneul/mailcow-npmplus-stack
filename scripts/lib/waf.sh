@@ -70,6 +70,8 @@ waf_render_crs_after_conf() (
         host="^${domain//./\\.}(?::[0-9]+)?\$"
         _waf_webmail_exempt "$host" "$base" PUT /api/drafts 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject'
         _waf_webmail_exempt "$host" "$((base+1))" POST /api/send 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject'
+        _waf_webmail_exempt "$host" "$((base+2))" POST /api/templates 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject'
+        _waf_webmail_exempt "$host" "$((base+3))" PUT '^/api/templates/[A-Za-z0-9_-]{20,}$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject' rx
         _waf_webmail_exempt "$host" "$((base+10))" GET /api/messages 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:q'
         _waf_webmail_exempt "$host" "$((base+20))" POST /api/auth/login 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.password'
         _waf_webmail_exempt "$host" "$((base+30))" POST /api/password 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.current,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.next,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.next2'
@@ -81,6 +83,11 @@ waf_render_crs_after_conf() (
         _waf_webmail_exempt "$host" 9600201 POST '^/api/admin/filters/[^/]+$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.script' rx
         _waf_webmail_exempt "$host" 9600202 POST /api/admin/teams 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.script'
         _waf_webmail_exempt "$host" 9600203 POST /api/admin/auth/login 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.password'
+        _waf_webmail_exempt "$host" 9600204 POST /api/admin/notices 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.bodyHtml,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.title'
+        _waf_webmail_exempt "$host" 9600205 PUT '^/api/admin/notices/[1-9][0-9]*$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.bodyHtml,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.title' rx
+        _waf_webmail_exempt "$host" 9600206 POST /api/admin/notices/preview 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.bodyHtml'
+        _waf_webmail_exempt "$host" 9600207 POST /api/admin/public-templates 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject'
+        _waf_webmail_exempt "$host" 9600208 PUT '^/api/admin/public-templates/[1-9][0-9]*$' 'ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.html,ctl:ruleRemoveTargetByTag=OWASP_CRS;ARGS:json.subject' rx
     fi
 )
 
@@ -101,7 +108,7 @@ _waf_webmail_crs_exclusions() {
   - filter: Is${band}Band == true && req.Host == "${domain}" && req.URL.Path startsWith "/api/folders/" && req.Method in ["PATCH", "DELETE"]
     apply:
       - Remove${band}BandRuleByID(920440)
-  - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.URL.Path == "/api/send" && req.Method == "POST") || (req.URL.Path == "/api/drafts" && req.Method == "PUT"))
+  - filter: Is${band}Band == true && req.Host == "${domain}" && ((req.Method == "POST" && req.URL.Path in ["/api/send", "/api/templates"]) || (req.Method == "PUT" && (req.URL.Path == "/api/drafts" || req.URL.Path matches "^/api/templates/[A-Za-z0-9_-]{20,}$")))
     apply:
       - Remove${band}BandRuleByID(930120)
   - filter: Is${band}Band == true && req.Host == "${domain}" && req.Method == "POST" && req.URL.Path in ["/api/rules/import/xml/preview", "/api/rules/import/xml"]
@@ -151,6 +158,9 @@ _waf_admin_crs_exclusions() {
     apply:
       - Remove${band}BandRuleByTag("attack-rce")
       - Remove${band}BandRuleByTag("attack-lfi")
+  - filter: Is${band}Band == true && req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && ((req.Method == "POST" && req.URL.Path in ["/api/admin/notices", "/api/admin/notices/preview", "/api/admin/public-templates"]) || (req.Method == "PUT" && req.URL.Path matches "^/api/admin/(notices|public-templates)/[1-9][0-9]*$"))
+    apply:
+      - Remove${band}BandRuleByID(930120)
   - filter: req.Host == "${WEBMAIL_ADMIN_HOSTNAME}" && req.Method == "POST" && req.URL.Path == "/api/admin/logo/preview"
     apply:
       - DisableBodyInspection()

@@ -351,14 +351,14 @@ INDEX 를 주인 본인 INDEX 와 같은 위치(`/var/vmail_index/%%u`)로 옮�
 
 ```bash
 sudo scripts/apply-dovecot-shared-index.sh            # 적용 (바뀐 게 있을 때만 반영, 아래 참고)
-sudo scripts/apply-dovecot-shared-index.sh --check    # 적용 여부만 확인 (공유 INDEX·캐시 설정 모두 적용됨=0, 아니면 1)
-sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으로 복구 (공유 INDEX + 캐시 설정 블록)
+sudo scripts/apply-dovecot-shared-index.sh --check    # 적용 여부만 확인 (공유 INDEX·캐시·목록 색인 설정 모두 적용됨=0, 아니면 1)
+sudo scripts/apply-dovecot-shared-index.sh --revert   # mailcow 원본 설정으로 복구 (공유 INDEX + extra.conf 관리 블록)
 ```
 
 - `MAILCOW_DIR` 환경변수로 mailcow 경로 지정 (기본 `/home/mailcow-dockerized`).
 - `data/conf/dovecot/shared_namespace_hc.conf` 를 만들고 `dovecot.conf` 의 include 한 줄을 교체한다.
   변경 전 `dovecot.conf.bak-shared-index-<날짜시각>` 로 백업.
-- 공유 namespace 설정이 바뀌면 `dovecot-mailcow` 를 재시작한다. 캐시 설정(아래)만 바뀌면 컨테이너 재시작 없이
+- 공유 namespace 설정이 바뀌면 `dovecot-mailcow` 를 재시작한다. extra.conf 설정(아래)만 바뀌면 컨테이너 재시작 없이
   `doveadm reload` 로 설정을 다시 적용한다(활성 IMAP/POP 세션은 재접속).
 - `setup.sh` 는 설치 시, `update.sh` 는 Phase 4 에서 자동으로 `apply` 를 호출한다
   (mailcow 업데이트가 `dovecot.conf` 를 덮어쓴 경우 재적용).
@@ -374,14 +374,19 @@ Dovecot(2.3.11+)은 캐시 정리(purge) 때 `mail_cache_unaccessed_field_drop` 
 ```
 # BEGIN mailcow-npmplus-stack (apply-dovecot-shared-index.sh)
 mail_cache_unaccessed_field_drop = 3650 days
+mailbox_list_index = no
 # END mailcow-npmplus-stack
 ```
 
+같은 블록의 `mailbox_list_index = no` 는 공유받지 않은 다른 사용자의 폴더에 `STATUS` 로 메일 수·안 읽은 수가 노출되는 것을 막는다.
+공유 namespace 에만 한정할 수 없어 전역으로 적용하며, 대신 메일함 목록 색인 가속을 사용하지 않는다.
+기존 캐시 한 줄만 있는 관리 블록도 재실행하면 새 내용으로 갱신한다.
+
 - 블록 밖의 기존 `extra.conf` 내용은 수정하지 않는다. 파일이 있으면 변경 전 `extra.conf.bak-shared-index-<날짜시각>` 로 백업.
-- 블록 밖에 같은 키가 이미 있거나 BEGIN/END 표식이 불완전·중복이면 **아무것도 바꾸지 않고** 오류로 종료한다(출력된 문제를 직접 정리 후 재실행).
-- 적용 후 `doveconf -h mail_cache_unaccessed_field_drop` 로 `3650 days` 를 확인한다.
+- 블록 밖에 `mail_cache_unaccessed_field_drop` 또는 `mailbox_list_index` 가 이미 있거나 BEGIN/END 표식이 불완전·중복이면 **아무것도 바꾸지 않고** 오류로 종료한다(출력된 문제를 직접 정리 후 재실행).
+- 적용 후 `doveconf -h mail_cache_unaccessed_field_drop` 로 `3650 days`, `doveconf -h mailbox_list_index` 로 `no` 를 확인한다(`--check` 도 두 실행 중 값을 확인).
 - `--revert` 는 `extra.conf` 의 관리 블록 제거(`30 days` 로 돌아왔는지 확인)와 함께 **공유 namespace include 도 mailcow 원래대로 되돌린다.**
-- 캐시 설정만 빼려면 `--revert` 를 쓰지 말고 `extra.conf` 의 관리 블록만 지운 뒤 `docker compose exec -T dovecot-mailcow doveadm reload` 를 실행한다(공유 INDEX 설정은 유지).
+- extra.conf 설정만 빼려면 `--revert` 를 쓰지 말고 `extra.conf` 의 관리 블록만 지운 뒤 `docker compose exec -T dovecot-mailcow doveadm reload` 를 실행한다(공유 INDEX 설정은 유지).
 - `doveadm reload` 가 실패하거나 중단된 뒤에는 파일이 이미 같아서 `apply` 를 다시 실행해도 reload 를 다시 하지 않는다.
   그 경우 `docker compose exec -T dovecot-mailcow doveadm reload`(또는 dovecot 재시작)를 직접 실행한다.
 

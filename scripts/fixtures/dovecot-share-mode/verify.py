@@ -24,6 +24,8 @@ args = sys.argv[1:]
 assert args[:4] == ['compose', 'exec', '-T', 'dovecot-mailcow']
 if args[4:] == ['doveconf', '-h', 'mail_cache_unaccessed_field_drop']:
     print('3650 days')
+elif args[4:] == ['doveconf', '-h', 'mailbox_list_index']:
+    print('no')
 elif args[4:] == ['doveconf', '-n']:
     if os.environ.get('FAIL_CONFIG'): sys.exit(1)
     print((root / 'mailcow/data/conf/dovecot/extra.conf').read_text() if (root / 'mailcow/data/conf/dovecot/extra.conf').exists() else '')
@@ -209,7 +211,8 @@ grep -q '^SHARE_WHOLE_MAILBOX="true"$' "$2/generated/webmail-admin.env"
     admin_block = conf.read_bytes()
     share_block = applied[:-len(original)]
     cache_block = (b'# BEGIN mailcow-npmplus-stack (apply-dovecot-shared-index.sh)\n'
-                   b'mail_cache_unaccessed_field_drop = 3650 days\n# END mailcow-npmplus-stack\n')
+                   b'mail_cache_unaccessed_field_drop = 3650 days\n'
+                   b'mailbox_list_index = no\n# END mailcow-npmplus-stack\n')
     auto_block = (b'# BEGIN mailstack autoexpunge (apply-dovecot-autoexpunge.sh)\n'
                  b'namespace inbox {\n  mailbox Junk {\n    autoexpunge = 30d\n  }\n'
                  b'  mailbox Trash {\n    autoexpunge = 30d\n  }\n}\n# END mailstack autoexpunge\n')

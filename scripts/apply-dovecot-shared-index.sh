@@ -12,14 +12,17 @@
 # default is 30 days. 3650 days is effectively "keep", not "never delete", and cache
 # that is already gone is not restored.) Content of extra.conf outside the block is
 # never modified.
+# The block also sets mailbox_list_index = no globally to prevent STATUS from exposing
+# message counts in another user's unshared folders. Mailbox-list index acceleration
+# is disabled as a result.
 #
 # Usage:
 #   apply-dovecot-shared-index.sh [apply]   write config, verify. A namespace change restarts
-#                                           dovecot-mailcow; a cache-setting-only change
+#                                           dovecot-mailcow; an extra.conf-only change
 #                                           re-applies the config without a container restart
 #                                           (doveadm reload; active IMAP/POP sessions reconnect)
 #   apply-dovecot-shared-index.sh --revert  restore the stock include AND remove the extra.conf block
-#                                           (to drop only the cache setting: delete the block by hand,
+#                                           (to drop only the extra.conf settings: delete the block by hand,
 #                                           then doveadm reload)
 #   apply-dovecot-shared-index.sh --check   report state only (no change, no restart/reload)
 #
@@ -152,13 +155,13 @@ swap_include() {
     rm -f "$tmp"
 }
 
-# ---- extra.conf managed block (mail_cache_unaccessed_field_drop) ----
+# ---- extra.conf managed block (cache retention and mailbox list indexing) ----
 
-block_text() { printf '%s\n%s = %s\n%s\n' "$BLOCK_BEGIN" "$CACHE_KEY" "$CACHE_VALUE" "$BLOCK_END"; }
+block_text() { printf '%s\n%s = %s\n%s\n%s\n' "$BLOCK_BEGIN" "$CACHE_KEY" "$CACHE_VALUE" 'mailbox_list_index = no' "$BLOCK_END"; }
 
 # Inspect extra.conf. Sets EXTRA_STATE (absent|none|same|different), EXTRA_L1/EXTRA_L2
 # (first/last line of the block) and EXTRA_OUTKEY (non-comment lines outside the block
-# that set the key). Dies — before anything has been changed — on a missing, duplicated
+# that set either managed key). Dies — before anything has been changed — on a missing, duplicated
 # or malformed marker.
 extra_inspect() {
     EXTRA_STATE=absent; EXTRA_L1=0; EXTRA_L2=0; EXTRA_OUTKEY=0
@@ -171,13 +174,13 @@ extra_inspect() {
         index($0, "BEGIN mailcow-npmplus-stack") || index($0, "END mailcow-npmplus-stack") {
             bad("malformed marker at line " NR); next
         }
-        inb { nbody++; if ($0 != W) differ = 1; next }
-        $0 ~ ("^[ \t]*" K "[ \t]*=") { outkey++ }
+        inb { nbody++; if ((nbody == 1 && $0 != W) || (nbody == 2 && $0 != "mailbox_list_index = no")) differ = 1; next }
+        $0 ~ ("^[ \t]*(" K "|mailbox_list_index)[ \t]*=") { outkey++ }
         END {
             if (inb) bad("BEGIN marker at line " l1 " has no END marker")
             if (nb != ne) bad("BEGIN/END marker count mismatch (" nb "/" ne ")")
             if (err != "") { print "ERR " err; exit }
-            st = (nb == 0) ? "none" : ((nbody == 1 && !differ) ? "same" : "different")
+            st = (nb == 0) ? "none" : ((nbody == 2 && !differ) ? "same" : "different")
             print "OK " st " " l1 + 0 " " l2 + 0 " " outkey + 0
         }' "$EXTRA_CONF")
     case "$res" in
@@ -188,7 +191,7 @@ extra_inspect() {
 }
 
 extra_die_if_outside_key() {
-    [ "$EXTRA_OUTKEY" -eq 0 ] || die "$EXTRA_CONF sets $CACHE_KEY outside the managed block — nothing was changed; remove or move that line manually"
+    [ "$EXTRA_OUTKEY" -eq 0 ] || die "$EXTRA_CONF sets $CACHE_KEY or mailbox_list_index outside the managed block — nothing was changed; remove or move that line manually"
 }
 
 # Write/replace the managed block. Everything outside it is kept byte for byte
@@ -225,17 +228,17 @@ extra_remove_block() {
     rm -f "$tmp"
 }
 
-# verify_cache <expected value>: running dovecot reports the expected value.
+# verify_cache <expected value> [key]: running dovecot reports the expected value.
 verify_cache() {
-    local expected="$1" out=""
+    local expected="$1" key="${2:-$CACHE_KEY}" out=""
     for _ in $(seq 1 15); do
-        if out=$(cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveconf -h "$CACHE_KEY" 2>/dev/null | tr -d '\r') \
+        if out=$(cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveconf -h "$key" 2>/dev/null | tr -d '\r') \
             && [ "$out" = "$expected" ]; then
             return 0
         fi
         sleep 2
     done
-    log "live $CACHE_KEY: ${out:-<none>} (expected $expected)"
+    log "live $key: ${out:-<none>} (expected $expected)"
     return 1
 }
 
@@ -246,7 +249,7 @@ reload_dovecot() {
 }
 
 # Restart when the namespace changed (a restart re-reads everything); otherwise reload
-# when only the cache setting changed.
+# when only the extra.conf settings changed.
 apply_changes() {
     local ns="$1" cache="$2"
     if [ "$ns" -eq 1 ]; then
@@ -275,14 +278,14 @@ check)
     fi
     extra_inspect
     if [ "$EXTRA_STATE" = same ] && [ "$EXTRA_OUTKEY" -eq 0 ]; then
-        if verify_cache "$CACHE_VALUE"; then
-            log "$CACHE_KEY: applied ($CACHE_VALUE, config + running dovecot)"
+        if verify_cache "$CACHE_VALUE" && verify_cache no mailbox_list_index; then
+            log "$CACHE_KEY: applied ($CACHE_VALUE, config + running dovecot); mailbox_list_index = no (config + running dovecot)"
         else
-            log "$CACHE_KEY: NOT active — block present but running dovecot differs (doveadm reload needed?)"
+            log "extra.conf settings ($CACHE_KEY, mailbox_list_index): NOT active — block present but running dovecot differs (doveadm reload needed?)"
             rc=1
         fi
     else
-        log "$CACHE_KEY: not applied (extra.conf block missing, outdated or conflicting key)"
+        log "extra.conf settings ($CACHE_KEY, mailbox_list_index): not applied (block missing, outdated or conflicting key)"
         rc=1
     fi
     exit "$rc"
@@ -314,15 +317,16 @@ apply)
     fi
     if [ "$EXTRA_STATE" != same ]; then
         extra_write_block
-        log "extra.conf: managed block written ($CACHE_KEY = $CACHE_VALUE)"
+        log "extra.conf: managed block written ($CACHE_KEY = $CACHE_VALUE, mailbox_list_index = no; prevents unshared-folder STATUS count disclosure, disables mailbox-list index acceleration)"
         changed_cache=1
     fi
 
     apply_changes "$changed_ns" "$changed_cache"
     verify_live "$LOC_HC" || die "namespace verification failed after apply (use --revert to roll back)"
     verify_cache "$CACHE_VALUE" || die "$CACHE_KEY verification failed after apply (use --revert to roll back)"
+    verify_cache no mailbox_list_index || die "mailbox_list_index verification failed after apply (use --revert to roll back)"
     if [ "$changed_ns" -eq 1 ] || [ "$changed_cache" -eq 1 ]; then
-        log "applied: shared namespace INDEX=/var/vmail_index/%%u, $CACHE_KEY=$CACHE_VALUE"
+        log "applied: shared namespace INDEX=/var/vmail_index/%%u, $CACHE_KEY=$CACHE_VALUE, mailbox_list_index=no"
     else
         log "already applied"
     fi

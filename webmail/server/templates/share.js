@@ -117,7 +117,7 @@ export function createTemplateShareService({ imap, config, store, activeAccounts
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2 || typeof input.domainAll !== 'boolean' || !Array.isArray(input.users) || input.users.length > 50) throw invalid();
     if (!Object.hasOwn(input, 'domainAll') || !Object.hasOwn(input, 'users')) throw invalid();
     const users = input.users.map(address), domainAll = input.domainAll;
-    if (users.some(user => !user || user === email) || new Set(users).size !== users.length) throw invalid();
+    if (users.some(user => !user || /^[-$]/.test(user) || user === email) || new Set(users).size !== users.length) throw invalid();
     return serial(session, async () => {
       const rows = await activeAccounts(session);
       if (!Array.isArray(rows)) throw unavailable();

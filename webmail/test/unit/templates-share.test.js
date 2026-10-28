@@ -130,6 +130,14 @@ for (const input of [
   const f = fixture(); await assert.rejects(f.service.put(f.session, input), { statusCode: 422 }); assert.equal(f.calls.length, 0); assert.equal(f.directoryCalls, 0);
 });
 
+for (const requested of ['-member@example.com', '$member@example.com']) test(`template sharing: active reserved-prefix address ${requested} rejects before IMAP and preserves ACL`, async () => {
+  const f = fixture(); f.accounts.push({ username: requested, active: 1 });
+  const before = [...f.acl].map(([path, acl]) => [path, [...acl]]);
+  await assert.rejects(f.service.put(f.session, { domainAll: true, users: [requested] }), { statusCode: 422, code: 'TEMPLATE_SHARE_INVALID' });
+  assert.equal(f.calls.length, 0); assert.equal(writes(f).length, 0);
+  assert.deepEqual([...f.acl].map(([path, acl]) => [path, [...acl]]), before);
+});
+
 for (const requested of ['alias@example.com', 'disabled@example.com', 'active2@example.com', 'missing@example.com']) test(`template sharing: ${requested} is not a distinct active=1 mailbox`, async () => {
   const f = fixture(); f.accounts.push({ address: 'alias@example.com', active: 1 }, { username: 'disabled@example.com', active: 0 }, { username: 'active2@example.com', active: 2 });
   await assert.rejects(f.service.put(f.session, { domainAll: false, users: [requested] }), { statusCode: 422 }); assert.equal(writes(f).length, 0); assert.equal(f.calls.length, 0);

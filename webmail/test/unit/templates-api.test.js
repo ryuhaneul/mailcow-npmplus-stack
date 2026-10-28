@@ -46,7 +46,7 @@ async function fixture(t, publicTemplates = {}) {
         }
         return box.rows.get(uid);
       },
-      async download(uid, part) { f.calls.push(['DOWNLOAD', path, part]); return { content: Readable.from([f.partFixture && path === received ? (part === '2' ? f.partFixture.bytes : Buffer.from(f.partFixture.html)) : Buffer.from('<p>{{내이름}}</p>')]), meta: { charset: 'utf-8' } }; },
+      async download(uid, part) { f.calls.push(['DOWNLOAD', path, part]); return { content: Readable.from([f.partFixture && path === received ? (part === '2' ? (f.partFixture.transformed ?? f.partFixture.bytes) : Buffer.from(f.partFixture.html)) : Buffer.from('<p>{{내이름}}</p>')]), meta: { charset: 'utf-8' } }; },
       async append(target, raw, flags) { f.calls.push(['APPEND', target, Buffer.from(raw)]); const ref = decodeRef(add(target, raw, new Set(flags))); return { uid: ref.uid, uidValidity: BigInt(ref.uidValidity) }; },
       async messageFlagsAdd(set, flags) { f.calls.push(['STORE', path, set]); for (const uid of String(set).split(',').map(Number)) for (const flag of flags) box.rows.get(uid)?.flags.add(flag); return true; },
       async messageMove(uid, target) { f.calls.push(['MOVE', path, uid, target]); const ref = decodeRef(add(target, box.rows.get(uid).source)); box.rows.delete(uid); return { uidMap: new Map([[uid, ref.uid]]), uidValidity: BigInt(ref.uidValidity) }; },
@@ -274,7 +274,10 @@ for (const [encoding, html] of [
   assert.equal(f.calls.filter(row => row[0] === 'APPEND').length, 1);
 });
 
-for (const [encoding, bytes, cid, roundtrip] of [
+for (const [encoding, bytes, cid, roundtrip, parameters] of [
+  ['8bit', Buffer.from([0x63, 0x61, 0x66, 0xe9]), 'text-charset@example.invalid', false, { charset: 'iso-8859-1' }],
+  ['7bit', Buffer.from('flowed soft \r\ncontinuation\r\n'), 'text-flowed@example.invalid', false, { charset: 'utf-8', format: 'flowed' }],
+  ['binary', Buffer.from([65, 10, 13, 0, 233]), 'text-binary@example.invalid', false, { charset: 'iso-8859-1' }],
   ['binary', Buffer.from([65, 10, 13, 0, 255, 66]), null, false],
   ['8bit', Buffer.from('합성\n본문\r끝'), null, false],
   ['7bit', Buffer.from('ascii\nline\rend'), null, false],
@@ -283,12 +286,13 @@ for (const [encoding, bytes, cid, roundtrip] of [
   ['base64', Buffer.from([137, 80, 78, 71, 10, 13, 0, 255]), 'synthetic-logo@example.invalid', false],
   ['base64', Buffer.from([137, 80, 78, 71, 10, 13, 0, 255]), 'synthetic-logo@example.invalid', true],
 ]) test(`templates API: ${encoding ?? 'missing'} attachment/CID bytes survive whole-MIME CRLF; upload roundtrip=${roundtrip}`, async t => {
-  const f = await fixture(t), type = cid ? 'image/png' : 'application/octet-stream', disposition = cid ? 'inline' : 'attachment';
+  const f = await fixture(t), type = parameters ? 'text/plain' : cid ? 'image/png' : 'application/octet-stream', disposition = cid ? 'inline' : 'attachment';
   const encoded = encoding === 'base64' ? Buffer.from(bytes.toString('base64') + '\r\n') : encoding === 'quoted-printable' ? Buffer.from([...bytes].map(byte => '=' + byte.toString(16).padStart(2, '0').toUpperCase()).join('')) : bytes;
-  const mime = Buffer.from(`Content-Type: ${type}\r\nContent-Disposition: ${disposition}; filename="sample.bin"\r\n${cid ? `Content-ID: <${cid}>\r\n` : ''}${encoding ? `Content-Transfer-Encoding: ${encoding}\r\n` : ''}\r\n`);
+  const mime = Buffer.from(`Content-Type: ${type}${parameters ? Object.entries(parameters).map(([key, value]) => `; ${key}=${value}`).join('') : ''}\r\nContent-Disposition: ${disposition}; filename="sample.bin"\r\n${cid ? `Content-ID: <${cid}>\r\n` : ''}${encoding ? `Content-Transfer-Encoding: ${encoding}\r\n` : ''}\r\n`);
   const html = `<p>first</p>\n<p>second</p>${cid ? `<img src="cid:${cid}">` : ''}\n`;
-  f.partFixture = { bytes, encoded, mime, html };
-  f.folders.get(received).rows.get(1).bodyStructure = { type: 'multipart/mixed', childNodes: [{ part: '1', type: 'text/html', size: Buffer.byteLength(html) }, { part: '2', type, encoding, id: cid ? `<${cid}>` : undefined, disposition, dispositionParameters: { filename: 'sample.bin' }, size: encoded.length }] };
+  f.partFixture = { bytes, encoded, mime, html, ...(parameters ? { transformed: parameters.format === 'flowed' ? Buffer.from(bytes.toString().replace(/ \r\n/g, '')) : Buffer.from(bytes.toString('latin1'), 'utf8') } : {}) };
+  if (parameters) assert.notDeepEqual(f.partFixture.transformed, bytes);
+  f.folders.get(received).rows.get(1).bodyStructure = { type: 'multipart/mixed', childNodes: [{ part: '1', type: 'text/html', size: Buffer.byteLength(html) }, { part: '2', type, encoding, parameters, id: cid ? `<${cid}>` : undefined, disposition, dispositionParameters: { filename: 'sample.bin' }, size: encoded.length }] };
   let inputHtml = html, attachments = [{ templateRef: f.sharedRef, part: '2' }];
   if (roundtrip) {
     const response = await f.request('POST', `/api/templates/${f.sharedRef}/attachments-to-compose`, { composeId: 'synthetic-roundtrip' }); status(response, 200);
@@ -298,11 +302,12 @@ for (const [encoding, bytes, cid, roundtrip] of [
   const response = await f.request('POST', '/api/templates', input({ html: inputHtml, attachments })); status(response, 201);
   const rows = [...f.folders.get(templatesFolder).rows.values()]; assert.equal(rows.length, 1);
   const raw = rows[0].source.toString('latin1'); assert.equal(/(?<!\r)\n/.test(raw), false);
-  const start = raw.indexOf('Content-Type: ' + type), end = raw.indexOf('\r\n--', start), part = raw.slice(start, end), separator = part.indexOf('\r\n\r\n');
+  const start = raw.lastIndexOf('Content-Type: ', raw.indexOf('sample.bin')), end = raw.indexOf('\r\n--', start), part = raw.slice(start, end), separator = part.indexOf('\r\n\r\n');
   assert.ok(start >= 0 && separator >= 0); assert.ok(part.includes('sample.bin')); assert.ok(part.includes('Content-Disposition: ' + disposition));
   const body = part.slice(separator + 4), savedEncoding = /Content-Transfer-Encoding: ([^\r]+)/i.exec(part)?.[1];
   assert.equal(savedEncoding, encoding === 'quoted-printable' ? 'quoted-printable' : 'base64');
   assert.deepEqual(savedEncoding === 'base64' ? Buffer.from(body, 'base64') : libqp.decode(body), bytes);
+  if (!roundtrip) assert.equal(f.calls.some(row => row[0] === 'DOWNLOAD' && row[2] === '2'), false);
   if (cid) assert.equal(/Content-ID:\s*<([^>]+)>/i.exec(part)?.[1], roundtrip ? /cid:([^"<>\s]+)/.exec(inputHtml)[1] : cid);
   if (['base64', 'quoted-printable'].includes(encoding) && !roundtrip) assert.equal(body, encoded.toString('latin1'));
 });

@@ -213,7 +213,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       if (!await client.messageDelete(ref.uid, { uid: true })) throw unavailable();
     });
   }
-  async function rawPart(client, uid, node, path) {
+  async function rawPart(client, uid, node, path, bodyOnly = false) {
     const mimeKey = `${node.part}.mime`;
     const headers = await client.fetchOne(uid, { bodyParts: [mimeKey] }, { uid: true, binary: false });
     const mime = headers?.bodyParts?.get(mimeKey);
@@ -221,7 +221,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     const file = path ? await open(path, 'wx', 0o600) : null;
     const hash = createHash('sha256'); let size = 0;
     try {
-      if (file) await file.writeFile(mime);
+      if (file && !bodyOnly) await file.writeFile(mime);
       async function* chunks() {
         const chunkSize = 64 * 1024; let offset = 0;
         while (true) {
@@ -349,12 +349,13 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             existingCids.push(node.id);
             if (templateParts) templateCids.set(`/api/messages/${encodeURIComponent(part.ref)}/parts/${encodeURIComponent(part.partId)}?inline=1`, node.id.trim().replace(/^<|>$/g, ''));
           }
-          if ((body.draftRef === part.ref || templateParts) && (!templateParts || ['base64', 'quoted-printable'].includes((node.encoding || '7bit').toLowerCase()))) {
-            const verified = await rawPart(client, ref.uid, node, path);
+          if (body.draftRef === part.ref || templateParts) {
+            const keepRaw = !templateParts || ['base64', 'quoted-printable'].includes((node.encoding || '7bit').toLowerCase());
+            const verified = await rawPart(client, ref.uid, node, path, !keepRaw);
             total += verified.size; if (total > maxBytes) throw tooLarge();
             const headers = attachmentHeaders(node, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
-            const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'], raw: true, ...(node.id ? { cid: node.id.trim().replace(/^<|>$/g, '') } : {}), contentDisposition: node.disposition || 'attachment' };
-            resumedParts.push({ ...part, ...metadata, ...verified, mime: mimeIdentity(node) });
+            const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'], ...(keepRaw ? { raw: true } : {}), ...(node.id ? { cid: node.id.trim().replace(/^<|>$/g, '') } : {}), contentDisposition: node.disposition || 'attachment' };
+            if (keepRaw) resumedParts.push({ ...part, ...metadata, ...verified, mime: mimeIdentity(node) });
             return metadata;
           }
           const download = await client.download(ref.uid, part.partId, { uid: true, binary: true });
@@ -362,7 +363,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
           await pipeline(download.content, limiter(bytes => { total += bytes; if (total > maxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           const headers = attachmentHeaders(node, false);
           const encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
-          const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'], ...(templateParts ? { ...(node.id ? { cid: node.id.trim().replace(/^<|>$/g, '') } : {}), contentDisposition: node.disposition || 'attachment' } : {}) };
+          const metadata = { filename: decodeURIComponent(encoded[1]), contentType: headers['content-type'] };
           return metadata;
         });
         attachments.push({ ...metadata, path });

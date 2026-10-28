@@ -710,7 +710,7 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 ### 설치·업데이트·TLS
 
-새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. 기존 서버는 사용자 공지·설정/데이터 백업 후 `sudo ./scripts/update.sh -y --skip-mailcow-update`로 스택만 전환할 수 있습니다. 웹메일 주소의 DNS A 레코드는 서버를 가리켜야 합니다.
+새 설치는 `.env` 설정 후 `sudo ./scripts/setup.sh`를 실행합니다. 기존 서버는 사용자 공지·설정/데이터 백업 후 `sudo ./scripts/update.sh --skip-mailcow-update`로 스택만 전환할 수 있습니다. 웹메일 주소의 DNS A 레코드는 서버를 가리켜야 합니다.
 
 두 명령은 ① Docker 판·다른 Docker 망/호스트 경로와의 겹침 검사 및 앱 설정 생성 → ② 앱 프로젝트 전환 → ③ NPMplus 전용 망 연결 → ④ Dovecot·DB·Postfix 신뢰 변경 → ⑤ verify 순서로 처리합니다. 옛 mailcow 망에 붙은 앱만 처음 한 번 `compose down` 후 올라옵니다(볼륨 보존). 이미 전용 망 구조이면 내리지 않으며, 같은 생성 파일은 다시 쓰지 않습니다. 1~4단계 실패 시 중단하고 바뀐 단계와 재시도 안내를 출력하며, 5단계 verify 실패는 경고합니다.
 
@@ -865,11 +865,40 @@ mysql 볼륨 전체 복원은 공지 데이터와 두 DB 계정도 백업 시점
 
 ### 공지 변경 이전 버전으로 되돌리기
 
-반영 전에 스택 snapshot, `/home/webmail` 소스 tar, `mailstack-webmail:before-<HEAD>` 이미지 tag, 스택 `.env`·`webmail-admin.env`·edge override 사본(0600), mailcow DB와 `mailstack_webmail`을 포함한 mysql 덤프를 보관합니다. 당시 HEAD와 실제 관리 DB IPv4도 비공개 작업 기록에 남깁니다. 시험 VM에서 아래 순서와 서비스 상태를 확인한 뒤 운영에 적용합니다.
+반영 전에 스택 snapshot, `$WEBMAIL_DIR` 소스 tar, `mailstack-webmail:before-<반영할 HEAD>` 이미지 tag, 스택 `.env`·`webmail-admin.env`·edge override 사본(0600), mailcow DB와 `mailstack_webmail`을 포함한 mysql 덤프를 보관합니다. 이미지 tag 이름은 **반영하려는 대상 HEAD** 기준입니다. 반영 전의 `mailstack-webmail:local` 이미지를 `mailstack-webmail:before-<반영할 HEAD>`로 tag합니다. 같은 이름의 tag가 이미 있으면 덮어쓰지 말고 중단합니다. 당시 실행 중인 이전 HEAD와 실제 관리 DB IPv4도 비공개 작업 기록에 남깁니다. 시험 VM에서 아래 순서와 서비스 상태를 확인한 뒤 운영에 적용합니다.
 
 1. 스택 레포를 기록한 이전 HEAD로 checkout합니다(운영 detached 허용). 이전 스크립트가 사용되는지 확인합니다.
-2. `/home/webmail`을 소스 tar로 복원하고 `mailstack-webmail:before-<HEAD>`를 `mailstack-webmail:local`로 다시 tag합니다.
-3. 백업한 `webmail-admin.env`·edge override를 복원해 관리 DB 고정 IP가 없던 상태로 돌립니다. 이전 라이브러리와 설정을 불러온 root 셸에서 `edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up up -d --no-deps --no-build webmail`을 실행합니다. 관리 화면을 켰었다면 같은 방식으로 `edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --no-deps --no-build webmail-admin`도 실행해 재생성합니다.
+2. `$WEBMAIL_DIR`을 소스 tar로 복원하고 반영 전에 보관한 `mailstack-webmail:before-<반영할 HEAD>`를 `mailstack-webmail:local`로 다시 tag합니다.
+3. 백업한 `webmail-admin.env`·edge override를 복원해 관리 DB 고정 IP가 없던 상태로 돌립니다. **1단계에서 이전 HEAD로 되돌린 스택 저장소 루트**에서 아래 명령을 실행합니다. 경로 변수는 실제 설치 경로에 맞춥니다. 이전 `webmail-env.sh`가 `edge.sh`와 `log-archive.sh`도 불러옵니다. 이미지 재빌드 없이 웹메일을 재생성하고, 관리 화면을 켰었다면 관리 컨테이너도 재생성합니다.
+
+   ```bash
+   sudo bash -e <<'BASH'
+   set +x
+   STACK_DIR=$PWD
+   export MAILCOW_DIR=/home/mailcow-dockerized
+   export WEBMAIL_DIR=/home/webmail
+   export NPMPLUS_DIR=/home/npmplus
+   export PROJECT_DIR="$STACK_DIR"
+   set +u
+   WEBMAIL_ENABLE=true
+   MAIL_AUTOEXPUNGE_ENABLE=
+   MAIL_SHARE_WHOLE_MAILBOX=false
+   MAIL_TRUSTED_SENDER_ENABLE=false
+   TOOLKIT_ENABLE=true
+   set -a
+   source "$STACK_DIR/.env"
+   set +a
+   source "$STACK_DIR/scripts/lib/webmail-env.sh"
+   WEBMAIL_STACK_ENV="$STACK_DIR/.env"
+   webmail_options >/dev/null
+   webmail_load_config "$WEBMAIL_STACK_ENV" "$MAILCOW_DIR" >/dev/null
+   set -u
+   edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up up -d --no-deps --no-build webmail
+   if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
+     edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --no-deps --no-build webmail-admin
+   fi
+   BASH
+   ```
 4. 이전 `apply-webmail-dbuser.sh apply`로 `webmail_ro`를 기존 5개 테이블 지정 열 SELECT만으로 되돌립니다. 이전 스크립트가 모르는 관리 계정은 MariaDB root로 `DROP USER IF EXISTS 'webmail_notices_admin'@'<기록한 관리 DB IPv4>';`를 실행해 제거합니다. 공지 스키마와 데이터는 보존합니다.
 5. 웹메일·관리 컨테이너 healthy, 로그인·메일 목록·합성 메일 발송 1통, 이전 `verify.sh` 통과, `SHOW GRANTS`가 이전 상태와 같은지 확인합니다. SHOW GRANTS의 인증 해시를 로그·대화에 노출하지 않습니다.
 

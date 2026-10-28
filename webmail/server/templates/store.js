@@ -132,17 +132,23 @@ export function createTemplateStore({ imap, config, buildMime, onFolderCreated, 
   }
   async function append(session, path, raw) {
     if (raw.length > maxBytes) throw new AppError(413, 'TEMPLATE_TOO_LARGE', '템플릿 크기가 허용 크기를 넘었어요.');
-    return imap.withMailbox(session, path, async client => {
+    let appended;
+    try { return await imap.withMailbox(session, path, async client => {
       const result = await client.append(path, raw, ['\\Seen']);
       if (!uint(Number(result?.uid)) || !uint(Number(result?.uidValidity))) throw unavailable();
       if (Number(result.uidValidity) !== Number(client.mailbox.uidValidity)) throw changed();
       const uid = Number(result.uid);
+      appended = { path, uid, uidValidity: Number(result.uidValidity) };
       const saved = await client.fetchOne(uid, { uid: true, source: true, size: true, bodyStructure: true, headers: ['X-WEBMAIL-TEMPLATE-ID', 'X-WEBMAIL-TEMPLATE-NAME', 'SUBJECT', 'DATE'] }, { uid: true });
       if (saved?.uid !== uid || !Buffer.isBuffer(saved.source) || !saved.source.equals(raw)) throw unavailable();
       const value = entry(path, Number(result.uidValidity), saved, session.email.toLowerCase());
       if (!value) throw unavailable();
       return value;
-    });
+    }); } catch (error) {
+      // The mailbox lock is released before removing only this APPEND's UID.
+      if (appended) await expunge(session, [appended]);
+      throw error;
+    }
   }
   async function expunge(session, rows) {
     for (const path of new Set(rows.map(row => row.path))) {

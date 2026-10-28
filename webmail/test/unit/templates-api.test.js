@@ -247,3 +247,14 @@ test('public template reader: partial-list errors log cause and copy finally cle
   fail=true; await assert.rejects(reader.copy({email:user}, publicRef(1)), {statusCode:413}); assert.deepEqual(removed, ['temporary-one','temporary-one']);
   db.fail=true; assert.deepEqual(await reader.list({email:user}), {items:[],unavailable:true}); assert.equal(logs[0].causeCode,'PUBLIC_TEMPLATES_UNAVAILABLE');
 });
+
+for (const [encoding, html] of [['7bit', '<p>plain</p>'], ['quoted-printable', '<p>hello world 가</p>'], ['base64', '<p>안녕하세요 반갑습니다</p>']]) test(`templates API: ${encoding} alternative body has no bare LF and creates exactly one message`, async t => {
+  const f = await fixture(t);
+  const created = await f.request('POST', '/api/templates', input({ subject: 'synthetic', html })); status(created, 201);
+  const rows = [...f.folders.get(templatesFolder).rows.values()]; assert.equal(rows.length, 1);
+  const raw = rows[0].source.toString('latin1');
+  assert.match(raw, new RegExp('Content-Transfer-Encoding: ' + encoding));
+  assert.equal(/(?<!\r)\n/.test(raw), false);
+  assert.ok(raw.includes('Content-Type: text/plain'));
+  assert.equal(f.calls.filter(row => row[0] === 'APPEND').length, 1);
+});

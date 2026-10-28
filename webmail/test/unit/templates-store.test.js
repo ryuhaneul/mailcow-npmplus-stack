@@ -144,10 +144,15 @@ for (const failure of ['before', 'after', 'no-uid']) test(`templates store: APPE
   assert.equal(f.folders.get(templatesFolder).rows.get(decodeRef(original.ref).uid).flags.has('\\Deleted'), false);
 });
 
-test('templates store: corrupt APPEND readback leaves old MIME, attachments and CID untouched', async () => {
+test('templates store: corrupt APPEND readback removes the new UID and leaves old MIME, attachments and CID untouched', async () => {
   const f = fixture(), original = f.add(templatesFolder), old = Buffer.from(bytes(f, original.ref)); f.verifyFailure = true;
   await assert.rejects(f.service.update(session(), original.ref, data({ baseUid: decodeRef(original.ref).uid })), { statusCode: 503 });
-  assert.deepEqual(bytes(f, original.ref), old); assert.ok(!f.calls.some(row => row[0] === 'flags'));
+  assert.deepEqual(bytes(f, original.ref), old);
+  assert.deepEqual([...f.folders.get(templatesFolder).rows.keys()], [decodeRef(original.ref).uid]);
+  const nextUid = decodeRef(original.ref).uid + 1;
+  assert.equal(f.calls.find(row => row[0] === 'flags')[2], String(nextUid));
+  assert.deepEqual(f.calls.find(row => row[0] === 'exec').slice(2), ['UID EXPUNGE', [{ type: 'SEQUENCE', value: String(nextUid) }]]);
+  assert.equal(original.row.flags.has('\\Deleted'), false);
 });
 
 for (const failure of ['flagFailure', 'expungeFailure']) test(`templates store: ${failure} returns verified save; next save cleans same-Date duplicates`, async () => {
@@ -365,4 +370,12 @@ for (const accurateSize of [true, false]) test(`templates store: omitted oversiz
   assert.equal(mutations(f).length, 0); assert.equal(f.builds.length, 0);
   const rows = f.folders.get(templatesFolder).rows;
   assert.deepEqual([...rows.keys()], [original.row.uid]); assert.deepEqual(rows.get(original.row.uid).source, before); assert.deepEqual([...original.row.flags], flags);
+});
+
+test('templates store: failed create readback removes only the just-appended UID without leaving a duplicate', async () => {
+  const f = fixture(); f.verifyFailure = true;
+  await assert.rejects(f.service.create(session(), data()), { statusCode: 503 });
+  assert.equal(f.folders.get(templatesFolder).rows.size, 0);
+  assert.equal(f.calls.filter(row => row[0] === 'append').length, 1);
+  assert.deepEqual(f.calls.find(row => row[0] === 'exec').slice(2), ['UID EXPUNGE', [{ type: 'SEQUENCE', value: '1' }]]);
 });

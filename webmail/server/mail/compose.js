@@ -378,7 +378,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       mail.html = sanitizeComposeHtml(inline.html, { publicHostnames: config.publicHostnames });
       active(session);
       // Explicit streams prevent nodemailer from treating user content as a URL/path.
-      const compiled = new MailComposer({ ...mail, ...(alternative ? { text: alternativeText(mail.html) } : {}), attachments: attachments.map(file => {
+      const compiled = new MailComposer({ ...mail, ...(alternative ? { text: templateParts ? alternativeText(mail.html).replace(/\r\n|\r|\n/g, '\r\n') : alternativeText(mail.html) } : {}), attachments: attachments.map(file => {
         const content = createReadStream(file.path); streams.push(content);
         return { filename: file.filename, contentType: file.contentType, ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), ...(file.raw ? { raw: content } : { content }) };
       }).concat(inline.parts), disableFileAccess: true, disableUrlAccess: true }).compile();

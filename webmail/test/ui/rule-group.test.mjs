@@ -25,7 +25,7 @@ await test('condition group editor',async t=>{
     const context=await browser.newContext({viewport:{width,height:900}});
     await context.addInitScript(mode=>localStorage.setItem('webmail-prefs',JSON.stringify({theme:'ink',mode})),mode);
     const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
-    const fixture=rulesFixture('ok',{doc:{...rulesFixture().doc,v:rule.conditions.some(c=>c.conditions||c.op==='matches')?2:1,rules:[rule]}});
+    const fixture=rulesFixture('ok',{doc:{...rulesFixture().doc,v:minimumDocumentVersion([rule]),rules:[rule]}});
     await page.route('**/api/prefs',route=>route.fulfill({json:{...fake.state.prefs,theme:'ink',mode}}));
     await page.route('**/api/rules',route=>route.request().method()==='GET'?route.fulfill({json:fixture}):route.fulfill({json:{rev:8}}));
     await page.route('**/api/rules/preview',route=>route.fulfill({json:{count:0,items:[],scanned:24,limited:false,partial:false}}));
@@ -76,6 +76,48 @@ await test('condition group editor',async t=>{
       else await expect(page.locator('.toast.rule-result')).not.toContainText('건너뛰었어요');
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
       if(skipped) await page.screenshot({path:`${captures}/existing-priority-skipped-${width}.png`,fullPage:true});
+      assert.deepEqual(errors,[]);await context.close();
+    }
+  });
+  await t.test('body editor blocks existing-mail application, saves/reopens v2 and never polls unavailable preview',async()=>{
+    for (const width of [1280,768,375]) {
+      const {page,context,errors}=await open(base([{field:'subject',op:'eq',value:'견적'}]),width);
+      let savedDoc,previews=0,applications=0;
+      await page.route('**/api/rules/preview',route=>{previews++;const body=route.request().postDataJSON().rule.conditions.some(c=>c.field==='body'||c.conditions?.some(c=>c.field==='body'));return route.fulfill({json:body?{state:'body_unavailable',partial:false}:{count:0,items:[],scanned:24,limited:false,partial:false}});});
+      await page.route('**/api/rules',route=>{
+        if(route.request().method()==='PUT'){savedDoc=route.request().postDataJSON().doc;return route.fulfill({json:{rev:8}});}
+        return savedDoc?route.fulfill({json:rulesFixture('ok',{doc:savedDoc,rev:8})}):route.fallback();
+      });
+      await page.route('**/api/rules/apply-existing',route=>{applications++;return route.fulfill({json:{matched:0,moved:0,trashed:0,flagged:0,failed:[]}});});
+      await page.getByLabel('1번 조건 항목',{exact:true}).selectOption('body');
+      await expect(page.getByLabel('1번 조건 방식',{exact:true})).toHaveValue('has');
+      assert.deepEqual(await page.getByLabel('1번 조건 방식',{exact:true}).locator('option').allTextContents(),['포함','포함 안 됨']);
+      await page.getByLabel('1번 조건 방식',{exact:true}).selectOption('not');
+      await expect(page.locator('.preview header')).toContainText('본문 조건은 미리 셀 수 없어요');
+      await expect(page.locator('.preview')).toHaveAttribute('aria-busy','false');
+      const checked=page.locator('.save-row input[type=checkbox]');await expect(checked).not.toBeChecked();await expect(checked).toBeDisabled();
+      await expect(page.locator('.save-row')).toContainText('본문 조건은 새로 오는 메일부터 적용돼요');
+      const before=previews;await page.waitForTimeout(1700);assert.equal(previews,before);
+      await expect(page.getByRole('button',{name:'규칙 저장',exact:true})).toBeEnabled();
+      await page.getByRole('button',{name:'규칙 저장',exact:true}).click();
+      await expect(page.locator('.toast')).toContainText('규칙을 저장했어요');
+      assert.equal(applications,0);assert.equal(savedDoc.v,2);validateDocument(savedDoc,{checkPolicy:false});
+      assert.deepEqual(savedDoc.rules[0].conditions,[{field:'body',op:'not',value:'견적'}]);
+      await expect(page.locator('.rules .say')).toContainText('본문에 견적이 없으면');
+      await page.goto(`${origin}/#rule/group001`);
+      await expect(page.getByLabel('1번 조건 항목',{exact:true})).toHaveValue('body');
+      await expect(page.getByLabel('1번 조건 방식',{exact:true})).toHaveValue('not');
+      await expect(page.locator('.preview header')).toContainText('본문 조건은 미리 셀 수 없어요');
+      await page.locator('.toast button').click();
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+      await page.screenshot({path:`${captures}/body-editor-${width}.png`,fullPage:true});
+      await page.locator('.rule-builder-view .scroll').evaluate(el=>{el.scrollTop=el.scrollHeight;});
+      await page.screenshot({path:`${captures}/body-editor-${width}-bottom.png`,fullPage:true});
+      assert.deepEqual((await new AxeBuilder({page}).include('.rule-builder-view').analyze()).violations,[]);
+      await page.getByLabel('1번 조건 항목',{exact:true}).selectOption('subject');
+      await expect(page.locator('.preview header')).toContainText('통 · 지금 조건에 맞는 메일');
+      await expect(checked).toBeChecked();await expect(checked).toBeEnabled();
+      assert.equal(applications,0);
       assert.deepEqual(errors,[]);await context.close();
     }
   });

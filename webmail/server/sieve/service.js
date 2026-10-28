@@ -8,7 +8,7 @@ import { readGmailXml as readXml } from './gmail-xml.js';
 import { convertGmailEntries as convertEntries } from './import-xml.js';
 import { classifyState } from './state.js';
 import { importScript, rulesDocument } from './import.js';
-import { invalidateInboxHeaders, loadInboxHeaders, matches, preview as previewMatches } from './match.js';
+import { invalidateInboxHeaders, loadInboxHeaders, matches, matchesWithBody, bodyValues, preview as previewMatches } from './match.js';
 import { assertUidValidity, decodeRef } from '../mail/ref.js';
 import { createActionService } from '../mail/actions.js';
 import { createFolderService } from '../mail/folders.js';
@@ -448,11 +448,13 @@ export function createRulesService({ config, imap, directory, logger, connect = 
   async function previewRule(session, body) {
     const started = performance.now();
     const rule = await validateRule(session, body, true);
+    if (bodyValues(rule).length) return { state: 'body_unavailable', partial: false };
     return previewMatches(rule, await loadInboxHeaders(imap, session, { now, budgetMs: Math.max(0, 3500 - (performance.now() - started)) }));
   }
   async function applyExisting(session, body) {
     // Do not queue folder validation behind an unfinished scan.
-    await validateRule(session, body, true);
+    const requested = await validateRule(session, body, true);
+    if (bodyValues(requested).length) throw new AppError(422, 'RULES_BODY_EXISTING', '본문 조건은 새로 오는 메일부터 적용돼요');
     const snapshot = await loadInboxHeaders(imap, session, { now, budgetMs: 0 });
     if (snapshot.partial) throw new AppError(409, 'PREVIEW_NOT_READY', '받은 메일 확인이 끝난 뒤 적용해 주세요.');
     const rule = await validateRule(session, body);
@@ -477,8 +479,7 @@ export function createRulesService({ config, imap, directory, logger, connect = 
         }
       });
       const eligible = found.filter(record => !priority.earlierRules.some(earlier => {
-        try { return matches(earlier, record.headers); }
-        catch { return true; } // Unknown priority must never allow a lower rule to act.
+        return matchesWithBody(earlier, record.headers) !== false;
       }));
       const skipped = found.length - eligible.length;
       const result = { matched: found.length, moved: 0, trashed: 0, flagged: 0, failed: [], ...(skipped ? { skipped } : {}) };

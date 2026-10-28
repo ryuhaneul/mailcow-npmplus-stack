@@ -324,3 +324,65 @@ for (const actions of [{ move: 'Projects' }, { read: true }]) test(`Gate D: chan
   assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
   assert.equal(f.client.rows.length, 2);
 });
+
+
+const bodyCondition = (value = 'needle', op = 'has') => ({ field: 'body', op, value });
+function storeBodyRules(f, conditions, { match = 'all', earlier = [], actions = { move: 'Projects' } } = {}) {
+  const target = { ...rule(actions), enabled: true, match, conditions };
+  f.doc.v = 2; f.doc.rules = [...earlier, target];
+  f.scripts.set('webmail-rules', generateScript(f.doc, { checkPolicy: false }));
+  return target;
+}
+const noMailMutations = f => assert.equal(f.commands.some(row => ['STORE', 'MOVE'].includes(row[0])), false);
+
+test('body preview is not counted, never starts a scan/search and is not partial', async t => {
+  const f = await fixture(t);
+  f.client.search = async () => { assert.fail('preview must not search'); };
+  const target = storeBodyRules(f, [bodyCondition()]);
+  assert.deepEqual(ok(await f.request('preview', target)), { state: 'body_unavailable', partial: false });
+  assert.deepEqual(f.commands, []);
+});
+
+for (const [name, conditions, match] of [
+  ['body has', [bodyCondition()], 'all'],
+  ['body not', [bodyCondition('needle', 'not')], 'all'],
+  ['OR with matching header', [{ field: 'subject', op: 'has', value: '회의' }, bodyCondition()], 'any'],
+  ['nested body', [{ field: 'from', op: 'has', value: 'sender' }, { match: 'any', conditions: [bodyCondition(), { field: 'subject', op: 'has', value: '회의' }] }], 'all'],
+]) test(`existing-mail request refuses ${name} before scanning or acting`, async t => {
+  const f = await fixture(t);
+  const target = storeBodyRules(f, conditions, { match, actions: { read: true, star: true, move: 'Projects' } });
+  let searches = 0;
+  f.client.search = async () => { searches++; assert.fail('body search must not run'); };
+  rejected(await f.request('apply-existing', target), 422, 'RULES_BODY_EXISTING');
+  assert.equal(searches, 0); assert.deepEqual(f.commands, []); noMailMutations(f);
+  assert.equal(f.client.rows.length, 2);
+});
+
+for (const enabled of [true, false]) test(`upper body-only rule enabled=${enabled} is unknown without searching`, async t => {
+  const f = await fixture(t, 3);
+  const earlier = { ...rule({ star: true }), id: 'body0001', enabled, conditions: [bodyCondition()] };
+  const target = storeBodyRules(f, [{ field: 'subject', op: 'has', value: '회의' }], { earlier: [earlier] });
+  let searches = 0;
+  f.client.search = async () => { searches++; assert.fail('body search must not run'); };
+  await loadInboxHeaders(f.app.imap, f.session);
+  const result = ok(await f.request('apply-existing', target));
+  assert.equal(result.matched, 3); assert.equal(result.skipped ?? 0, enabled ? 3 : 0);
+  assert.equal(result.moved, enabled ? 0 : 3); assert.equal(searches, 0);
+  if (enabled) noMailMutations(f);
+});
+
+for (const match of ['all', 'any']) for (const headerMatches of [false, true]) for (const op of ['has', 'not']) {
+  test(`upper ${match} with header=${headerMatches} and body ${op} preserves three-valued priority without searching`, async t => {
+    const f = await fixture(t, 3);
+    const earlier = { ...rule({ star: true }), id: 'body0001', enabled: true, match,
+      conditions: [{ field: 'subject', op: 'has', value: headerMatches ? '회의' : 'absent' }, bodyCondition('needle', op)] };
+    const target = storeBodyRules(f, [{ field: 'subject', op: 'has', value: '회의' }], { earlier: [earlier] });
+    let searches = 0;
+    f.client.search = async () => { searches++; assert.fail('body search must not run'); };
+    await loadInboxHeaders(f.app.imap, f.session);
+    const result = ok(await f.request('apply-existing', target));
+    const skipped = match === 'all' && !headerMatches ? 0 : 3;
+    assert.equal(result.skipped ?? 0, skipped); assert.equal(result.moved, 3 - skipped);
+    assert.equal(searches, 0); if (skipped) noMailMutations(f);
+  });
+}

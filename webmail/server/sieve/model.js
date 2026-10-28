@@ -59,7 +59,7 @@ export function allowedMoveFolder(folder) {
 /** Minimum wire version for the rule features in use. */
 export function minimumDocumentVersion(rules) {
   return Array.isArray(rules) && rules.some(rule => Array.isArray(rule?.conditions)
-    && rule.conditions.some(condition => condition && (Object.hasOwn(condition, 'conditions') || condition.op === 'matches'))) ? 2 : 1;
+    && rule.conditions.some(condition => condition && (Object.hasOwn(condition, 'conditions') || condition.op === 'matches' || condition.field === 'body'))) ? 2 : 1;
 }
 
 /** Policy context: folders are {path, specialUse?, shared?, virtual?, personal?}.
@@ -92,8 +92,12 @@ export function validateDocument(doc, { folders = [], maxRedirects = 100, checkP
           continue;
         }
         object(condition, c, ['field', 'op', 'value']);
-        if (!['from', 'to', 'subject', 'attachment'].includes(condition.field)) invalid(`${c}.field`, 'field');
+        if (!['from', 'to', 'subject', 'attachment', 'body'].includes(condition.field)) invalid(`${c}.field`, 'field');
         if (!['has', 'not', 'eq', 'start', 'matches'].includes(condition.op)) invalid(`${c}.op`, 'operator');
+        if (condition.field === 'body') {
+          if (doc.v === 1) invalid('$.v', 'version');
+          if (!['has', 'not'].includes(condition.op)) invalid(`${c}.op`, 'operator');
+        }
         if (condition.field === 'attachment') {
           if (condition.op !== 'has' || condition.value !== '') invalid(c, 'attachment');
         } else text(condition.value, `${c}.value`, { min: 1, max: 200 });

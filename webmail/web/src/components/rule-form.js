@@ -29,8 +29,9 @@ export function ruleProblem(rule, allFolders, internalDomains, forwardText) {
         continue;
       }
       if (Object.keys(c).some(key => !['field', 'op', 'value'].includes(key))
-        || !['from', 'to', 'subject', 'attachment'].includes(c.field)
+        || !['from', 'to', 'subject', 'attachment', 'body'].includes(c.field)
         || !['has', 'not', 'eq', 'start', 'matches'].includes(c.op)) return '조건 항목과 방식을 확인해 주세요.';
+      if (c.field === 'body' && !['has', 'not'].includes(c.op)) return '본문 조건은 포함·포함 안 됨만 사용할 수 있어요.';
       if (c.field === 'attachment') {
         if (c.op !== 'has' || c.value !== '') return '첨부파일 조건을 확인해 주세요.';
       } else if (!safe(c.value) || [...c.value].length < 1 || [...c.value].length > 200) return '조건 값은 제어문자와 ${ 없이 1~200자로 입력해 주세요.';

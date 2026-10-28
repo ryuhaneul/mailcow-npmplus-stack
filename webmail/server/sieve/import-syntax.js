@@ -65,9 +65,40 @@ function prefix(pattern) {
   return result;
 }
 
-export function readConditions(reader, depth = 0) {
+export function readConditions(reader, depth = 0, { gmailWords = false } = {}) {
+  // Match only gmail2sieve's whole-message word test. Other body tests retain
+  // the unsupported path below, including altered headers, values and tags.
+  function wordTest() {
+    const start = reader.i;
+    try {
+      reader.expect('anyof'); reader.expect('('); reader.expect('header'); reader.expect(':contains');
+      const headers = reader.strings().map(value => value.toLowerCase()).sort();
+      if (JSON.stringify(headers) !== '["cc","from","subject","to"]') throw new Error();
+      const value = reader.string();
+      reader.expect(','); reader.expect('body'); reader.expect(':text'); reader.expect(':contains');
+      if (reader.string() !== value) throw new Error();
+      reader.expect(')');
+      return { gmailWord: value };
+    } catch { reader.i = start; return null; }
+  }
+  function expandWords(node, inverted = false) {
+    if (Object.hasOwn(node, 'not')) return expandWords(node.not, !inverted);
+    if (Object.hasOwn(node, 'gmailWord')) return {
+      match: inverted ? 'all' : 'any',
+      conditions: ['subject', 'from', 'to', 'body'].map(field => ({ field, op: inverted ? 'not' : 'has', value: node.gmailWord })),
+    };
+    if (node.conditions) return {
+      match: inverted ? (node.match === 'all' ? 'any' : 'all') : node.match,
+      conditions: node.conditions.map(child => expandWords(child, inverted)),
+    };
+    return inverted ? { not: node } : node;
+  }
   function read(level) {
     if (level > 8) unsupported('조건이 너무 복잡해요.');
+    if (gmailWords) {
+      const word = wordTest();
+      if (word) return word;
+    }
     const keyword = reader.take();
     if (['allof', 'anyof'].includes(keyword)) {
       reader.expect('('); const parts = [read(level + 1)];
@@ -109,7 +140,10 @@ export function readConditions(reader, depth = 0) {
     });
     return { match: 'any', conditions };
   }
-  try { return normalizeConditionTree(read(depth)); }
+  try {
+    const tree = read(depth);
+    return normalizeConditionTree(gmailWords ? expandWords(tree) : tree);
+  }
   catch (error) {
     if (error.reason === 'group_shape') unsupported('조건이 너무 복잡해요.');
     if (error.reason === 'negation') unsupported('이 제외 조건은 옮길 수 없어요.');

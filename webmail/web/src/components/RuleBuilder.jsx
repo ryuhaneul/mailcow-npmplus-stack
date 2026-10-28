@@ -15,7 +15,7 @@ import { normalizeConditionTree } from '../../../server/sieve/condition-tree.js'
 import './rule-builder.css';
 
 function rulesDocumentVersion(rules) {
-  return rules.some(rule => rule.conditions.some(c => c.conditions || c.op === 'matches')) ? 2 : 1;
+  return rules.some(rule => rule.conditions.some(c => c.conditions || c.op === 'matches' || c.field === 'body')) ? 2 : 1;
 }
 
 export default function RuleBuilder({ id, query }) {
@@ -85,6 +85,8 @@ export default function RuleBuilder({ id, query }) {
     return () => {current = false; clearTimeout(timer); controller.abort();};
   }, [serialized, problem]);
   const leaves = draft?.conditions.flatMap(c => c.conditions ?? [c]) ?? [];
+  const hasBody = leaves.some(c => c.field === 'body');
+  useEffect(() => {setApplyOld(!hasBody);}, [hasBody]);
   function changeConditions(conditions, focus) {
     nextFocus.current = focus;
     setDraft({...draft,conditions});
@@ -110,8 +112,8 @@ export default function RuleBuilder({ id, query }) {
     const label = childIndex === undefined ? `${index+1}번 조건` : `묶음 ${groupNumber}의 ${childIndex+1}번 조건`;
     const update = patch => updateCondition(index,patch,childIndex);
     return <div class="cond" key={childIndex ?? index} data-condition={childIndex === undefined ? index : `${index}-${childIndex}`}>
-      <select class="dd" aria-label={`${label} 항목`} value={condition.field} onChange={e => update({field:e.currentTarget.value,...(e.currentTarget.value === 'attachment' ? {op:'has',value:''} : {})})}>{[['from','보낸 사람'],['to','받는 사람(To·Cc)'],['subject','제목'],['attachment','첨부파일']].map(([value,label]) => <option value={value}>{label}</option>)}</select>
-      <select class="dd" aria-label={`${label} 방식`} disabled={condition.field === 'attachment'} value={condition.op} onChange={e => update({op:e.currentTarget.value})}>{(condition.field === 'attachment' ? [['has','있음']] : [['has','포함'],['not','포함 안 됨'],['eq',condition.field === 'subject' ? '제목이 정확히' : '주소가 정확히'],['start',condition.field === 'subject' ? '제목이 시작' : '주소가 시작'],['matches','패턴(*)']]).map(([value,label]) => <option value={value}>{label}</option>)}</select>
+      <select class="dd" aria-label={`${label} 항목`} value={condition.field} onChange={e => update({field:e.currentTarget.value,...(e.currentTarget.value === 'attachment' ? {op:'has',value:''} : e.currentTarget.value === 'body' && !['has','not'].includes(condition.op) ? {op:'has'} : {})})}>{[['from','보낸 사람'],['to','받는 사람(To·Cc)'],['subject','제목'],['body','본문'],['attachment','첨부파일']].map(([value,label]) => <option value={value}>{label}</option>)}</select>
+      <select class="dd" aria-label={`${label} 방식`} disabled={condition.field === 'attachment'} value={condition.op} onChange={e => update({op:e.currentTarget.value})}>{(condition.field === 'attachment' ? [['has','있음']] : condition.field === 'body' ? [['has','포함'],['not','포함 안 됨']] : [['has','포함'],['not','포함 안 됨'],['eq',condition.field === 'subject' ? '제목이 정확히' : '주소가 정확히'],['start',condition.field === 'subject' ? '제목이 시작' : '주소가 시작'],['matches','패턴(*)']]).map(([value,label]) => <option value={value}>{label}</option>)}</select>
       <input class={`inp${condition.op === 'matches' ? ' rule-pattern-input' : ''}`} aria-label={`${label} 값`} aria-describedby={condition.op === 'matches' ? 'rule-pattern-note' : undefined} value={condition.value} disabled={condition.field === 'attachment'} placeholder={condition.field === 'attachment' ? '값 필요 없음' : '조건 값을 입력하세요'} onInput={e => update({value:e.currentTarget.value})}/>
       <button class="ib remove-condition" type="button" aria-label={`${label} 빼기`} disabled={childIndex === undefined ? draft.conditions.length === 1 : draft.conditions[index].conditions.length <= 2} onClick={() => removeCondition(index,childIndex)}><Icon name="minus"/></button>
     </div>;
@@ -124,14 +126,14 @@ export default function RuleBuilder({ id, query }) {
   }
   async function save(event) {
     event.preventDefault();
-    if (saving.current || problem || !rule || error || busy || (applyOld && (pending || !preview || preview.partial))) return;
+    if (saving.current || problem || !rule || error || busy || (applyOld && !hasBody && (pending || !preview || preview.partial))) return;
     saving.current = true; setBusy(true); setError(null);
     let saved = false;
     try {
       const rules = id ? data.doc.rules.map(item => item.id === id ? rule : item) : [...data.doc.rules, rule];
       await api('/api/rules', {method:'PUT',body:{baseRev:data.rev,doc:{...data.doc,v:rulesDocumentVersion(rules),rules}}});
       saved = true;
-      if (applyOld) {
+      if (applyOld && !hasBody) {
         try {
           const result = await api('/api/rules/apply-existing', {method:'POST',body:{rule}});
           toast.value = {kind:'rule-apply-result',message:`규칙을 저장했어요. 기존 메일 ${result.matched.toLocaleString()}통 일치 · 이동 ${result.moved}통 · 휴지통 ${result.trashed}통 · 표시 ${result.flagged}통 · 실패 ${result.failed.length}통.${result.skipped ? ` 위 규칙에 먼저 해당돼 ${result.skipped.toLocaleString()}통은 건너뛰었어요.` : ''} 전달은 앞으로 오는 메일에만 해요.`};
@@ -179,7 +181,7 @@ export default function RuleBuilder({ id, query }) {
           </div></div>
           <p class="rule-note">위에서부터 처음 맞는 규칙 하나만 적용해요. 뒤에 있는 규칙의 동작은 실행하지 않아요.</p>
           {problem && <p class="rule-note" role="status">{problem}</p>}
-          <div class="save-row"><label><input type="checkbox" disabled={pending || !preview || preview.partial} checked={applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>이미 받은 메일 <b class="num">{pending || !preview ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= MAX_RULES)}>규칙 저장</button></div></div>
+          <div class="save-row"><label><input type="checkbox" disabled={hasBody || pending || !preview || preview.partial} checked={!hasBody && applyOld} onChange={e => setApplyOld(e.currentTarget.checked)}/><span>{hasBody ? '본문 조건은 새로 오는 메일부터 적용돼요' : <>이미 받은 메일 <b class="num">{pending || preview?.count === undefined ? '…' : preview.count.toLocaleString()}</b>통에도 지금 적용</>}</span></label><div class="r"><a class="btn ghost" href="#filters">취소</a><button class="btn pri" type="submit" disabled={Boolean(problem) || pending || Boolean(previewError) || !preview || (!id && data.doc.rules.length >= MAX_RULES)}>규칙 저장</button></div></div>
           {preview?.partial && <p class="rule-note" role="status">받은 메일 확인이 끝나면 이미 받은 메일에도 적용할 수 있어요.</p>}
           {!id && data.doc.rules.length >= MAX_RULES && <p class="rule-note">규칙은 최대 {MAX_RULES}개까지 저장할 수 있어요.</p>}
         </fieldset>

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { existsSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
-import { validateDocument, canonicalJSON, MAX_SCRIPT_BYTES } from '../../server/sieve/model.js';
+import { validateDocument, canonicalJSON, MAX_SCRIPT_BYTES, minimumDocumentVersion } from '../../server/sieve/model.js';
 import { conditionTest, generateScript, hashBody, MAGIC } from '../../server/sieve/generate.js';
-import { parseScript } from '../../server/sieve/parse.js';
+import { parseScript, regenerateScript } from '../../server/sieve/parse.js';
 import { classifyState } from '../../server/sieve/state.js';
 import { sieveFileEntries, sieveTestOutput, withSieveTemps } from '../int/lib/sieve-host.js';
 import { api, waitForPreview } from '../int/lib/runtime.js';
@@ -529,4 +529,69 @@ test('external forwarding adds exactly one mandatory standalone spam guard after
   doc.rules = [rule(1, { forward: ['a@EXAMPLE.COM', 'a@alias.example.com'] })];
   assert.equal(generateScript(doc, context).includes(guard), false);
   assert.equal(generateScript(doc, { ...context, internalDomains: [] }).includes(guard), true);
+});
+
+
+for (const op of ['has', 'not', 'eq', 'start', 'matches']) test(`body model permits only has/not: ${op}`, () => {
+  const doc = document(); doc.v = 2; doc.rules[0].conditions = [{ field: 'body', op, value: '본문' }];
+  if (!['has', 'not'].includes(op)) {
+    assert.throws(() => validateDocument(doc, context), error => error.reason === 'operator'); return;
+  }
+  assert.equal(validateDocument(doc, context), doc);
+  assert.equal(minimumDocumentVersion(doc.rules), 2);
+  const generated = generateScript(doc, context);
+  assert.deepEqual(parseScript(generated).doc, doc);
+  assert.ok(generated.includes(`${op === 'not' ? 'not ' : ''}body :text :contains "본문"`));
+  assert.ok(generated.split('\n').find(line => line.startsWith('require ')).includes('"body"'));
+  doc.v = 1;
+  assert.throws(() => validateDocument(doc, context), error => error.path === '$.v' && error.reason === 'version');
+});
+
+test('body values use the existing 1–200 character limits and quoting', () => {
+  const doc = document(); doc.v = 2; doc.rules[0].conditions = [{ field: 'body', op: 'has', value: 'x' }];
+  for (const value of ['', 'x'.repeat(201)]) {
+    doc.rules[0].conditions[0].value = value; assert.throws(() => validateDocument(doc, context));
+  }
+  doc.rules[0].conditions[0].value = 'x'.repeat(200); validateDocument(doc, context);
+  assert.equal(conditionTest({ field: 'body', op: 'has', value: 'say "hello"' }), String.raw`body :text :contains "say \"hello\""`);
+});
+
+test('body version selection includes nested/disabled conditions and agrees with browser version function', async () => {
+  const source = await readFile(new URL('../../web/src/components/RuleBuilder.jsx', import.meta.url), 'utf8');
+  const body = /function rulesDocumentVersion\(rules\) \{([\s\S]*?)\n\}/.exec(source)[1];
+  const browserVersion = new Function('rules', body);
+  const leaf = { field: 'body', op: 'not', value: '본문' };
+  for (const conditions of [[leaf], [{ field: 'subject', op: 'has', value: 'first' }, { match: 'any', conditions: [leaf, { field: 'subject', op: 'has', value: 'notice' }] }]]) {
+    const doc = document(); doc.v = 2; doc.rules[0].enabled = false; doc.rules[0].conditions = conditions;
+    assert.equal(minimumDocumentVersion(doc.rules), 2); assert.equal(browserVersion(doc.rules), 2);
+    assert.ok(generateScript(doc, context).includes('"relational", "body"'));
+  }
+  assert.equal(browserVersion(document().rules), 1);
+});
+
+
+test('body-free generation and regen remain byte-identical to 826fb4b for all roundtrip fixtures', () => {
+  const expectedHashes = [
+    "c9b07a10fb6a8d80967f63c64e4d576005eef358ac9e8ba1917a7cb5d352bf63",
+    "119c0f99edaffdaded44cf16114a193222bc3ea78f1b01b9ff90241a43eaec7f",
+    "f103f16cfe77dd20181d9e7f06344acbd4a0fb2eb06db6404133b880d2658215",
+    "aa2295d5971a4776424a8e0eb736cab66ae8be67cdaae83c8d511ad7df16ed28",
+    "a5116e18ca07567bcac8cd17ff5c285b530a00930960f2df8a9816ef1546371b",
+    "04b9dc029cb8ab746ab2176d34d7e5bfacacecc5bc169ca8012ee8eb5627c6b1",
+    "35192219d7cfa3995b0fcc54399f45594e014e135bb608bcff16df69b6f579ff",
+    "c6502bf85742cda053b6fa98e057aad78604a77259a2271faac177cd34bd60d7",
+    "f57ae738950c7ce6a9d15f1a415df3db65ac5843ae5ccbe36c1c23b8acd0bc49",
+    "c335066b92a24088b8e509f39cd41334a55d6cdda21336bba3446e19cf91f737",
+    "843b6d91f1a41cc675aba5feea3104d71c88abc33578afaa76e7285b652dce0f",
+    "81f9c71eb2a424ea9757ba8a6109803fedccf6cd91771fe53e28461067d4cd91",
+    "b239aa730b7c170690417d80fac08eb2fe96764cb3a1d8430d9d716ed332894c",
+    "ff9070cd2648c9ccae0acf18867ae0b467c02c82a248455b02ccb0e942bbeda1",
+    "134392be434d7e0c8e271dd5518b2ceb50f542c49f69e7d7dde114c4cb5df893"
+];
+  assert.equal(fixtures.length, expectedHashes.length);
+  for (const [i, fixture] of fixtures.entries()) {
+    const generated = generateScript(fixture.doc, context);
+    assert.equal(hashBody(generated), expectedHashes[i], fixture.name);
+    assert.equal(regenerateScript(generated, context), generated);
+  }
 });

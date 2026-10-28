@@ -44,7 +44,12 @@ for (const value of ['?', '\\', '\\q', '*'.repeat(21), '', 'x'.repeat(201), '${u
 fixtures.push(
   ['attachment', all(leaf('', 'has', 'attachment')), true],
   ['attachment negation', all(leaf('', 'not', 'attachment')), false],
-  ['unknown field', all(leaf('x', 'has', 'body')), false],
+  ['body includes', all(leaf('x', 'has', 'body')), true],
+  ['body excludes', all(leaf('x', 'not', 'body')), true],
+  ['body exact unsupported', all(leaf('x', 'eq', 'body')), false],
+  ['body prefix unsupported', all(leaf('x', 'start', 'body')), false],
+  ['body pattern unsupported', all(leaf('x', 'matches', 'body')), false],
+  ['unknown field', all(leaf('x', 'has', 'unsupported')), false],
   ['unknown op', all(leaf('x', 'regex')), false],
   ['all/any', all(leaf(), any(leaf('a'), leaf('b'))), true],
   ['any/all', any(leaf(), all(leaf('a'), leaf('b'))), true],

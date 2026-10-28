@@ -24,7 +24,7 @@ export function gmailBlocks(source) {
       if (/^\(동작 없음/.test(item.summary)) unsupported('원래 동작이 없어 생략된 필터예요.');
       const end = markers[i + 1]?.index ?? (footerAt < 0 ? source.length : footerAt);
       const reader = new Reader(source.slice(marker.index + marker[0].length, end));
-      reader.expect('if'); const condition = readConditions(reader); reader.expect('{');
+      reader.expect('if'); const condition = readConditions(reader, 0, { gmailWords: true }); reader.expect('{');
       const actions = {}; let archive = false; let neverSpam = false;
       while (reader.peek() !== '}') {
         const action = reader.take();

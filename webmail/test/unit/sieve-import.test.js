@@ -27,7 +27,7 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 const cases = [
   ['gmail-basic', 'gmail2sieve', ['same', 'same'], 2],
   ['gmail-labels', 'gmail2sieve', ['changed', 'changed'], 2],
-  ['gmail-unsupported', 'gmail2sieve', ['unconvertible', 'unconvertible', 'unconvertible'], 0],
+  ['gmail-unsupported', 'gmail2sieve', ['changed', 'unconvertible', 'unconvertible'], 1],
   ['gmail-wildcards', 'gmail2sieve', ['same', 'same', 'unconvertible'], 2],
   ['gmail-mixed', 'gmail2sieve', ['changed', 'same', 'unconvertible', 'unconvertible'], 2],
   ['rainloop-move', 'rainloop', ['same'], 1],
@@ -326,4 +326,76 @@ test('CLI regen rejects modified, damaged and newer scripts without stdout', asy
     assert.equal(result.status, 2); assert.equal(result.stdout, '');
     assert.ok(JSON.parse(result.stderr).error.message.includes(state));
   }
+});
+
+
+const wordTest = value => `anyof(header :contains ["subject", "from", "to", "cc"] "${value}", body :text :contains "${value}")`;
+const wordGroup = (value, negative = false) => ({ match: negative ? 'all' : 'any', conditions: ['subject', 'from', 'to', 'body'].map(field => ({ field, op: negative ? 'not' : 'has', value })) });
+async function importWordExpression(expression) {
+  const source = (await read('gmail-basic.sieve')).replace('header :contains "from" "sender@example.com"', expression);
+  return importScript(source, { policy });
+}
+for (const negative of [false, true]) test(`gmail2sieve whole-message word expands exactly: negative=${negative}`, async () => {
+  const report = await importWordExpression(`${negative ? 'not ' : ''}${wordTest('견적')}`);
+  assert.equal(report.rules.length, 2);
+  assert.equal(report.items[0].status, 'same'); assert.deepEqual(report.items[0].changes, []);
+  assert.deepEqual({ match: report.rules[0].match, conditions: report.rules[0].conditions }, wordGroup('견적', negative));
+  assert.equal(rulesDocument(report.rules).v, 2);
+  assert.equal(parseScript(generateScript(rulesDocument(report.rules), policy)).state, 'ok');
+});
+
+test('gmail2sieve multiple words preserve outer AND/OR and NOT without not nodes', async () => {
+  const cases = [
+    [`allof(${wordTest('a')}, ${wordTest('b')})`, { match: 'all', conditions: [wordGroup('a'), wordGroup('b')] }],
+    [`anyof(${wordTest('a')}, ${wordTest('b')})`, { match: 'any', conditions: [...wordGroup('a').conditions, ...wordGroup('b').conditions] }],
+    [`not anyof(${wordTest('a')}, ${wordTest('b')})`, { match: 'all', conditions: [...wordGroup('a', true).conditions, ...wordGroup('b', true).conditions] }],
+    [`not allof(${wordTest('a')}, ${wordTest('b')})`, { match: 'any', conditions: [wordGroup('a', true), wordGroup('b', true)] }],
+    [`not not ${wordTest('a')}`, wordGroup('a')],
+  ];
+  for (const [expression, expected] of cases) {
+    const report = await importWordExpression(expression);
+    assert.equal(report.rules.length, 2, expression);
+    assert.deepEqual({ match: report.rules[0].match, conditions: report.rules[0].conditions }, expected);
+    assert.equal(JSON.stringify(report.rules[0]).includes('"not":'), false);
+    validateDocument(rulesDocument(report.rules), policy);
+  }
+});
+
+for (const expression of [
+  'body :text :contains "a"',
+  wordTest('a').replace('body :text :contains "a"', 'body :text :contains "b"'),
+  wordTest('a').replace('"subject", "from", "to", "cc"', '"subject", "from", "to"'),
+  wordTest('a').replace(':text', ':raw'),
+  wordTest('a').replace('body :text :contains', 'body :text :is'),
+  wordTest('a').replace('anyof', 'allof'),
+  wordTest('a').replace('body :text :contains "a"', 'body :text :contains ["a"]'),
+  'not header :contains ["to", "cc"] "a"',
+  'header :contains "to" "a"',
+]) test(`noncanonical body/recipient import remains unsupported: ${expression}`, async () => {
+  const report = await importWordExpression(expression);
+  assert.equal(report.items[0].status, 'unconvertible'); assert.equal(report.rules.length, 1);
+});
+
+test('whole-message expansion still rejects existing depth and count limit overflow', async () => {
+  const expressions = [
+    `anyof(${['a','b','c'].map(wordTest).join(', ')})`,
+    `allof(${['a','b','c','d','e','f'].map(wordTest).join(', ')})`,
+    `allof(${wordTest('a')}, anyof(header :contains "subject" "b", allof(header :contains "from" "c", header :contains "subject" "d")))`,
+  ];
+  for (const expression of expressions) {
+    const report = await importWordExpression(expression);
+    assert.equal(report.items[0].status, 'unconvertible'); assert.equal(report.rules.length, 1);
+  }
+});
+
+test('synthetic XML produced by repository gmail2sieve imports include and exclude words', () => {
+  const require = createRequire(import.meta.url); const core = require('../../../tools/gmail2sieve/core.js');
+  const dom = new JSDOM('');
+  try {
+    const xml = '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:apps="http://schemas.google.com/apps/2006"><entry><apps:property name="hasTheWord" value="견적"/><apps:property name="doesNotHaveTheWord" value="광고"/><apps:property name="label" value="Archive"/><apps:property name="shouldArchive" value="true"/></entry></feed>';
+    const output = core.convert(core.parseFiltersXml(xml, new dom.window.DOMParser()), { now: '2026-10-27T00:00:00Z' });
+    const report = importScript(output.script, { policy });
+    assert.equal(report.rules.length, 1); assert.equal(report.items[0].status, 'same');
+    assert.deepEqual(report.rules[0].conditions, [wordGroup('견적'), ...wordGroup('광고', true).conditions]);
+  } finally { dom.window.close(); }
 });

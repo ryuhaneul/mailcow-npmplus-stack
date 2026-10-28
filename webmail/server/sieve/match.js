@@ -75,6 +75,32 @@ export function matches(rule, headers) {
   return test(rule);
 }
 
+/** Distinct body values, including values in nested condition groups. */
+export function bodyValues(node) {
+  const values = new Set();
+  function visit(condition) {
+    if (condition.conditions) condition.conditions.forEach(visit);
+    else if (condition.field === 'body') values.add(condition.value);
+  }
+  visit(node);
+  return [...values];
+}
+
+/** Three-valued matching: body conditions and unknown comparisons return null. */
+export function matchesWithBody(rule, headers) {
+  function test(node) {
+    if (node.conditions) {
+      const values = node.conditions.map(test);
+      if (node.match === 'all') return values.includes(false) ? false : values.includes(null) ? null : true;
+      return values.includes(true) ? true : values.includes(null) ? null : false;
+    }
+    if (node.field === 'body') return null;
+    try { return matches({ match: 'all', conditions: [node] }, headers); }
+    catch { return null; }
+  }
+  return test(rule);
+}
+
 function yearBefore(time) {
   const date = new Date(time);
   const month = date.getUTCMonth();

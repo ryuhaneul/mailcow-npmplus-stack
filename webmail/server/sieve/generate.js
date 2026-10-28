@@ -12,6 +12,7 @@ const uniqueAddresses = values => [...new Set(values.map(asciiLower))];
 export function conditionTest(condition) {
   if (Object.hasOwn(condition, 'conditions')) return `${condition.match === 'all' ? 'allof' : 'anyof'}(${condition.conditions.map(conditionTest).join(', ')})`;
   const { field, op, value } = condition;
+  if (field === 'body') return `${op === 'not' ? 'not ' : ''}body :text :contains ${quote(value)}`;
   if (field === 'attachment') return 'header :contains "content-type" "multipart/mixed"';
   const headers = field === 'to' ? '["to", "cc"]' : quote(field);
   const test = field !== 'subject' && ['eq', 'start', 'matches'].includes(op) ? 'address :all' : 'header';
@@ -38,8 +39,9 @@ export function generateScript(doc, { addresses = [], trashPath = 'Trash', ...po
   const internal = new Set((policy.internalDomains ?? []).map(asciiLower));
   const externalForward = targets.some(target => !internal.has(target.split('@')[1]));
   const forwardIndex = new Map(targets.map((target, i) => [target, i]));
+  const hasBody = node => node.field === 'body' || node.conditions?.some(hasBody);
   const lines = [
-    'require ["fileinto", "imap4flags", "variables", "copy", "vacation", "date", "relational"];',
+    `require ["fileinto", "imap4flags", "variables", "copy", "vacation", "date", "relational"${doc.rules.some(hasBody) ? ', "body"' : ''}];`,
     ...(externalForward ? ['if header :contains "X-Spam-Flag" "YES" { stop; }'] : []),
     'if not header :is "X-Spam-Flag" "YES" {',
     '  set "wm_stop" "0";',
@@ -66,7 +68,7 @@ export function generateScript(doc, { addresses = [], trashPath = 'Trash', ...po
   for (const [i, rule] of doc.rules.entries()) {
     if (!rule.enabled) continue;
     const combined = conditionTest(rule);
-    const fields = { from: '보낸 사람', to: '받는 사람', subject: '제목', attachment: '첨부파일' };
+    const fields = { from: '보낸 사람', to: '받는 사람', subject: '제목', attachment: '첨부파일', body: '본문' };
     const summary = node => Object.hasOwn(node, 'conditions') ? `(${node.conditions.map(summary).join(node.match === 'all' ? ' 및 ' : ' 또는 ')})` : fields[node.field];
     lines.push(`  # 규칙 ${i + 1}: ${rule.conditions.map(summary).join(rule.match === 'all' ? ' 및 ' : ' 또는 ')}`, `  if allof(not string :is "${'${wm_stop}'}" "1", ${combined}) {`);
     if (rule.actions.read) lines.push('    addflag "\\\\Seen";');

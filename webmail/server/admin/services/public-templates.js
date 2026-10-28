@@ -51,8 +51,7 @@ export function createPublicTemplatesService({ store, domains, audit, config = {
     const html = await normalizeHtml(data.html);
     // Inspect both parsed DOMs: sanitization must not silently discard a CID reference.
     if (hasPublicTemplateCidReference(data.html) || hasPublicTemplateCidReference(html)) throw new AppError(422, 'PUBLIC_TEMPLATE_CID', '메일에 붙인 이미지는 넣을 수 없어요.');
-    const fragment = JSDOM.fragment(html);
-    for (const image of fragment.querySelectorAll('img[src]')) {
+    for (const source of [data.html, html]) for (const image of JSDOM.fragment(source).querySelectorAll('img[src]')) {
       if (!/^https:/i.test(image.getAttribute('src').trim())) throw new AppError(422, 'PUBLIC_TEMPLATE_IMAGE_URL', '그림은 https 주소만 넣을 수 있어요.');
     }
     return { name, subject: data.subject, html, audienceAll: data.audienceAll, domains: data.audienceAll ? [] : names, keepFileIds: data.keepFileIds, newFiles: files };

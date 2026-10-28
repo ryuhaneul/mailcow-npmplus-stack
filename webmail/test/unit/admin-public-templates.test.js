@@ -105,7 +105,7 @@ test('public templates admin HTTP: CRUD, retained attachments, microsecond 409 a
   assert.equal(created.headers['content-security-policy'], adminCsp);
 });
 
-for (const [label, src] of [['http', 'http://example.test/a.png'], ['relative protocol', '//example.test/a.png'], ['data', 'data:image/png;base64,AAAA']]) test(`public templates admin: ${label} image rejected with specific reason`, async () => {
+for (const [label, src] of [['relative', 'local.png'], ['ftp', 'ftp://example.test/a.png'], ['http', 'http://example.test/a.png'], ['relative protocol', '//example.test/a.png'], ['data', 'data:image/png;base64,AAAA']]) test(`public templates admin: ${label} image rejected with specific reason`, async () => {
   const f = fixture();
   await assert.rejects(f.save({ html: `<img src="${src}">` }), error => rejected(422, 'PUBLIC_TEMPLATE_IMAGE_URL')(error) && error.message.includes('https'));
   assert.equal(f.calls.length, 0);

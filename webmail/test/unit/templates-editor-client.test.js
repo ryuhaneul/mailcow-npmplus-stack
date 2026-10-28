@@ -130,3 +130,13 @@ test('pin reordering retains the active root editor and explicit new/share route
   assert.equal(templateEditorSelection([b], '', first.defaultRef).selected, b);
   for (const selection of ['new', 'share', 'removed']) assert.equal(templateEditorSelection([a, b], selection, 'a').selected, null);
 });
+
+test('omitted template body remains marked and rejects even a name-only save payload', () => {
+  const model = templateEditorModel({ ...original, html: '', bodyOmitted: true });
+  assert.equal(model.bodyOmitted, true);
+  assert.throws(() => templateEditorPayload({ ...model, name: '이름만 변경' }), { code: 'TEMPLATE_BODY_OMITTED' });
+  const source = readFileSync(new URL('../../web/src/components/TemplateEditor.jsx', import.meta.url), 'utf8');
+  assert.ok(source.includes('needsReload || full || model.bodyOmitted} onClick={save}'));
+  assert.ok(source.includes('disabled={Boolean(busy) || model.bodyOmitted} onUpload='));
+  assert.ok(source.includes('본문이 너무 커서 수정할 수 없어요.'));
+});

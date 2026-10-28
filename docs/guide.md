@@ -1263,7 +1263,7 @@ sudo python3 -c 'from pathlib import Path; import shutil; root=Path("/home/mailc
 
 ### 템플릿 서버 설정 (1단계)
 
-개인 템플릿은 사용자 메일함의 `Templates`와 하위 `Templates/공유`에 메일로 저장하는 구조입니다. 이 폴더는 Thunderbird 등 다른 IMAP 프로그램에서도 일반 폴더로 보이며, 본문·첨부를 포함한 용량은 사용자 메일함 용량에 포함됩니다. 이번 단계는 서버 설정과 관리 작업의 보호 범위만 준비합니다. 웹메일의 저장·불러오기·변수·공유 화면과 회사 공용 템플릿 DB·API·화면은 후속 단계입니다.
+개인 템플릿은 사용자 메일함의 `Templates`와 하위 `Templates/공유`에 메일로 저장하는 구조입니다. 이 폴더는 Thunderbird 등 다른 IMAP 프로그램에서도 일반 폴더로 보이며, 본문·첨부를 포함한 용량은 사용자 메일함 용량에 포함됩니다. 웹메일에서 템플릿 저장·불러오기·변수 채우기·공유를 사용할 수 있습니다. 회사 공용 템플릿은 웹메일 DB에 저장하며, 관리 화면에서 작성·대상을 관리하고 웹메일에서 읽기·불러오기·내 템플릿으로 복사할 수 있습니다.
 
 `WEBMAIL_ENABLE=true`인 setup·update는 `scripts/apply-dovecot-template-groups.sh apply -y`를 실행합니다. 별도 토글 없이 `extra.conf`에 다음 관리 블록을 넣어 로그인 사용자의 도메인을 ACL 그룹으로 사용합니다.
 

@@ -2,7 +2,7 @@ import { templateUid } from './api.js';
 
 export function templateEditorModel(template) {
   return template ? {
-    id: template.id, owner: template.owner, ref: template.ref, name: template.name, subject: template.subject, html: template.html, shared: template.inShared,
+    id: template.id, owner: template.owner, ref: template.ref, name: template.name, subject: template.subject, html: template.html, bodyOmitted: template.bodyOmitted === true, shared: template.inShared,
     attachments: template.attachments.map(file => ({ ...file, templateRef: template.ref })),
   } : { name: '새 템플릿', subject: '', html: '<p><br></p>', shared: false, attachments: [] };
 }
@@ -11,6 +11,7 @@ export function templateEditorStamp(model) {
 }
 export function templateEditorDirty(model, baseline) { return Boolean(model && baseline !== templateEditorStamp(model)); }
 export function templateEditorPayload(model) {
+  if (model.bodyOmitted) throw { code: 'TEMPLATE_BODY_OMITTED', message: '본문이 너무 커서 수정할 수 없어요.' };
   const name = model.name.trim();
   if (!name || [...name].length > 100) throw { code: 'TEMPLATE_INVALID', message: '템플릿 이름은 1~100자로 입력해 주세요.' };
   return { name, subject: model.subject, html: model.html, shared: model.shared, attachments: model.attachments.map(file => file.uploadId ? { uploadId: file.uploadId } : { templateRef: file.templateRef, part: file.part }), ...(model.ref ? { baseUid: templateUid(model.ref) } : {}) };

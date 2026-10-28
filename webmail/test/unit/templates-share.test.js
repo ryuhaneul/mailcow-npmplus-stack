@@ -25,7 +25,7 @@ function fixture({ folders = ['INBOX', templatesFolder, sharedTemplatesFolder, r
   const f = { session: { email: viewer, connection: {}, prefs: { sharedView: { [owner]: false } } }, calls: [], acl: new Map(), folders: new Map(), accounts: [viewer, reader, other].map(username => ({ username, active: 1 })), directoryCalls: 0, locks: 0 };
   function folder(path) {
     const result = { validity: f.folders.size + 100, nextUid: 1, rows: new Map() };
-    f.folders.set(path, result); f.acl.set(path, new Map([[`user=${viewer}`, 'lrswipkxteacd']]));
+    f.folders.set(path, result); f.acl.set(path, new Map([[viewer, 'lrswipkxteacd']]));
     return result;
   }
   folders.forEach(folder);
@@ -93,28 +93,28 @@ const bodyOf = value => value.subarray(value.indexOf('\r\n\r\n') + 4);
 
 test('template sharing: GET is non-creating and reports only exact lr targets plus INBOX readers', async () => {
   const f = fixture({ folders: ['INBOX'] });
-  f.acl.set('INBOX', new Map([[`user=${viewer}`, 'lrsw'], [`user=${reader}`, 'lrs'], [other, 'lr'], ['user=not-reader@example.com', 'l'], ['group=example.com', 'lr'], ['group=staff@example.com', 'lr'], ['-user=negative@example.com', 'lr'], ['anyone', 'lr']]));
+  f.acl.set('INBOX', new Map([[viewer, 'lrsw'], [reader, 'lrs'], [other, 'lr'], ['not-reader@example.com', 'l'], ['$example.com', 'lr'], ['$staff@example.com', 'lr'], ['-negative@example.com', 'lr'], ['anyone', 'lr']]));
   assert.deepEqual(await f.service.get(f.session), { domainAll: false, domain: 'example.com', users: [], inboxReaders: [other, reader].sort() });
   assert.equal(writes(f).length, 0); assert.equal(f.directoryCalls, 0);
 });
 
 test('template sharing: PUT manages users and own-domain lr only, with readback and unrelated manual ACL preserved', async () => {
   const f = fixture();
-  const manual = [['owner', 'lrswipkxteacd'], [`user=${viewer}`, 'lrswipkxteacd'], ['anyone', 'lr'], ['authenticated', 'lrs'], ['group=other.example', 'lr'], ['user=manual@example.com', 'lrs'], ['-user=negative@example.com', 'lr'], ['group=staff@example.com', 'lr']];
-  f.acl.set(sharedTemplatesFolder, new Map([...manual, ['user=old@example.com', 'rl']]));
+  const manual = [['owner', 'lrswipkxteacd'], [viewer, 'lrswipkxteacd'], ['anyone', 'lr'], ['authenticated', 'lrs'], ['$other.example', 'lr'], ['manual@example.com', 'lrs'], ['-negative@example.com', 'lr'], ['$staff@example.com', 'lr']];
+  f.acl.set(sharedTemplatesFolder, new Map([...manual, ['old@example.com', 'rl']]));
   const value = await f.service.put(f.session, { domainAll: true, users: [reader.toUpperCase(), other] });
   assert.deepEqual(value, { domainAll: true, domain: 'example.com', users: [other, reader].sort(), inboxReaders: [] });
   for (const [id, rights] of manual) assert.equal(f.acl.get(sharedTemplatesFolder).get(id), rights);
-  assert.equal(f.acl.get(sharedTemplatesFolder).has('user=old@example.com'), false);
-  assert.deepEqual(writes(f).map(row => row.slice(0, 3)), [['DELETEACL', sharedTemplatesFolder, 'user=old@example.com'], ['SETACL', sharedTemplatesFolder, `user=${reader}`], ['SETACL', sharedTemplatesFolder, `user=${other}`], ['SETACL', sharedTemplatesFolder, 'group=example.com']]);
+  assert.equal(f.acl.get(sharedTemplatesFolder).has('old@example.com'), false);
+  assert.deepEqual(writes(f).map(row => row.slice(0, 3)), [['DELETEACL', sharedTemplatesFolder, 'old@example.com'], ['SETACL', sharedTemplatesFolder, reader], ['SETACL', sharedTemplatesFolder, other], ['SETACL', sharedTemplatesFolder, '$example.com']]);
   f.calls = [];
   await f.service.put(f.session, { domainAll: true, users: [reader, other] }); assert.equal(writes(f).length, 0);
   await f.service.put(f.session, { domainAll: false, users: [] });
   assert.deepEqual([...f.acl.get(sharedTemplatesFolder)], manual);
 });
 
-for (const manual of [[`user=${reader}`, 'lrs'], ['group=example.com', 'lrs'], [reader, 'lrs']]) test(`template sharing: requested manual principal ${manual[0]} conflicts before every write`, async () => {
-  const f = fixture(); f.acl.get(sharedTemplatesFolder).set(...manual); f.acl.get(sharedTemplatesFolder).set('user=old@example.com', 'lr');
+for (const manual of [[reader, 'lrs'], ['$example.com', 'lrs']]) test(`template sharing: requested manual principal ${manual[0]} conflicts before every write`, async () => {
+  const f = fixture(); f.acl.get(sharedTemplatesFolder).set(...manual); f.acl.get(sharedTemplatesFolder).set('old@example.com', 'lr');
   const before = [...f.acl.get(sharedTemplatesFolder)];
   await assert.rejects(f.service.put(f.session, { domainAll: true, users: [reader] }), error => { assert.equal(error.statusCode, 422); assert.equal(error.code, 'TEMPLATE_SHARE_CONFLICT'); assert.ok(error.message.includes(manual[0])); return true; });
   assert.equal(writes(f).length, 0); assert.deepEqual([...f.acl.get(sharedTemplatesFolder)], before);
@@ -122,7 +122,7 @@ for (const manual of [[`user=${reader}`, 'lrs'], ['group=example.com', 'lrs'], [
 
 for (const input of [
   { domainAll: true, users: [viewer] }, { domainAll: true, users: ['anyone'] }, { domainAll: true, users: ['authenticated'] },
-  { domainAll: true, users: ['group=other.example'] }, { domainAll: true, users: [{ address: reader, rights: 'lrs' }] },
+  { domainAll: true, users: ['$other.example'] }, { domainAll: true, users: [{ address: reader, rights: 'lrs' }] },
   { domainAll: true, users: [reader], rights: 'lrs' }, { domainAll: true, users: [], path: 'INBOX' },
   { domainAll: true, users: [], group: 'other.example' }, { domainAll: true, users: [reader, reader.toUpperCase()] },
   { domainAll: 'true', users: [] }, { users: [] }, { domainAll: true, users: Array.from({ length: 51 }, (_, i) => `user${i}@example.com`) },
@@ -143,10 +143,10 @@ test('template sharing: exactly 50 active users are accepted', async () => {
 
 for (const utf8 of [true, false]) test(`template sharing: initial ACL hook clears copied entries but keeps owner; UTF8=${utf8}`, async () => {
   const f = fixture({ folders: ['INBOX'], utf8 });
-  f.acl.set('INBOX', new Map([['owner', 'lrswipkxteacd'], [viewer, 'lr'], [`user=${viewer}`, 'lrsw'], [`user=${reader}`, 'lr'], ['group=example.com', 'lr'], ['anyone', 'lr']]));
+  f.acl.set('INBOX', new Map([['owner', 'lrswipkxteacd'], [viewer, 'lrsw'], [reader, 'lr'], ['$example.com', 'lr'], ['anyone', 'lr']]));
   await f.service.put(f.session, { domainAll: true, users: [other] });
-  assert.deepEqual([...f.acl.get(templatesFolder)], [['owner', 'lrswipkxteacd'], [viewer, 'lr'], [`user=${viewer}`, 'lrsw']]);
-  assert.deepEqual([...f.acl.get(sharedTemplatesFolder)], [['owner', 'lrswipkxteacd'], [viewer, 'lr'], [`user=${viewer}`, 'lrsw'], [`user=${other}`, 'lr'], ['group=example.com', 'lr']]);
+  assert.deepEqual([...f.acl.get(templatesFolder)], [['owner', 'lrswipkxteacd'], [viewer, 'lrsw']]);
+  assert.deepEqual([...f.acl.get(sharedTemplatesFolder)], [['owner', 'lrswipkxteacd'], [viewer, 'lrsw'], [other, 'lr'], ['$example.com', 'lr']]);
   assert.equal(f.calls.filter(row => row[0] === 'CREATE').length, 2);
   assert.ok(writes(f).every(row => !row[1].startsWith('Shared/')));
 });
@@ -159,7 +159,7 @@ test('template sharing: hook account mismatch and outside path stop before GETAC
 });
 
 test('template sharing: hook failure removes only newly created empty folder through store recovery', async () => {
-  const f = fixture({ folders: ['INBOX'] }); f.acl.get('INBOX').set(`user=${reader}`, 'lr'); f.failCommand = 'DELETEACL';
+  const f = fixture({ folders: ['INBOX'] }); f.acl.get('INBOX').set(reader, 'lr'); f.failCommand = 'DELETEACL';
   await assert.rejects(f.service.put(f.session, { domainAll: false, users: [other] }), { statusCode: 503 });
   assert.equal(f.folders.has(templatesFolder), false); assert.ok(!f.calls.some(row => row[0] === 'SETACL'));
 });

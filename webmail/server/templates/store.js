@@ -171,7 +171,7 @@ export function createTemplateStore({ imap, config, buildMime, onFolderCreated, 
       const value = rows.find(item => item.ref === token);
       if (!value || latest(rows).find(item => item.id === value.id)?.ref !== token) throw missing();
       const result = await reader.read(session, token);
-      return { ...publicEntry(value), html: result.html ?? '', text: result.text ?? '', attachments: result.attachments.map(part => ({ part: part.partId, name: part.filename, size: part.size, type: part.contentType })) };
+      return { ...publicEntry(value), html: result.html ?? '', text: result.text ?? '', bodyOmitted: result.bodyOmitted === true, attachments: result.attachments.map(part => ({ part: part.partId, name: part.filename, size: part.size, type: part.contentType })) };
     });
   }
   async function createWith(session, prepare, shared = false) {
@@ -205,6 +205,8 @@ export function createTemplateStore({ imap, config, buildMime, onFolderCreated, 
     return serialized(session, async () => {
       const rows = await scan(session), original = current(rows, ref, data.baseUid);
       if (data.shared !== undefined && data.shared !== original.inShared) throw invalid();
+      const body = await reader.read(session, token);
+      if (body.bodyOmitted) throw new AppError(422, 'TEMPLATE_BODY_OMITTED', '본문이 너무 커서 수정할 수 없어요.');
       const raw = await build(session, data, original.id);
       const saved = await append(session, original.path, raw);
       try { await expunge(session, rows.filter(row => row.id === original.id)); }

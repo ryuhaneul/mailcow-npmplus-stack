@@ -77,7 +77,7 @@ export default function TemplateEditor({ template, count, maximum = 200, onChang
   }, [dirty]);
   useLayoutEffect(() => { if (model && !template) nameInput.current?.focus(); }, [Boolean(model)]);
   async function save() {
-    if (!valid() || !current.current || pending.current || needsReload || full) return;
+    if (!valid() || !current.current || pending.current || needsReload || full || current.current.bodyOmitted) return;
     pending.current = true; setBusy('save'); setError(null);
     try {
       await editor.current?.whenIdle(); if (!valid()) return;
@@ -140,9 +140,10 @@ export default function TemplateEditor({ template, count, maximum = 200, onChang
     {error && <div role="alert" class="tpl-editor-error">{templateEditorConflict(error) ? '다른 곳에서 먼저 바뀌었어요. 입력은 그대로 두었어요.' : error.message}</div>}
     {needsReload && <button type="button" class="btn sm" disabled={Boolean(busy)} onClick={reload}>다시 불러오기</button>}
     {!model ? !error && <p role="status">템플릿을 불러오는 중…</p> : <>
-      <div class="tplA-acts"><button type="button" class="btn sm ghost" aria-pressed={model.shared} aria-describedby={!canMove ? `${id}-save-first` : undefined} disabled={Boolean(busy) || !canMove || needsReload} onClick={move}><Icon name="share" size="xs"/>{model.shared ? '공유 폴더에서 빼기' : '공유 폴더에 넣기'}</button>{!canMove && <small id={`${id}-save-first`}>먼저 저장해 주세요</small>}<button type="button" class="btn sm ghost tplA-del" disabled={Boolean(busy) || !model.ref || needsReload} onClick={remove}><Icon name="trash" size="xs"/>삭제</button><span class="sp"/><button type="button" class="btn sm pri" disabled={Boolean(busy) || needsReload || full} onClick={save}>{busy === 'save' ? '저장 중…' : '저장'}</button></div>
+      <div class="tplA-acts"><button type="button" class="btn sm ghost" aria-pressed={model.shared} aria-describedby={!canMove ? `${id}-save-first` : undefined} disabled={Boolean(busy) || !canMove || needsReload} onClick={move}><Icon name="share" size="xs"/>{model.shared ? '공유 폴더에서 빼기' : '공유 폴더에 넣기'}</button>{!canMove && <small id={`${id}-save-first`}>먼저 저장해 주세요</small>}<button type="button" class="btn sm ghost tplA-del" disabled={Boolean(busy) || !model.ref || needsReload} onClick={remove}><Icon name="trash" size="xs"/>삭제</button><span class="sp"/><button type="button" class="btn sm pri" disabled={Boolean(busy) || needsReload || full || model.bodyOmitted} onClick={save}>{busy === 'save' ? '저장 중…' : '저장'}</button></div>
       {full && <p role="status" class="tpl-note">내 템플릿은 {maximum}개까지 저장할 수 있어요.</p>}
-      <TemplateEditorFields model={model} onChange={edit} editor={editor} disabled={Boolean(busy)} onUpload={upload} onRemoveAttachment={removeAttachment} onError={setError} nameInput={nameInput}/>
+      {model.bodyOmitted && <p role="status" class="tpl-note">본문이 너무 커서 수정할 수 없어요.</p>}
+      <TemplateEditorFields model={model} onChange={edit} editor={editor} disabled={Boolean(busy) || model.bodyOmitted} onUpload={upload} onRemoveAttachment={removeAttachment} onError={setError} nameInput={nameInput}/>
     </>}
   </div>;
 }

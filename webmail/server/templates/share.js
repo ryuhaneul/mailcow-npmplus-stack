@@ -20,17 +20,16 @@ function sessionClient(client, session) {
   if (address(client.options?.auth?.user) !== email) throw unavailable();
   return email;
 }
-function ownerPrincipal(id, email) { return ['owner', email, `user=${email}`].includes(id.toLowerCase()); }
+function ownerPrincipal(id, email) { return ['owner', email].includes(id.toLowerCase()); }
 function userPrincipal(id) {
-  if (id.startsWith('user=')) return address(id.slice(5));
-  if (/^(?:-|group=|group-override=)/.test(id)) return null;
+  if (/^[-$]/.test(id)) return null;
   return address(id);
 }
 function managed(id, rights, email) {
   if (!exactRead(rights) || ownerPrincipal(id, email)) return null;
   const user = userPrincipal(id);
-  if (user) return `user=${user}`;
-  return id === `group=${email.split('@')[1]}` ? id : null;
+  if (user) return user;
+  return id === `$${email.split('@')[1]}` ? id : null;
 }
 async function command(client, name, args, untagged = {}) {
   if (typeof client.preCheck === 'function') await client.preCheck();
@@ -93,8 +92,8 @@ export function createTemplateShareService({ imap, config, store, activeAccounts
     let domainAll = false;
     for (const [id, rights] of acl) {
       const principal = managed(id, rights, email);
-      if (principal?.startsWith('user=')) users.add(principal.slice(5));
-      if (principal === `group=${domain}`) domainAll = true;
+      if (principal && userPrincipal(principal)) users.add(principal);
+      if (principal === `$${domain}`) domainAll = true;
     }
     for (const [id, rights] of inbox) {
       const user = userPrincipal(id);
@@ -125,10 +124,10 @@ export function createTemplateShareService({ imap, config, store, activeAccounts
       const active = new Set(rows.filter(row => String(row.active) === '1').map(row => address(row.username)).filter(Boolean));
       if (users.some(user => !active.has(user))) throw invalid();
       // Existing manual ACL conflicts must reject before creating or writing anything.
-      const desired = new Set(users.map(user => `user=${user}`));
-      if (domainAll) desired.add(`group=${email.split('@')[1]}`);
+      const desired = new Set(users);
+      if (domainAll) desired.add(`$${email.split('@')[1]}`);
       const check = acl => {
-        const conflicts = [...acl].filter(([id, rights]) => !managed(id, rights, email) && desired.has(userPrincipal(id) ? `user=${userPrincipal(id)}` : id)).map(([id]) => id);
+        const conflicts = [...acl].filter(([id, rights]) => !managed(id, rights, email) && desired.has(userPrincipal(id) || id)).map(([id]) => id);
         if (conflicts.length) throw new AppError(422, 'TEMPLATE_SHARE_CONFLICT', `기존 수동 공유 권한과 겹쳐요: ${conflicts.join(', ')}`);
       };
       await imap.withMailbox(session, 'INBOX', async client => { sessionClient(client, session); check((await state(client, email)).acl); });

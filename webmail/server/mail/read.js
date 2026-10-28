@@ -87,7 +87,7 @@ export function createReadService({ imap, config = {}, markSeen = true }) {
       const attachments = parts.filter(part => part !== body && (part.attachment || !['text/html', 'text/plain'].includes(part.type))).map(part => ({ partId: part.part, filename: decodeWords(part.dispositionParameters?.filename || part.parameters?.name || `attachment-${part.part}`), size: part.size || 0, contentType: part.type, inline: part.disposition === 'inline' && inlineTypes.has(part.type) }));
       const headers = libmime.decodeHeaders(row.headers?.toString('latin1') || '');
       const result = { ref: token, folder: ref.path, subject: decodeWords(envelope.subject), from: addresses(envelope.from), to: addresses(envelope.to), cc: addresses(envelope.cc), replyTo: addresses(envelope.replyTo), date: envelope.date ? new Date(envelope.date).toISOString() : null, messageId: envelope.messageId || null, inReplyTo: envelope.inReplyTo || headers['in-reply-to']?.[0] || null, references: headers.references?.join(' ') || '', attachments, blockedImages: 0, senderAlwaysShow, seen: row.flags?.has('\\Seen') || false, flagged: row.flags?.has('\\Flagged') || false, spam: ref.path === 'Junk' };
-      if (body && body.size > maxBodyBytes) result.text = oversizedBody;
+      if (body && body.size > maxBodyBytes) { result.text = oversizedBody; result.bodyOmitted = true; }
       else if (body) {
         // Bound the decoder too: some charset/flowed decoders buffer before emitting.
         const download = await client.download(ref.uid, body.part, { uid: true, binary: true, maxBytes: maxBodyBytes + 1 });
@@ -98,7 +98,7 @@ export function createReadService({ imap, config = {}, markSeen = true }) {
           if (bytes > maxBodyBytes) { oversized = true; download.content.destroy(); break; }
           chunks.push(Buffer.from(chunk));
         }
-        if (oversized) result.text = oversizedBody;
+        if (oversized) { result.text = oversizedBody; result.bodyOmitted = true; }
         else {
           const text = decodeCharset(Buffer.concat(chunks), download.meta?.charset || body.parameters?.charset || 'utf-8');
           if (body.type === 'text/html') Object.assign(result, sanitizeHtml(text, { ref: token, cidParts, images: images || senderAlwaysShow }));

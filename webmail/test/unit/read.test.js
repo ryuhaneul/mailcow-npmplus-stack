@@ -186,7 +186,7 @@ test('read body limit: oversized BODYSTRUCTURE skips download and returns displa
   f.client.structure = { type: 'text/html', size: 5 * 1024 * 1024 + 1 };
   const result = await f.service.read(f.session, token);
   assert.equal(result.text, '본문이 너무 커서 표시하지 않았어요');
-  assert.equal(result.html, undefined); assert.deepEqual(f.client.downloads, []);
+  assert.equal(result.html, undefined); assert.equal(result.bodyOmitted, true); assert.deepEqual(f.client.downloads, []);
   assert.equal(result.seen, true); assert.ok(f.client.released);
 });
 
@@ -199,7 +199,7 @@ test('read body limit: missing or inaccurate size stops streaming before bufferi
     })(), { highWaterMark: 1 });
     const result = await f.service.read(f.session, token);
     assert.equal(result.text, '본문이 너무 커서 표시하지 않았어요');
-    assert.equal(result.html, undefined); assert.ok(f.client.stream.destroyed); assert.ok(produced < 20);
+    assert.equal(result.html, undefined); assert.equal(result.bodyOmitted, true); assert.ok(f.client.stream.destroyed); assert.ok(produced < 20);
     assert.equal(f.client.downloads[0].options.maxBytes, 1024 * 1024 + 1);
   }
 });

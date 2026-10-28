@@ -83,7 +83,7 @@ function fixture({ folders = ['INBOX', templatesFolder, sharedTemplatesFolder], 
       },
       async download(uid, part, options) {
         f.calls.push(['download', path, uid, part, options]);
-        return { content: Readable.from([Buffer.from(part === '1.2.1' ? '<p>{{내이름}}</p><script>evil()</script><img src="cid:logo@example">' : 'plain {{오늘}}')]), meta: { charset: 'utf-8' } };
+        return { content: Readable.from([Buffer.from(f.downloadBody ?? (part === '1.2.1' ? '<p>{{내이름}}</p><script>evil()</script><img src="cid:logo@example">' : 'plain {{오늘}}'))]), meta: { charset: 'utf-8' } };
       },
     };
   }
@@ -132,7 +132,7 @@ test('templates store: update verifies new full MIME before old UID expunge and 
   assert.equal(saved.id, original.id); assert.notEqual(saved.ref, original.ref); assert.equal(bytes(f, original.ref), undefined);
   assert.deepEqual(mimeBody(bytes(f, saved.ref)), mimeBody(source(data().subject, data().html)));
   for (const marker of [attachment.toString('base64'), image.toString('base64'), 'Content-ID: <logo@example>']) assert.ok(bytes(f, saved.ref).includes(Buffer.from(marker)));
-  const order = f.calls.map(row => row[0]); assert.ok(order.indexOf('append') < order.indexOf('fetchOne')); assert.ok(order.indexOf('fetchOne') < order.indexOf('flags'));
+  const order = f.calls.map(row => row[0]), verified = f.calls.findIndex(row => row[0] === 'fetchOne' && row[3].source); assert.ok(order.indexOf('append') < verified); assert.ok(verified < order.indexOf('flags'));
   assert.deepEqual(f.calls.find(row => row[0] === 'exec').slice(2), ['UID EXPUNGE', [{ type: 'SEQUENCE', value: String(decodeRef(original.ref).uid) }]]);
   assert.ok(oldBytes.length > 0);
 });
@@ -348,4 +348,21 @@ test('templates store: shared attachment manifest reaches the guarded compose bu
   assert.deepEqual(f.builds[0].attachments, [{ templateRef: sharedRef, part: '2' }]);
   const outside = encodeRef('Shared/author@example.com/INBOX', 100, 1);
   await assert.rejects(f.service.create(session(), data({ attachments: [{ templateRef: outside, part: '2' }] })), { statusCode: 403 });
+});
+
+for (const accurateSize of [true, false]) test(`templates store: omitted oversized body rejects overwrite and preserves original UID, MIME and attachments; accurateSize=${accurateSize}`, async () => {
+  const f = fixture({ config: { attachMaxMb: 25, bodyMaxMb: 1 } });
+  const html = '<p>' + 'a'.repeat(1024 * 1024) + '</p>';
+  const original = f.add(templatesFolder, { raw: source('large', html) });
+  original.row.bodyStructure.childNodes[0].childNodes[1].childNodes[0].size = accurateSize ? Buffer.byteLength(html) : 1;
+  f.downloadBody = html;
+  const before = Buffer.from(original.row.source), flags = [...original.row.flags];
+  assert.ok(before.length < 25 * 1024 * 1024);
+  const detail = await f.service.get(session(), original.ref);
+  assert.equal(detail.bodyOmitted, true); assert.equal(detail.html, ''); assert.equal(detail.attachments.length, 2);
+  f.calls = [];
+  await assert.rejects(f.service.update(session(), original.ref, data({ name: '이름만 변경', html: detail.html, baseUid: original.row.uid })), { statusCode: 422, code: 'TEMPLATE_BODY_OMITTED' });
+  assert.equal(mutations(f).length, 0); assert.equal(f.builds.length, 0);
+  const rows = f.folders.get(templatesFolder).rows;
+  assert.deepEqual([...rows.keys()], [original.row.uid]); assert.deepEqual(rows.get(original.row.uid).source, before); assert.deepEqual([...original.row.flags], flags);
 });

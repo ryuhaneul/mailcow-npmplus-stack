@@ -75,7 +75,10 @@ from pathlib import Path
 u=json.loads(Path(sys.argv[1]).read_text())
 assert set(u)=={'webmail_ro@172.22.1.240','webmail_notices_admin@172.22.1.241'}
 web=u['webmail_ro@172.22.1.240']; admin=u['webmail_notices_admin@172.22.1.241']
-assert len(web['grants'])==8 and len(admin['grants'])==3
+assert len(web['grants'])==11 and len(admin['grants'])==6
+for table in ('public_templates','public_template_domains','public_template_files'):
+    assert sum(('GRANT SELECT ON mailstack_webmail.'+table+' TO ') in g for g in web['grants'])==1
+    assert sum(('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.'+table+' TO ') in g for g in admin['grants'])==1
 assert not any('notice_counter' in g for g in web['grants'])
 assert not any('notice_reads' in g or '`mailcow`.' in g for g in admin['grants'])
 assert sum('GRANT SELECT (' in g for g in web['grants'])==5
@@ -92,7 +95,7 @@ cmp -s "$WEBMAIL_ENV_FILE" "$TMP/env.before" || fail changed-passwords
 ! grep -qE 'synthetic-root|synthetic-hash|WEBMAIL_.*PASSWORD=' "$TMP/result" || fail leaked-secret
 pass 'reapply is idempotent and preserves both persisted passwords without logging secrets'
 # Every mutation starts from the exact accepted state; --check may never fix it.
-for error in schema-wide global grant-option reads-delete admin-reads admin-mailcow admin-schema admin-counter-insert missing-column; do
+for error in schema-wide global grant-option reads-delete admin-reads admin-mailcow admin-schema admin-counter-insert missing-column template-write missing-template; do
     cp "$TMP/users.before" "$TMP/users.json"
     python3 - "$TMP/users.json" "$error" <<'PY'
 from pathlib import Path
@@ -100,6 +103,7 @@ import json, sys
 p=Path(sys.argv[1]); u=json.loads(p.read_text()); error=sys.argv[2]
 r='webmail_ro@172.22.1.240'; a='webmail_notices_admin@172.22.1.241'
 extra={
+'template-write':(r,"GRANT INSERT ON mailstack_webmail.public_template_files TO 'webmail_ro'@'172.22.1.240'"),
 'schema-wide':(r,"GRANT SELECT ON mailstack_webmail.* TO 'webmail_ro'@'172.22.1.240'"),
 'global':(r,"GRANT ALL PRIVILEGES ON *.* TO 'webmail_ro'@'172.22.1.240'"),
 'grant-option':(r,"GRANT SELECT ON mailstack_webmail.notices TO 'webmail_ro'@'172.22.1.240' WITH GRANT OPTION"),
@@ -108,7 +112,8 @@ extra={
 'admin-mailcow':(a,"GRANT SELECT ON mailcow.mailbox TO 'webmail_notices_admin'@'172.22.1.241'"),
 'admin-schema':(a,"GRANT ALL PRIVILEGES ON mailstack_webmail.* TO 'webmail_notices_admin'@'172.22.1.241'"),
 'admin-counter-insert':(a,"GRANT INSERT ON mailstack_webmail.notice_counter TO 'webmail_notices_admin'@'172.22.1.241'")}
-if error=='missing-column': u[r]['grants']=[g for g in u[r]['grants'] if 'sender_acl' not in g]
+if error=='missing-template': u[a]['grants']=[g for g in u[a]['grants'] if 'public_template_domains' not in g]
+elif error=='missing-column': u[r]['grants']=[g for g in u[r]['grants'] if 'sender_acl' not in g]
 else:
     key,grant=extra[error]; u[key]['grants'].append(grant)
 p.write_text(json.dumps(u,sort_keys=True))

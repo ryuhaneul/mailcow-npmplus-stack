@@ -71,7 +71,7 @@ export function attachmentHeaders(part, inline) {
   const disposition = inline && inlineTypes.has(contentType) ? 'inline' : 'attachment';
   return { 'content-type': /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(contentType) ? contentType : 'application/octet-stream', 'content-disposition': `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`, 'x-content-type-options': 'nosniff', ...(disposition === 'inline' && contentType === 'application/pdf' ? { 'content-security-policy': 'sandbox' } : {}) };
 }
-export function createReadService({ imap, config = {} }) {
+export function createReadService({ imap, config = {}, markSeen = true }) {
   const maxBodyBytes = (config.bodyMaxMb ?? 5) * 1024 * 1024;
   const oversizedBody = '본문이 너무 커서 표시하지 않았어요';
   async function read(session, token, query = {}) {
@@ -105,7 +105,7 @@ export function createReadService({ imap, config = {} }) {
           else result.text = text;
         }
       } else result.text = '';
-      if (!result.seen && (await mailboxRights(client, ref.path)).seen) {
+      if (markSeen && !result.seen && (await mailboxRights(client, ref.path)).seen) {
         await client.messageFlagsAdd(ref.uid, ['\\Seen'], { uid: true }); result.seen = true;
       }
       return result;

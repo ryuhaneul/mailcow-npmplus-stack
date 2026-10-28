@@ -60,7 +60,7 @@ await test('admin notices A: list, editor, microsecond contract and leave protec
   async function write(page,title='합성 새 공지') {await page.getByLabel('제목',{exact:true}).fill(title);await fillBody(page);}
   await t.test('menu order/group, four filters, empty filter, pin and hide/re-publish requests',async()=>{
     const f=await open();try{
-      const nav=await f.page.locator('#nav a').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('href')));assert.equal(nav.indexOf('#notices'),nav.indexOf('#logo')-1);
+      const nav=await f.page.locator('#nav a').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('href')));assert.equal(nav.indexOf('#notices'),nav.indexOf('#public-templates')-1);assert.equal(nav.indexOf('#public-templates'),nav.indexOf('#logo')-1);
       await expect(f.page.getByRole('button',{name:'전체',exact:true})).toHaveAttribute('aria-pressed','true');await expect(f.page.locator('.na-tr[data-id]')).toHaveCount(4);
       await f.page.getByRole('button',{name:'임시',exact:true}).click();await expect(f.page.locator('.na-tr[data-id]')).toHaveCount(1);await expect(f.page.locator('.na-tr[data-id] .ttl')).toHaveText('준비 중인 공지');
       await f.page.getByRole('button',{name:'숨김',exact:true}).click();await expect(f.page.locator('.na-tr[data-id="3"]')).toBeVisible();await f.page.locator('.na-tr[data-id="3"]').getByRole('button',{name:'다시 게시',exact:true}).click();await expect(f.page.getByText('이 상태의 공지가 없어요.',{exact:true})).toBeVisible();

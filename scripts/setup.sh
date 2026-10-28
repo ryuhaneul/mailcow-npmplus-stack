@@ -921,6 +921,10 @@ fi
 setup_archive_finish || die "Full-source log archive backfill failed"
 webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
 
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-template-groups.sh" apply -y
+fi
+
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
     header "Phase 6c: Junk/Trash retention"
     warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."

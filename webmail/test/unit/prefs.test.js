@@ -16,7 +16,7 @@ const config = {
   imapHost: 'imap.example.com', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com',
   defaultTheme: 'olive', defaultMode: 'dark',
 };
-const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, pinnedFolders: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null });
+const defaults = () => ({ theme: 'olive', mode: 'dark', accent: {}, layout: null, folderColors: {}, pinnedFolders: [], templatePins: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null });
 class PrefsImap extends EventEmitter {
   constructor(options) { super(); this.options = options; this.enabled = new Set(); this.capabilities = new Map(); this.usable = false; this.value = null; this.metadata = new Map(); this.calls = []; }
   async connect() { this.usable = true; }
@@ -412,4 +412,37 @@ test('prefs field updates preserve concurrent sender names and add image permiss
   status(await f.request('PUT', oldClient), 204);
   stored = JSON.parse(f.client.value); assert.deepEqual(stored.imageAllow, []); assert.equal(stored.mode, 'dark');
   assert.equal(stored.fromNames['user@example.com'], 'Concurrent Name');
+});
+
+
+test('prefs: template pins normalize owner/UUID, round trip and preserve unrelated prefs', async t => {
+  const f = await fixture(t), id = '12345678-1234-4ABC-8ABC-123456789ABC';
+  status(await f.request('PUT', { templatePins: [{ owner: 'READER@EXAMPLE.COM', id }] }), 204);
+  status(await f.request('PUT', { theme: 'ink' }), 204);
+  const result = await f.request('GET');
+  assert.deepEqual(result.json().templatePins, [{ owner: 'reader@example.com', id: id.toLowerCase() }]);
+  assert.equal(result.json().theme, 'ink');
+});
+
+for (const pins of [null, {}, [{ owner: 'public', id: '12345678-1234-4abc-8abc-123456789abc' }], [{ owner: 'reader@example.com', id: 'bad' }], [{ owner: 'reader@example.com', id: '12345678-1234-4abc-8abc-123456789abc', extra: true }], Array.from({ length: 21 }, (_, i) => ({ owner: 'reader@example.com', id: `12345678-1234-4abc-8abc-${String(i).padStart(12, '0')}` })), [{ owner: 'reader@example.com', id: '12345678-1234-4abc-8abc-123456789abc' }, { owner: 'READER@EXAMPLE.COM', id: '12345678-1234-4ABC-8ABC-123456789ABC' }]]) test('prefs: invalid template pins are 400 with no metadata writes', async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { templatePins: pins }), 400);
+  assert.ok(!f.client.calls.some(call => call.command === 'SETMETADATA'));
+});
+
+
+test('prefs: public numeric pins coexist with email UUID pins and round trip unchanged', async t => {
+  const f = await fixture(t), pins = [{ owner: 'public', id: '1' }, { owner: 'public', id: String(Number.MAX_SAFE_INTEGER) }, { owner: 'reader@example.com', id: '12345678-1234-4abc-8abc-123456789abc' }];
+  status(await f.request('PUT', { templatePins: pins }), 204);
+  assert.deepEqual((await f.request('GET')).json().templatePins, pins);
+});
+for (const id of ['0', '-1', '01', '1.0', '1e2', ' 1', '1 ', String(Number.MAX_SAFE_INTEGER + 1), 1, '12345678-1234-4abc-8abc-123456789abc']) test(`prefs: public pin id ${JSON.stringify(id)} rejected without metadata writes`, async t => {
+  const f = await fixture(t);
+  status(await f.request('PUT', { templatePins: [{ owner: 'public', id }] }), 400);
+  assert.ok(!f.client.calls.some(call => call.command === 'SETMETADATA'));
+});
+test('prefs: duplicate public pins and mixed list above twenty rejected without writes', async t => {
+  const f = await fixture(t);
+  for (const pins of [[{ owner: 'public', id: '1' }, { owner: 'public', id: '1' }], Array.from({ length: 21 }, (_, i) => ({ owner: 'public', id: String(i + 1) })), [{ owner: 'PUBLIC', id: '1' }], [{ owner: 'reader@example.com', id: '1' }]]) status(await f.request('PUT', { templatePins: pins }), 400);
+  assert.ok(!f.client.calls.some(call => call.command === 'SETMETADATA'));
 });

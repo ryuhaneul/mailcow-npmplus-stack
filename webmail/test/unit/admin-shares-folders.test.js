@@ -280,3 +280,38 @@ test('history known limit: restoring a placeholder fails after an earlier folder
   const record = (await f.history.list()).items.find(record => record.revertOf === removed.auditId);
   assert.equal(record.result, 'failed'); assert.equal(record.code, 'DOCKERAPI_REJECTED');
 });
+
+
+test('shares: revoke retains visible Templates tree ACL and removes Templates-old', async t => {
+  const protectedRows = [row('Templates'), row('Templates/공유'), row('Templates/공유/깊이', grantee, ['lookup', 'read', 'write'])];
+  const f = await fixture(t, [row('INBOX'), row('Templates-old'), ...protectedRows]);
+  for (const item of f.rows) f.folders.add(item.mailbox);
+  const item = await f.item();
+  assert.equal(item.grants[0].folders.length, 5);
+  const result = await f.change(false, item.etag);
+  assert.deepEqual(f.rows, protectedRows);
+  assert.deepEqual(f.writes, [['delete', grantee, 'INBOX'], ['delete', grantee, 'Templates-old']]);
+  assert.equal(result.grants[0].folders.length, 3);
+  const record = await f.history.detail(result.auditId);
+  assert.equal(record.before.grants[0].folders.length, 5);
+  assert.equal(record.after.grants[0].folders.length, 3);
+  assert.equal((await f.change(false)).unchanged, true);
+  assert.equal(f.writes.length, 2);
+});
+
+for (const action of ['share.grant', 'share.revoke']) test(`history: ${action} restores other folders without changing old or current Templates ACL`, async t => {
+  const protectedRows = [row('Templates', other), row('Templates/공유', grantee, ['lookup', 'read', 'write'])];
+  const f = await fixture(t, protectedRows);
+  for (const mailbox of ['Templates', 'Templates/공유', 'Templates-old']) f.folders.add(mailbox);
+  const templateGrant = (mailbox, value = rights) => ({ grantee, folders: [{ mailbox, rights: value }] });
+  // A historical record may contain Templates changes made before this protection.
+  const before = { version: 2, grants: [{ grantee, folders: [{ mailbox: 'Templates', rights }, { mailbox: 'Templates-old', rights }] }] };
+  const after = { version: 2, grants: [templateGrant('Templates/공유')] };
+  const record = await f.audit.run({ action, actor: 'admin', ip: '192.0.2.1', target: owner, kind: 'config', revertible: true, before, after }, async intent => ({ id: intent.id }));
+  const result = await f.history.revert(record.id, revertOptions);
+  assert.equal(result.result, 'ok');
+  assert.deepEqual(f.writes, [['set', grantee, 'Templates-old']]);
+  assert.deepEqual(f.rows, [...protectedRows, row('Templates-old')]);
+  const restored = await f.history.detail(result.id);
+  assert.ok(restored.after.grants.some(item => item.grantee === other && item.folders.some(folder => folder.mailbox === 'Templates')));
+});

@@ -58,6 +58,29 @@ CREATE TABLE IF NOT EXISTS mailstack_webmail.notice_counter (
   id TINYINT NOT NULL PRIMARY KEY CHECK (id = 1),
   next_seq BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS mailstack_webmail.public_templates (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  subject TEXT NOT NULL,
+  body_html MEDIUMTEXT NOT NULL,
+  audience_all TINYINT(1) NOT NULL DEFAULT 1,
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  updated_by VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS mailstack_webmail.public_template_domains (
+  template_id BIGINT NOT NULL,
+  domain VARCHAR(255) NOT NULL,
+  PRIMARY KEY (template_id, domain),
+  FOREIGN KEY (template_id) REFERENCES mailstack_webmail.public_templates(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS mailstack_webmail.public_template_files (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  template_id BIGINT NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  type VARCHAR(255) NOT NULL,
+  data MEDIUMBLOB NOT NULL,
+  FOREIGN KEY (template_id) REFERENCES mailstack_webmail.public_templates(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 INSERT IGNORE INTO mailstack_webmail.notice_counter (id, next_seq) VALUES (1, 0);
 SQL
 fi
@@ -67,6 +90,9 @@ SELECT id,title,body_html,category,audience_all,pinned,state,publish_seq,publish
 SELECT notice_id,domain FROM mailstack_webmail.notice_domains LIMIT 0;
 SELECT email,last_seen_seq,updated_at FROM mailstack_webmail.notice_reads LIMIT 0;
 SELECT id,next_seq FROM mailstack_webmail.notice_counter LIMIT 0;
+SELECT id,name,subject,body_html,audience_all,updated_at,updated_by FROM mailstack_webmail.public_templates LIMIT 0;
+SELECT template_id,domain FROM mailstack_webmail.public_template_domains LIMIT 0;
+SELECT id,template_id,name,type,data FROM mailstack_webmail.public_template_files LIMIT 0;
 SQL
 READY=$(mysql_root <<'SQL'
 SELECT (SELECT COUNT(*) FROM mailstack_webmail.notice_counter) = 1

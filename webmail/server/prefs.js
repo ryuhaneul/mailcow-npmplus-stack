@@ -4,6 +4,8 @@ import { getMetadata, setMetadataEntries } from './mail/imap-raw.js';
 import { sanitizeComposeHtml } from './mail/sanitize.js';
 import { withSignatureStoreLock } from './signature-store-lock.js';
 import { signatureMirrorHash } from './signatures.js';
+import { publicTemplateId } from './templates/public.js';
+import { templateIdPattern } from './templates/mime.js';
 
 export const MAX_PREFS_BYTES = 64 * 1024;
 export const PREFS_ENTRY = '/private/vendor/mailstack-webmail/prefs';
@@ -51,6 +53,19 @@ const fields = {
     if (!Array.isArray(value) || value.length > 50 || new Set(value).size !== value.length || value.some(path => typeof path !== 'string' || !path.trim() || /[\0\r\n]/.test(path))) throw invalid();
     return [...value];
   },
+  templatePins: value => {
+    try {
+      if (!Array.isArray(value) || value.length > 20) throw invalid();
+      const pins = value.map(item => {
+        exact(item, ['owner', 'id']);
+        if (item.owner === 'public') { publicTemplateId(item.id); return { owner: 'public', id: item.id }; }
+        if (typeof item.id !== 'string' || !templateIdPattern.test(item.id)) throw invalid();
+        return { owner: address(item.owner), id: item.id.toLowerCase() };
+      });
+      if (new Set(pins.map(item => JSON.stringify(item))).size !== pins.length) throw invalid();
+      return pins;
+    } catch { throw new AppError(400, 'TEMPLATE_PINS_INVALID', '템플릿 고정은 중복 없이 20개까지 설정할 수 있어요.'); }
+  },
   pinPosition: value => choice(value, ['mine', 'inbox']),
   sharedView: value => {
     if (!object(value) || Object.keys(value).length > 100) throw invalid();
@@ -81,7 +96,7 @@ const fields = {
   defaultFrom: value => value === null ? null : address(value),
 };
 function defaults(config) {
-  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, pinnedFolders: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
+  return { theme: config.defaultTheme, mode: config.defaultMode, accent: {}, layout: null, folderColors: {}, pinnedFolders: [], templatePins: [], pinPosition: 'mine', sharedView: {}, imageAllow: [], signatures: {}, fromNames: {}, defaultFrom: null };
 }
 function normalize(doc, config) {
   if (!object(doc) || !Object.keys(doc).length || Object.keys(doc).some(key => !Object.hasOwn(fields, key) && key !== 'imageAllowAdd')) throw invalid();

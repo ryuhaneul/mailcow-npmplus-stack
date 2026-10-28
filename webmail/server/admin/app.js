@@ -1,4 +1,7 @@
 import { join } from 'node:path';
+import { createPublicTemplatesStore } from '../templates/public-store.js';
+import { createPublicTemplatesService } from './services/public-templates.js';
+import publicTemplatesRoutes from './routes/public-templates.js';
 import { createNoticesStore } from '../notices/store.js';
 import { createNoticesService } from './services/notices.js';
 import noticesRoutes from './routes/notices.js';
@@ -81,7 +84,7 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {} } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {} } = {}) {
   if (logger !== false) {
     const base = logOptions(config.logLevel);
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
@@ -158,6 +161,11 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('notices', noticesService);
   app.addHook('onClose', async () => { await noticesStore.close?.(); });
   await app.register(noticesRoutes, { service: noticesService });
+  const publicTemplatesStore = publicTemplates.store ?? createPublicTemplatesStore({ ...publicTemplates, config, mode: 'admin' });
+  const publicTemplatesService = createPublicTemplatesService({ store: publicTemplatesStore, domains, audit, config });
+  app.decorate('publicTemplates', publicTemplatesService);
+  app.addHook('onClose', async () => { await publicTemplatesStore.close?.(); });
+  await app.register(publicTemplatesRoutes, { service: publicTemplatesService });
   const senders = createSendersService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('senders', senders);
   await app.register(sendersRoutes, { service: senders });

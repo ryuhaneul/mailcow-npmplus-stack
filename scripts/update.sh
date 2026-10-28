@@ -425,6 +425,10 @@ fi
 
 webmail_reconcile_share_mode "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE"
 
+if [ "$WEBMAIL_ENABLE" = true ]; then
+    MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-template-groups.sh" apply -y
+fi
+
 if [ "$MAIL_AUTOEXPUNGE_ENABLE" = true ]; then
     warn "Junk/Trash retention applies to ALL mail clients (${MAIL_AUTOEXPUNGE_DAYS:-30} days)."
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-autoexpunge.sh" apply -y

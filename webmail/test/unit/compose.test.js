@@ -874,3 +874,12 @@ for (const name of ['=?UTF-8?B?SGVsbG8=?=', 'Team =?UTF-8?Q?Other_Name?=']) test
     assert.equal(headers.bcc, undefined);
   }
 });
+
+
+test('compose upload: HTTP fields cannot inject internal CID metadata', async t => {
+  const f = await fixture(t), boundary = 'synthetic-cid-metadata';
+  const payload = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="cid"\r\n\r\nforged@example.com\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="sample.png"\r\nContent-Type: image/png\r\n\r\nsynthetic\r\n--${boundary}--\r\n`);
+  const response = await f.app.inject({ method: 'POST', url: '/api/attachments', headers: { ...f.headers, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload });
+  assert.equal(response.statusCode, 422, response.body);
+  assert.deepEqual(await readdir(f.dir), []);
+});

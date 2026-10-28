@@ -61,6 +61,7 @@ export default function Sidebar() {
           {index === 0 && folders.value.virtualAllMail && <NavItem href="#allmail" title="전체편지함" icon="layers"/>}
         </Fragment>;
       })}
+      <NavItem href="#templates" title="템플릿" icon="tpl"/>
       {prefs.value.pinPosition !== 'inbox' && pinnedGroup}
       <h3>내 폴더 <button type="button" aria-label="폴더 만들기" onClick={()=>{folderDialog.value={folder:null};}}><Icon name="plus" size="xs"/></button></h3>
       {privateRows.map(folder=><div class="folder-row" key={folder.path}><NavItem href={`#f/${encodeURIComponent(folder.path)}`} title={folder.name} folder={folder} mark={pinnedPaths.includes(folder.path)}/>{pinButton(folder)}<button class="ib" type="button" aria-label={`${folder.name} 폴더 관리`} onClick={()=>{folderDialog.value={folder};}}><Icon name="more" size="s"/></button></div>)}

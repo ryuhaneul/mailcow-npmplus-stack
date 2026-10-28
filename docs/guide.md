@@ -1259,3 +1259,39 @@ hcmail에만 한때 추가한 백신 검사 생략 줄은 레포에서 관리하
 ```bash
 sudo python3 -c 'from pathlib import Path; import shutil; root=Path("/home/mailcow-dockerized/data/conf/rspamd/local.d"); pairs=[("antivirus.conf", "  # 2026-10-26 Dovecot Sieve 재발송 사본(172.22.1.250)은 원본 수신 때 검사됨 - 건너뜀\n"), ("external_services.conf", "  # 2026-10-26 Dovecot Sieve 재발송 사본은 건너뜀\n")]; rows=[(root/name, (comment + "  whitelist = \"/etc/rspamd/custom/dovecot_trusted.map\";\n").encode()) for name,comment in pairs]; data=[(p,block,p.read_bytes()) for p,block in rows]; assert all(raw.count(block)==1 and not Path(str(p)+".bak-remove-skipsieve").exists() for p,block,raw in data), "원문/백업 확인 필요: 변경하지 않음"; [(shutil.copy2(p,str(p)+".bak-remove-skipsieve"),p.write_bytes(raw.replace(block,b"",1))) for p,block,raw in data]'
 ```
+
+
+### 템플릿 서버 설정 (1단계)
+
+개인 템플릿은 사용자 메일함의 `Templates`와 하위 `Templates/공유`에 메일로 저장하는 구조입니다. 이 폴더는 Thunderbird 등 다른 IMAP 프로그램에서도 일반 폴더로 보이며, 본문·첨부를 포함한 용량은 사용자 메일함 용량에 포함됩니다. 이번 단계는 서버 설정과 관리 작업의 보호 범위만 준비합니다. 웹메일의 저장·불러오기·변수·공유 화면과 회사 공용 템플릿 DB·API·화면은 후속 단계입니다.
+
+`WEBMAIL_ENABLE=true`인 setup·update는 `scripts/apply-dovecot-template-groups.sh apply -y`를 실행합니다. 별도 토글 없이 `extra.conf`에 다음 관리 블록을 넣어 로그인 사용자의 도메인을 ACL 그룹으로 사용합니다.
+
+```conf
+# BEGIN mailstack template-groups (apply-dovecot-template-groups.sh)
+plugin {
+  acl_groups = %d
+}
+# END mailstack template-groups
+```
+
+`bash scripts/apply-dovecot-template-groups.sh --check`는 블록과 `doveconf -n`의 실효 설정을 확인합니다. apply는 멱등이며 내용이 같으면 추가 백업·reload가 없습니다. 변경 전 `extra.conf.bak.*`를 남기고 설정 검사 또는 reload가 실패하면 원문을 복원합니다. 다른 설정은 보존하고 `extra.conf` 권한은 0600으로 유지합니다. 컨테이너 재시작 없이 Dovecot reload만 하며 열린 IMAP·POP 연결은 한 번 끊길 수 있습니다. 관리 블록 밖에 `acl_groups`가 있거나 표식이 손상·중복되면 무변경 중단하므로 직접 확인 후 재실행하세요.
+
+템플릿 공유의 단위는 `Templates/공유` 하나이며, 이 서버의 활성 사용자(`user=<주소>`) 또는 같은 도메인 전체(`group=<도메인>`)에 읽기 전용 `lr` 권한을 주는 구조입니다. `anyone`·`authenticated`는 사용하지 않습니다. 다른 도메인은 그룹에 해당하지 않습니다. 메일함 전체 공유가 켜져 있으면 INBOX 공유를 받은 사람은 공유 폴더 밖의 템플릿도 읽을 수 있습니다. INBOX 공유 회수는 그 상속 접근을 없애지만, 템플릿 폴더에 따로 준 공유는 유지합니다.
+
+관리 화면의 공유 목록·스냅숏·변경 기록에는 템플릿의 실제 ACL도 계속 표시합니다. 관리의 **공유 빼기·남은 권한 정리·공유 기록 되돌리기**는 `Templates` 및 `Templates/…`의 명시적 ACL을 변경하지 않습니다. 과거 기록에 템플릿 ACL 변경이 들어 있어도 복원 때 현재 템플릿 ACL을 보존합니다. 메일 정리는 미리보기 개수·실행 직전 재확인·삭제·삭제 후 확인 모두에서 같은 트리를 제외합니다. `Templates-old`, `Archive/Templates` 등은 이 보호 대상이 아닙니다.
+
+`apply-dovecot-webmail.sh`의 AllMail 가상 폴더는 `Templates`와 `Templates/*`를 제외합니다. 이 AllMail을 쓰는 전체편지함·통합 검색에도 템플릿 메일이 섞이지 않습니다. `Templates-old`는 제외하지 않습니다.
+
+신규 템플릿 폴더의 ACL 초기화 실패 뒤 빈 폴더 삭제도 실패하거나 폴더가 비어 있지 않으면 503과 `TEMPLATE_FOLDER_RECOVERY_REQUIRED` 경고를 남깁니다. 자동 재판별이나 재정리는 하지 않습니다.
+해당 계정의 `Templates/공유` ACL을 `doveadm acl get -u <계정> 'Templates/공유'`로 확인하고 원하지 않는 항목을 `doveadm acl delete`로 제거한 뒤 재시도하세요. 생성 실패 대상이 `Templates`이면 그 폴더도 같은 방법으로 확인합니다.
+
+템플릿 설정을 되돌릴 때는 다음 순서를 지킵니다.
+
+1. 반영 전 스택 snapshot, `/home/webmail` 소스 tar, `before-<HEAD>` 이미지 tag와 Dovecot `extra.conf` 사본을 확보합니다.
+2. **현재 HEAD의 새 스크립트가 있는 상태에서 먼저** `bash scripts/apply-dovecot-template-groups.sh --revert -y`로 관리 블록을 제거하고 reload합니다.
+3. 스택을 이전 HEAD로 되돌립니다.
+4. 이전 HEAD의 `bash scripts/apply-dovecot-webmail.sh apply -y`로 AllMail 정의를 원복합니다.
+5. 웹메일·관리 이미지를 이전 tag로 재생성합니다.
+
+사용자 `Templates` 폴더·메일·ACL은 삭제하지 않고 일반 폴더로 남깁니다. `acl_groups` 제거 후 도메인 그룹 ACL은 어느 사용자에게도 맞지 않아 효력이 없어집니다. 복원 뒤 `verify.sh`, 웹메일 로그인·메일 발송 1통, 공유 메일함 보기를 확인합니다. 중간 실패는 원인을 해결한 뒤 같은 HEAD의 update를 재실행합니다. 운영 반영은 별도 승인 후 수행합니다.

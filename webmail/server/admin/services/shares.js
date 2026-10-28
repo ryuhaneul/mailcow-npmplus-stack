@@ -5,6 +5,7 @@ import { createAclFolders } from '../acl-folders.js';
 
 const invalid = () => new AppError(422, 'INVALID_INPUT', '서로 다른 활성 메일함을 선택해 주세요.');
 const unsupported = () => new AppError(409, 'ACL_UNSUPPORTED', '이 공유는 다른 권한이 섞여 있어 화면에서 바꿀 수 없어요. 관리자에게 문의해 주세요.');
+const isTemplateFolder = mailbox => mailbox === 'Templates' || mailbox.startsWith('Templates/');
 const readOnly = rights => isDeepStrictEqual(rights, ['lookup', 'read']);
 const address = value => typeof value === 'string' && /^[^\s@]+@[^\s@]+$/.test(value.trim()) ? value.trim().toLowerCase() : null;
 export function groupMailboxAddresses(filters) {
@@ -72,14 +73,15 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
       const before = await snapshot(owner);
       assertUnchanged(expected, before);
       const existing = before.grants.find(row => row.grantee === grantee);
-      if (existing && !existing.folders.every(folder => readOnly(folder.rights))) throw unsupported();
+      if (existing && !existing.folders.filter(folder => grant || !isTemplateFolder(folder.mailbox)).every(folder => readOnly(folder.rights))) throw unsupported();
+      const mutableFolders = existing?.folders.filter(folder => !isTemplateFolder(folder.mailbox)) ?? [];
       const response = state => ({ owner, grantee, ...describe(state), applied: true });
-      if (grant ? existing?.folders.some(folder => folder.mailbox === 'INBOX') : !existing) return { ...response(before), unchanged: true };
+      if (grant ? existing?.folders.some(folder => folder.mailbox === 'INBOX') : !mutableFolders.length) return { ...response(before), unchanged: true };
       const after = normalized(grant ? [
         ...before.grants.filter(row => row.grantee !== grantee),
         { grantee, folders: [...(existing?.folders ?? []), { mailbox: 'INBOX', rights: ['lookup', 'read'] }] },
-      ] : before.grants.filter(row => row.grantee !== grantee));
-      const mailboxes = grant ? ['INBOX'] : existing.folders.map(folder => folder.mailbox);
+      ] : before.grants.map(row => row.grantee === grantee ? { ...row, folders: row.folders.filter(folder => isTemplateFolder(folder.mailbox)) } : row));
+      const mailboxes = grant ? ['INBOX'] : mutableFolders.map(folder => folder.mailbox);
       return audit.run({ actor, ip, action: grant ? 'share.grant' : 'share.revoke', target: owner, kind: 'config', revertible: true, before, after }, async intent => {
         assertUnchanged(expected, await snapshot(owner));
         await aclFolders.assertExist(owner, mailboxes);
@@ -97,8 +99,18 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     async prepareRevert({ target, record }) {
       // Re-read the folder list inside the owner lock before comparing either state.
       const available = new Set(await aclFolders.list(target));
-      const retained = state => normalized(state.grants.map(row => ({ ...row, folders: row.folders.filter(folder => available.has(folder.mailbox)) })));
-      const skipped = [...new Set(record.before.grants.flatMap(row => row.folders.filter(folder => !available.has(folder.mailbox)).map(folder => folder.mailbox)))].sort();
+      const current = await snapshot(target);
+      const protectedGrants = current.grants.map(row => ({ ...row, folders: row.folders.filter(folder => isTemplateFolder(folder.mailbox)) }));
+      const retained = state => {
+        const grants = state.grants.map(row => ({ ...row, folders: row.folders.filter(folder => !isTemplateFolder(folder.mailbox) && available.has(folder.mailbox)) }));
+        for (const row of protectedGrants) {
+          const grant = grants.find(item => item.grantee === row.grantee);
+          if (grant) grant.folders.push(...row.folders);
+          else grants.push(row);
+        }
+        return normalized(grants);
+      };
+      const skipped = [...new Set(record.before.grants.flatMap(row => row.folders.filter(folder => !isTemplateFolder(folder.mailbox) && !available.has(folder.mailbox)).map(folder => folder.mailbox)))].sort();
       return { target: retained(record.before), expected: retained(record.after), skipped };
     },
     async write({ session, target, value, expected, skipped = [] }) {
@@ -112,7 +124,7 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
       for (const key of changed) {
         const grantee = (previous.get(key) ?? desired.get(key)).grantee;
         for (const state of [current, value]) {
-          if (state.grants.find(row => row.grantee === grantee)?.folders.some(folder => !readOnly(folder.rights))) throw unsupported();
+          if (state.grants.find(row => row.grantee === grantee)?.folders.some(folder => !isTemplateFolder(folder.mailbox) && !readOnly(folder.rights))) throw unsupported();
         }
       }
       await aclFolders.assertExist(target, changed.map(key => (desired.get(key) ?? previous.get(key)).mailbox));

@@ -1,0 +1,50 @@
+/* Company templates reuse the notices A frame and its management tokens. */
+.na-public .na-tr{grid-template-columns:minmax(0,1fr) 180px 110px 72px}
+.na-public .ttl>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.na-public .tpl-ed{display:grid;gap:12px;min-width:0}
+.na-public .tpl-ed .row{display:grid;gap:7px}
+.na-public .tpl-ed .row label{font-size:13px;font-weight:600}
+.na-public .tpl-ed .row input{height:40px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r-ctl);background:var(--surface);color:var(--ink);font:inherit;min-width:0}
+.na-public .tpl-editor-format{display:flex;align-items:center;flex-wrap:wrap;position:relative;gap:4px;padding:4px;border:1px solid var(--line-2);border-radius:var(--r-ctl);background:var(--sunken)}
+.na-public .fmt{display:flex;align-items:center;flex-wrap:wrap;gap:2px;flex:1}
+.na-public .fmt .ib{height:28px;width:30px;display:grid;place-items:center;cursor:pointer}
+.na-public .fmt .ib:hover{background:var(--surface)}
+.na-public .fmt .size{width:auto;max-width:100%;font:inherit;font-size:12px}
+.na-public .fmt .htmlbtn,.na-public .tpl-vbtn{padding:6px;font-size:12px;cursor:pointer}
+.na-public .fmt .htmlbtn[aria-pressed=true]{background:var(--surface)}
+.na-public .compose-format-panel{flex-basis:100%;padding:8px 4px}
+.na-public .compose-format-panel label{font-size:12px}
+.na-public .compose-source-shell{display:none;position:relative;min-height:220px;border:1px solid var(--line-2);border-radius:var(--r-ctl);overflow:hidden}
+.na-public .tpl-ed.html .compose-source-shell{display:block}
+.na-public .tpl-ed.html .compose-editor-wrap{display:none}
+.na-public .compose-source-pre,.na-public .compose-source-input{margin:0;padding:12px;width:100%;min-height:220px;font:13px/1.65 monospace;white-space:pre;tab-size:2;box-sizing:border-box}
+.na-public .compose-source-pre{position:absolute;inset:0;overflow:hidden;pointer-events:none;background:var(--surface)}
+.na-public .compose-source-line{display:block;min-height:1.65em}
+.na-public .compose-source-input{position:relative;display:block;resize:vertical;overflow:auto;border:0;color:transparent;caret-color:var(--ink);background:transparent}
+.na-public .compose-source-input::selection{background:var(--hover)}
+.na-public .compose-source-shell.is-composing .compose-source-input{color:var(--ink)}
+.na-public .compose-source-shell.is-composing .compose-source-pre{visibility:hidden}
+.na-public .tpl-vmenu{position:absolute;z-index:5;top:100%;right:0;min-width:210px;padding:8px;border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+.na-public .tpl-vmenu h4{font-size:11px;color:var(--ink-3);padding:6px;margin:0}
+.na-public .tpl-vmenu button{display:flex;width:100%;padding:7px 8px;text-align:left;gap:8px;font-size:13px;cursor:pointer}
+.na-public .tpl-vmenu button:hover{background:var(--hover)}
+.na-public .tpl-vmenu small{margin-left:auto;color:var(--ink-3)}
+.na-public .tpl-ed .foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+.na-public .tpl-atts{display:flex;gap:6px;flex-wrap:wrap;min-width:0}
+.na-public .att{display:flex;align-items:center;gap:5px;padding:5px 7px;background:var(--sunken);border-radius:var(--r-ctl);max-width:100%}
+.na-public .att>span{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;min-width:0}
+.na-public .att small{white-space:nowrap;color:var(--ink-3)}
+.na-public .att .ib{display:grid;place-items:center;flex:none;cursor:pointer}
+.na-public .addatt{display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--ink-2)}
+.na-public .tpl-vars-sum{flex-basis:100%;color:var(--ink-3)}
+.na-public .hint{font-size:12px;color:var(--ink-3);margin:0}
+.na-public .ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;flex:none}
+@media(max-width:760px){
+  .na-public .na-tr{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'title acts' 'target time';gap:8px}
+  .na-public .na-tr.th{display:none}
+  .na-public .na-tr .ttl{grid-area:title}
+  .na-public .na-tr .c-tg{display:block!important;grid-area:target;font-size:12px;overflow-wrap:anywhere}
+  .na-public .na-tr .c-at{display:block!important;grid-area:time;font-size:12px;text-align:right}
+  .na-public .na-tr .acts{grid-area:acts}
+  .na-public .page-head .actions{align-self:flex-start}
+}

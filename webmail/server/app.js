@@ -1,4 +1,6 @@
 import Fastify, { LogController } from 'fastify';
+import { createPublicTemplatesStore } from './templates/public-store.js';
+import { createPublicTemplatesReader } from './templates/public.js';
 import { createNoticesStore } from './notices/store.js';
 import noticesRoutes from './routes/notices.js';
 import fastifyStatic from '@fastify/static';
@@ -31,23 +33,27 @@ import { createFolderService } from './mail/folders.js';
 import installDirectory from './routes/directory.js';
 import composeRoutes from './routes/compose.js';
 import { createComposeService } from './mail/compose.js';
+import templateRoutes from './routes/templates.js';
+import { createTemplateStore } from './templates/store.js';
+import { clearInheritedTemplateAcl, createTemplateShareService } from './templates/share.js';
 import { createSmtpService } from './mail/smtp.js';
 import rulesRoutes from './routes/rules.js';
 import { createRulesService } from './sieve/service.js';
 
-export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {} } = {}) {
+export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {}, directory = {}, publicTemplates = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
   installClientIp(app);
   await installAuth(app, { ...auth, config });
-  await installDirectory(app, { config });
+  await installDirectory(app, { ...directory, config });
   const noticesStore = notices.store ?? createNoticesStore({ ...notices, config });
   app.decorate('notices', noticesStore);
   app.addHook('onClose', async () => { await noticesStore.close?.(); });
   await app.register(noticesRoutes, { service: noticesStore });
   const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
-  await app.register(composeRoutes, { config, service: createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now }) });
+  const compose = createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now });
+  await app.register(composeRoutes, { config, service: compose });
   const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory, logger: app.log });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
@@ -64,7 +70,15 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   } });
   await app.register(signatureImagesRoutes, { service: images });
   await app.register(signaturesRoutes, { service: signatures, normalizeHtml, imap: app.imap });
-  await app.register(prefsRoutes, { config, service: createPrefsService({ config, imap: app.imap, logger: app.log, signatures, directory: app.directory }) });
+  const prefs = createPrefsService({ config, imap: app.imap, logger: app.log, signatures, directory: app.directory });
+  await app.register(prefsRoutes, { config, service: prefs });
+  const templates = createTemplateStore({ config, imap: app.imap, logger: app.log, buildMime: compose.buildTemplateMime, onFolderCreated: clearInheritedTemplateAcl });
+  const sharing = createTemplateShareService({ config, imap: app.imap, store: templates, activeAccounts: session => app.directory.activeAccounts(session) });
+  const publicStore = publicTemplates.store ?? createPublicTemplatesStore({ ...publicTemplates, config });
+  app.addHook('onClose', async () => { await publicStore.close?.(); });
+  const publicReader = createPublicTemplatesReader({ store: publicStore, templates, compose, config, logger: app.log,
+    configured: Boolean(publicTemplates.store || config.dbHost && config.dbUser && config.dbPassword) });
+  await app.register(templateRoutes, { config, store: templates, sharing, prefs, compose, publicReader });
   await app.register(passwordRoutes, { config });
   await app.register(healthRoutes);
   await app.register(configRoutes, { config });

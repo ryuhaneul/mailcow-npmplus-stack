@@ -339,3 +339,15 @@ test('sender display overrides affect identities only; revoked and invalid overr
   assert.equal(items.find(item => item.kind === 'alias').name, '사용자');
   assert.equal(items.some(item => item.address === 'revoked@example.com'), false);
 });
+
+
+test('template sharing accounts: fresh mailbox-only rows with active=1, never aliases or cached contacts', async () => {
+  const data = tables();
+  data.mailbox.push({ username: 'reader@other.example', active: 1 }, { username: 'disabled@example.com', active: 0 }, { username: 'active2@example.com', active: 2 });
+  data.alias.push(alias('alias@example.com'));
+  const { service, calls } = fixture(data);
+  assert.deepEqual(await service.activeAccounts(session()), [{ username: 'user@example.com', active: 1 }, { username: 'reader@other.example', active: 1 }]);
+  data.mailbox[1].active = 0;
+  assert.deepEqual(await service.activeAccounts(session()), [{ username: 'user@example.com', active: 1 }]);
+  assert.deepEqual(calls, [directoryQueries.mailbox, directoryQueries.mailbox]);
+});

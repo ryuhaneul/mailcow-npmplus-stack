@@ -24,7 +24,7 @@ export function createAclFolders({ doveadm, config, dockerapi }) {
       }
       for (const { id, global, rights } of rows) {
         if (typeof global !== 'string') throw new AppError(502, 'DOVEADM_REJECTED', 'doveadm이 요청을 거절했어요.');
-        result.push({ user: owner, id: id.slice(id.indexOf('=') + 1), mailbox, rights: [...(global ? ['global'] : []), ...rights.split(/\s+/).filter(Boolean)] });
+        result.push({ user: owner, id: id.startsWith('user=') ? id.slice(5) : id, mailbox, rights: [...(global ? ['global'] : []), ...rights.split(/\s+/).filter(Boolean)] });
       }
     }
     return result;

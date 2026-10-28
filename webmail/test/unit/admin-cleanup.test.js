@@ -57,7 +57,7 @@ for (const before of [undefined, '', '2026/10/01', '2026-02-30', '2026-13-01', '
   const f = await fixture(t); await assert.rejects(count(f, { ...input, before }), { statusCode: 422, code: 'DATE_REQUIRED' }); assert.equal(f.requests.length, 0);
 });
 for (const [before, timestamp] of [['2025-01-01', '1735657200'], ['2024-03-01', '1709218800']]) test(`cleanup: ${before} uses KST midnight for count and token execution`, async t => {
-  const f = await fixture(t), query = ['mailbox', 'INBOX', 'before', timestamp];
+  const f = await fixture(t), query = ['mailbox', 'INBOX', 'before', timestamp, 'not', 'mailbox', 'Templates', 'not', 'mailbox', 'Templates/*'];
   const preview = await count(f, { ...input, before });
   assert.deepEqual(f.requests.find(row => row.command === 'search').args.query, query);
   const result = await run(f, preview.token);
@@ -103,7 +103,7 @@ test('cleanup: count changed rejects without expunge or audit intent', async t =
 test('cleanup: one expunge, difference count, quota and irreversible result with no secrets', async t => {
   const f = await fixture(t), preview = await count(f); assert.equal(preview.count, 3); assert.equal(preview.usage.usedBytes, 11264);
   const result = await run(f, preview.token); assert.equal(result.deleted, 3); assert.equal(result.remaining, 0); assert.equal(result.after.usedBytes, 7168); assert.equal(expunges(f).length, 1);
-  assert.deepEqual(expunges(f)[0].args.query, ['mailbox', 'INBOX', 'before', '1790780400']);
+  assert.deepEqual(expunges(f)[0].args.query, ['mailbox', 'INBOX', 'before', '1790780400', 'not', 'mailbox', 'Templates', 'not', 'mailbox', 'Templates/*']);
   const rows = (await f.audit.read()).rows; assert.equal(rows[0].kind, 'irreversible'); assert.equal(rows[0].revertible, false); assert.equal(rows[1].detail.deleted, 3);
   for (const value of [secret, Buffer.from(secret).toString('base64'), preview.token]) assert.ok(!JSON.stringify({ rows, logs: f.logs, result }).includes(value));
   await assert.rejects(run(f, preview.token), { statusCode: 409 }); assert.equal(expunges(f).length, 1);
@@ -172,4 +172,29 @@ test('cleanup: empty filter object counts mail without team confirmation', async
   const result = await count(f);
   assert.equal(result.count, 3); assert.match(result.token, /^[a-f0-9]{64}$/);
   assert.equal(expunges(f).length, 0);
+});
+
+
+test('cleanup: preview and execution preserve exactly Templates tree, including newly added templates', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'webmail-cleanup-templates-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const messages = ['INBOX', 'Templates', 'Templates/공유', 'Templates/공유/깊이', 'Templates-old', 'Archive/Templates', 'templates'];
+  const calls = [];
+  const doveadm = { async call(command, args) {
+    calls.push({ command, args: structuredClone(args) });
+    assert.deepEqual(args.query, ['mailbox', '*', 'before', '1790780400', 'not', 'mailbox', 'Templates', 'not', 'mailbox', 'Templates/*']);
+    const selected = messages.filter(name => name !== 'Templates' && !name.startsWith('Templates/'));
+    if (command === 'search') return selected.map((_, i) => ({ 'mailbox-guid': 'synthetic', uid: String(i + 1) }));
+    assert.equal(command, 'expunge');
+    for (const name of selected) messages.splice(messages.indexOf(name), 1);
+    return [];
+  } };
+  const service = createCleanupService({ doveadm, mailcow: { async call() { return []; } }, quota: { async usage() { return {}; } }, audit: createAudit({ dir }), lock: createResourceLock(), now: () => Date.parse('2026-10-17T00:00:00Z') });
+  const preview = await service.count({ session, data: { ...input, folder: 'all' } });
+  assert.equal(preview.count, 4);
+  messages.push('Templates/새 폴더');
+  const result = await service.run({ ...ctx, data: { token: preview.token, confirmAddress: mailbox } });
+  assert.equal(result.deleted, 4);
+  assert.deepEqual(messages, ['Templates', 'Templates/공유', 'Templates/공유/깊이', 'Templates/새 폴더']);
+  assert.deepEqual(calls.map(row => row.command), ['search', 'search', 'expunge', 'search']);
 });

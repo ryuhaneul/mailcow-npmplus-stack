@@ -176,6 +176,8 @@ INBOX
 -Trash
 -Junk
 -Drafts
+-Templates
+-Templates/*
 -WebmailVirtual/*
 -Shared/*
 EOF

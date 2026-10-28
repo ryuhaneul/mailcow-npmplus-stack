@@ -22,7 +22,7 @@ const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CH
 await mkdir(captures,{recursive:true});
 // Same baseline targets established by select-all V3; all other axe nodes fail.
 const knownSidebarHashes = [
-  ...['compose','inbox','allmail','spam','shared','filters','storage','password','settings'].map(path => `#${path}`),
+  ...['compose','inbox','allmail','spam','shared','templates','filters','storage','password','settings'].map(path => `#${path}`),
   ...['Sent','Drafts','Archive','Trash','거래처','하늘 프로젝트','인사·총무','세금계산서','뉴스레터','디자인 리뷰',
     'Shared/sales@example.com/INBOX','Shared/sales@example.com/거래처','Shared/sales@example.com/거래처/2026','Shared/sales@example.com/견적','Shared/support@example.com/INBOX'].map(path => `#f/${encodeURIComponent(path)}`),
 ];

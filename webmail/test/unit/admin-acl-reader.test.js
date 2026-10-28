@@ -24,7 +24,7 @@ const acl = {
 const owned = [
   { user: owner, id: grantee, mailbox: 'INBOX', rights: ['lookup', 'read'] },
   { user: owner, id: 'anyone', mailbox: 'INBOX', rights: ['global', 'lookup'] },
-  { user: owner, id: 'staff=mail', mailbox: 'Archive', rights: ['lookup', 'read', '-write'] },
+  { user: owner, id: 'group=staff=mail', mailbox: 'Archive', rights: ['lookup', 'read', '-write'] },
   { user: owner, id: 'authenticated', mailbox: 'Archive/2026', rights: [] },
   { user: owner, id: grantee, mailbox: 'MySharedNotes', rights: ['global', 'read'] },
 ];
@@ -225,4 +225,17 @@ test('ACL reader: missing or non-string global rejects the whole result after a 
     } } });
     await assert.rejects(reader.getAcl(owner), { statusCode: 502, code: 'DOVEADM_REJECTED' });
   }
+});
+
+
+test('ACL reader: domain group and matching user remain distinct, including Templates tree', async () => {
+  const names = ['Templates', 'Templates/공유', 'Templates/공유/깊이', 'Templates-old'];
+  const reader = createAclReader({ config: enabled, dockerapi: {}, doveadm: { async call(command, args) {
+    if (command === 'mailboxList') return names.map(mailbox => ({ mailbox }));
+    assert.ok(names.includes(args.mailbox));
+    return ['user=example.com', 'group=example.com', 'anyone', 'authenticated', '-user=example.com'].map(id => ({ id, global: '', rights: 'lookup read' }));
+  } } });
+  const rows = await reader.getAcl(owner);
+  assert.equal(rows.length, 20);
+  for (const mailbox of names) assert.deepEqual(rows.filter(row => row.mailbox === mailbox).map(row => row.id), ['example.com', 'group=example.com', 'anyone', 'authenticated', '-user=example.com']);
 });

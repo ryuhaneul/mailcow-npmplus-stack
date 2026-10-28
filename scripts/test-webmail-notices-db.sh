@@ -24,17 +24,20 @@ statefile = root/'schema.json'
 state = json.loads(statefile.read_text()) if statefile.exists() else {}
 if 'CREATE DATABASE' in sql:
     assert 'CREATE DATABASE IF NOT EXISTS mailstack_webmail CHARACTER SET utf8mb4' in sql
-    assert sql.count('CREATE TABLE IF NOT EXISTS') == 4
-    assert sql.count('ENGINE=InnoDB DEFAULT CHARSET=utf8mb4') == 4
+    assert sql.count('CREATE TABLE IF NOT EXISTS') == 7
+    assert sql.count('ENGINE=InnoDB DEFAULT CHARSET=utf8mb4') == 7
     for field in ('title VARCHAR(200)', 'body_html MEDIUMTEXT', "ENUM('update','maintenance','info')", "ENUM('draft','published','hidden')", 'publish_seq BIGINT NULL UNIQUE', 'published_at DATETIME NULL', 'updated_by VARCHAR(255)', 'created_at DATETIME(6)', 'updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)', 'PRIMARY KEY (notice_id, domain)', 'ON DELETE CASCADE', 'email VARCHAR(255)', 'last_seen_seq BIGINT', 'CHECK (id = 1)', 'INSERT IGNORE INTO mailstack_webmail.notice_counter (id, next_seq) VALUES (1, 0)'):
         assert field in sql, field
+    for field in ('name VARCHAR(100)', 'subject TEXT', 'data MEDIUMBLOB', 'PRIMARY KEY (template_id, domain)', 'REFERENCES mailstack_webmail.public_templates(id) ON DELETE CASCADE'):
+        assert field in sql, field
+    assert 'cid' not in sql.lower()
     assert not re.search(r'^(DROP|TRUNCATE|DELETE|REPLACE|UPDATE)\s', sql, re.M)
     if (root/'ddl-fail').exists(): sys.exit(1)
     state.setdefault('counter', 0); state.setdefault('notices', []); state.setdefault('reads', {})
     statefile.write_text(json.dumps(state))
 elif not statefile.exists(): sys.exit(1)
 elif 'LIMIT 0' in sql:
-    assert sql.count('LIMIT 0') == 4
+    assert sql.count('LIMIT 0') == 7
 elif 'SELECT COUNT(*) FROM mailstack_webmail.notice_counter' in sql:
     print(int(state.get('counter', -1) >= 0))
 else: sys.exit(91)
@@ -50,7 +53,7 @@ if run --check; then fail 'missing schema passed'; fi
 pass 'missing schema check fails without writes'
 run apply || { cat "$TMP/result"; fail apply; }
 run --check || fail check
-pass 'fresh schema has all four tables, required fields, constraints and counter seed'
+pass 'fresh schema has all seven tables, required fields, constraints and counter seed'
 python3 - "$TMP/schema.json" <<'PY'
 import json, sys
 from pathlib import Path

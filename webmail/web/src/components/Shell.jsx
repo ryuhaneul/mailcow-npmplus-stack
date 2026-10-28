@@ -22,6 +22,7 @@ import StoragePage from '../pages/StoragePage.jsx';
 import { DeleteMessagesDialog } from '../pages/EmptyFolderDialog.jsx';
 import PasswordPage from '../pages/PasswordPage.jsx';
 import SettingsPage from '../pages/SettingsPage.jsx';
+import TemplatesPage from './TemplatesPage.jsx';
 import SharedSettingsPage from '../pages/SharedSettingsPage.jsx';
 import KeysDialog from './KeysDialog.jsx';
 import FolderDialog, { folderDialog } from './FolderDialog.jsx';
@@ -99,7 +100,7 @@ export default function Shell() {
           {receiptResults.length>0&&<><ol style={{maxHeight:'45vh',overflowY:'auto'}}>{receiptResults.map(item=><li key={item.composeId}>{item.message} {item.ref&&<a href={`#read/${encodeURIComponent(item.ref)}`}>사본 보기</a>}</li>)}</ol><button class="btn sm" type="button" onClick={()=>setReceiptResults([])}>결과 닫기</button></>}
           {receiptError&&<small>{receiptError}</small>}
         </div>}
-        <div class="stage">{(isListRoute(current)||['read','compose'].includes(current.name))?<MailView/>:current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'shared' ? <SharedSettingsPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
+        <div class="stage">{(isListRoute(current)||['read','compose'].includes(current.name))?<MailView/>:current.name === 'templates' ? <TemplatesPage/> : current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'shared' ? <SharedSettingsPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
         <Composer/>
       </main>
     </div>

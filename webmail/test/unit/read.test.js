@@ -212,3 +212,16 @@ test('read body limit: exact cap remains intact and smaller HTML follows the exi
   const html = fixture({ bodyMaxMb: 1 });
   assert.match((await html.service.read(html.session, token)).html, /안녕하세요/);
 });
+
+
+test('read: markSeen is opt-out; shared reads never STORE even with seen rights', async () => {
+  const normal = fixture();
+  assert.equal((await normal.service.read(normal.session, token)).seen, true);
+  assert.equal(normal.client.flags.length, 1);
+  const client = new ReadImap(), session = {};
+  client.exec = () => { throw new Error('markSeen:false must skip MYRIGHTS as well'); };
+  const imap = { async withRef(_session, ref, operation) { return operation(client, decodeRef(ref)); } };
+  const readonly = createReadService({ imap, markSeen: false });
+  assert.equal((await readonly.read(session, token)).seen, false);
+  assert.equal(client.flags.length, 0);
+});

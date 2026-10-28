@@ -16,6 +16,12 @@ import { signatureError } from '../signatures.js';
 import { createSignatureImageMap } from '../signature-images.js';
 import { formatBytes } from '../format.js';
 import SignatureDialog from './SignatureDialog.jsx';
+import TemplatePicker, { TemplateInsertDialog } from './TemplatePicker.jsx';
+import TemplateSaveDialog from './TemplateSaveDialog.jsx';
+import TemplateVarsBar from './TemplateVarsBar.jsx';
+import TemplateVarsDialog, { TemplateSendWarning } from './TemplateVarsDialog.jsx';
+import { getTemplate, createTemplate, updateTemplate, templateAttachmentsToCompose, templateUid, templateComposeImages } from '../templates/api.js';
+import { insertTemplate, composeTemplateInsertion, templateSaveInput, updateTemplateVariables, refreshTemplateDefaults, prepareTemplateVariables, beginTemplateVariableEdit, cancelTemplateVariableEdit, unfilledTemplateVariables, templateSendWarnings } from '../templates/vars.js';
 import Icon from './Icon.jsx';
 import FromPicker from './FromPicker.jsx';
 import RecipientInput from './RecipientInput.jsx';
@@ -24,11 +30,17 @@ import HtmlSource from './HtmlSource.jsx';
 import ComposeEditor from './ComposeEditor.jsx';
 import AttachDrop from './AttachDrop.jsx';
 import './compose.css';
+import './templates.css';
 
 export default function Composer() {
   const [model,setModel]=useState(null),[identity,setIdentity]=useState(null),[domain,setDomain]=useState(''),[raw,setRaw]=useState(false),[error,setError]=useState(null),[busy,setBusy]=useState(''),[saving,setSaving]=useState(false),[savedTime,setSavedTime]=useState(null),[result,setResult]=useState(null),[showCc,setShowCc]=useState(false),[showBcc,setShowBcc]=useState(false);
   const current=useRef(null),live=useRef(true),owner=useRef(session.value),version=useRef(0),savedVersion=useRef(0),editedAt=useRef(0),timer=useRef(null),savePromise=useRef(null),uploads=useRef(Promise.resolve()),sending=useRef(false),closing=useRef(false),completed=useRef(false),recovering=useRef(false),editor=useRef(null),fileInput=useRef(null),fileKey=useRef(0),delivery=useRef('idle'),lookupPending=useRef(false);
   const [signatureMenu,setSignatureMenu]=useState(false),[replacement,setReplacement]=useState(null),[imageUrls,setImageUrls]=useState(new Map());
+  const [templatePicker,setTemplatePicker]=useState(false),[templateSave,setTemplateSave]=useState(false),[templateInsertion,setTemplateInsertion]=useState(null),[templateError,setTemplateError]=useState(null);
+  const [varsHidden,setVarsHidden]=useState(false),[varsDialog,setVarsDialog]=useState(null),[sendWarning,setSendWarning]=useState(null),[varsFocus,setVarsFocus]=useState(null);
+  const varsRoot=useRef(null),varsButton=useRef(null),sendButton=useRef(null);
+  const templateSeed=useRef(null);
+  const templateButton=useRef(null),templateSaveButton=useRef(null),templatePending=useRef(null);
   const [restoration,setRestoration]=useState(()=>hasPendingSendAttempt()?undefined:null),restoredAttempt=useRef(false);
   const [draftImageUrls,setDraftImageUrls]=useState(new Map()),draftUrls=useRef(new Map());
   const signatureSnapshot=useRef(null),imageSnapshot=useRef(null),imageMap=useRef(null),signatureRoot=useRef(null),signatureButton=useRef(null),signaturePopup=useRef(null),signatureChange=useRef(0),signaturePromise=useRef(null);
@@ -36,7 +48,8 @@ export default function Composer() {
   function active(){return live.current&&session.value===owner.current;}
   function fail(value){if(completed.current){if(recovering.current&&value.source==='draft'&&active())setResult(previous=>({...previous,recoveryError:'사본을 임시 저장하지 못했어요. '+value.message}));return;}if((current.current?.kind==='draft'||seed?.kind==='draft')&&['MESSAGE_NOT_FOUND','STALE_REF'].includes(value.code))value={...value,message:'임시 메일이 다른 창에서 변경되었거나 삭제됐어요. 임시보관함에서 다시 열어 주세요.'};if(active()&&!['NO_SESSION','SESSION_EXPIRED'].includes(value.code))setError(['SIGNATURE_IMAGE_NOT_FOUND','SIGNATURE_INVALID'].includes(value.code)?signatureError(value):value);}
   function schedule(){clearTimeout(timer.current);if(!completed.current&&!['checking','unknown'].includes(delivery.current)&&!sending.current&&!closing.current)timer.current=setTimeout(()=>{void saveDraft().catch(fail);},Math.max(0,3000-(Date.now()-editedAt.current)));}
-  function patch(value,dirty=true){if(!active()||!current.current)return;current.current={...current.current,...value};setModel(current.current);if(dirty){version.current++;editedAt.current=Date.now();setSavedTime(null);schedule();}}
+  function variableContext(value){return {to:value.to,from:value.from,identities:composeIdentities.value?.identities||identity?.identities||[]};}
+  function patch(value,dirty=true){if(!active()||!current.current)return;let next={...current.current,...value};if(next.templateState&&!Object.hasOwn(value,'templateState')&&(Object.hasOwn(value,'to')&&JSON.stringify(next.to)!==JSON.stringify(current.current.to)||Object.hasOwn(value,'from')&&next.from!==current.current.from)){const filled=refreshTemplateDefaults(next,next.templateState,variableContext(next));next={...next,...updateCompositionHtml(next,filled.html).patch,subject:filled.subject,templateState:filled.state};}current.current=next;setModel(current.current);if(dirty){version.current++;editedAt.current=Date.now();setSavedTime(null);schedule();}}
   async function saveDraft(manual=false){
     if(savePromise.current)return savePromise.current;
     if(!current.current||restoredAttempt.current||delivery.current==='checking'||!manual&&(completed.current||delivery.current==='unknown'||savedVersion.current===version.current))return;
@@ -59,7 +72,7 @@ export default function Composer() {
   },[refreshedIdentity,refreshedSignatures,refreshedImages]);
   async function releaseAttachments(){if(!active()||!current.current)return;await Promise.allSettled(current.current.attachments.filter(file=>file.id).map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
   function releaseDraftImages(){for(const url of draftUrls.current.values())URL.revokeObjectURL(url);draftUrls.current.clear();}
-  function reset(){if(sendResultNotice.value?.composeId===current.current?.composeId)sendResultNotice.value=null;releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;recovering.current=false;delivery.current='idle';restoredAttempt.current=false;}
+  function reset(){if(sendResultNotice.value?.composeId===current.current?.composeId)sendResultNotice.value=null;releaseDraftImages();setDraftImageUrls(new Map());signatureChange.current++;signaturePromise.current=null;clearTimeout(timer.current);current.current=null;setModel(null);setResult(null);setError(null);setRaw(false);setSavedTime(null);setSignatureMenu(false);setReplacement(null);templateSeed.current=null;setTemplatePicker(false);setTemplateSave(false);setTemplateInsertion(null);setTemplateError(null);setVarsHidden(false);setVarsDialog(null);setSendWarning(null);setVarsFocus(null);imageMap.current?.clear();setImageUrls(new Map());version.current=0;savedVersion.current=0;completed.current=false;recovering.current=false;delivery.current='idle';restoredAttempt.current=false;}
   useEffect(()=>{live.current=true;imageMap.current=createSignatureImageMap({loadContent:composeImageContent});return()=>{live.current=false;if(['checking','unknown'].includes(delivery.current))toast.value={kind:'send-unknown',message:'발송 여부를 확인할 수 없어요. 보낸편지함·임시보관함을 확인해 주세요.',ownerEmail:owner.current?.user?.email};pendingSend.value=null;detachedSendAttempts.value=[];sendResultNotice.value=null;clearTimeout(timer.current);imageMap.current.dispose();releaseDraftImages();};},[]);
   useEffect(()=>{if(restoration!==undefined)return;let cancelled=false;restoreSendAttempt(owner.current.user.email).then(value=>{if(!cancelled){setRestoration(value);if(value)navigate('compose');}});return()=>{cancelled=true;};},[]);
   useEffect(()=>{
@@ -108,7 +121,7 @@ export default function Composer() {
           if(cancelled||!active()){for(const url of cidUrls.values())URL.revokeObjectURL(url);return;}
         }catch(error){for(const url of cidUrls.values())URL.revokeObjectURL(url);throw error;}
         draftUrls.current=cidUrls;setDraftImageUrls(cidUrls);
-        setImageUrls(urls);current.current=value;setModel(value);setShowCc(value.cc.length>0);setShowBcc(value.bcc.length>0);composeSeed.value=null;
+        setImageUrls(urls);current.current=value;templateSeed.current=seed?.templateRef||null;setModel(value);setShowCc(value.cc.length>0);setShowBcc(value.bcc.length>0);composeSeed.value=null;
         if(seed&&seed.kind!=='draft'){version.current=1;editedAt.current=Date.now();schedule();}
       }catch(value){
         if(!cancelled&&active()&&value.code==='DRAFT_UNSUPPORTED'&&seed?.kind==='draft'){
@@ -153,15 +166,20 @@ export default function Composer() {
       else {delivery.current=delivery.current==='checking'?'unknown':delivery.current;setResult(previous=>({...previous,status:previous?.status==='checking'?'unknown':previous?.status||'unknown',lookupError:'결과를 다시 확인하지 못했어요 — 잠시 뒤 다시 확인'}));}
     }finally{lookupPending.current=false;if(active())setBusy('');}
   }
-  async function send(){
-    if(sending.current||closing.current||completed.current||['checking','unknown'].includes(delivery.current)||!current.current)return;
+  async function send(allowUnfilled=false){
+    if(templatePending.current||sending.current||closing.current||completed.current||['checking','unknown'].includes(delivery.current)||!current.current)return;
     sending.current=true;clearTimeout(timer.current);setBusy('send');setError(null);
     let requested=false;
     try{
-      await signaturePromise.current;await savePromise.current;await uploads.current;if(!active())return;
-      const body=composePayload(current.current,true);
+      await signaturePromise.current;await savePromise.current;await uploads.current;await editor.current?.whenIdle();if(!active())return;
+      const committedPending=Boolean(current.current.pendingTo||current.current.pendingCc||current.current.pendingBcc);
+      let body=composePayload(current.current,true);
       // Commit pending recipient text once, before capturing the send attempt.
       patch({to:body.to,cc:body.cc,bcc:body.bcc,pendingTo:'',pendingCc:'',pendingBcc:''},false);
+      body=composePayload(current.current,true);
+      const missing=templateSendWarnings(body);
+      if(missing.length&&!allowUnfilled){if(committedPending)patch({},true);setSendWarning(missing);return;}
+      setSendWarning(null);
       delivery.current='checking';
       if(sendResultNotice.value?.composeId===body.composeId)sendResultNotice.value={...sendResultNotice.value,status:'checking',message:'발송 결과 확인 중이에요'};
       await rememberSendAttempt(body.composeId,owner.current.user.email);
@@ -174,7 +192,7 @@ export default function Composer() {
       else if(['CSRF','BAD_ORIGIN'].includes(value.code))applyDelivery({status:'not_sent',error:value});
       else if(['NO_SESSION','SESSION_EXPIRED'].includes(value.code)||!active())toast.value={kind:'send-unknown',message:unknownMessage,ownerEmail:owner.current?.user?.email};
       else await checkDelivery();
-    }finally{sending.current=false;if(active()){setBusy('');if(current.current&&!completed.current&&delivery.current==='not_sent'&&version.current!==savedVersion.current)schedule();}}
+    }finally{sending.current=false;if(active()){setBusy('');if(current.current&&!completed.current&&['idle','not_sent'].includes(delivery.current)&&version.current!==savedVersion.current)schedule();}}
   }
   function viewMailbox(specialUse){
     const folder=folders.value.folders.find(item=>item.specialUse===`\\${specialUse}`&&!item.shared);
@@ -246,6 +264,90 @@ export default function Composer() {
   }
   async function removeFile(file){
     try{if(file.id){await api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'});patch({attachments:current.current.attachments.filter(item=>item.id!==file.id)});}else patch({forwardFiles:current.current.forwardFiles.filter(item=>!(item.ref===file.ref&&item.partId===file.partId))});}catch(value){fail(value);}
+  }
+  function applyVariableResult(value){
+    if(!current.current)return;
+    const dirty=value.subject!==current.current.subject||value.html!==current.current.html;
+    patch({...updateCompositionHtml(current.current,value.html).patch,subject:value.subject,templateState:value.state},dirty);
+  }
+  function changeTemplateVariable(name,value){
+    if(!current.current?.templateState||disabled)return;
+    applyVariableResult(updateTemplateVariables(current.current,current.current.templateState,{[name]:value}));
+  }
+  function openVariableDialog(focusName){
+    if(!current.current)return;
+    const prepared=prepareTemplateVariables(current.current,current.current.templateState,variableContext(current.current));
+    applyVariableResult(prepared);setVarsHidden(false);
+    setVarsDialog({snapshot:beginTemplateVariableEdit(current.current,current.current.templateState),focusName:typeof focusName==='string'?focusName:undefined});
+  }
+  function cancelVariableDialog(){
+    const restored=cancelTemplateVariableEdit(varsDialog.snapshot);applyVariableResult(restored);setVarsDialog(null);
+  }
+  function fillBeforeSend(){
+    if(!current.current)return;
+    const prepared=prepareTemplateVariables(current.current,current.current.templateState,variableContext(current.current));
+    applyVariableResult(prepared);setSendWarning(null);setVarsHidden(false);
+    if(window.matchMedia('(max-width:760px)').matches)openVariableDialog();
+    else setVarsFocus({names:unfilledTemplateVariables(current.current)});
+  }
+  useLayoutEffect(()=>{
+    if(!varsFocus)return;
+    queueMicrotask(()=>{
+      const input=[...(varsRoot.current?.querySelectorAll('input[data-template-var]')||[])].find(input=>varsFocus.names.includes(input.dataset.templateVar));
+      const target=input||(varsFocus.names.includes('받는사람이름')?document.getElementById('compose-to'):null)||(raw?document.querySelector('.compose-source-input'):document.querySelector('iframe.compose-editor')?.contentDocument?.body)||sendButton.current;
+      target?.focus();
+    });setVarsFocus(null);
+  },[varsFocus,varsHidden]);
+  useEffect(()=>{if(open&&model&&identity&&!disabled&&templateSeed.current){const ref=templateSeed.current;templateSeed.current=null;void chooseTemplate({ref});}},[open,model?.composeId,identity,disabled]);
+  function openTemplatePicker(){if(current.current?.html!==undefined&&!restoredAttempt.current&&!disabled&&!templatePending.current){setTemplateError(null);setSignatureMenu(false);setTemplatePicker(true);}}
+  async function chooseTemplate(item,mode){
+    if(!current.current||disabled||templatePending.current||sending.current||closing.current)return;
+    const composeId=current.current.composeId;
+    const valid=()=>active()&&current.current?.composeId===composeId;
+    setBusy('template');setTemplateError(null);setTemplatePicker(false);
+    const pending=(async()=>{
+      let copied,urls=new Map(),applied=false;
+      try{
+        await uploads.current;await signaturePromise.current;await editor.current?.whenIdle();if(!valid())return;
+        const detail=item.html===undefined?await getTemplate(item.ref):item;if(!valid())return;
+        const candidate=insertTemplate(current.current,detail,{mode});setTemplatePicker(false);
+        if(candidate.confirmationRequired){setTemplateInsertion(detail);return;}
+        copied=await templateAttachmentsToCompose(detail.ref,composeId);if(!valid())return;
+        const total=[...current.current.attachments,...current.current.forwardFiles,...copied.uploads].reduce((sum,file)=>sum+file.size,current.current.signatureImageBytes);
+        if(total>config.value.attachMaxMb*1024**2)throw {code:'ATTACH_TOO_LARGE',message:attachmentLimitMessage(detail.name,config.value.attachMaxMb,total)};
+        for(const [cid,source] of templateComposeImages(detail,copied.html)){
+          const generation=authGeneration,response=await fetch(source,{credentials:'same-origin'});
+          if(!response.ok){const {error}=await response.json();if(valid()&&generation===authGeneration&&['NO_SESSION','SESSION_EXPIRED'].includes(error.code))endSession(error.code);throw error;}
+          urls.set(cid,URL.createObjectURL(await response.blob()));
+        }
+        await editor.current?.whenIdle();if(!valid())return;
+        const result=composeTemplateInsertion(current.current,detail,{mode,html:copied.html,uploads:copied.uploads.map(file=>({...file,filename:file.name}))},{to:current.current.to,from:current.current.from,identities:composeIdentities.value?.identities||identity?.identities||[]});
+        if(result.confirmationRequired){setTemplateInsertion(detail);return;}
+        const reconciled=updateCompositionHtml(current.current,result.patch.html).patch;
+        for(const [cid,url] of urls)draftUrls.current.set(cid,url);setDraftImageUrls(new Map(draftUrls.current));
+        patch({...result.patch,...reconciled,selectedTemplate:detail});applied=true;setTemplateInsertion(null);setVarsHidden(false);if(result.patch.templateState.names.length&&window.matchMedia('(max-width:760px)').matches)openVariableDialog();
+      }catch(value){if(valid()){setTemplateError(value);if(!templateInsertion)fail(value);}}
+      finally{
+        if(!applied){for(const url of urls.values())URL.revokeObjectURL(url);if(copied&&active())await Promise.allSettled(copied.uploads.map(file=>api(`/api/attachments/${encodeURIComponent(file.id)}`,{method:'DELETE'})));}
+      }
+    })();
+    templatePending.current=pending;uploads.current=pending.catch(()=>{});
+    try{await pending;}finally{if(templatePending.current===pending)templatePending.current=null;if(valid())setBusy('');}
+  }
+  async function saveTemplate({name,existing}){
+    if(!current.current||disabled||templatePending.current)return;
+    const composeId=current.current.composeId,valid=()=>active()&&current.current?.composeId===composeId;
+    setBusy('template-save');setTemplateError(null);
+    const pending=(async()=>{
+      try{
+        await uploads.current;await signaturePromise.current;await editor.current?.whenIdle();if(!valid())return;
+        const body=templateSaveInput(current.current,{name,existing});
+        const value=existing?await updateTemplate(existing.ref,{...body,baseUid:templateUid(existing.ref)}):await createTemplate(body);
+        if(valid()){patch({selectedTemplate:value},false);setTemplateSave(false);toast.value={kind:'info',message:'템플릿으로 저장했어요.'};}
+      }catch(value){if(valid())setTemplateError(value);}
+    })();
+    templatePending.current=pending;
+    try{await pending;}finally{if(templatePending.current===pending)templatePending.current=null;if(valid())setBusy('');}
   }
   function normalizedSignatures(id){ return prepareComposeSignature(signatureSnapshot.current,id); }
   async function changeSignature(action,confirm=false){
@@ -351,13 +453,13 @@ export default function Composer() {
     items[next]?.focus();
   }
   useEffect(()=>{if(!open||result?.status!=='sent'||result.sentCopySavedTo)return;const key=event=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();void close();}};document.addEventListener('keydown',key);return()=>document.removeEventListener('keydown',key);},[open,result]);
-  useEffect(()=>open?registerShortcuts('compose',{'Ctrl+Enter':()=>void send(),'Ctrl+Shift+H':()=>setRaw(value=>!value)}):undefined,[open]);
+  useEffect(()=>open?registerShortcuts('compose',{'Ctrl+Enter':()=>void send(),'Ctrl+Shift+H':()=>setRaw(value=>!value),t:event=>{if(event.target.closest('.composer'))openTemplatePicker();}}):undefined,[open,disabled]);
   if(!open&&!model)return null;
   const title=({reply:'답장',replyall:'전체 답장',forward:'전달',draft:'임시 메일 이어 쓰기'})[model?.kind]||'새 메일',signature=(refreshedSignatures||signatureSnapshot.current)?.items.find(item=>item.id===model?.selectedSignatureId),layout=document.documentElement.dataset.compose;
   const signatureItems=[{id:null,name:'없음'},...((refreshedSignatures||signatureSnapshot.current)?.items||[])],totalBytes=model?[...model.attachments,...model.forwardFiles].reduce((sum,file)=>sum+file.size,model.signatureImageBytes):0;
   const nextId=replacement?.type==='from'?defaultCompositionSignature(signatureSnapshot.current,replacement.from,model.kind):replacement?.id;
   return <><div class="compose-dim" onClick={()=>void close()} aria-hidden="true"/><section class={`composer ${raw?'html':''}`} aria-label={title} aria-busy={Boolean(busy)}>
-    <div class="c-head"><h2>{title}</h2><span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy||result?.status==='checking')} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
+    <div class="c-head"><h2>{title}</h2>{model&&identity&&!restoredAttempt.current&&<button ref={templateButton} type="button" class="tplA-open" aria-haspopup="dialog" disabled={disabled} onClick={openTemplatePicker}><svg class="i s" aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>템플릿<span class="kbd">T</span></button>}<span class="saved" role="status">{saving?'임시 저장 중…':savedTime?`임시 저장됨 · ${savedTime.toLocaleTimeString('ko-KR',{hour:'numeric',minute:'2-digit'})}`:''}</span><div class="r"><button class="ib" type="button" aria-label="쓰기 창 배치 바꾸기" title="떠 있는 창 / 서랍 / 화면 전체" onClick={()=>{const root=document.documentElement;updatePrefs({layout:{pane:root.dataset.pane,density:root.dataset.density,compose:['float','drawer','full'][(['float','drawer','full'].indexOf(layout)+1)%3]}});}}><Icon name="expand" size="s"/></button><button class="ib" type="button" aria-label="쓰기 창 닫기" disabled={Boolean(busy||result?.status==='checking')} onClick={()=>void close()}><Icon name="x" size="s"/></button></div></div>
     {model?.fromChanged&&<div class="compose-alert compose-result" role="status">보내는 주소를 기본 주소로 바꿨어요.</div>}
     {error&&<div class="compose-alert" role="alert">{error.message}{error.smtpMessage&&<> {error.smtpMessage}</>}</div>}
     {result&&<div class={`compose-alert compose-result delivery-${result.status}`} role="status" aria-live="polite">
@@ -382,11 +484,16 @@ export default function Composer() {
     {model&&identity&&!restoredAttempt.current?<><div class="c-inner"><FromPicker identities={identity} from={model.from} onChange={from} disabled={disabled}/><RecipientInput label="받는 사람" id="compose-to" values={model.to} query={model.pendingTo} onValues={to=>patch({to})} onQuery={pendingTo=>patch({pendingTo})} onError={fail} domain={domain} disabled={disabled}><div class="side-l"><button type="button" disabled={disabled} onClick={()=>setShowCc(!showCc)}>참조</button><button type="button" disabled={disabled} onClick={()=>setShowBcc(!showBcc)}>숨은참조</button></div></RecipientInput>
       {showCc&&<RecipientInput label="참조" id="compose-cc" values={model.cc} query={model.pendingCc} onValues={cc=>patch({cc})} onQuery={pendingCc=>patch({pendingCc})} onError={fail} disabled={disabled}/>}{showBcc&&<RecipientInput label="숨은참조" id="compose-bcc" values={model.bcc} query={model.pendingBcc} onValues={bcc=>patch({bcc})} onQuery={pendingBcc=>patch({pendingBcc})} onError={fail} disabled={disabled}/>}
       <div class="fld"><label for="compose-subject">제목</label><div class="val"><input id="compose-subject" value={model.subject} disabled={disabled} onInput={event=>patch({subject:event.currentTarget.value})}/></div><span/></div>
-      <FormatBar raw={raw} toggle={()=>setRaw(value=>!value)} editor={editor} disabled={disabled}/><div class="code-note"><Icon name="info" size="s"/>HTML 원문을 직접 고치는 중입니다. 서식 단추는 원문 모드에서 쉬어요. 다시 누르면 서식 편집으로 돌아갑니다.</div>
+      <FormatBar raw={raw} toggle={()=>setRaw(value=>!value)} editor={editor} disabled={disabled}/>{model.templateState?.names.length>0&&!varsHidden&&<TemplateVarsBar name={model.selectedTemplate?.name} state={model.templateState} missing={unfilledTemplateVariables(model)} disabled={disabled} rootRef={varsRoot} buttonRef={varsButton} onChange={changeTemplateVariable} onOpen={openVariableDialog} onDismiss={()=>setVarsHidden(true)}/>}<div class="code-note"><Icon name="info" size="s"/>HTML 원문을 직접 고치는 중입니다. 서식 단추는 원문 모드에서 쉬어요. 다시 누르면 서식 편집으로 돌아갑니다.</div>
       {model.internalImages&&<div class="code-note always" role="status">원문 본문 속 이미지는 함께 가지 않아요.{model.kind==='forward'?'(첨부는 전달됨)':''}</div>}
       <ComposeEditor signatureNonce={model.signatureNonce} html={editorHtml()} onChange={html=>editHtml(html,true)} disabled={disabled} editor={editor}/><HtmlSource html={model.html} onChange={html=>editHtml(html)} disabled={disabled}/>
       <div class="compose-signature-bar" ref={signatureRoot} onKeyDown={signatureKeyboard} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget))setSignatureMenu(false);}}><button ref={signatureButton} class="signature-picker" type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={signatureMenu} aria-controls="compose-signature-menu" onClick={()=>setSignatureMenu(!signatureMenu)}>서명: {signature?.name||'없음'} <Icon name="down" size="xs"/></button>{model.signatureDirty&&<small>이 메일에서 수정함</small>}{signatureMenu&&<div ref={signaturePopup} id="compose-signature-menu" class="signature-menu" role="menu" aria-label="서명 바꾸기">{signatureItems.map(item=><button key={item.id??'none'} type="button" role="menuitemradio" tabIndex={-1} aria-checked={model.selectedSignatureId===item.id} onClick={()=>{changeSignature({type:'signature',id:item.id});signatureButton.current.focus();}}>{item.name}{model.selectedSignatureId===item.id&&<Icon name="check" size="s"/>}</button>)}</div>}</div>
       <AttachDrop files={[...model.attachments,...model.forwardFiles]} limit={config.value.attachMaxMb} disabled={disabled} onFiles={addFiles} onRemove={removeFile} inputRef={fileInput}/><small class="compose-grants" role="status">첨부 {[...model.attachments,...model.forwardFiles].some(file=>file.sizeKnown===false)?'크기 확인 필요':formatBytes(totalBytes)} / {config.value.attachMaxMb}MB · 서명 이미지 포함</small>
-    </div><div class="c-foot"><div class="send"><button type="button" disabled={disabled||completed.current||model.attachments.some(file=>file.uploading)} onClick={()=>void send()}><Icon name="send" size="s"/>{busy==='send'?'보내는 중…':'보내기'}</button></div><div class="r"><button class="ib" type="button" aria-label="파일 첨부" disabled={disabled} onClick={()=>fileInput.current.click()}><Icon name="clip" size="s"/></button><button class="ib" type="button" aria-label="임시 메일 삭제" disabled={disabled||result?.sentCopySavedTo===null} onClick={()=>void discard()}><Icon name="trash" size="s"/></button></div></div></>:<div class="empty-read" role="status">{restoredAttempt.current?'발송 결과를 확인하는 창이에요. 작성 내용은 임시보관함에서 확인해 주세요.':error?'':seed?.kind==='draft'?'임시 메일을 불러오는 중…':'보낼 주소를 불러오는 중…'}</div>}
-  </section>{replacement&&<SignatureDialog key={`${replacement.type}:${replacement.from??replacement.id??'none'}`} type="replace" nextSignature={signatureSnapshot.current.items.find(item=>item.id===nextId)||null} returnFocusRef={signatureButton} onCancel={()=>setReplacement(null)} onConfirm={()=>changeSignature(replacement,true)}/>}</>;
+    </div><div class="c-foot"><div class="send"><button ref={sendButton} type="button" disabled={disabled||completed.current||model.attachments.some(file=>file.uploading)} onClick={()=>void send()}><Icon name="send" size="s"/>{busy==='send'?'보내는 중…':'보내기'}</button></div><div class="r"><button ref={templateSaveButton} class="tplA-savebtn" type="button" aria-label="템플릿으로 저장" disabled={disabled||model.attachments.some(file=>file.uploading)} onClick={()=>{setTemplateError(null);setTemplateSave(true);}}><svg class="i s" aria-hidden="true" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg><span>템플릿으로 저장</span></button><button class="ib" type="button" aria-label="파일 첨부" disabled={disabled} onClick={()=>fileInput.current.click()}><Icon name="clip" size="s"/></button><button class="ib" type="button" aria-label="임시 메일 삭제" disabled={disabled||result?.sentCopySavedTo===null} onClick={()=>void discard()}><Icon name="trash" size="s"/></button></div></div></>:<div class="empty-read" role="status">{restoredAttempt.current?'발송 결과를 확인하는 창이에요. 작성 내용은 임시보관함에서 확인해 주세요.':error?'':seed?.kind==='draft'?'임시 메일을 불러오는 중…':'보낼 주소를 불러오는 중…'}</div>}
+  </section>{templatePicker&&<TemplatePicker returnFocusRef={templateButton} onCancel={()=>setTemplatePicker(false)} onChoose={chooseTemplate} onCreate={()=>{setTemplatePicker(false);setTemplateError(null);setTemplateSave(true);}}/>}
+  {templateInsertion&&<TemplateInsertDialog template={templateInsertion} kind={model.kind} busy={busy==='template'} error={templateError} returnFocusRef={templateButton} onCancel={()=>{setTemplateInsertion(null);setTemplateError(null);}} onConfirm={mode=>chooseTemplate(templateInsertion,mode)}/>}
+  {templateSave&&<TemplateSaveDialog subject={model.subject} hasForwardFiles={model.forwardFiles.length>0} selectedTemplate={model.selectedTemplate} busy={busy==='template-save'} error={templateError} returnFocusRef={templateSaveButton} onCancel={()=>{setTemplateSave(false);setTemplateError(null);}} onSave={saveTemplate}/>}
+  {varsDialog&&model?.templateState&&<TemplateVarsDialog name={model.selectedTemplate?.name} subject={model.subject} state={model.templateState} missing={unfilledTemplateVariables(model)} focusName={varsDialog.focusName} returnFocusRef={varsButton} onChange={changeTemplateVariable} onClose={()=>setVarsDialog(null)} onCancel={cancelVariableDialog}/>}
+  {sendWarning&&<TemplateSendWarning items={sendWarning} returnFocusRef={sendButton} onClose={()=>setSendWarning(null)} onFill={fillBeforeSend} onSend={()=>{setSendWarning(null);void send(true);}}/>}
+  {replacement&&<SignatureDialog key={`${replacement.type}:${replacement.from??replacement.id??'none'}`} type="replace" nextSignature={signatureSnapshot.current.items.find(item=>item.id===nextId)||null} returnFocusRef={signatureButton} onCancel={()=>setReplacement(null)} onConfirm={()=>changeSignature(replacement,true)}/>}</>;
 }

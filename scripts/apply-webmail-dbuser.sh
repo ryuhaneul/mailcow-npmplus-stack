@@ -87,7 +87,10 @@ verify_grants() {
         expected=$(printf '%s\n' \
             'mailstack_webmail.notices:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.notice_domains:DELETE,INSERT,SELECT,UPDATE' \
-            'mailstack_webmail.notice_counter:SELECT,UPDATE' | LC_ALL=C sort)
+            'mailstack_webmail.notice_counter:SELECT,UPDATE' \
+            'mailstack_webmail.public_templates:DELETE,INSERT,SELECT,UPDATE' \
+            'mailstack_webmail.public_template_domains:DELETE,INSERT,SELECT,UPDATE' \
+            'mailstack_webmail.public_template_files:DELETE,INSERT,SELECT,UPDATE' | LC_ALL=C sort)
     else
     expected=$(printf '%s\n' \
         'alias:active,address,domain,goto,sender_allowed' \
@@ -97,7 +100,10 @@ verify_grants() {
         'sender_acl:logged_in_as,send_as' \
         'mailstack_webmail.notices:SELECT' \
         'mailstack_webmail.notice_domains:SELECT' \
-        'mailstack_webmail.notice_reads:INSERT,SELECT,UPDATE' | LC_ALL=C sort)
+        'mailstack_webmail.notice_reads:INSERT,SELECT,UPDATE' \
+        'mailstack_webmail.public_templates:SELECT' \
+        'mailstack_webmail.public_template_domains:SELECT' \
+        'mailstack_webmail.public_template_files:SELECT' | LC_ALL=C sort)
     fi
     [ "$actual" = "$expected" ]
 }
@@ -139,6 +145,9 @@ admin_account() (
             printf 'REVOKE ALL PRIVILEGES, GRANT OPTION FROM %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_templates TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_domains TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_files TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, UPDATE ON mailstack_webmail.notice_counter TO %s;\n' "$ACCOUNT"
         } | mysql_root >/dev/null || die 'could not apply admin notices grants'
         unset PASSWORD_SQL
@@ -179,6 +188,9 @@ case "$MODE" in
             printf 'GRANT SELECT (`logged_in_as`, `send_as`) ON `%s`.`sender_acl` TO %s;\n' "$WEBMAIL_DB_NAME" "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT ON mailstack_webmail.public_templates TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT ON mailstack_webmail.public_template_domains TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT ON mailstack_webmail.public_template_files TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE ON mailstack_webmail.notice_reads TO %s;\n' "$ACCOUNT"
         } | mysql_root >/dev/null || die "could not apply column grants; check may be used after recovery"
         unset PASSWORD_SQL

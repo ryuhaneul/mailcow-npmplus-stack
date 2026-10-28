@@ -16,6 +16,9 @@ import { sanitizeComposeHtml } from './sanitize.js';
 import { prepareSignatureInline } from './signature-inline.js';
 import { createSignatureImagesService } from '../signature-images.js';
 import { withSignatureStoreLock } from '../signature-store-lock.js';
+import { decodeTemplateRef } from '../templates/store.js';
+import { decodeSharedTemplateRef } from '../templates/share.js';
+import { templateIdPattern } from '../templates/mime.js';
 
 const invalid = () => new AppError(422, 'BAD_REQUEST', '작성 내용을 확인해 주세요.');
 const tooLarge = () => new AppError(413, 'ATTACH_TOO_LARGE', '첨부 파일 합계가 허용 크기를 넘었어요.');
@@ -83,6 +86,16 @@ function mimeIdentity(part) {
   const ordered = parameters => Object.fromEntries(Object.entries(parameters || {}).sort(([a],[b])=>a.localeCompare(b)));
   return JSON.stringify({ type: part.type, parameters: ordered(part.parameters), disposition: part.disposition || '', dispositionParameters: ordered(part.dispositionParameters), id: part.id || '' });
 }
+function rewriteTemplateCids(html, urls) {
+  if (!urls.size) return html;
+  const fragment = JSDOM.fragment(html);
+  for (const image of fragment.querySelectorAll('img[src]')) {
+    const cid = urls.get(image.getAttribute('src'));
+    if (cid) image.setAttribute('src', `cid:${cid}`);
+  }
+  const container = fragment.ownerDocument.createElement('div'); container.append(fragment);
+  return container.innerHTML;
+}
 function alternativeText(html) {
   const fragment = JSDOM.fragment(html);
   for (const node of fragment.querySelectorAll('style')) node.remove();
@@ -138,8 +151,8 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
       try { onBytes(chunk.length); callback(null, chunk); } catch (error) { callback(error); }
     } });
   }
-  async function upload(session, parts) {
-    return serial(session, async state => {
+  async function uploadToState(session, state, parts, metadata = {}) {
+      if (Object.keys(metadata).some(key => !['cid', 'contentDisposition'].includes(key)) || (metadata.cid !== undefined && (typeof metadata.cid !== 'string' || !/^[A-Za-z0-9._@-]{1,200}$/.test(metadata.cid))) || (metadata.contentDisposition !== undefined && !['inline', 'attachment'].includes(metadata.contentDisposition))) throw invalid();
       let file, path, composeId;
       try {
         const dir = await directoryFor(session);
@@ -152,7 +165,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
             continue;
           }
           if (file || part.type !== 'file' || part.fieldname !== 'file') throw invalid();
-          file = { id: id(), filename: String(part.filename || 'attachment').replace(/[\x00-\x1f\x7f\\/]/g, '_'), size: 0, contentType: part.mimetype || 'application/octet-stream' };
+          file = { id: id(), filename: String(part.filename || 'attachment').replace(/[\x00-\x1f\x7f\\/]/g, '_'), size: 0, contentType: part.mimetype || 'application/octet-stream', ...metadata };
           path = join(dir, file.id);
           await pipeline(part.file, limiter(bytes => { file.size += bytes; if (file.size > maxBytes || sessionBytes + file.size > sessionMaxBytes) throw tooLarge(); }), createWriteStream(path, { flags: 'wx', mode: 0o600 }));
           if (part.file.truncated) throw tooLarge();
@@ -169,7 +182,9 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
         if (error.code === 'FST_REQ_FILE_TOO_LARGE') throw tooLarge();
         throw error;
       }
-    });
+  }
+  async function upload(session, parts, metadata) {
+    return serial(session, state => uploadToState(session, state, parts, metadata));
   }
   async function remove(session, attachmentId) {
     return serial(session, async state => {
@@ -307,28 +322,34 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     }
     return result;
   }
-  async function build(session, state, body, mail, alternative = false) {
+  async function build(session, state, body, mail, alternative = false, templateParts = false) {
     const temporary = [], streams = [];
     try {
       let total = 0;
-      const attachments = [], existingCids = [], resumedParts = [];
+      const attachments = [], existingCids = [], resumedParts = [], templateCids = new Map();
       for (const attachmentId of new Set(body.attachmentIds || [])) {
         const file = state.attachments.get(attachmentId);
         if (!file) throw notFound();
         const path = join(sessionDir(session), attachmentId);
         try { total += (await stat(path)).size; } catch (error) { if (error.code === 'ENOENT') throw notFound(); throw error; }
         if (total > maxBytes) throw tooLarge();
-        attachments.push({ filename: file.filename, contentType: file.contentType, path });
+        if (file.cid) existingCids.push(file.cid);
+        attachments.push({ filename: file.filename, contentType: file.contentType, ...(file.cid ? { cid: file.cid } : {}), ...(file.contentDisposition ? { contentDisposition: file.contentDisposition } : {}), path });
       }
       for (const part of body.forwardParts || []) {
+        if (templateParts) templateRef(session, part.ref);
         const dir = await directoryFor(session);
         const path = join(dir, id()); temporary.push(path);
         const metadata = await imap.withRef(session, part.ref, async (client, ref) => {
-          const row = await client.fetchOne(ref.uid, { bodyStructure: true }, { uid: true });
+          const row = await client.fetchOne(ref.uid, { bodyStructure: true, ...(templateParts ? { uid: true, headers: ['X-WEBMAIL-TEMPLATE-ID'] } : {}) }, { uid: true });
+          if (templateParts) assertTemplate(row, ref);
           const node = bodyParts(row?.bodyStructure).find(node => node.part === part.partId);
-          if (!node) throw notFound();
-          if (typeof node.id === 'string') existingCids.push(node.id);
-          if (body.draftRef === part.ref) {
+          if (!node || (templateParts && !node.attachment && !node.id)) throw notFound();
+          if (typeof node.id === 'string') {
+            existingCids.push(node.id);
+            if (templateParts) templateCids.set(`/api/messages/${encodeURIComponent(part.ref)}/parts/${encodeURIComponent(part.partId)}?inline=1`, node.id.trim().replace(/^<|>$/g, ''));
+          }
+          if (body.draftRef === part.ref || templateParts) {
             const verified = await rawPart(client, ref.uid, node, path);
             total += verified.size; if (total > maxBytes) throw tooLarge();
             const headers = attachmentHeaders(node, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
@@ -346,6 +367,7 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
         });
         attachments.push({ ...metadata, path });
       }
+      mail.html = rewriteTemplateCids(mail.html, templateCids);
       const prepare = stored => prepareSignatureInline({ html: mail.html, signatureImages: body.signatureImages, images: stored, existingCids, nonce: id() });
       // Take owned bytes while holding the account queue, before any deletion can win.
       const inline = body.signatureImages === undefined || (Array.isArray(body.signatureImages) && body.signatureImages.length === 0)
@@ -523,5 +545,98 @@ export function createComposeService({ config, imap, directory, smtp, logger, im
     }
     return result;
   }
-  return { upload, remove, loadDraft, sendStatus, draft, send };
+  function templateRef(session, token) {
+    return decodeRef(token).path.startsWith('Shared/') ? decodeSharedTemplateRef(token, session) : decodeTemplateRef(token);
+  }
+  function assertTemplate(row, ref) {
+    const headers = libmime.decodeHeaders(row?.headers?.toString('latin1') || '');
+    if (row?.uid !== ref.uid || !templateIdPattern.test(headers['x-webmail-template-id']?.[0]?.trim() ?? '')) throw new AppError(404, 'TEMPLATE_NOT_FOUND', '템플릿을 찾을 수 없어요.');
+  }
+  async function buildTemplateMime(session, input) {
+    const data = structuredClone(input);
+    return serial(session, async state => {
+      if (typeof data?.html !== 'string' || !header(data?.subject ?? '') || !Array.isArray(data.attachments ?? [])) throw invalid();
+      const body = { attachmentIds: [], forwardParts: [] };
+      for (const part of data.attachments ?? []) {
+        if (typeof part?.uploadId === 'string') body.attachmentIds.push(part.uploadId);
+        else {
+          templateRef(session, part?.templateRef);
+          if (typeof part?.part !== 'string' || !/^\d+(?:\.\d+)*$/.test(part.part)) throw invalid();
+          body.forwardParts.push({ ref: part.templateRef, partId: part.part });
+        }
+      }
+      return (await build(session, state, body, { subject: data.subject ?? '', html: data.html }, true, true)).raw;
+    }).catch(error => { if (error instanceof AppError) throw error; throw unavailable(); });
+  }
+  async function templateAttachments(session, token, input, html) {
+    templateRef(session, token);
+    if (!input || Object.keys(input).length !== 1 || typeof input.composeId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.composeId) || typeof html !== 'string') throw invalid();
+    const composeId = input.composeId;
+    return serial(session, async state => {
+      const created = [], byPart = new Map();
+      const occupied = new Set([...state.attachments.values()].map(file => file.cid?.toLowerCase()).filter(Boolean));
+      try {
+        await imap.withRef(session, token, async (client, ref) => {
+          const row = await client.fetchOne(ref.uid, { uid: true, bodyStructure: true, headers: ['X-WEBMAIL-TEMPLATE-ID'] }, { uid: true });
+          assertTemplate(row, ref);
+          for (const node of bodyParts(row.bodyStructure).filter(part => part.attachment || part.id)) {
+            const headers = attachmentHeaders(node, false), encoded = /filename\*=UTF-8''([^;]*)/.exec(headers['content-disposition']);
+            const filename = decodeURIComponent(encoded[1]);
+            let cid;
+            if (node.id) {
+              do { cid = `wm-template-v1.${id()}@template.invalid`; } while (occupied.has(cid.toLowerCase()));
+              occupied.add(cid.toLowerCase());
+            }
+            const download = await client.download(ref.uid, node.part, { uid: true, binary: true, maxBytes: maxBytes + 1 });
+            if (!download.content) throw notFound();
+            async function* parts() {
+              yield { type: 'field', fieldname: 'composeId', value: composeId };
+              yield { type: 'file', fieldname: 'file', filename, mimetype: headers['content-type'], file: download.content };
+            }
+            let uploaded;
+            try { uploaded = await uploadToState(session, state, parts(), { ...(cid ? { cid, contentDisposition: 'inline' } : { contentDisposition: 'attachment' }) }); }
+            finally { download.content.destroy(); }
+            created.push(uploaded);
+            if (cid) byPart.set(node.part, cid);
+          }
+        });
+        const urls = new Map([...byPart].map(([part, cid]) => [`/api/messages/${encodeURIComponent(token)}/parts/${encodeURIComponent(part)}?inline=1`, cid]));
+        const rewritten = rewriteTemplateCids(html, urls);
+        return { uploads: created.map(file => ({ id: file.id, name: file.filename, size: file.size })), html: rewritten };
+      } catch (error) {
+        for (const file of created) state.attachments.delete(file.id);
+        const removed = await Promise.allSettled(created.map(file => rm(join(sessionDir(session), file.id), { force: true })));
+        if (removed.some(result => result.status === 'rejected')) logger?.error({ code: 'TEMPLATE_ATTACHMENTS_ROLLBACK_FAILED' }, '템플릿 임시 첨부 정리에 실패했습니다.');
+        if (error instanceof AppError) throw error;
+        throw unavailable();
+      }
+    });
+  }
+  async function publicTemplateAttachments(session, input, template, loadFile) {
+    if (!input || Object.keys(input).length !== 1 || typeof input.composeId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.composeId) || typeof template?.html !== 'string' || !Array.isArray(template.attachments)) throw invalid();
+    return serial(session, async state => {
+      const created = [];
+      try {
+        for (const metadata of template.attachments) {
+          const file = await loadFile(metadata.part);
+          if (!Buffer.isBuffer(file.data)) throw notFound();
+          const stream = Readable.from([file.data]);
+          async function* parts() {
+            yield { type: 'field', fieldname: 'composeId', value: input.composeId };
+            yield { type: 'file', fieldname: 'file', filename: file.name, mimetype: file.type, file: stream };
+          }
+          try { created.push(await uploadToState(session, state, parts(), { contentDisposition: 'attachment' })); }
+          finally { stream.destroy(); }
+        }
+        return { uploads: created.map(file => ({ id: file.id, name: file.filename, size: file.size })), html: template.html };
+      } catch (error) {
+        for (const file of created) state.attachments.delete(file.id);
+        const results = await Promise.allSettled(created.map(file => rm(join(sessionDir(session), file.id), { force: true })));
+        if (results.some(result => result.status === 'rejected')) logger?.error({ code: 'PUBLIC_TEMPLATE_ATTACHMENTS_ROLLBACK_FAILED' }, '공용 템플릿 임시 첨부 정리에 실패했습니다.');
+        if (error instanceof AppError) throw error;
+        throw unavailable();
+      }
+    });
+  }
+  return { upload, remove, loadDraft, sendStatus, draft, send, buildTemplateMime, templateAttachments, publicTemplateAttachments };
 }

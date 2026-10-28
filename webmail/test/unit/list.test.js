@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createEventService } from '../../server/mail/events.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseSearchQuery } from '../../server/mail/search-query.js';
@@ -545,4 +545,19 @@ test('scoped SEARCH follows compiler charset rules on ASCII and UTF8=ACCEPT conn
   await searchUids(client, [{ uid: '1:5000' }, { subject: '합성' }, { from: '합성@example.com' }]);
   assert.equal(attributes.some(attribute => attribute.value === 'CHARSET'), false);
   assert.equal(attributes.filter(attribute => attribute.type === 'LITERAL').length, 2);
+});
+
+
+test('templates: AllMail and unified search use the virtual definition with exact Templates tree exclusions', async () => {
+  const script = await readFile(new URL('../../../scripts/apply-dovecot-webmail.sh', import.meta.url), 'utf8');
+  const match = /cat > "\$WORK\/definition" <<'EOF'\n([\s\S]*?)\nEOF/.exec(script);
+  assert.ok(match);
+  const lines = match[1].split('\n');
+  assert.ok(lines.includes('-Templates')); assert.ok(lines.includes('-Templates/*'));
+  const excludes = lines.filter(line => line.startsWith('-')).map(line => line.slice(1));
+  const excluded = path => excludes.some(pattern => pattern.endsWith('/*') ? path.startsWith(pattern.slice(0, -1)) : path === pattern);
+  for (const name of ['Templates', 'Templates/공유', 'Templates/공유/깊이']) assert.equal(excluded(name), true);
+  for (const name of ['Templates-old', 'Archive/Templates', 'templates']) assert.equal(excluded(name), false);
+  assert.equal(listOptions({ view: 'allmail' }).mailbox, 'WebmailVirtual/AllMail');
+  assert.equal(listOptions({ q: 'subject:test' }).mailbox, 'WebmailVirtual/AllMail');
 });

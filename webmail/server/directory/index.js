@@ -84,5 +84,12 @@ export function createDirectoryService({ config, db, imap, now = Date.now, recen
     }
     return { items: [...unique.values()].filter(item => lower(item.name).includes(q) || item.address.includes(q)).slice(0, limit) };
   }
-  return { mailboxName, identities, assertFrom, internalDomains, contacts, close: () => db.end() };
+  async function activeAccounts() {
+    try {
+      const [rows] = await db.execute(directoryQueries.mailbox);
+      if (!Array.isArray(rows)) throw unavailable();
+      return rows.filter(row => String(row.active) === '1').map(row => ({ username: row.username, active: row.active }));
+    } catch { throw unavailable(); }
+  }
+  return { mailboxName, activeAccounts, identities, assertFrom, internalDomains, contacts, close: () => db.end() };
 }

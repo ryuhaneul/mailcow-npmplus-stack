@@ -86,11 +86,11 @@ await test('compose templates: approved A picker, save, variables and send guard
       if (process.env.TEMPLATES_CAPTURE_DIR) { await mkdir(process.env.TEMPLATES_CAPTURE_DIR, { recursive: true }); await c.page.screenshot({ path: `${process.env.TEMPLATES_CAPTURE_DIR}/compose-templates-${width}-${mode}.png` }); }
     } finally { await c.page.close(); }
   });
-  await t.test('T ignores typing and IME; picker search, arrow keys, Enter, Esc and focus return', async () => {
+  await t.test('T has no template action; picker button, search, arrows, Enter, Esc and focus return', async () => {
     const c = await open(); try {
       const subject = c.page.getByRole('textbox', { name: '제목', exact: true }); await subject.fill('typed'); await subject.press('t'); await expect(c.page.locator('dialog.tplA-pickdlg')).toHaveCount(0);
       await c.templateButton.dispatchEvent('keydown', { key: 't', isComposing: true, bubbles: true }); await expect(c.page.locator('dialog.tplA-pickdlg')).toHaveCount(0);
-      await c.templateButton.focus(); await c.page.keyboard.press('t');
+      await c.templateButton.focus(); await c.page.keyboard.press('t'); await expect(c.page.locator('dialog.tplA-pickdlg')).toHaveCount(0); await expect(c.templateButton.locator('.kbd')).toHaveCount(0); await c.templateButton.click();
       const search = c.page.getByRole('combobox', { name: '템플릿 찾기' }); await expect(search).toBeFocused();
       await search.fill('없는 이름'); await expect(c.page.getByText('찾는 템플릿이 없어요.', { exact: true })).toBeVisible();
       await search.fill('견적'); await search.press('ArrowDown'); await expect(c.page.getByRole('option', { name: item.name })).toHaveAttribute('aria-selected', 'true');

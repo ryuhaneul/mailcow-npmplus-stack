@@ -4,10 +4,8 @@ import { JSDOM } from 'jsdom';
 import { templateSaveInput, composeTemplateInsertion, refreshTemplateDefaults } from '../../web/src/templates/vars.js';
 import { templateUid, templateComposeImages } from '../../web/src/templates/api.js';
 import { updateCompositionHtml, composePayload } from '../../web/src/compose.js';
-import { initShortcuts, registerShortcuts } from '../../web/src/shortcuts.js';
 import { readFileSync } from 'node:fs';
 import { parse } from '@babel/parser';
-import { route } from '../../web/src/router.js';
 
 const dom = new JSDOM('<button id="outside"></button><section class="composer"><button id="opener"></button><input><textarea></textarea><select></select><div contenteditable="true"></div></section>'), previousDocument = globalThis.document;
 globalThis.document = dom.window.document;
@@ -68,22 +66,7 @@ test('compose integration inserts returned CID HTML, fills defaults, reconciles 
   assert.equal(next.references, model.references);
 });
 
-test('T is restricted to the compose surface and ignores inputs, IME, modifiers and modal dialogs', t => {
-  const previous = route.value; route.value = { name: 'compose' }; let opened = 0;
-  const unregister = registerShortcuts('compose', { t: () => opened++ }), stop = initShortcuts();
-  t.after(() => { stop(); unregister(); route.value = previous; });
-  const fire = (selector, options = {}) => document.querySelector(selector).dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 't', bubbles: true, cancelable: true, ...options }));
-  fire('#opener'); assert.equal(opened, 1);
-  fire('#opener', { key: 'T', shiftKey: true }); assert.equal(opened, 2);
-  for (const selector of ['input', 'textarea', 'select', '[contenteditable]', '#outside']) fire(selector);
-  for (const options of [{ isComposing: true }, { keyCode: 229 }, { ctrlKey: true }, { altKey: true }, { metaKey: true }]) fire('#opener', options);
-  assert.equal(opened, 2);
-  route.value = { name: 'inbox' }; fire('#opener'); assert.equal(opened, 2);
-  route.value = { name: 'compose' };
-  const dialog = document.createElement('dialog'); dialog.setAttribute('open', ''); document.body.append(dialog);
-  fire('#opener'); assert.equal(opened, 2); dialog.remove();
-  unregister(); fire('#opener'); assert.equal(opened, 2);
-});
+
 
 test('changed JSX parses without a build or browser', () => {
   for (const name of ['Composer', 'TemplatePicker', 'TemplateSaveDialog']) parse(readFileSync(new URL(`../../web/src/components/${name}.jsx`, import.meta.url), 'utf8'), { sourceType: 'module', plugins: ['jsx'] });

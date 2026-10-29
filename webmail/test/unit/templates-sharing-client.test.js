@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from '@babel/parser';
 import { getTemplateShare, putTemplateShare, addTemplateShareUser, templateShareSummary, copyTemplate, getTemplate, templateUnavailable } from '../../web/src/templates/api.js';
-import { initialComposition } from '../../web/src/compose.js';
+import { transformSync } from '@babel/core';
+import transformJsx from '@babel/plugin-transform-react-jsx';
+import { initialComposition, recipients } from '../../web/src/compose.js';
 import { session } from '../../web/src/state/session.js';
 
 const share = { domainAll: false, domain: 'example.invalid', users: ['person@example.invalid'], inboxReaders: ['inbox-reader@example.invalid'] };
@@ -91,4 +93,36 @@ test('template compose seeds preserve normal initialization and existing reply/f
 test('sharing, read-only and composer JSX parse without a browser/build', () => {
   parse(readFileSync(new URL('../ui/templates-page.test.mjs', import.meta.url), 'utf8'), { sourceType: 'module' });
   for (const name of ['TemplateShareDialog', 'TemplatesPage', 'Composer', 'Icon']) parse(readFileSync(new URL(`../../web/src/components/${name}.jsx`, import.meta.url), 'utf8'), { sourceType: 'module', plugins: ['jsx'] });
+});
+
+test('RecipientInput without optional sharing props keeps contact queries, paste and external-address commit unchanged', async () => {
+  const source = readFileSync(new URL('../../web/src/components/RecipientInput.jsx', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace('export default ', '');
+  const code = transformSync(source, {configFile:false,babelrc:false,plugins:[[transformJsx,{pragma:'h'}]]}).code;
+  const effects=[], urls=[], commits=[], queries=[], errors=[];
+  const h=(type,props,...children)=>({type,props:{...props,children}});
+  const factory=new Function('useEffect','useState','api','config','recipients','Icon','h',code+';return RecipientInput;');
+  const Component=factory(fn=>effects.push(fn), value=>[value,()=>{}], async url=>{urls.push(url);return {items:[{address:'outside@other.example',kind:'person'}]};},{value:{contactsEnabled:true}},recipients,()=>null,h);
+  const tree=Component({label:'받는 사람',id:'test-person',values:[],query:'Outside <outside@other.example>',onValues:value=>commits.push(value),onQuery:value=>queries.push(value),onError:value=>errors.push(value),domain:'example.com'});
+  const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props.children)]:[];
+  const input=nodes(tree).find(node=>node.type==='input');
+  assert.equal(input.props.placeholder,'이름이나 주소 · @example.com');assert.equal(input.props.ref,undefined);
+  input.props.onInput({currentTarget:{value:'paste@example.net; other@example.net'}});assert.equal(queries[0],'paste@example.net; other@example.net');
+  input.props.onKeyDown({key:'Enter',preventDefault(){}});assert.deepEqual(commits[0],[{name:'Outside',address:'outside@other.example'}]);assert.deepEqual(errors,[]);
+  effects[0]();await Promise.resolve();assert.equal(urls[0],'/api/contacts?q=Outside%20%3Coutside%40other.example%3E&limit=8');
+});
+
+test('scoped Enter checks the typed full address before stale suggestions and selects highlighted local suggestions', () => {
+  const source=readFileSync(new URL('../../web/src/components/RecipientInput.jsx',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace('export default ','');
+  const code=transformSync(source,{configFile:false,babelrc:false,plugins:[[transformJsx,{pragma:'h'}]]}).code;
+  const h=(type,props,...children)=>({type,props:{...props,children}}), factory=new Function('useEffect','useState','api','config','recipients','Icon','h',code+';return RecipientInput;');
+  function enter(query,items){
+    const errors=[],values=[],Component=factory(()=>{},initial=>[Array.isArray(initial)?items:initial===false?true:initial,()=>{}],()=>{}, {value:{}},recipients,()=>null,h);
+    const tree=Component({label:'사람 지정',id:'scoped',values:[],query,onValues:next=>values.push(next),onQuery:()=>{},onError:error=>errors.push(error),addressScope:{domain:'example.com',exclude:[]}});
+    const nodes=node=>Array.isArray(node)?node.flatMap(nodes):node&&typeof node==='object'?[node,...nodes(node.props.children)]:[];
+    nodes(tree).find(node=>node.type==='input').props.onKeyDown({key:'Enter',preventDefault(){}});return {errors,values};
+  }
+  const suggestion={name:'추천 사람',address:'recommended@example.com',kind:'person'};
+  const blocked=enter('outside@other.example',[suggestion]);assert.deepEqual(blocked.values,[]);assert.equal(blocked.errors[0].message,'같은 도메인 사용자만 지정할 수 있어요');
+  assert.equal(enter('local-id',[suggestion]).values[0][0].address,suggestion.address);
+  assert.equal(enter('local-id',[]).values[0][0].address,'local-id@example.com');
 });

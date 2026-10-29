@@ -14,7 +14,6 @@ function registeredShortcut(event, editing) {
   const key = event.ctrlKey && event.key === 'Enter' ? 'Ctrl+Enter' : event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'h' ? 'Ctrl+Shift+H' : event.key.toLowerCase();
   if (editing && !(route.value.name === 'compose' && ['Ctrl+Enter','Ctrl+Shift+H'].includes(key))) return false;
   if ((event.ctrlKey || event.metaKey || event.altKey) && !['Ctrl+Enter','Ctrl+Shift+H'].includes(key)) return false;
-  if (route.value.name === 'compose' && key === 't' && !event.target.closest('.composer')) return false;
   const handler = scopes.get(route.value.name)?.[key];
   if (!handler) return false;
   event.preventDefault(); handler(event); return true;

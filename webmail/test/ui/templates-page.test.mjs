@@ -38,6 +38,11 @@ await test('templates management: approved A list/edit/share/read-only flows', a
       }
       return route.fulfill({ json: { ...fake.state.prefs, mode, templatePins: state.pins } });
     });
+    await page.route('**/api/contacts?*', route => route.fulfill({ json: { items: [
+      {name:'추천 사람',address:'recommended@example.com',kind:'person'}, {name:'나',address:'user@example.com',kind:'person'},
+      {name:'이미 공유',address:'member@example.com',kind:'person'}, {name:'외부',address:'outside@other.example',kind:'person'},
+      {name:'팀',address:'team@example.com',kind:'team'},
+    ] } }));
     await page.route('**/api/templates**', async route => {
       const request = route.request(), path = new URL(request.url()).pathname, method = request.method(), body = request.postData() ? request.postDataJSON() : undefined;
       requests.push({ path, method, body });
@@ -66,6 +71,26 @@ await test('templates management: approved A list/edit/share/read-only flows', a
     return { page, requests, errors, state };
   }
   const row = (page, name) => page.locator('.tplA-row').filter({ hasText: name });
+  for (const width of [1280, 375]) await t.test(`template help, spacing and keys ${width} light`, async () => {
+    const c = await open({width}); try {
+      await expect(c.page.locator('.tplA-lead li')).toHaveCount(3);
+      await expect(c.page.locator('.tplA-lead')).toBeVisible();
+      await expect(c.page.locator('.tplA-lead li').nth(0)).toHaveText("메일 쓰기에서 '템플릿' 버튼으로 불러오고, '템플릿으로 저장'으로 저장해요.");
+      const gaps = await c.page.evaluate(() => { const lead=document.querySelector('.tplA-lead').getBoundingClientRect(), row=document.querySelector('.tplA-title-row').getBoundingClientRect(), frame=document.querySelector('.tplA-split').getBoundingClientRect(); return [lead.top-row.bottom,frame.top-lead.bottom]; });
+      assert.ok(Math.abs(gaps[0]-gaps[1])<=1, JSON.stringify(gaps));
+      if(process.env.TEMPLATE_REVIEW_CAPTURE_DIR){await mkdir(process.env.TEMPLATE_REVIEW_CAPTURE_DIR,{recursive:true});await c.page.screenshot({path:`${process.env.TEMPLATE_REVIEW_CAPTURE_DIR}/templates-${width}-light.png`});}
+      await c.page.evaluate(()=>{location.hash='keys';}); const keys=c.page.getByRole('dialog',{name:'키보드 단축키'});await expect(keys).toBeVisible();await expect(keys.locator('kbd').filter({hasText:/^T$/})).toHaveCount(0);await c.page.keyboard.press('Escape');
+    } finally { await c.page.close(); }
+  });
+  await t.test('share people use same-domain recommendations and local account ids without changing server validation', async () => {
+    const c = await open(); try {
+      await c.page.locator('.tplA-sf').getByRole('button',{name:'공유 설정',exact:true}).click();const dialog=c.page.getByRole('dialog',{name:'공유 폴더 공유 설정'}), person=dialog.getByRole('combobox',{name:'사람 지정 추가'});
+      await person.fill('추천');await expect(dialog.getByRole('option')).toHaveCount(1);await expect(dialog.getByRole('option')).toContainText('추천 사람');await expect(dialog.getByRole('option')).toContainText('recommended@example.com');await dialog.getByRole('option').click();
+      await person.fill('local-id');await person.press('Enter');await expect(dialog.getByText('local-id@example.com',{exact:true}).first()).toBeVisible();
+      await person.fill('outside@other.example');await person.press('Enter');await expect(dialog.locator('.tpl-share-recipient').getByRole('alert')).toHaveText('같은 도메인 사용자만 지정할 수 있어요');
+      await person.fill('');await dialog.getByRole('button',{name:'저장',exact:true}).click();await expect(dialog).toHaveCount(0);assert.deepEqual(c.state.share.users,['member@example.com','recommended@example.com','local-id@example.com']);
+    } finally { await c.page.close(); }
+  });
   for (const width of [1280, 768, 375]) for (const mode of ['light', 'dark']) await t.test(`list/edit/share layout ${width} ${mode}`, async () => {
     const c = await open({ width, mode }); try {
       await expect(row(c.page, own.name)).toBeVisible(); await row(c.page, own.name).click(); await expect(c.page.getByRole('textbox', { name: '이름', exact: true })).toHaveValue(own.name);
@@ -91,7 +116,7 @@ await test('templates management: approved A list/edit/share/read-only flows', a
   await t.test('share save submits only chosen domain/users; inherited readers are immutable and focus returns', async () => {
     const c = await open(); try {
       await c.page.locator('.tplA-sf').getByRole('button', { name: '공유 설정', exact: true }).click(); const dialog = c.page.getByRole('dialog', { name: '공유 폴더 공유 설정' });
-      await dialog.getByRole('checkbox', { name: '같은 도메인 전체에 공유' }).check(); await dialog.getByRole('textbox', { name: '사람 지정', exact: true }).fill('합성 사람 <new@example.com>'); await dialog.getByRole('button', { name: '추가', exact: true }).click();
+      await dialog.getByRole('checkbox', { name: '같은 도메인 전체에 공유' }).check(); await dialog.getByRole('combobox', { name: '사람 지정 추가', exact: true }).fill('합성 사람 <new@example.com>'); await dialog.getByRole('button', { name: '추가', exact: true }).click();
       await dialog.getByRole('button', { name: '저장', exact: true }).click(); await expect(dialog).toHaveCount(0);
       await expect(c.page.locator('.tplA-sf').getByRole('button', { name: '공유 설정', exact: true })).toBeFocused();
       const put = c.requests.find(request => request.path === '/api/templates/share' && request.method === 'PUT'); assert.deepEqual(put.body, { domainAll: true, users: ['member@example.com', 'new@example.com'] });
@@ -100,7 +125,7 @@ await test('templates management: approved A list/edit/share/read-only flows', a
   for (const code of ['TEMPLATE_SHARE_INVALID', 'TEMPLATE_SHARE_CONFLICT']) await t.test(`share error retains chosen addresses: ${code}`, async () => {
     const c = await open({ shareError: code }); try {
       await c.page.locator('.tplA-sf').getByRole('button', { name: '공유 설정', exact: true }).click(); const dialog = c.page.getByRole('dialog', { name: '공유 폴더 공유 설정' });
-      await dialog.getByRole('textbox', { name: '사람 지정', exact: true }).fill('alias@example.com'); await dialog.getByRole('button', { name: '추가', exact: true }).click(); await dialog.getByRole('button', { name: '저장', exact: true }).click();
+      await dialog.getByRole('combobox', { name: '사람 지정 추가', exact: true }).fill('alias@example.com'); await dialog.getByRole('button', { name: '추가', exact: true }).click(); await dialog.getByRole('button', { name: '저장', exact: true }).click();
       await expect(dialog.getByRole('alert')).toHaveText(code === 'TEMPLATE_SHARE_CONFLICT' ? '기존 수동 공유 권한과 겹쳐요: user=alias@example.com' : '공유할 활성 메일 계정을 확인해 주세요.');
       await expect(dialog.getByText('alias@example.com', { exact: true }).first()).toBeVisible(); assert.deepEqual(c.state.share.users, ['member@example.com']);
       await c.page.keyboard.press('Escape'); await expect(dialog).toHaveCount(0);

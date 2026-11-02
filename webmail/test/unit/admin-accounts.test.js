@@ -121,7 +121,10 @@ test('accounts: detail projects all five references and excludes app password/sy
 
 test('accounts: ACL reads have max four workers, restricted scope and partial warning', async t => {
   const f = await fixture(t);
-  for (let i = 0; i < 10; i++) f.filters.push({ ...f.filters[0], username: `team${i}@example.com` });
+  for (let i = 0; i < 10; i++) {
+    f.filters.push({ ...f.filters[0], username: `team${i}@example.com` });
+    f.boxes.push(makeBox(`team${i}@example.com`));
+  }
   let inFlight = 0, maximum = 0;
   f.dockerapi.getAcl = async owner => { inFlight++; maximum = Math.max(maximum, inFlight); await new Promise(resolve => setImmediate(resolve)); inFlight--; if (owner === team) throw new Error(secret); return []; };
   const result = await read(f); assert.equal(maximum, 4); assert.equal(result.warnings[0].code, 'SHARES_PARTIAL'); assert.ok(!JSON.stringify(result).includes(secret));

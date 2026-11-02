@@ -298,3 +298,23 @@ test('rename: updates bundled team alias targets through the existing alias path
   assert.equal(f.aliases[0].private_comment, 'mailadmin:team-members'); assert.equal(f.aliases[0].internal, '1');
   assert.equal(f.filters[0].script_data, script);
 });
+
+for (const active of [0, '0']) test(`rename: inactive target ${JSON.stringify(active)} refuses preview and execution before writes`, async t => {
+  const f = await fixture(t, false), initial = await preview(f); f.boxes[0].active = active;
+  for (const operation of [() => preview(f), () => run(f, initial.etag)]) {
+    await assert.rejects(operation(), error => error.statusCode === 409 && error.code === 'MAILBOX_INACTIVE' && error.message.includes('계정을 켠 뒤'));
+  }
+  assert.equal(writes(f).length, 0);
+});
+
+test('rename: unrelated inactive owner is skipped and warned in preview and result', async t => {
+  const f = await fixture(t, false); f.boxes[2].active = 0; f.options.aclFailure = other;
+  const initial = await preview(f); assert.deepEqual(initial.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [other]);
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok');
+  assert.deepEqual(result.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [other]);
+});
+
+for (const [before, after] of [[0, 1], [1, 0], [1, 2]]) test(`rename: unrelated owner active ${before}→${after} invalidates preview`, async t => {
+  const f = await fixture(t, false); f.boxes[2].active = before; const initial = await preview(f); f.boxes[2].active = after;
+  await assert.rejects(run(f, initial.etag), { statusCode: 409, code: 'CHANGED_ELSEWHERE' }); assert.equal(writes(f).length, 0);
+});

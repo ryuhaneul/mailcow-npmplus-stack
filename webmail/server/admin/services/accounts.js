@@ -14,6 +14,8 @@ const scriptHash = source => createHash('sha256').update(String(source ?? '')).d
 const protocols = ['imap', 'pop3', 'smtp', 'sieve', 'eas', 'dav'];
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const invalid = () => new AppError(422, 'INVALID_INPUT', '계정 입력값을 확인해 주세요.');
+const inactiveMailbox = () => new AppError(409, 'MAILBOX_INACTIVE', '계정을 켠 뒤 다시 해 주세요.');
+const ownerVersions = owners => [...owners].sort(([a], [b]) => a.localeCompare(b));
 const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 계정 설정이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
 const safeCode = error => error instanceof AppError && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'INTERNAL_ERROR';
 const sieveWarning = () => ({ ...sieveDisabledWarning });
@@ -117,7 +119,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return { address: item.address, name: item.name, kind: item.kind, usedBytes: item.usedBytes, quotaGb: item.quotaGb, etag: etag(snapshot(row)) };
     }) };
   }
-  async function detail(session, rawAddress, { allShares = false, aclSnapshot } = {}) {
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false } = {}) {
     const addr = address(rawAddress), row = await box(session, addr);
     const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
       rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
@@ -125,10 +127,16 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     ]);
     const groups = groupMailboxAddresses(filters), warnings = [], shares = new Map();
     const owners = [...new Set([...(allShares ? boxes.map(box => normalize(box.username)) : groups), addr])];
+    const activeByOwner = new Map(boxes.map(box => [normalize(box.username), box.active]));
+    const skipped = [];
     let cursor = 0, sharesPartial = false;
     await Promise.all(Array.from({ length: Math.min(4, owners.length) }, async () => {
       while (cursor < owners.length) {
         const owner = owners[cursor++];
+        const active = activeByOwner.get(owner);
+        if (![0, 1, 2, '0', '1', '2'].includes(active)) { sharesPartial = true; continue; }
+        ownerSnapshot?.set(owner, Number(active));
+        if (active === 0 || active === '0' || skipOwnShares && owner === addr) { skipped.push(owner); continue; }
         try {
           const ownerAcl = await aclFolders.readOwned(owner);
           aclSnapshot?.set(owner, ownerAcl);
@@ -140,6 +148,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       }
     }));
     if (sharesPartial) warnings.push({ code: 'SHARES_PARTIAL', message: '공유 정보 일부를 읽지 못했어요. 공유 화면에서 다시 확인해 주세요.' });
+    if (skipped.length) warnings.push({ code: 'SHARES_INACTIVE_SKIPPED', addresses: skipped.sort(),
+      message: `꺼진 계정(${skipped.join(', ')})이 남에게 준 공유는 확인하지 못했어요. 처리 후 공유 화면에서 확인해 주세요.` });
     warnings.push(...folderWarnings());
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
@@ -331,8 +341,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
     if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
-    const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map();
-    const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
+    const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map(), ownerSnapshot = new Map();
+    const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
     const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
@@ -340,6 +350,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
     const refs = { ...info.refs, aliases: info.refs.aliases.map(alias => ({ ...alias, effect: mode === 'disable' ? 'kept' : alias.targets.every(target => target === addr) ? 'deleted' : 'target_removed' })) };
     const versions = {
+      shareOwners: ownerVersions(ownerSnapshot),
       aliases: aliasRows.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
       teams: teamsToClean.map(row => ({ mailbox: normalize(row.username), id: row.id, sha256: scriptHash(row.script_data), etag: row.teamEtag })),
       senders: senderRows.map(row => ({ mailbox: normalize(row.username), sha256: etag(row.sender_acl) })),
@@ -358,7 +369,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     return { address: addr, mode, cleanRefs, forwardTo, etag: etag(plan.state), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
       refs: plan.refs, sharesScope: plan.sharesScope, irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
       confirmation: mode === 'delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.',
-      warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...folderWarnings()] };
+      warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
   }
   async function lifecycleRun({ session, actor, ip, addr: rawAddress, data, mode = 'delete' }) {
     const addr = address(rawAddress), cleanRefs = data?.cleanRefs, forwardTo = data?.forwardTo ? address(data.forwardTo) : null;
@@ -368,9 +379,12 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       assertUnchanged(data.etag, plan.state);
       const steps = [], cleaned = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
       const expectedAccount = structuredClone(plan.account);
+      const skipOwnShares = cleanRefs && plan.account.active === 0;
+      const verifyShareOwners = owners => assertUnchanged(etag(plan.state.versions.shareOwners.filter(([owner]) => owners.has(owner)).map(([owner, active]) =>
+        [owner, owner === addr ? expectedAccount.active : active])), ownerVersions(owners));
       let lostSession, stage, touched = false;
       const entry = { actor, ip, action: mode === 'delete' ? 'mailbox.delete' : 'mailbox.leave', target: addr,
-        kind: mode === 'delete' ? 'irreversible' : 'config', revertible: false, before: { account: plan.account, refs: plan.refs }, after: mode === 'delete' ? {} : { active: 2, forwardTo } };
+        kind: mode === 'delete' ? 'irreversible' : 'config', revertible: false, before: { account: plan.account, refs: plan.refs }, after: { ...(mode === 'delete' ? {} : { active: 2, forwardTo }), ...(skipOwnShares ? { ownSharesUnchecked: true } : {}) } };
       const result = await audit.run(entry, async () => {
         const success = (name, target, auditId = null) => { touched = true; steps.push({ stage: name, target, status: 'ok', auditId }); };
         try {
@@ -450,7 +464,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           if (mode === 'delete') {
             stage = 'mailbox';
             await lock.run(addr, async () => {
-              const current = await detail(session, addr, { allShares: true });
+              const checkedOwners = new Map();
+              const current = await detail(session, addr, { allShares: true, ownerSnapshot: checkedOwners });
+              verifyShareOwners(checkedOwners);
               if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못해 삭제를 멈췄어요.');
               if (Object.values(current.refs).some(refs => refs.length)) throw new AppError(409, 'REFERENCES_REMAIN', '연결이 남아 있어 메일함을 지우지 않았어요. 다시 미리보기를 확인해 주세요.');
               assertUnchanged(etag(expectedAccount), snapshot(await box(session, addr)));
@@ -465,16 +481,18 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           }
           if (mode === 'disable' && cleanRefs) {
             stage = 'shares';
-            const current = await detail(session, addr, { allShares: true });
+            const checkedOwners = new Map();
+            const current = await detail(session, addr, { allShares: true, ownerSnapshot: checkedOwners, skipOwnShares });
+            verifyShareOwners(checkedOwners);
             if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || current.refs.shares.length) throw verifyFailed();
           }
-          return { result: 'ok', steps, detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...folderWarnings()] };
+          return { result: 'ok', steps, detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
         } catch (error) {
           if (!touched) throw error;
           if (error instanceof MailcowAuthLost) lostSession = error;
           const recovery = stage === 'aliases' ? [{ stage, message: '별칭 대상과 대상 메일함의 보내기 권한을 mailcow에서 확인하고 원래 권한을 복원해 주세요.' }] : [];
           steps.push({ stage: stage ?? 'verify', status: 'failed', code: safeCode(error), auditId: null, ...(recovery.length ? { recovery: recovery[0].message } : {}) });
-          return { result: 'partial', steps, ...(recovery.length ? { recovery } : {}), detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps, ...(recovery.length ? { recovery } : {}) }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...folderWarnings()] };
+          return { result: 'partial', steps, ...(recovery.length ? { recovery } : {}), detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps, ...(recovery.length ? { recovery } : {}) }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
         }
       });
       if (lostSession) throw lostSession;
@@ -485,7 +503,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (!data || !['preview', 'run'].includes(data.action) || !['disable', 'delete'].includes(data.mode) || typeof data.cleanRefs !== 'boolean') throw invalid();
     const result = data.action === 'preview' ? await deletePreview(session, data.address, data) :
       await lifecycleRun({ session, actor, ip, addr: data.address, data, mode: data.mode });
-    return { ...result, warnings: [...leaveWarnings(), ...folderWarnings()] };
+    return { ...result, warnings: [...leaveWarnings(), ...result.warnings.filter(warning => !leaveWarnings().some(row => row.code === warning.code))] };
   }
   const renameNotices = [
     '앱 암호·본인 필터 소유자는 mailcow가 함께 바꿔요.',
@@ -495,7 +513,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   const aclReadOnly = row => addressPattern.test(row.id) && isDeepStrictEqual([...new Set(row.rights)].sort(), ['lookup', 'read']);
   async function renamePlan(session, old, next) {
     const row = await box(session, old), account = snapshot(row);
-    if (![1, 2].includes(account.active)) throw new AppError(409, 'MAILBOX_INACTIVE', '로그인이 켜져 있거나 받기 전용인 메일함만 주소를 바꿀 수 있어요.');
+    if (row.active === 0 || row.active === '0') throw inactiveMailbox();
+    if (![1, 2, '1', '2'].includes(row.active)) throw new AppError(502, 'SHARES_UNAVAILABLE', '메일함의 사용 상태를 확인하지 못했어요. 다시 시도해 주세요.');
     const [boxes, aliases, filters, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'syncjobs/all/no_log')]);
     if (boxes.some(item => normalize(item.username) === next) || aliases.some(item => normalize(item.address) === next)) throw new AppError(409, 'ADDRESS_IN_USE', '새 주소가 이미 메일함이나 별칭으로 있어요.');
     const affectedFilters = [];
@@ -512,7 +531,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const aliasRows = aliases.filter(item => targets(item.goto).includes(old)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(item => normalize(item.username) === old || targets(item.sender_acl).includes(old)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(item => normalize(item.user2) === old).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    const aclByOwner = new Map(), info = await detail(session, old, { allShares: true, aclSnapshot: aclByOwner });
+    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, old, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
     const shares = relatedShares(aclByOwner, old).map(row => ({ owner: row.owner, grantee: row.id, mailbox: row.mailbox, rights: [...row.rights] }));
     for (const share of shares) {
@@ -529,7 +548,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       syncjobs: syncRows.map(job => ({ id: job.id, before: old, after: next })),
       oldAlias: [{ address: old, targets: [next] }],
     };
-    const state = { old, next, keepOldAsAlias: true, account,
+    const state = { old, next, keepOldAsAlias: true, account, shareOwners: ownerVersions(ownerSnapshot),
       filters: affectedFilters.map(filter => ({ id: filter.id, owner: normalize(filter.username), sha256: scriptHash(filter.script_data), active: filter.active, type: filter.filter_type })),
       aliases: aliasRows.map(alias => ({ id: alias.id, sha256: etag(alias) })),
       senders: senderRows.map(item => ({ mailbox: normalize(item.username), sha256: etag(item.sender_acl) })),
@@ -543,7 +562,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (!data || !['preview', 'run'].includes(data.action) || typeof data.newLocal !== 'string' || data.newLocal.includes('@') || data.keepOldAsAlias !== true) throw invalid();
     const next = address(`${data.newLocal}@${old.split('@')[1]}`);
     if (next === old) throw invalid();
-    const preview = plan => ({ address: old, newAddress: next, changes: plan.changes, etag: etag(plan.state), sharesScope: 'all', notices: renameNotices, warnings: folderWarnings() });
+    const preview = plan => ({ address: old, newAddress: next, changes: plan.changes, etag: etag(plan.state), sharesScope: 'all', notices: renameNotices, warnings: plan.info.warnings });
     if (data.action === 'preview') return preview(await renamePlan(session, old, next));
     const addresses = [old, next].sort();
     return lock.run(`flow:${addresses[0]}`, () => lock.run(`flow:${addresses[1]}`, async () => {
@@ -558,7 +577,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         { stage: 'oldAlias', message: `${old}를 ${next}로 보내는 별칭을 만들어 주세요.` },
       ];
       let renamed = false, fatal, stage = 'mailbox';
-      const warnings = [];
+      const warnings = plan.info.warnings.filter(warning => warning.code !== 'SUBFOLDER_ACL_UNCHECKED');
       const expectedAccount = { ...plan.account, address: next, senderAcl: replaceAddress(plan.account.senderAcl, old, next) };
       const record = { actor, ip, action: 'mailbox.rename', target: old, kind: 'config', revertible: false, before: { address: old, changes: plan.changes }, after: { address: next, keepOldAsAlias: true } };
       const result = await audit.run(record, async () => {
@@ -657,7 +676,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             try { if (renameMember(filter.script_data, old, next).changed) throw verifyFailed(); }
             catch (error) { if (error instanceof Refused) throw verifyFailed(); throw error; }
           }
-          const checkedAcl = new Map(), info = await detail(session, next, { allShares: true, aclSnapshot: checkedAcl });
+          const checkedAcl = new Map(), checkedOwners = new Map(), info = await detail(session, next, { allShares: true, aclSnapshot: checkedAcl, ownerSnapshot: checkedOwners });
+          assertUnchanged(etag(ownerVersions(new Map(plan.state.shareOwners.map(([owner, active]) => [owner === old ? next : owner, active]).filter(([owner]) => checkedOwners.has(owner))))), ownerVersions(checkedOwners));
           if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || [...checkedAcl.values()].some(acl => acl.some(item => normalize(item.id) === old))) throw verifyFailed();
           for (const share of plan.changes.shares) if (!checkedAcl.get(share.newOwner)?.some(item => item.mailbox === share.mailbox && normalize(item.id) === share.newGrantee && aclReadOnly(item))) throw verifyFailed();
           return { result: 'ok', address: next, steps, recovery: [], warnings: [...warnings, ...folderWarnings()], detail: { steps }, notices: renameNotices };
@@ -699,6 +719,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     }
     if (prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const mailbox = await box(session, addr);
+    if (mailbox.active === 0 || mailbox.active === '0') throw inactiveMailbox();
     if (Number(mailbox.messages) !== 0) throw notEmpty();
     const relatedFilters = [];
     for (const filter of filters.filter(row => ['prefilter', 'postfilter'].includes(row.filter_type))) {
@@ -711,7 +732,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         throw new AppError(409, error.code.toUpperCase(), `${normalize(filter.username)}의 필터를 해석할 수 없어요. 필터 화면에서 먼저 확인해 주세요.`);
       }
     }
-    const aclByOwner = new Map(), info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner });
+    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(row => row.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
     const shares = relatedShares(aclByOwner, addr);
     if (shares.some(row => !aclReadOnly(row))) throw new AppError(409, 'ACL_UNSUPPORTED', '관련 공유에 읽기 외 권한이 있어요. 공유를 먼저 확인해 주세요.');
@@ -723,9 +744,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       { code: 'OWN_SENDER_RIGHTS_REMOVED', message: `이 메일함이 다른 주소로 보내던 권한 ${snapshot(mailbox).senderAcl.length}개는 없어져요` },
       { code: 'OWN_SHARES_REMOVED', message: `이 메일함을 다른 사람에게 공유한 ${shares.filter(row => row.owner === addr).length}건은 없어져요` },
       { code: 'INCOMING_SHARES_UNUSED', message: `다른 함에서 이 주소에 준 공유 ${shares.filter(row => row.owner !== addr).length}건은 남지만 로그인할 수 없어 쓰이지 않아요` },
-      ...folderWarnings(),
+      ...info.warnings,
     ];
-    const state = { direction, addr, options, account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
+    const state = { direction, addr, options, shareOwners: ownerVersions(ownerSnapshot), account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
       filters: relatedFilters.map(row => ({ id: row.id, owner: normalize(row.username), sha256: scriptHash(row.script_data), active: row.active, type: row.filter_type })),
       senders: senderVersions, acl: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: jobs.map(row => ({ id: row.id, sha256: etag(row) })),

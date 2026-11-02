@@ -337,3 +337,23 @@ test('convert: bundled team alias cannot be converted into a mailbox', async t =
   await assert.rejects(preview(f), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
   assert.equal(writes(f).length, 0);
 });
+
+for (const active of [0, '0']) test(`convert: inactive mailbox ${JSON.stringify(active)} refuses preview and execution before writes`, async t => {
+  const f = await fixture(t), initial = await convert(f, { action: 'preview' }); f.boxes.find(row => row.username === addr).active = active;
+  for (const action of ['preview', 'run']) await assert.rejects(convert(f, { action, etag: initial.etag }),
+    error => error.statusCode === 409 && error.code === 'MAILBOX_INACTIVE' && error.message.includes('계정을 켠 뒤'));
+  assert.equal(writes(f).length, 0);
+});
+
+test('convert: unrelated inactive mailbox warns without blocking mailbox-to-alias', async t => {
+  const f = await fixture(t); f.boxes.find(row => row.username === other).active = 0; f.options.aclFailure = other;
+  const initial = await convert(f, { action: 'preview' }); assert.deepEqual(initial.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [other]);
+  const result = await convert(f, { action: 'run', etag: initial.etag }); assert.equal(result.result, 'ok');
+  assert.deepEqual(result.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [other]);
+});
+
+for (const [before, after] of [[0, 1], [1, 0], [1, 2]]) test(`convert: unrelated owner active ${before}→${after} invalidates preview`, async t => {
+  const f = await fixture(t); f.boxes.find(row => row.username === other).active = before;
+  const initial = await convert(f, { action: 'preview' }); f.boxes.find(row => row.username === other).active = after;
+  await assert.rejects(convert(f, { action: 'run', etag: initial.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' }); assert.equal(writes(f).length, 0);
+});

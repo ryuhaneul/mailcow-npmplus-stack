@@ -1311,6 +1311,6 @@ sudo /usr/local/sbin/mailcow-netfilter-watchdog --check
 sudo journalctl -t mailcow-netfilter-watchdog
 ```
 
-설치·업데이트를 반복해도 cron을 중복 생성하지 않습니다. cron 내용이 스택 형식과 다르면 보존하고 경고합니다. 기존 임시 감시의 `/etc/cron.d/netfilter-watchdog`와 `/root/scripts/netfilter-watchdog.sh`는 알려진 원문의 SHA-256과 정확히 일치할 때만 각각 `.bak.<날짜시각>`으로 백업 후 제거하며, 수정본은 보존·경고하므로 중복 감시가 남았는지 직접 확인하세요.
+설치·업데이트를 반복해도 cron을 중복 생성하지 않습니다. cron 내용이 스택 형식과 다르면 보존하고 경고합니다. 기존 임시 감시의 `/etc/cron.d/netfilter-watchdog`와 `/root/scripts/netfilter-watchdog.sh`는 알려진 원문의 SHA-256과 정확히 일치할 때만 `/root/backups/mailcow-netfilter-watchdog/`(권한 0700)에 원래 경로의 `/`를 `_`로 바꾼 이름과 `.bak.<날짜시각>`을 붙여 백업 후 제거합니다. cron이 백업을 실행하지 않도록 백업은 `/etc/cron.d` 밖에 저장합니다. 수정본은 보존·경고하므로 중복 감시가 남았는지 직접 확인하세요.
 
 감시를 끄려면 `sudo rm /etc/cron.d/mailcow-netfilter-watchdog`를 실행합니다. 완전히 제거하려면 이어서 `sudo rm /usr/local/sbin/mailcow-netfilter-watchdog`를 실행합니다. setup·update를 다시 실행하면 재설치됩니다. 롤백은 cron을 먼저 끈 뒤 스택을 적용 전 HEAD로 되돌립니다. 임시 감시 백업은 조사·복구용으로 보존합니다.

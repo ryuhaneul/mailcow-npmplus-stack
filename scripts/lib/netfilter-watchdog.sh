@@ -6,7 +6,8 @@ netfilter_watchdog_install() {
     local source_file="${BASH_SOURCE[0]%/*}/../mailcow-netfilter-watchdog.sh"
     local comment='# Restart stuck Mailcow netfilter after a pubsub error'
     local new_line="* * * * * root $command_file"
-    local old_file expected actual backup
+    local backup_dir=/root/backups/mailcow-netfilter-watchdog
+    local old_file expected actual backup backup_name
 
     if [ -e "$cron_file" ] || [ -L "$cron_file" ]; then
         if [ -L "$cron_file" ] || ! cmp -s "$cron_file" <(printf '%s\n' "$comment" "$new_line"); then
@@ -42,7 +43,10 @@ netfilter_watchdog_install() {
             warn "Netfilter watchdog: custom temporary content preserved at $old_file"
             continue
         fi
-        backup="$old_file.bak.$(date +%Y%m%d-%H%M%S-%N)"
+        mkdir -p "$backup_dir" || return 1
+        chmod 700 "$backup_dir" || return 1
+        backup_name="${old_file#/}"
+        backup="$backup_dir/${backup_name//\//_}.bak.$(date +%Y%m%d-%H%M%S-%N)"
         cp -p -- "$old_file" "$backup" || return 1
         rm -- "$old_file" || return 1
         log "Netfilter watchdog: temporary file backed up at $backup and removed"

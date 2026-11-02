@@ -13,7 +13,7 @@ import sys
 root, tmp = map(Path, sys.argv[1:])
 for name in ('mailcow-netfilter-watchdog.sh', 'lib/netfilter-watchdog.sh'):
     s = (root/'scripts'/name).read_text()
-    for prefix in ('/etc/cron.d/', '/usr/local/sbin/', '/root/scripts/', '/run/'):
+    for prefix in ('/etc/cron.d/', '/usr/local/sbin/', '/root/scripts/', '/root/backups/', '/run/'):
         s = s.replace(prefix, str(tmp) + prefix)
     (tmp/'project/scripts'/name).write_text(s)
 for name in ('setup', 'update'):
@@ -165,13 +165,18 @@ echo synthetic-known-cron > "$TMP/etc/cron.d/netfilter-watchdog"
 source "$TMP/update.sh"
 for old in "$TMP/root/scripts/netfilter-watchdog.sh" "$TMP/etc/cron.d/netfilter-watchdog"; do
     [ ! -e "$old" ] || fail cleanup
-    backups=("$old".bak.*)
+    backup_name="${old#/}"
+    backups=("$TMP/root/backups/mailcow-netfilter-watchdog/${backup_name//\//_}".bak.*)
     [ "${#backups[@]}" = 1 ] && [ -f "${backups[0]}" ] || fail backup
     grep -q '^synthetic-known-' "${backups[0]}" || fail backup-content
 done
 source "$TMP/update.sh"
-[ "$(find "$TMP/root/scripts" "$TMP/etc/cron.d" -name '*.bak.*' | wc -l)" = 2 ] || fail repeat-cleanup
+[ "$(find "$TMP/root/backups/mailcow-netfilter-watchdog" -name '*.bak.*' | wc -l)" = 2 ] || fail repeat-cleanup
 pass 'known temporary files backed up before removal; repeated cleanup is inert'
+[ "$(stat -c '%a' "$TMP/root/backups/mailcow-netfilter-watchdog")" = 700 ] || fail backup-permissions
+[ "$(find "$TMP/etc/cron.d" -type f | wc -l)" = 1 ] && [ -f "$CRON" ] || fail cron-backup-remains
+[ "$(find "$TMP/root/scripts" -name '*.bak.*' | wc -l)" = 0 ] || fail script-backup-remains
+pass 'backups stay in the private 0700 directory with none left in cron.d'
 for old in "$TMP/root/scripts/netfilter-watchdog.sh" "$TMP/etc/cron.d/netfilter-watchdog"; do
     echo synthetic-custom > "$old"
 done

@@ -610,6 +610,9 @@ admin_access apply || die "Admin access-list application failed"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/cert-reload.sh"
 cert_reload_install || die "Cert reload cron installation failed"
+# shellcheck source=lib/netfilter-watchdog.sh
+source "$SCRIPT_DIR/lib/netfilter-watchdog.sh"
+netfilter_watchdog_install || die "Netfilter watchdog cron installation failed"
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/dovecot-ready.sh

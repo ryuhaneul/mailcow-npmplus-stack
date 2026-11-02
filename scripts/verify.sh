@@ -485,6 +485,8 @@ echo ""
 # --- Cert reload cron ---
 echo "[Maintenance]"
 check "Cert reload cron installed" test -f /etc/cron.d/mailcow-cert-reload
+check "Netfilter watchdog cron installed" test -f /etc/cron.d/mailcow-netfilter-watchdog
+check "Netfilter not stuck after pubsub error" /usr/local/sbin/mailcow-netfilter-watchdog --check
 check "Cert reload targets: unique Postfix/Dovecot compose labels" bash "$SCRIPT_DIR/mailcow-cert-reload.sh" --check
 
 # shellcheck source-path=SCRIPTDIR

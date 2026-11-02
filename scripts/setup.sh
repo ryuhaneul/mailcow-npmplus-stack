@@ -1343,6 +1343,9 @@ header "Phase 9: Maintenance"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/cert-reload.sh"
 cert_reload_install || die "Cert reload cron installation failed"
+# shellcheck source=lib/netfilter-watchdog.sh
+source "$SCRIPT_DIR/lib/netfilter-watchdog.sh"
+netfilter_watchdog_install || die "Netfilter watchdog cron installation failed"
 
 # ============================================================
 # Phase 10: Toolkit UI Integration

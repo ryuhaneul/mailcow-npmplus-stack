@@ -30,17 +30,29 @@ matches=()
 container="${matches[0]}"
 started=$(docker inspect --format '{{.State.StartedAt}}' "$container") || exit 1
 [ -n "$started" ] || exit 1
-# Capture the complete output before matching: pipefail + grep -q can cause SIGPIPE.
-logs=$(docker logs --since "$started" "$container" 2>&1) || exit 1
-if [[ "$logs" == *'Error reading log line from pubsub'* ]]; then
+# Consume the full stream to avoid SIGPIPE and retain only per-pattern counts.
+hits=$(docker logs --since "$started" "$container" 2>&1 | awk '
+    index($0, "Error reading log line from pubsub") { pubsub++ }
+    index($0, "Exception in thread") { thread++ }
+    END { print pubsub+0, thread+0 }
+') || exit 1
+read -r pubsub_count thread_count <<< "$hits"
+reason=''
+if [ "$pubsub_count" -gt 0 ]; then
+    reason='pubsub error (Error reading log line from pubsub)'
+fi
+if [ "$thread_count" -gt 0 ]; then
+    reason="${reason:+$reason; }thread exception (Exception in thread)"
+fi
+if [ -n "$reason" ]; then
     if [ "$CHECK_ONLY" = true ]; then
-        echo "Netfilter: pubsub error since container start" >&2
+        echo "Netfilter: $reason since container start" >&2
         exit 1
     fi
     if docker restart "$container" >/dev/null; then
-        logger -t mailcow-netfilter-watchdog -- "Netfilter: restarted after pubsub error"
+        logger -t mailcow-netfilter-watchdog -- "Netfilter: restarted after $reason"
     else
-        logger -t mailcow-netfilter-watchdog -- "Netfilter: restart after pubsub error failed"
+        logger -t mailcow-netfilter-watchdog -- "Netfilter: restart after $reason failed"
         exit 1
     fi
 fi

@@ -46,8 +46,20 @@ case "$1" in
         cat "$NF_TEST_TMP/started" ;;
     logs)
         [ "$*" = "logs --since $(cat "$NF_TEST_TMP/started") synthetic-a" ] || exit 92
-        if [ "$(cat "$NF_TEST_TMP/started")" = '2026-01-01T00:00:00Z' ] && [ "$(cat "$NF_TEST_TMP/mode")" = error ]; then
-            echo "Error reading log line from pubsub: 'max_attempts'" >&2
+        if [ "$(cat "$NF_TEST_TMP/started")" = '2026-01-01T00:00:00Z' ]; then
+            case "$(cat "$NF_TEST_TMP/mode")" in
+                error) echo "Error reading log line from pubsub: 'max_attempts'" >&2 ;;
+                autopurge)
+                    cat >&2 <<'TRACEBACK'
+Exception in thread Thread-1 (autopurge):
+Traceback (most recent call last):
+  File "/app/main.py", line 308, in autopurge
+    MAX_ATTEMPTS = int(f2boptions['max_attempts'])
+KeyError: 'max_attempts'
+TRACEBACK
+                    ;;
+                *) echo 'synthetic healthy log' ;;
+            esac
         else echo 'synthetic healthy log'; fi ;;
     restart)
         [ "$*" = 'restart synthetic-a' ] || exit 93
@@ -84,10 +96,21 @@ pass 'pubsub error restarts exactly once and journals result'
 bash "$WATCHDOG"
 [ "$(restarts)" = 1 ] && [ "$(wc -l < "$TMP/journal")" = 1 ] || fail repeat
 pass 'next cycle filters old error using the new StartedAt'
+reset_case autopurge
+if bash "$WATCHDOG" --check > "$TMP/result" 2>&1; then fail check-autopurge; fi
+[ "$(restarts)" = 0 ] && [ ! -s "$TMP/journal" ] || fail check-autopurge-mutation
+grep -q 'Exception in thread' "$TMP/result" || fail check-autopurge-reason
+bash "$WATCHDOG"
+[ "$(restarts)" = 1 ] && grep -q 'restarted after thread exception (Exception in thread)' "$TMP/journal" || fail autopurge
+! grep -q 'pubsub' "$TMP/journal" || fail autopurge-reason
+pass 'autopurge traceback fails read-only check and restarts once with thread-specific journal'
+bash "$WATCHDOG"
+[ "$(restarts)" = 1 ] && [ "$(wc -l < "$TMP/journal")" = 1 ] || fail repeat-autopurge
+pass 'next cycle ignores traceback from before the new StartedAt'
 reset_case healthy
 bash "$WATCHDOG"
 [ "$(restarts)" = 0 ] && [ ! -s "$TMP/journal" ] || fail healthy
-pass 'healthy cycle never restarts or journals'
+pass 'logs containing neither error pattern never restart or journal'
 for mode in absent stopped multiple; do
     reset_case "$mode"
     if bash "$WATCHDOG" > "$TMP/result" 2>&1; then fail "$mode accepted"; fi
@@ -118,7 +141,7 @@ pass '--check reports error/healthy state without restart or journal, even under
 reset_case error
 touch "$TMP/restart-fail"
 if bash "$WATCHDOG" > "$TMP/result" 2>&1; then fail restart-failure; fi
-grep -q 'restart after pubsub error failed' "$TMP/journal" || fail failure-journal
+grep -q 'restart after pubsub error (Error reading log line from pubsub) failed' "$TMP/journal" || fail failure-journal
 pass 'failed restart returns failure and journals outcome'
 if bash "$WATCHDOG" --unknown >/dev/null 2>&1; then fail unknown-option; fi
 pass 'unknown option is rejected'

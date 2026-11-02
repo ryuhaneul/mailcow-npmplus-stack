@@ -1299,9 +1299,9 @@ plugin {
 
 ### Netfilter 멈춤 감시
 
-netfilter의 옵션 갱신과 로그 감시가 겹치면 `max_attempts` 조회 오류 뒤 감시 스레드가 멈추고, 컨테이너는 실행 중이어도 새 차단을 처리하지 못할 수 있습니다. setup·update는 `/usr/local/sbin/mailcow-netfilter-watchdog`와 `/etc/cron.d/mailcow-netfilter-watchdog`를 설치하여 매분 확인합니다.
+netfilter의 옵션 갱신과 로그 감시가 겹치면 `max_attempts` 조회 오류 뒤 로그 감시 또는 autopurge 스레드가 멈출 수 있습니다. 컨테이너는 실행 중이어도 새 차단이나 기존 차단 해제를 처리하지 못할 수 있습니다. setup·update는 `/usr/local/sbin/mailcow-netfilter-watchdog`와 `/etc/cron.d/mailcow-netfilter-watchdog`를 설치하여 매분 확인합니다.
 
-감시 도구는 compose 서비스 라벨 `netfilter-mailcow`로 실행 중인 컨테이너를 찾고, 현재 시작 시각 이후 로그에 `Error reading log line from pubsub`가 있으면 해당 컨테이너를 재시작합니다. 재시작하면 **기존 차단 목록이 초기화됩니다**(upstream 동작). 컨테이너가 없거나 여러 개면 재시작하지 않으며, 동시 감시는 잠금으로 중복 재시작을 막습니다. 정상 주기는 기록하지 않고, 재시작 결과와 대상 조회 개수 문제를 `logger -t mailcow-netfilter-watchdog`로 기록합니다.
+감시 도구는 compose 서비스 라벨 `netfilter-mailcow`로 실행 중인 컨테이너를 찾고, 현재 시작 시각 이후 로그에 `Error reading log line from pubsub` 또는 `Exception in thread`가 있으면 해당 컨테이너를 재시작합니다. 후자는 autopurge를 포함한 어느 스레드든 처리되지 않은 예외가 난 경우를 감지합니다. 로그는 전체를 변수에 보관하지 않고 스트림으로 끝까지 읽어 판정합니다. 재시작하면 **기존 차단 목록이 초기화됩니다**(upstream 동작). 컨테이너가 없거나 여러 개면 재시작하지 않으며, 동시 감시는 잠금으로 중복 재시작을 막습니다. 정상 주기는 기록하지 않고, 재시작 결과·감지한 문구와 대상 조회 개수 문제를 `logger -t mailcow-netfilter-watchdog`로 기록합니다.
 
 ```bash
 # 수동 감시·필요 시 재시작

@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import SMTPConnection from 'nodemailer/lib/smtp-connection';
+import { Readable } from 'node:stream';
 import { mailTlsOptions } from '../mail/imap-pool.js';
 import { notificationAddress } from './quota-notification-state.js';
 import { AppError } from '../errors.js';
@@ -12,7 +13,7 @@ export function monitorMessage(sender, recipient, events) {
   return {from:{address:sender},to:[{address:recipient}],envelope:{from:sender,to:[recipient]},subject:'[메일 이상 감시] 판정 결과',text,html:'<pre>'+escape(text)+'</pre>',disableFileAccess:true,disableUrlAccess:true};
 }
 // One connection per notification: SMTPTransport.close() does not cancel its active I/O.
-export function createMonitorTransport(options) {
+export function createMonitorTransport({ onDataStart = () => {}, ...options }) {
   const connection=new SMTPConnection(options);
   let closed=false,finish;
   const abortError=()=>Object.assign(new Error('Monitor transport closed'),{monitorAbort:true});
@@ -24,7 +25,12 @@ export function createMonitorTransport(options) {
       connection.once('error',finish);
       connection.connect(error=>{
         if(error||closed)return finish(error??abortError());
-        connection.send(mail.message.getEnvelope(),mail.message.createReadStream(),finish);
+        // SMTPConnection pulls this public stream only after the server accepts DATA.
+        const message=Readable.from((async function*(){
+          onDataStart();
+          yield* mail.message.createReadStream();
+        })());
+        connection.send(mail.message.getEnvelope(),message,finish);
       });
     },
     close(){if(closed)return;closed=true;connection.close();finish?.(abortError());}
@@ -32,19 +38,19 @@ export function createMonitorTransport(options) {
 }
 export function createMonitorMailer({ config, transportFactory = createMonitorTransport }) {
   return async (recipient, events, {signal}={}) => {
-    let transport, started=false, aborted;
+    let transport, dataStarted=false, aborted;
     try {
       const message=monitorMessage('postmaster@'+config.domain,recipient,events);
       if(signal?.aborted)throw Object.assign(new Error(),{explicit:true});
-      transport=transportFactory({host:config.smtpHost,port:25,secure:false,requireTLS:true,tls:mailTlsOptions(config),connectionTimeout:10000,greetingTimeout:10000,socketTimeout:60000,logger:false,debug:false});
+      transport=transportFactory({host:config.smtpHost,port:25,secure:false,requireTLS:true,tls:mailTlsOptions(config),connectionTimeout:10000,greetingTimeout:10000,socketTimeout:60000,logger:false,debug:false,onDataStart:()=>{dataStarted=true;}});
       const result=await new Promise((resolve,reject)=>{
         aborted=()=>{try{transport.close();}catch{}reject(Object.assign(new Error(),{monitorAbort:true}));};
         signal?.addEventListener('abort',aborted,{once:true});
         if(signal?.aborted){aborted();return;}
-        started=true;Promise.resolve(transport.sendMail(message)).then(resolve,reject);
+        Promise.resolve(transport.sendMail(message)).then(resolve,reject);
       });
-      if (!result.accepted?.some(a=>String(a).toLowerCase()===recipient.toLowerCase()) || result.rejected?.length)throw Object.assign(new Error(),{responseCode:550});
-    }catch(e){const explicit=e.explicit===true || !started || !e.monitorAbort&&(Number.isInteger(e.responseCode)&&e.responseCode>=400 || ['CONN','EHLO','HELO','STARTTLS','AUTH','MAIL FROM','RCPT TO'].includes(e.command));
+      if (!result.accepted?.some(a=>String(a).toLowerCase()===recipient.toLowerCase()) || result.rejected?.length)throw new Error('Monitor SMTP acceptance unconfirmed');
+    }catch(e){const explicit=!dataStarted || !e.monitorAbort&&Number.isInteger(e.responseCode)&&e.responseCode>=400&&e.responseCode<600;
       throw Object.assign(new AppError(502,explicit?'MONITOR_SEND_FAILED':'MONITOR_SEND_UNKNOWN','감시 알림 발송 상태를 확인해 주세요.'),{explicit});
     }finally{signal?.removeEventListener('abort',aborted);try{transport?.close();}catch{}}
   };

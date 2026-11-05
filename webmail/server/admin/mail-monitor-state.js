@@ -57,9 +57,20 @@ export function validMonitorState(v) {
   if (!v.notifications.every(n => keys(n, ['id','at','phase','item','target','values','thresholds','recipientResults']) && safeText(n.id) && monitorTime(n.at) && n.at !== null && ['alert','recovery'].includes(n.phase) && monitorItems.includes(n.item) && safeText(n.target) && Array.isArray(n.values) && n.values.every(r=>keys(r,['windowMinutes','value'])&&[0,5,15,60].includes(r.windowMinutes)&&nonnegative(r.value)) && Array.isArray(n.thresholds) && n.thresholds.every(r=>keys(r,['windowMinutes','threshold'])&&[0,5,15,60].includes(r.windowMinutes)&&integer(r.threshold)) && Array.isArray(n.recipientResults) && n.recipientResults.every(r => keys(r, ['recipient','result']) && notificationAddress(r.recipient) && ['sent','failed','unknown'].includes(r.result)))) return false;
   return true;
 }
+export const emptyBounces = () => ({ v:1, revision:0, startedAt:null, completedEnd:null, recipients:[], seen:[], collection:{ lastAttemptAt:null, reason:null } });
+export function validBounces(v) {
+  if (!keys(v,Object.keys(emptyBounces())) || v.v!==1 || !nonnegative(v.revision) || !monitorTime(v.startedAt) || !monitorTime(v.completedEnd) || !Array.isArray(v.recipients) || v.recipients.length>10000 || !Array.isArray(v.seen) || !keys(v.collection,['lastAttemptAt','reason']) || !monitorTime(v.collection.lastAttemptAt) || !(v.collection.reason===null||safeText(v.collection.reason))) return false;
+  const ids=new Set(),addresses=new Set();
+  for (const r of v.recipients) {
+    if (!keys(r,['id','recipient','firstSeenAt','lastSeenAt','bounceCount','lastDsn','lastReason','sourceEventKey','internalExcluded','supported','manual','autoUntil','releasedAt']) || !safeText(r.id) || !r.id || ids.has(r.id) || !safeText(r.recipient) || !r.recipient || addresses.has(r.recipient) || !monitorTime(r.firstSeenAt) || r.firstSeenAt===null || !monitorTime(r.lastSeenAt) || r.lastSeenAt===null || !integer(r.bounceCount) || !/^5\.\d{1,3}\.\d{1,3}$/.test(r.lastDsn) || !safeText(r.lastReason) || r.lastReason.length>300 || !/^[a-f0-9]{64}$/.test(r.sourceEventKey) || typeof r.internalExcluded!=='boolean' || typeof r.supported!=='boolean' || !monitorTime(r.autoUntil) || !monitorTime(r.releasedAt)) return false;
+    if (r.manual!==null && (!keys(r.manual,['until','actor','at']) || !monitorTime(r.manual.until) || !monitorTime(r.manual.at) || r.manual.at===null || !safeText(r.manual.actor))) return false;
+    ids.add(r.id);addresses.add(r.recipient);
+  }
+  return v.seen.every(e=>keys(e,['key','at'])&&/^[a-f0-9]{64}$/.test(e.key)&&monitorTime(e.at)&&e.at!==null) && new Set(v.seen.map(e=>e.key)).size===v.seen.length;
+}
 const unavailable = () => new AppError(503, 'MONITOR_STORE_UNAVAILABLE', '감시 저장소를 확인해 주세요.');
 export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem } = {}) {
-  const spec = { settings: { max: 1024*1024, fallback: defaultMonitorSettings, valid: v => { try { return JSON.stringify(v) === JSON.stringify(validateMonitorSettings(v)); } catch { return false; } } }, state: { max: 4*1024*1024, fallback: emptyMonitorState, valid: validMonitorState } };
+  const spec = { bounces: {max:16*1024*1024, fallback:emptyBounces, valid:validBounces}, settings: { max: 1024*1024, fallback: defaultMonitorSettings, valid: v => { try { return JSON.stringify(v) === JSON.stringify(validateMonitorSettings(v)); } catch { return false; } } }, state: { max: 4*1024*1024, fallback: emptyMonitorState, valid: validMonitorState } };
   async function read(name) {
     let handle;
     try {
@@ -88,5 +99,5 @@ export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem
     } catch { throw unavailable(); }
     finally { await file?.close(); await parent?.close(); await fs.unlink(tmp).catch(()=>{}); }
   }
-  return { readSettings:()=>read('settings'), saveSettings:v=>write('settings',v), readState:()=>read('state'), saveState:v=>write('state',v) };
+  return { readBounces:()=>read('bounces'), saveBounces:v=>write('bounces',v), readSettings:()=>read('settings'), saveSettings:v=>write('settings',v), readState:()=>read('state'), saveState:v=>write('state',v) };
 }

@@ -19,7 +19,7 @@ export function monitorTargets(snapshot,incidents=[]) {
   }
   return result;
 }
-export function createMonitorService({ store, collector, config, mailcow, audit, lock, history, send, now=Date.now, monotonicNow=()=>performance.now(), setTimeout:schedule=globalThis.setTimeout, clearTimeout:cancel=globalThis.clearTimeout }) {
+export function createMonitorService({ store, collector, config, mailcow, audit, lock, history, send, onSettingsSaved=async()=>{}, policyStatus=()=>({available:false}), now=Date.now, monotonicNow=()=>performance.now(), setTimeout:schedule=globalThis.setTimeout, clearTimeout:cancel=globalThis.clearTimeout }) {
   let running=false;const anchors=new Map(),attempts=new Map();
   history?.register('monitor.settings',{label:'메일 감시 설정을 바꿨어요'});history?.register('monitor.send',{label:'메일 감시 알림을 보냈어요'});
   async function change(fn){return lock.run('mail-monitor-state',async()=>{const s=await store.readState();const value=await fn(s);await store.saveState(s);return value;});}
@@ -32,9 +32,10 @@ export function createMonitorService({ store, collector, config, mailcow, audit,
     if(!data||typeof data!=='object'||Array.isArray(data)||typeof data.etag!=='string')throw invalid();
     const {etag:expected,...input}=data,settings=validateMonitorSettings(input);
     await lock.run('mail-monitor-settings',async()=>{const before=await store.readSettings();assertUnchanged(expected,before);await audit.run({actor,ip,action:'monitor.settings',target:'메일 감시',kind:'config',revertible:false,before,after:settings},async()=>{await store.saveSettings(settings);return {};});});
+    await onSettingsSaved();
     return view(session);
   }
-  async function status(){const settings=await store.readSettings(),s=await store.readState();const metrics=settings.enabled&&s.snapshot?s.snapshot.metrics:monitorItems.map(item=>({item,windows:(Array.isArray(settings.rules[item])?settings.rules[item]:[settings.rules[item]]).map(r=>({windowMinutes:r.windowMinutes??0,threshold:r.threshold,value:null,target:null,targets:[],complete:false,status:settings.enabled?'unknown':'disabled',reason:settings.enabled?'NOT_CHECKED':'DISABLED'}))}));return {enabled:settings.enabled,lastAttemptAt:s.lastAttemptAt,lastCompleteAt:s.lastCompleteAt,asOf:s.asOf,metrics,sources:s.snapshot?.sources??{},policy:{available:false},pending:s.outbox.length};}
+  async function status(){const settings=await store.readSettings(),s=await store.readState();const metrics=settings.enabled&&s.snapshot?s.snapshot.metrics:monitorItems.map(item=>({item,windows:(Array.isArray(settings.rules[item])?settings.rules[item]:[settings.rules[item]]).map(r=>({windowMinutes:r.windowMinutes??0,threshold:r.threshold,value:null,target:null,targets:[],complete:false,status:settings.enabled?'unknown':'disabled',reason:settings.enabled?'NOT_CHECKED':'DISABLED'}))}));return {enabled:settings.enabled,lastAttemptAt:s.lastAttemptAt,lastCompleteAt:s.lastCompleteAt,asOf:s.asOf,metrics,sources:s.snapshot?.sources??{},policy:policyStatus(),pending:s.outbox.length};}
   async function notifications(query={}){
     if(!query||Object.keys(query).some(k=>!['before','limit'].includes(k))||query.limit!==undefined&&(!/^[1-9]\d*$/.test(String(query.limit))||Number(query.limit)>100))throw invalid();
     let id=null;if(query.before!==undefined){if(typeof query.before!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(query.before))throw invalid();try{id=Buffer.from(query.before,'base64url').toString('utf8');if(Buffer.from(id).toString('base64url')!==query.before)throw invalid();}catch{throw invalid();}}

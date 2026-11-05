@@ -1,3 +1,6 @@
+import { createBouncePolicy, createBouncePolicyListener } from './bounce-policy.js';
+import { createBouncesService } from './services/bounces.js';
+import bouncesRoutes from './routes/bounces.js';
 import { join } from 'node:path';
 import { createPublicTemplatesStore } from '../templates/public-store.js';
 import { createPublicTemplatesService } from './services/public-templates.js';
@@ -156,8 +159,17 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.addHook('preClose', async () => quotaNotificationScheduler.stop());
   await app.register(quotaNotificationRoutes, { service: quotaNotifications });
 
+  const monitorStore = createMonitorStore({ dir: config.monitorDir ?? (config.auditDir ? join(config.auditDir, 'mail-monitor') : '/data/mail-monitor') });
+  const bouncePolicy = createBouncePolicy();
+  const bounceListener = createBouncePolicyListener({ config: config.bouncePolicy, policy: bouncePolicy });
+  const bounces = createBouncesService({ store: monitorStore, mailcow: app.mailcow, logArchive: createLogArchiveClient({ config, logger: app.log }), policy: bouncePolicy, policyStatus: bounceListener.status, audit, lock: adminLock, history });
+  const bounceScheduler = createMonitorScheduler({ service: bounces, logger: app.log });
+  app.decorate('bounces', bounces);
+  app.addHook('onReady', async () => { await bounces.initialize(); await bounceListener.start(); bounceScheduler.start(); });
+  app.addHook('preClose', async () => { await bounceScheduler.stop(); await bounceListener.stop(); });
+  await app.register(bouncesRoutes, { service: bounces });
   const monitor = createMonitorService({
-    store: createMonitorStore({ dir: config.monitorDir ?? (config.auditDir ? join(config.auditDir, 'mail-monitor') : '/data/mail-monitor') }),
+    store: monitorStore, onSettingsSaved: bounces.settingsChanged, policyStatus: bounceListener.status,
     collector: createMonitorCollector({ config, mailcow: app.mailcow, logArchive: createLogArchiveClient({ config, logger: app.log }) }),
     config, mailcow: app.mailcow, audit, lock: adminLock, history, send: createMonitorMailer({ config }),
   });

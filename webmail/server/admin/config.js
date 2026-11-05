@@ -61,6 +61,18 @@ export function loadAdminConfig(env = process.env) {
     if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || url.pathname !== '/' || logArchiveRaw !== logArchiveRaw.trim()) invalid('LOG_ARCHIVE_URL');
     logArchiveUrl = url.origin;
   }
+  const bounceBind = env.BOUNCE_POLICY_BIND ?? '', bouncePeer = env.BOUNCE_POLICY_PEER ?? '';
+  const bouncePort = env.BOUNCE_POLICY_PORT ?? '10040';
+  if (typeof bounceBind !== 'string' || typeof bouncePeer !== 'string' || bouncePort !== '10040') invalid('BOUNCE_POLICY_PORT');
+  if (bounceBind || bouncePeer) {
+    const network = value('MAILCOW_IPV4_NETWORK');
+    for (const [key, address] of [['BOUNCE_POLICY_BIND', bounceBind], ['BOUNCE_POLICY_PEER', bouncePeer]]) {
+      if (isIP(address) !== 4 || !address.startsWith(network + '.') || ['0','255'].includes(address.split('.').at(-1))) invalid(key);
+    }
+    if (bounceBind === bouncePeer) invalid('BOUNCE_POLICY_PEER');
+    if (!mailcowApiKey || !logArchiveUrl || !logArchiveKey) invalid('BOUNCE_POLICY_BIND');
+  }
+  const bouncePolicy = Object.freeze({ bind:bounceBind, peer:bouncePeer, port:10040 });
   const imapHost = host('IMAP_HOST'), smtpHost = host('SMTP_HOST'), mailTlsServername = host('MAIL_TLS_SERVERNAME');
   const mailTlsMode = choice('MAIL_TLS_MODE', ['verify', 'pin']);
   const mailTlsPinFile = value('MAIL_TLS_PIN_FILE', true);
@@ -116,7 +128,7 @@ export function loadAdminConfig(env = process.env) {
   if (typeof dbPassword !== 'string' || /[\x00-\x1f\x7f-\x9f]/.test(dbPassword)) invalid('DB_PASSWORD');
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly, dbHost, dbName, dbUser, dbPassword,

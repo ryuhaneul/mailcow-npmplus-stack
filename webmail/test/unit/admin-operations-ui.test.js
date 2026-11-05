@@ -97,3 +97,10 @@ test('settings and approved monitoring pages compile with existing admin compone
   const css=await readFile(new URL('../../web/src/admin/pages/monitor.css',import.meta.url),'utf8');assert.ok(css.includes('white-space:normal'));assert.ok(css.includes('border:1px solid var(--line-2)'));assert.ok(!css.includes('border-color:var(--ink-3)'));
  }finally{await server.close();}
 });
+
+test('bounce auto/manual/resolved filters and sender search are wired to the new server contract',async()=>{
+ const fake=createFakeAdminApi();for(const [state,expected] of [['auto','bounce-1'],['manual','bounce-2'],['resolved','bounce-4']]){const result=(await monitorFakeRequest(fake,'/api/admin/bounces?state='+state)).body;assert.equal(result.items.length,1);assert.equal(result.items[0].id,expected);}
+ assert.equal((await monitorFakeRequest(fake,'/api/admin/bounces?q=bulk%40example.com')).body.items[0].id,'bounce-4');
+ const {readFile}=await import('node:fs/promises');const page=await readFile(new URL('../../web/src/admin/pages/Bounces.jsx',import.meta.url),'utf8');
+ for(const [state,label] of [['auto','자동 억제'],['manual','수동 억제'],['resolved','정리 완료']])assert.ok(page.includes("['"+state+"','"+label+"']"));assert.ok(page.includes("Object.hasOwn(row,'resolvedAt')"));assert.ok(page.includes("row.sender||'확인 불가'"));
+});

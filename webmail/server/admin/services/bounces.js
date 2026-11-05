@@ -23,12 +23,34 @@ export function bounceEvent(row) {
   // Keep a short classification, never the remote server's arbitrary diagnostic/body text.
   const reason = dsn === '5.1.1' ? '받는 주소 없음' : dsn === '5.1.10' ? '메일을 받지 않는 도메인 (null MX)' : '영구 배달 실패 (' + dsn + ')';
   const key = createHash('sha256').update(JSON.stringify([time.toString(),match[1],match[2],address.recipient,dsn])).digest('hex');
-  return { ...address, dsn, reason, key, at: iso(Date.parse(row.time)), stamp: row.time };
+  return { ...address, qid:match[2], dsn, reason, key, at: iso(Date.parse(row.time)), stamp: row.time };
+}
+// Compact qmgr facts only. Correlation never crosses this completed search window.
+export function bounceSenderEvent(row) {
+  const text=/^postfix\/qmgr(?:\[\d+\])?$/.test(row.program)?`${row.program}: ${row.message}`:row.program==='postfix'?row.message:'';
+  const match=/^(?:(?:[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\S+)\s+\S+\s+)?postfix\/qmgr(?:\[\d+\])?:\s*([A-Za-z0-9]+):\s+([\s\S]*)/.exec(text);
+  if(!match)return null;
+  const stamp=monitorTimestamp(row.time);if(stamp===null)return null;
+  if(/^removed\b/.test(match[2]))return {qid:match[1],stamp,kind:'removed',sender:null};
+  if(!/^from=/.test(match[2]))return null;
+  const raw=/^from=<([^>]*)>/.exec(match[2])?.[1],address=raw&&!raw.includes('*')?bounceAddress(raw):null;
+  return {qid:match[1],stamp,kind:'from',sender:address?.recipient??null};
+}
+export function correlateBounceSenders(events,facts) {
+  const byQueue=new Map();
+  for(const fact of facts){if(!byQueue.has(fact.qid))byQueue.set(fact.qid,[]);byQueue.get(fact.qid).push(fact);}
+  for(const list of byQueue.values())list.sort((a,b)=>a.stamp<b.stamp?-1:a.stamp>b.stamp?1:0);
+  for(const event of events){
+    const list=byQueue.get(event.qid)??[],stamp=monitorTimestamp(event.stamp);let low=0,high=list.length;
+    while(low<high){const mid=(low+high)>>>1;if(list[mid].stamp<=stamp)low=mid+1;else high=mid;}
+    const fact=list[low-1];event.sender=fact?.kind==='from'?fact.sender:null;
+  }
+  return events;
 }
 export function createBouncesService({ store, mailcow, logArchive, policy, audit, lock, history, now = Date.now, monotonicNow = () => performance.now(), limits = {}, policyStatus = () => policy.status() }) {
   const cap = { milliseconds:120000, pages:256, rows:200000, bytes:128*1024*1024, ...limits };
   let running = false, collectionError = null;
-  for (const action of ['suppress','release','delete']) history?.register('bounce.' + action, { label:'반송 주소 억제를 바꿨어요' });
+  for (const action of ['suppress','release','delete','resolution']) history?.register('bounce.' + action, { label:action==='resolution'?'반송 주소 정리 완료 표시를 바꿨어요':'반송 주소 억제를 바꿨어요' });
   async function readState() { try { return await store.readBounces(); } catch(e) { policy.invalidate('STORE_UNAVAILABLE'); throw e; } }
   async function readSettings() { try { return await store.readSettings(); } catch(e) { policy.invalidate('STORE_UNAVAILABLE'); throw e; } }
   const active = (r, settings) => r.manual && (r.manual.until === null || Date.parse(r.manual.until) > now()) ? 'manual' : settings.bounceAuto.enabled && r.autoUntil && Date.parse(r.autoUntil) > now() ? 'auto' : 'none';
@@ -58,7 +80,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
     if (success === null || success < monitorTimestamp(iso(end))) fail('COLLECTION_UNCONFIRMED');
     let pages=0, rows=0, bytes=0; const started=monotonicNow();
     for (let attempt=0;attempt<2;attempt++) {
-      const events=[], ids=new Set(), cursors=new Set(); let cursor=null, coverage=null;
+      const events=[],senderFacts=[], ids=new Set(), cursors=new Set(); let cursor=null, coverage=null;
       try {
         do {
           if (signal.aborted) fail('COLLECTION_ABORTED');
@@ -74,6 +96,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
             if (!object(row) || typeof row.id!=='string' || !row.id || row.id.length>512 || ids.has(row.id) || typeof row.program!=='string' || typeof row.message!=='string' || Array.from(row.message).length>=4000 || ['[민감 정보가 포함된 로그]','[구조화 로그 내용 생략]'].includes(row.message) || row.truncated || row.unknownTime) fail('ARCHIVE_LOSS');
             ids.add(row.id); const stamp=monitorTimestamp(row.time);
             if(stamp===null || stamp<monitorTimestamp(iso(start)) || stamp>=monitorTimestamp(iso(end))) fail('ARCHIVE_TIME_RANGE');
+            const senderFact=bounceSenderEvent(row);if(senderFact)senderFacts.push(senderFact);
             const event=bounceEvent(row); if(event) events.push(event);
             else if (/\bstatus=bounced\b/.test(row.message) && /\bdsn=5\./.test(row.message)) fail('ARCHIVE_PARSE_LOSS');
           }
@@ -82,7 +105,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           else if(result.partialReason!==null || result.complete===false) fail('ARCHIVE_INCOMPLETE');
         } while(cursor);
         if (signal.aborted || monotonicNow()-started>=cap.milliseconds) fail('COLLECTION_LIMIT');
-        return events;
+        return correlateBounceSenders(events,senderFacts);
       } catch(e) { if ((e.status===410 || e.statusCode===410) && attempt===0) continue; throw e; }
     }
   }
@@ -111,10 +134,11 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           if(seen.has(event.key))continue;
           seen.add(event.key);state.seen.push({key:event.key,at:event.at});
           let row=recipients.get(event.recipient);
-          if(!row){row={id:randomUUID(),recipient:event.recipient,firstSeenAt:event.at,lastSeenAt:event.at,bounceCount:0,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,internalExcluded:policy.internal(event.recipient),supported:event.supported,manual:null,autoUntil:null,releasedAt:null};state.recipients.push(row);recipients.set(event.recipient,row);}
+          if(!row){row={id:randomUUID(),recipient:event.recipient,firstSeenAt:event.at,lastSeenAt:event.at,bounceCount:0,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,internalExcluded:policy.internal(event.recipient),supported:event.supported,manual:null,autoUntil:null,releasedAt:null,sender:null,resolvedAt:null};state.recipients.push(row);recipients.set(event.recipient,row);}
           row.bounceCount++;
+          if(row.resolvedAt!==null && monitorTimestamp(event.stamp)>monitorTimestamp(row.resolvedAt))row.resolvedAt=null;
           if(Date.parse(event.at)<Date.parse(row.firstSeenAt))row.firstSeenAt=event.at;
-          if(Date.parse(event.at)>=Date.parse(row.lastSeenAt))Object.assign(row,{lastSeenAt:event.at,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key});
+          if(Date.parse(event.at)>=Date.parse(row.lastSeenAt))Object.assign(row,{lastSeenAt:event.at,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,sender:event.sender});
           const afterRelease=row.releasedAt===null || monitorTimestamp(event.stamp)>monitorTimestamp(row.releasedAt);
           if(settings.bounceAuto.enabled && event.supported && !policy.internal(event.recipient) && ['5.1.1','5.1.10'].includes(event.dsn) && afterRelease){
             const until=Date.parse(event.at)+settings.bounceAuto.durationMinutes*minute;
@@ -138,17 +162,17 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
     } finally {clearTimeout(timer);parent?.removeEventListener('abort',abort);running=false;}
   }
   async function list(query={}) {
-    if(!object(query) || Object.keys(query).some(k=>!['q','state','before','limit'].includes(k)) || query.q!==undefined && (typeof query.q!=='string' || Array.from(query.q).length>200 || /[\x00-\x1f\x7f]/.test(query.q)) || !['all','suppressed','unsuppressed','internal'].includes(query.state??'all') || query.limit!==undefined && (!/^[1-9]\d*$/.test(String(query.limit)) || Number(query.limit)>100))throw invalid();
+    if(!object(query) || Object.keys(query).some(k=>!['q','state','before','limit'].includes(k)) || query.q!==undefined && (typeof query.q!=='string' || Array.from(query.q).length>200 || /[\x00-\x1f\x7f]/.test(query.q)) || !['all','suppressed','unsuppressed','internal','auto','manual','resolved'].includes(query.state??'all') || query.limit!==undefined && (!/^[1-9]\d*$/.test(String(query.limit)) || Number(query.limit)>100))throw invalid();
     const state=await readState(),settings=await readSettings();
-    const rows=state.recipients.map(r=>projection(r,settings)).filter(r=>(!query.q || (r.recipient+' '+r.lastDsn+' '+r.lastReason).toLowerCase().includes(query.q.toLowerCase())) && (query.state===undefined || query.state==='all' || query.state==='internal'&&r.internalExcluded || query.state==='suppressed'&&!r.internalExcluded&&r.state!=='none' || query.state==='unsuppressed'&&!r.internalExcluded&&r.state==='none')).sort((a,b)=>b.lastSeenAt.localeCompare(a.lastSeenAt)||a.id.localeCompare(b.id));
+    const rows=state.recipients.map(r=>projection(r,settings)).filter(r=>(!query.q || (r.recipient+' '+r.lastDsn+' '+r.lastReason+' '+(r.sender??'')).toLowerCase().includes(query.q.toLowerCase())) && (query.state===undefined || query.state==='all' || query.state==='resolved'&&r.resolvedAt!==null || ['auto','manual'].includes(query.state)&&!r.internalExcluded&&r.state===query.state || query.state==='internal'&&r.internalExcluded || query.state==='suppressed'&&!r.internalExcluded&&r.state!=='none' || query.state==='unsuppressed'&&!r.internalExcluded&&r.state==='none')).sort((a,b)=>b.lastSeenAt.localeCompare(a.lastSeenAt)||a.id.localeCompare(b.id));
     let index=0;
     if(query.before!==undefined){if(typeof query.before!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(query.before))throw invalid();const id=Buffer.from(query.before,'base64url').toString();if(Buffer.from(id).toString('base64url')!==query.before)throw invalid();index=rows.findIndex(r=>r.id===id)+1;if(!index)throw invalid();}
     const limit=Number(query.limit??50),items=rows.slice(index,index+limit);
     return {items,total:rows.length,nextBefore:index+limit<rows.length?Buffer.from(items.at(-1).id).toString('base64url'):null,collection:{...state.collection,completedEnd:state.completedEnd,reason:collectionError??state.collection.reason},policy:policyStatus()};
   }
   async function mutate({id,data,actor,ip},kind) {
-    const names=kind==='suppress'?(data?.mode==='duration'?['mode','minutes','etag']:['mode','etag']):['etag'];
-    if(!exact(data,names)||typeof data.etag!=='string'||typeof id!=='string'||id.length>128 || kind==='suppress'&&(!['duration','manual'].includes(data.mode)||data.mode==='duration'&&(!Number.isSafeInteger(data.minutes)||data.minutes<1||data.minutes>525600)))throw invalid();
+    const names=kind==='resolution'?['resolved','etag']:kind==='suppress'?(data?.mode==='duration'?['mode','minutes','etag']:['mode','etag']):['etag'];
+    if(!exact(data,names)||typeof data.etag!=='string'||typeof id!=='string'||id.length>128 || kind==='resolution'&&typeof data.resolved!=='boolean' || kind==='suppress'&&(!['duration','manual'].includes(data.mode)||data.mode==='duration'&&(!Number.isSafeInteger(data.minutes)||data.minutes<1||data.minutes>525600)))throw invalid();
     return lock.run('mail-bounces',async()=>{
       const state=await readState(),settings=await readSettings(),row=state.recipients.find(r=>r.id===id);
       if(!row)throw new AppError(404,'NOT_FOUND','반송 주소를 찾을 수 없어요.');assertUnchanged(data.etag,row);
@@ -157,6 +181,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
       if(kind==='delete' && active(row,settings)!=='none')throw new AppError(409,'BOUNCE_SUPPRESSED','먼저 억제를 해제해 주세요.');
       const before=structuredClone(row);
       if(kind==='suppress')row.manual={until:data.mode==='manual'?null:iso(now()+data.minutes*minute),actor:String(actor??'admin'),at:iso(now())};
+      else if(kind==='resolution')row.resolvedAt=data.resolved?iso(now()):null;
       else if(kind==='release'){row.manual=null;row.autoUntil=null;row.releasedAt=iso(now());}
       else state.recipients=state.recipients.filter(r=>r.id!==id);
       state.revision++;
@@ -166,5 +191,5 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
       return result;
     });
   }
-  return {initialize,settingsChanged,refreshDomains,runOnce,list,suppress:args=>mutate(args,'suppress'),release:args=>mutate(args,'release'),remove:args=>mutate(args,'delete')};
+  return {initialize,settingsChanged,refreshDomains,runOnce,list,suppress:args=>mutate(args,'suppress'),release:args=>mutate(args,'release'),remove:args=>mutate(args,'delete'),resolve:args=>mutate(args,'resolution')};
 }

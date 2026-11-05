@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { AppError } from '../errors.js';
+import { bounceAddress } from './bounce-policy.js';
 import { notificationAddress } from './quota-notification-state.js';
 
 export const monitorItems = Object.freeze(['account', 'total', 'queue', 'relayReceived', 'relayRejected']);
@@ -62,12 +63,14 @@ export function validBounces(v) {
   if (!keys(v,Object.keys(emptyBounces())) || v.v!==1 || !nonnegative(v.revision) || !monitorTime(v.startedAt) || !monitorTime(v.completedEnd) || !Array.isArray(v.recipients) || v.recipients.length>10000 || !Array.isArray(v.seen) || !keys(v.collection,['lastAttemptAt','reason']) || !monitorTime(v.collection.lastAttemptAt) || !(v.collection.reason===null||safeText(v.collection.reason))) return false;
   const ids=new Set(),addresses=new Set();
   for (const r of v.recipients) {
-    if (!keys(r,['id','recipient','firstSeenAt','lastSeenAt','bounceCount','lastDsn','lastReason','sourceEventKey','internalExcluded','supported','manual','autoUntil','releasedAt']) || !safeText(r.id) || !r.id || ids.has(r.id) || !safeText(r.recipient) || !r.recipient || addresses.has(r.recipient) || !monitorTime(r.firstSeenAt) || r.firstSeenAt===null || !monitorTime(r.lastSeenAt) || r.lastSeenAt===null || !integer(r.bounceCount) || !/^5\.\d{1,3}\.\d{1,3}$/.test(r.lastDsn) || !safeText(r.lastReason) || r.lastReason.length>300 || !/^[a-f0-9]{64}$/.test(r.sourceEventKey) || typeof r.internalExcluded!=='boolean' || typeof r.supported!=='boolean' || !monitorTime(r.autoUntil) || !monitorTime(r.releasedAt)) return false;
+    if (!(keys(r,['id','recipient','firstSeenAt','lastSeenAt','bounceCount','lastDsn','lastReason','sourceEventKey','internalExcluded','supported','manual','autoUntil','releasedAt']) || keys(r,['id','recipient','firstSeenAt','lastSeenAt','bounceCount','lastDsn','lastReason','sourceEventKey','internalExcluded','supported','manual','autoUntil','releasedAt','sender','resolvedAt'])) || !safeText(r.id) || !r.id || ids.has(r.id) || !safeText(r.recipient) || !r.recipient || addresses.has(r.recipient) || !monitorTime(r.firstSeenAt) || r.firstSeenAt===null || !monitorTime(r.lastSeenAt) || r.lastSeenAt===null || !integer(r.bounceCount) || !/^5\.\d{1,3}\.\d{1,3}$/.test(r.lastDsn) || !safeText(r.lastReason) || r.lastReason.length>300 || !/^[a-f0-9]{64}$/.test(r.sourceEventKey) || typeof r.internalExcluded!=='boolean' || typeof r.supported!=='boolean' || !monitorTime(r.autoUntil) || !monitorTime(r.releasedAt)) return false;
+    if (Object.hasOwn(r,'sender') && (!(r.sender===null || safeText(r.sender)&&r.sender.length<=320&&bounceAddress(r.sender)?.recipient===r.sender) || !monitorTime(r.resolvedAt))) return false;
     if (r.manual!==null && (!keys(r.manual,['until','actor','at']) || !monitorTime(r.manual.until) || !monitorTime(r.manual.at) || r.manual.at===null || !safeText(r.manual.actor))) return false;
     ids.add(r.id);addresses.add(r.recipient);
   }
   return v.seen.every(e=>keys(e,['key','at'])&&/^[a-f0-9]{64}$/.test(e.key)&&monitorTime(e.at)&&e.at!==null) && new Set(v.seen.map(e=>e.key)).size===v.seen.length;
 }
+export function normalizeBounces(value) { if(!validBounces(value))throw unavailable(); return {...value,recipients:value.recipients.map(r=>({sender:null,resolvedAt:null,...r}))}; }
 const unavailable = () => new AppError(503, 'MONITOR_STORE_UNAVAILABLE', '감시 저장소를 확인해 주세요.');
 export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem } = {}) {
   const spec = { bounces: {max:16*1024*1024, fallback:emptyBounces, valid:validBounces}, settings: { max: 1024*1024, fallback: defaultMonitorSettings, valid: v => { try { return JSON.stringify(v) === JSON.stringify(validateMonitorSettings(v)); } catch { return false; } } }, state: { max: 4*1024*1024, fallback: emptyMonitorState, valid: validMonitorState } };
@@ -81,7 +84,7 @@ export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem
       if (!stat.isFile() || stat.size > spec[name].max || (stat.mode & 0o777) !== 0o600) throw unavailable();
       const value = JSON.parse(await handle.readFile('utf8'));
       if (!spec[name].valid(value)) throw unavailable();
-      return value;
+      return name==='bounces'?normalizeBounces(value):value;
     } catch (e) { if (e.code === 'ENOENT') return spec[name].fallback(); throw unavailable(); }
     finally { await handle?.close(); }
   }
@@ -99,5 +102,5 @@ export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem
     } catch { throw unavailable(); }
     finally { await file?.close(); await parent?.close(); await fs.unlink(tmp).catch(()=>{}); }
   }
-  return { readBounces:()=>read('bounces'), saveBounces:v=>write('bounces',v), readSettings:()=>read('settings'), saveSettings:v=>write('settings',v), readState:()=>read('state'), saveState:v=>write('state',v) };
+  return { readBounces:()=>read('bounces'), saveBounces:v=>write('bounces',normalizeBounces(v)), readSettings:()=>read('settings'), saveSettings:v=>write('settings',v), readState:()=>read('state'), saveState:v=>write('state',v) };
 }

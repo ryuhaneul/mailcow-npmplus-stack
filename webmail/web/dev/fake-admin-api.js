@@ -186,7 +186,7 @@ export function createFakeAdminApi() {
           if(state.bounces.readError)return fail(state.bounces.readError);
           state.bounces.queries.push(url.search);
           const q=(url.searchParams.get('q')??'').toLowerCase(),filter=url.searchParams.get('state')??'all';
-          return page(state.bounces.items.map(project).filter(r=>(r.recipient+' '+r.lastReason+' '+(r.sender??'')).toLowerCase().includes(q)&&(filter==='all'||filter==='resolved'&&r.resolvedAt||filter==='internal'&&r.internalExcluded||filter==='suppressed'&&!r.internalExcluded&&r.state!=='none'||filter==='unsuppressed'&&!r.internalExcluded&&r.state==='none')));
+          return page(state.bounces.items.map(project).filter(r=>(r.recipient+' '+r.lastReason+' '+(r.sender??'')).toLowerCase().includes(q)&&(filter==='all'||['auto','manual'].includes(filter)&&!r.internalExcluded&&r.state===filter||filter==='resolved'&&r.resolvedAt||filter==='internal'&&r.internalExcluded||filter==='suppressed'&&!r.internalExcluded&&r.state!=='none'||filter==='unsuppressed'&&!r.internalExcluded&&r.state==='none')));
         }
         return fail({status:404,code:'NOT_FOUND',message:'합성 경로 없음'});
       }

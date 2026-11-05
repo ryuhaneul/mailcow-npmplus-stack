@@ -53,3 +53,47 @@ test('fail2ban unwhitelist fixture returns404 for absent entry without mutation'
  await fake.middleware({url:'/api/admin/fail2ban/actions',method:'POST',headers:{},async *[Symbol.asyncIterator](){yield JSON.stringify({network:'192.0.2.99',action:'unwhitelist'});}},response,()=>assert.fail('unexpected next'));
  assert.equal(response.statusCode,404);assert.deepEqual(result.error,{status:404,code:'NOT_FOUND',message:'차단 안 함 목록에 없는 주소예요.'});assert.deepEqual(fake.state.fail2ban,initial);
 });
+
+async function monitorFakeRequest(fake,path,{method='GET',body}={}) {
+ let result;const response={setHeader(){},end(value){result=JSON.parse(value);}};
+ await fake.middleware({url:path,method,headers:{'x-mailadmin-csrf':fake.state.session.csrf},async *[Symbol.asyncIterator](){if(body)yield JSON.stringify(body);}},response,()=>assert.fail('unexpected next'));
+ return {status:response.statusCode??200,body:result};
+}
+test('monitor draft validation, numeric payload and window-only changes preserve bounce settings',async()=>{
+ const {defaultMonitorSettings}=await import('../../server/admin/mail-monitor-state.js');const {monitorSettingsValid,numericMonitorSettings,monitorChanges}=await import('../../web/src/admin/pages/monitor.js');
+ const before=defaultMonitorSettings(),after=structuredClone(before);assert.equal(monitorSettingsValid(before),true);after.rules.relayReceived.windowMinutes=15;assert.equal(monitorChanges(before,after).length,1);
+ after.enabled=true;assert.equal(monitorSettingsValid(after),false);after.recipients=['ops@example.com'];after.repeatMinutes='60';after.rules.account[0].threshold='51';assert.equal(monitorSettingsValid(after),true);assert.equal(numericMonitorSettings(after).rules.account[0].threshold,51);assert.deepEqual(numericMonitorSettings(after).bounceAuto,before.bounceAuto);
+ for(const value of ['',0,-1,1.5,'NaN']){after.repeatMinutes=value;assert.equal(Boolean(monitorSettingsValid(after)),false);}
+});
+test('monitor fixture has two independent account windows, unknown/disabled states and shared-etag conflicts',async()=>{
+ const fake=createFakeAdminApi();const view=(await monitorFakeRequest(fake,'/api/admin/monitor')).body;
+ const status=(await monitorFakeRequest(fake,'/api/admin/monitor/status')).body;assert.equal(status.metrics.length,5);assert.notEqual(status.metrics[0].windows[0].target,status.metrics[0].windows[1].target);
+ fake.state.monitor.mode='partial';const partial=(await monitorFakeRequest(fake,'/api/admin/monitor/status')).body.metrics.find(m=>m.item==='total').windows[1];assert.equal(partial.value,null);assert.equal(partial.complete,false);assert.equal(partial.reason,'ARCHIVE_GAP');assert.ok(partial.previous);
+ fake.state.monitor.mode='warmup';assert.equal((await monitorFakeRequest(fake,'/api/admin/monitor/status')).body.metrics[0].windows[0].reason,'WARMING_UP');
+ const saved=await monitorFakeRequest(fake,'/api/admin/monitor',{method:'PUT',body:{...view.settings,enabled:false,etag:view.etag}});assert.equal(saved.status,200);assert.equal((await monitorFakeRequest(fake,'/api/admin/monitor/status')).body.enabled,false);
+ assert.equal((await monitorFakeRequest(fake,'/api/admin/monitor',{method:'PUT',body:{...view.settings,etag:view.etag}})).status,409);
+});
+test('bounce fixture resolution is independent of suppression; old server fields remain optional',async()=>{
+ const fake=createFakeAdminApi(),list=(await monitorFakeRequest(fake,'/api/admin/bounces?limit=50')).body,row=list.items.find(r=>r.id==='bounce-2');const before=structuredClone(row.manual);
+ const result=await monitorFakeRequest(fake,'/api/admin/bounces/'+row.id+'/resolution',{method:'PUT',body:{resolved:true,etag:row.etag}});assert.equal(result.status,200);assert.ok(result.body.resolvedAt);assert.deepEqual(result.body.manual,before);assert.equal(result.body.state,'manual');
+ const filtered=(await monitorFakeRequest(fake,'/api/admin/bounces?state=resolved')).body;assert.ok(filtered.items.some(r=>r.id===row.id));
+ const unresolved=await monitorFakeRequest(fake,'/api/admin/bounces/'+row.id+'/resolution',{method:'PUT',body:{resolved:false,etag:result.body.etag}});assert.equal(unresolved.body.resolvedAt,null);assert.deepEqual(unresolved.body.manual,before);
+ const {bounceStatus}=await import('../../web/src/admin/pages/bounces.js');assert.equal(bounceStatus({...row,internalExcluded:true}).state,'internal');assert.equal(bounceStatus({...row,manual:{until:'2000-01-01T00:00:00.000Z'},state:'none'}).state,'none');
+});
+test('CSV export drains all filtered pages, includes BOM/KST/sender and escapes formulas',async()=>{
+ const {exportBouncesCsv}=await import('../../web/src/admin/pages/bounces.js');const fake=createFakeAdminApi(),template=fake.state.bounces.items[3];fake.state.bounces.items=Array.from({length:71},(_,i)=>({...template,id:'csv-'+i,recipient:(i?'csv'+i:'=FORMULA')+'@example.net',sender:'account@example.com',lastSeenAt:'2026-11-05T00:00:00.000Z'}));
+ const csv=await exportBouncesCsv(async path=>(await monitorFakeRequest(fake,path)).body,{q:'example.net',state:'resolved'});assert.ok(csv.startsWith('\ufeff'));assert.equal(csv.split('\r\n').filter(Boolean).length,72);assert.ok(csv.includes("'=FORMULA@example.net"));assert.ok(csv.includes('account@example.com'));assert.ok(csv.includes('09:00'));assert.equal(fake.state.bounces.queries.length,2);assert.ok(fake.state.bounces.queries.every(q=>q.includes('state=resolved')&&q.includes('q=example.net')));
+ await assert.rejects(exportBouncesCsv(async()=>({items:[],total:1,nextBefore:null})),/목록이 바뀌었습니다/);
+});
+test('settings and approved monitoring pages compile with existing admin components; overview keeps its sections',async()=>{
+ const {createServer}=await import('vite');const {fileURLToPath}=await import('node:url');const {readFile}=await import('node:fs/promises');
+ const server=await createServer({root:fileURLToPath(new URL('../../web',import.meta.url)),configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),server:{middlewareMode:true,watch:null},appType:'custom'});
+ try{
+  for(const name of ['Settings','Monitor','Bounces'])assert.equal(typeof(await server.ssrLoadModule('/src/admin/pages/'+name+'.jsx')).default,'function');
+  const Cards=(await server.ssrLoadModule('/src/admin/components/MonitoringStatusCards.jsx')).default;assert.equal(Cards({resource:{loading:true}}).props['aria-label'],'감시 상태');const disabled=Cards({resource:{data:{enabled:false}}});assert.ok(disabled);
+  const settings=(await server.ssrLoadModule('/src/admin/pages/Settings.jsx')).default({parts:['bounces']});assert.equal(settings.props.children.at(-1).type.name,'Bounces');
+  const overview=await readFile(new URL('../../web/src/admin/pages/Overview.jsx',import.meta.url),'utf8');assert.equal((overview.match(/<MonitoringStatusCards /g)||[]).length,1);assert.ok(overview.indexOf('<StatusCards ')<overview.indexOf('<MonitoringStatusCards '));assert.ok(overview.indexOf('<MonitoringStatusCards ')<overview.indexOf('<h2>인증서'));
+  for(const section of ['메일 큐','메일 저장소','호환 사용량','mailcow 관리자','메일 자동 비움'])assert.ok(overview.includes(section));
+  const css=await readFile(new URL('../../web/src/admin/pages/monitor.css',import.meta.url),'utf8');assert.ok(css.includes('white-space:normal'));assert.ok(css.includes('border:1px solid var(--line-2)'));assert.ok(!css.includes('border-color:var(--ink-3)'));
+ }finally{await server.close();}
+});

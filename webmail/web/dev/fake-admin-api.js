@@ -1,3 +1,5 @@
+import { defaultMonitorSettings,validateMonitorSettings } from '../../server/admin/mail-monitor-state.js';
+import { etag } from '../../server/admin/lock.js';
 import { isIP } from 'node:net';
 import { createFaviconService } from '../../server/admin/services/favicon.js';
 import { createResourceLock } from '../../server/admin/lock.js';
@@ -28,6 +30,13 @@ export function createFakeAdminApi() {
   state.flow = { joinMode: 'ok', failedLine: null, partialLine: null, authLostAtBatch: 0, batches: [] };
   const accountProtocols = { imap: true, pop3: true, smtp: true, sieve: true, eas: true, dav: true };
   state.quotaNotifications = { settings: { enabled: false, sender: '', threshold: 90, intervalMinutes: 60 }, etag: 'synthetic-quota-1', effectiveEnabled: false, state: { v: 1, accounts: {}, lastCheckAt: null, lastRunFailure: null }, warnings: [] };
+  state.monitor = {settings:{...defaultMonitorSettings(),bounceAuto:{enabled:true,durationMinutes:60},enabled:true,recipients:['ops@example.com','security@example.com']},mode:'complete',readError:null,statusError:null,writeError:null,writes:[],at:new Date().toISOString(),history:[{id:'monitor-event-1',at:new Date().toISOString(),phase:'alert',item:'relayRejected',target:'192.0.2.24',values:[{windowMinutes:5,value:32}],thresholds:[{windowMinutes:5,threshold:20}],recipientResults:[{recipient:'ops@example.com',result:'sent'}]}]};
+  state.bounces = {readError:null,writeError:null,queries:[],collectionError:null,items:[
+    {id:'bounce-1',recipient:'missing@example.net',bounceCount:12,lastDsn:'5.1.1',lastReason:'받는 주소 없음',sender:'sender@example.com',manual:null,autoUntil:new Date(Date.now()+3600000).toISOString(),resolvedAt:null},
+    {id:'bounce-2',recipient:'nomail@example.org',bounceCount:4,lastDsn:'5.1.10',lastReason:'메일을 받지 않는 도메인 (null MX)',sender:null,manual:{until:null,actor:'합성관리자',at:new Date().toISOString()},autoUntil:null,resolvedAt:null},
+    {id:'bounce-3',recipient:'person@example.com',bounceCount:1,lastDsn:'5.1.1',lastReason:'받는 주소 없음',internalExcluded:true,sender:'sender@example.com',manual:null,autoUntil:null,resolvedAt:null},
+    {id:'bounce-4',recipient:'old@example.net',bounceCount:2,lastDsn:'5.2.2',lastReason:'영구 배달 실패 (5.2.2)',sender:'bulk@example.com',manual:null,autoUntil:null,resolvedAt:new Date().toISOString()},
+  ].map(r=>({supported:true,internalExcluded:false,releasedAt:null,lastSeenAt:new Date().toISOString(),...r}))};
   state.accounts = { patchError: null, result: 'ok', version: 1, revertible: false, items: [
     { address: 'person@example.com', name: '합성 구성원', kind: 'personal', active: 1, quotaGb: 20, usedBytes: 2147483648, messages: 123 },
     { address: 'team@example.com', name: '합성 팀', kind: 'team', active: 1, quotaGb: 50, usedBytes: 1073741824, messages: 20 },
@@ -155,6 +164,53 @@ export function createFakeAdminApi() {
     }
     if (state.failure || !state.session) { response.statusCode = 403; response.end(JSON.stringify({ error: state.failure ?? { code: 'NO_SESSION', message: '로그인이 필요해요.' } })); return; }
     if (url.pathname === '/api/admin/auth/session') return response.end(JSON.stringify({ ...state.session, features: state.features }));
+    if (/^\/api\/admin\/(?:monitor|bounces)(?:\/|$)/.test(url.pathname)) {
+      const send=data=>response.end(JSON.stringify(data)),monitorView=()=>({settings:state.monitor.settings,etag:etag(state.monitor.settings),effectiveEnabled:state.monitor.settings.enabled,warnings:[]});
+      const active=row=>row.manual&&(row.manual.until===null||Date.parse(row.manual.until)>Date.now())?'manual':state.monitor.settings.bounceAuto.enabled&&row.autoUntil&&Date.parse(row.autoUntil)>Date.now()?'auto':'none';
+      const project=row=>({...row,state:active(row),etag:etag(row)});
+      if(request.method==='GET'){
+        if(url.pathname.startsWith('/api/admin/monitor')&&state.monitor.readError)return fail(state.monitor.readError);
+        if(url.pathname==='/api/admin/monitor')return send(monitorView());
+        if(url.pathname==='/api/admin/monitor/status'){
+          if(state.monitor.statusError)return fail(state.monitor.statusError);
+          const values={account:[18,82],total:[284,1220],queue:[23],relayReceived:[346],relayRejected:[32]};
+          const metrics=Object.keys(values).map(item=>({item,windows:(Array.isArray(state.monitor.settings.rules[item])?state.monitor.settings.rules[item]:[state.monitor.settings.rules[item]]).map((r,i)=>{
+            const complete=state.monitor.mode!=='warmup'&&!(state.monitor.mode==='partial'&&item==='total'&&i===1),value=values[item][i],target=item==='account'?(i===0?'sender@example.com':'bulk@example.com'):item.startsWith('relay')?'192.0.2.24':'all';
+            return {windowMinutes:r.windowMinutes??0,threshold:r.threshold,value:complete?value:null,target:complete?target:null,targets:complete?[{target,value}]:[],complete,status:!complete?'unknown':value>r.threshold?'exceeded':value===r.threshold?'warning':'normal',reason:complete?null:state.monitor.mode==='warmup'?'WARMING_UP':'ARCHIVE_GAP',...(!complete&&state.monitor.mode==='partial'?{previous:{value:100,target,observedAt:state.monitor.at}}:{})};
+          })}));
+          return send({enabled:state.monitor.settings.enabled&&state.monitor.mode!=='disabled',asOf:state.monitor.at,lastAttemptAt:state.monitor.at,lastCompleteAt:state.monitor.mode==='complete'?state.monitor.at:null,metrics,sources:{},policy:{available:true,degraded:false}});
+        }
+        const page=items=>{const before=url.searchParams.get('before'),index=before?items.findIndex(r=>r.id===Buffer.from(before,'base64url').toString())+1:0,limit=Math.min(100,Number(url.searchParams.get('limit')??50));if(before&&!index)return fail({status:422,code:'INVALID_INPUT',message:'목록을 다시 읽어 주세요.'});const selected=items.slice(index,index+limit);return send({items:selected,total:items.length,nextBefore:index+limit<items.length?Buffer.from(selected.at(-1).id).toString('base64url'):null,...(url.pathname.endsWith('bounces')?{collection:{completedEnd:state.monitor.at,lastAttemptAt:state.monitor.at,reason:state.bounces.collectionError},policy:{available:true,degraded:false}}:{})});};
+        if(url.pathname==='/api/admin/monitor/notifications')return page(state.monitor.history);
+        if(url.pathname==='/api/admin/bounces'){
+          if(state.bounces.readError)return fail(state.bounces.readError);
+          state.bounces.queries.push(url.search);
+          const q=(url.searchParams.get('q')??'').toLowerCase(),filter=url.searchParams.get('state')??'all';
+          return page(state.bounces.items.map(project).filter(r=>(r.recipient+' '+r.lastReason+' '+(r.sender??'')).toLowerCase().includes(q)&&(filter==='all'||filter==='resolved'&&r.resolvedAt||filter==='internal'&&r.internalExcluded||filter==='suppressed'&&!r.internalExcluded&&r.state!=='none'||filter==='unsuppressed'&&!r.internalExcluded&&r.state==='none')));
+        }
+        return fail({status:404,code:'NOT_FOUND',message:'합성 경로 없음'});
+      }
+      if(request.headers['x-mailadmin-csrf']!==state.session.csrf)return fail({status:403,code:'CSRF',message:'다시 로그인해 주세요.'});
+      let body;try{let raw='';for await(const part of request)raw+=part;body=JSON.parse(raw);}catch{return fail({status:422,code:'INVALID_INPUT',message:'입력 값을 확인해 주세요.'});}
+      if(url.pathname==='/api/admin/monitor'&&request.method==='PUT'){
+        if(state.monitor.writeError)return fail(state.monitor.writeError);
+        if(body.etag!==etag(state.monitor.settings))return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 설정이 바뀌었습니다.'});
+        try{const {etag:expected,...settings}=body;state.monitor.settings=validateMonitorSettings(settings);}catch{return fail({status:422,code:'INVALID_INPUT',message:'감시 설정을 확인해 주세요.'});}
+        state.monitor.writes.push(body);return send(monitorView());
+      }
+      if(state.bounces.writeError)return fail(state.bounces.writeError);
+      const match=/^\/api\/admin\/bounces\/([^/]+)(?:\/(suppression|resolution))?$/.exec(url.pathname),row=state.bounces.items.find(r=>r.id===match?.[1]);
+      if(!row)return fail({status:404,code:'NOT_FOUND',message:'주소가 없습니다.'});
+      if(body.etag!==etag(row))return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었습니다.'});
+      if(match[2]==='resolution'&&request.method==='PUT'&&typeof body.resolved==='boolean'){row.resolvedAt=body.resolved?new Date().toISOString():null;return send(project(row));}
+      if(match[2]==='suppression'&&request.method==='PUT'){
+        if(row.internalExcluded||!row.supported||!['manual','duration'].includes(body.mode)||body.mode==='duration'&&(!Number.isSafeInteger(body.minutes)||body.minutes<1||body.minutes>525600))return fail({status:422,code:'INVALID_INPUT',message:'억제 값을 확인해 주세요.'});
+        row.manual={until:body.mode==='manual'?null:new Date(Date.now()+body.minutes*60000).toISOString(),actor:'합성관리자',at:new Date().toISOString()};return send(project(row));
+      }
+      if(match[2]==='suppression'&&request.method==='DELETE'){row.manual=null;row.autoUntil=null;row.releasedAt=new Date().toISOString();return send(project(row));}
+      if(!match[2]&&request.method==='DELETE'){if(active(row)!=='none')return fail({status:409,code:'BOUNCE_SUPPRESSED',message:'먼저 억제를 해제해 주세요.'});state.bounces.items=state.bounces.items.filter(r=>r!==row);return send({id:row.id,deleted:true});}
+      return fail({status:404,code:'NOT_FOUND',message:'합성 경로 없음'});
+    }
     if (/^\/api\/admin\/trusted(?:\/|$)/.test(url.pathname)) {
       if (state.features.trusted !== true) return fail({ status: 404, code: 'NOT_FOUND', message: '합성 경로 없음' });
       if (state.session.step !== 'done') return fail({ status: 403, code: 'FORBIDDEN', message: '관리 권한이 필요해요.' });

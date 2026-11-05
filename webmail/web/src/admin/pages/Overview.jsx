@@ -1,3 +1,4 @@
+import MonitoringStatusCards from '../components/MonitoringStatusCards.jsx';
 import { useAdminData } from '../hooks/useAdminData.js';
 import StatusCards from '../components/StatusCards.jsx';
 import FtsStatus from '../components/FtsStatus.jsx';
@@ -16,11 +17,12 @@ export function administratorRow(item) {
 export function autoexpungeMessage(days) { return typeof days === 'number' ? `스팸·휴지통에서 ${days}일 지난 메일을 자동으로 지웁니다` : '꺼져 있습니다'; }
 export default function Overview() {
   const status = useAdminData('/api/admin/status'), queue = useAdminData('/api/admin/queue'), compat = useAdminData('/api/admin/compat-usage'), data = status.data;
+  const monitor = useAdminData('/api/admin/monitor/status');
   const fts = useAdminData('/api/admin/fts-status');
   const admins = useAdminData('/api/admin/admins'), autoexpunge = useAdminData('/api/admin/autoexpunge');
-  const reload = () => { status.reload(); queue.reload(); compat.reload(); admins.reload(); autoexpunge.reload(); fts.reload(); };
+  const reload = () => { status.reload(); queue.reload(); compat.reload(); admins.reload(); autoexpunge.reload(); fts.reload(); monitor.reload(); };
   return <div data-admin-page="overview"><div class="page-head"><div><h1>운영 현황</h1><p>마지막 확인 {kst(Date.now())}</p></div><div class="actions"><button class="btn" type="button" onClick={reload}><AdminIcon name="sync"/>새로고침</button></div></div>
-    <div class="content"><StatusCards resource={status}/><div class="grid2"><section class="card"><h2>인증서</h2><Result resource={status}>
+    <div class="content"><StatusCards resource={status}/><MonitoringStatusCards resource={monitor}/><div class="grid2"><section class="card"><h2>인증서</h2><Result resource={status}>
       {data?.certificates.map(cert => <div class="certificate" key={cert.port}><h3>{cert.port} 포트</h3>{cert.error ? <LoadError error={{ code: cert.error }} title="인증서를 불러오지 못했습니다" retry={status.reload}/> : <><p>{cert.daysRemaining}일 · {kst(cert.expiresAt)} 만료</p><p>{cert.valid ? '검증 성공' : `검증 실패 · ${cert.reason}`}</p></>}</div>)}
     </Result></section><section class="card"><h2>서비스 상태</h2><Result resource={status}>
       <Result value={data?.version} resource={status} title="판 정보를 불러오지 못했습니다"><div class="mini-row"><span>mailcow</span><span>{data?.version.version}</span></div></Result>

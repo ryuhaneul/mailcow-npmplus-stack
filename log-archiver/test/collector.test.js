@@ -510,3 +510,13 @@ test('64 MiB physical line stays below 256 MiB peak RSS with one gap and exact s
   t.diagnostic(`peak RSS ${(peakRssKiB / 1024).toFixed(1)} MiB; discarded ${physicalBytes} bytes; offset ${totalBytes}; gaps 1`);
   assert.ok(peakRssKiB < 256 * 1024, `peak RSS ${peakRssKiB} KiB exceeds 256 MiB`);
 });
+
+test('source successful collection timestamps advance on quiet cycles, separate source failures and reset on restart',async t=>{
+ let current='2026-10-21T09:00:00Z';const f=await fixture(t,{requiredSources:['postfix','dovecot'],now:()=>new Date(current)});
+ assert.deepEqual((await f.collector.status()).sources,{postfix:{lastSuccessfulCollectionAt:null},dovecot:{lastSuccessfulCollectionAt:null}});
+ const dir=path.join(f.dockerRoot,id('a'));await fs.mkdir(dir);await fs.writeFile(path.join(dir,'config.v2.json'),JSON.stringify({Name:'/mailcowdockerized-postfix-mailcow-1',Config:{Labels:{'com.docker.compose.project':'mailcowdockerized','com.docker.compose.service':'postfix-mailcow'}}}));await fs.writeFile(path.join(dir,id('a')+'-json.log'),json('postfix/smtpd[1]: synthetic'));
+ await f.collector.collect();let status=await f.collector.status();assert.equal(status.sources.postfix.lastSuccessfulCollectionAt,new Date(current).toISOString());assert.equal(status.sources.dovecot.lastSuccessfulCollectionAt,null);
+ current='2026-10-21T09:01:00Z';await f.collector.collect();status=await f.collector.status();assert.equal(status.sources.postfix.lastSuccessfulCollectionAt,new Date(current).toISOString());
+ await fs.appendFile(path.join(dir,id('a')+'-json.log'),'partial');current='2026-10-21T09:02:00Z';await f.collector.collect();assert.equal((await f.collector.status()).sources.postfix.lastSuccessfulCollectionAt,'2026-10-21T09:01:00.000Z');
+ await f.restart();assert.equal((await f.collector.status()).sources.postfix.lastSuccessfulCollectionAt,null);
+});

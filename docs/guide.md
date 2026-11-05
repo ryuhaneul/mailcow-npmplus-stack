@@ -1314,3 +1314,7 @@ sudo journalctl -t mailcow-netfilter-watchdog
 설치·업데이트를 반복해도 cron을 중복 생성하지 않습니다. cron 내용이 스택 형식과 다르면 보존하고 경고합니다. 기존 임시 감시의 `/etc/cron.d/netfilter-watchdog`와 `/root/scripts/netfilter-watchdog.sh`는 알려진 원문의 SHA-256과 정확히 일치할 때만 `/root/backups/mailcow-netfilter-watchdog/`(권한 0700)에 원래 경로의 `/`를 `_`로 바꾼 이름과 `.bak.<날짜시각>`을 붙여 백업 후 제거합니다. cron이 백업을 실행하지 않도록 백업은 `/etc/cron.d` 밖에 저장합니다. 수정본은 보존·경고하므로 중복 감시가 남았는지 직접 확인하세요.
 
 감시를 끄려면 `sudo rm /etc/cron.d/mailcow-netfilter-watchdog`를 실행합니다. 완전히 제거하려면 이어서 `sudo rm /usr/local/sbin/mailcow-netfilter-watchdog`를 실행합니다. setup·update를 다시 실행하면 재설치됩니다. 롤백은 cron을 먼저 끈 뒤 스택을 적용 전 HEAD로 되돌립니다. 임시 감시 백업은 조사·복구용으로 보존합니다.
+
+### 메일 감시의 보관기 관측 한계
+
+메일 감시는 최초 시작 및 실제로 관측한 보관기 성공 시각의 null·역행에서 5분/1시간 준비 시간을 다시 적용합니다. 그 사이에 보관기가 재시작되어 null 구간을 놓친 경우는 성공 시각 1필드로 판별할 수 없어 수치가 실제보다 적게 집계되고 이상 알림이 늦거나 빠질 수 있습니다. 없는 발송량을 만들어 거짓 이상 알림을 발생시키는 방식은 아닙니다.

@@ -10,6 +10,12 @@ import { createQuotaNotificationMailer } from './quota-notification-mail.js';
 import { createQuotaNotificationScheduler } from './quota-notification-scheduler.js';
 import { createQuotaNotificationsService } from './services/quota-notifications.js';
 import quotaNotificationRoutes from './routes/quota-notifications.js';
+import { createMonitorStore } from './mail-monitor-state.js';
+import { createMonitorCollector } from './mail-monitor-collector.js';
+import { createMonitorMailer } from './mail-monitor-mail.js';
+import { createMonitorScheduler } from './mail-monitor-scheduler.js';
+import { createMonitorService } from './services/mail-monitor.js';
+import monitorRoutes from './routes/mail-monitor.js';
 import Fastify, { LogController } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { existsSync, statSync } from 'node:fs';
@@ -149,6 +155,17 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.addHook('onReady', async () => quotaNotificationScheduler.start());
   app.addHook('preClose', async () => quotaNotificationScheduler.stop());
   await app.register(quotaNotificationRoutes, { service: quotaNotifications });
+
+  const monitor = createMonitorService({
+    store: createMonitorStore({ dir: config.monitorDir ?? (config.auditDir ? join(config.auditDir, 'mail-monitor') : '/data/mail-monitor') }),
+    collector: createMonitorCollector({ config, mailcow: app.mailcow, logArchive: createLogArchiveClient({ config, logger: app.log }) }),
+    config, mailcow: app.mailcow, audit, lock: adminLock, history, send: createMonitorMailer({ config }),
+  });
+  app.decorate('mailMonitor', monitor);
+  const monitorScheduler = createMonitorScheduler({ service: monitor, logger: app.log });
+  app.addHook('onReady', async () => monitorScheduler.start());
+  app.addHook('preClose', async () => monitorScheduler.stop());
+  await app.register(monitorRoutes, { service: monitor });
 
   const aliases = createAliasesService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('aliases', aliases);

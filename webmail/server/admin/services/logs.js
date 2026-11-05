@@ -56,7 +56,7 @@ function archiveQuery(query) {
 }
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const nullableTime = value => value === null || typeof value === 'string' && Number.isFinite(Date.parse(value));
-function archiveCoverage(value, source) {
+export function archiveCoverage(value, source) {
   if (!object(value) || !Object.hasOwn(archiveSources, value.source) || source && value.source !== source || !nullableTime(value.oldest) || !nullableTime(value.newest) || !Array.isArray(value.gaps)) throw archiveUnavailable();
   return { source: value.source, oldest: value.oldest, newest: value.newest, gaps: value.gaps.map(gap => {
     if (!object(gap) || !nullableTime(gap.from) || !nullableTime(gap.to) || typeof gap.reason !== 'string') throw archiveUnavailable();

@@ -68,7 +68,8 @@ class Collector {
     this.queue = Promise.resolve();
     this.closed = false;
     this.failed = false;
-    this.latest = { backfillComplete: false, generations: [], issues: [], collectionLagSeconds: null };
+    this.successfulCollections = Object.fromEntries(this.requiredSources.map(source => [source, { lastSuccessfulCollectionAt: null }]));
+    this.latest = { backfillComplete: false, generations: [], issues: [], collectionLagSeconds: null, sources: structuredClone(this.successfulCollections) };
   }
 
   collect() {
@@ -90,6 +91,7 @@ class Collector {
   }
 
   async cycle() {
+    this.cycleFailures = new Set();
     const stamp = this.now().toISOString();
     if (!utcTime(stamp)) throw new TypeError('Invalid collector clock');
     const checkpoints = structuredClone(this.checkpoint.generations);
@@ -231,7 +233,11 @@ class Collector {
       return { generation, source: checkpoint.source, instance: checkpoint.instance, path: checkpoint.path, offset: checkpoint.offset, size: checkpoint.observedSize, active: checkpoint.active, visible: file.visible, pendingBytes: Math.max(0, checkpoint.observedSize - checkpoint.offset) };
     });
     const gaps = Object.values(this.checkpoint.generations).flatMap((item) => item.gaps ?? []);
-    this.latest = { observedAt: stamp, transactionId: committed.transactionId, backfillComplete: generations.every((item) => item.pendingBytes === 0) && issues.length === 0, generations, issues, gaps,
+    for (const source of this.requiredSources) {
+      const sourceGenerations = generations.filter(item => item.source === source);
+      if (sourceGenerations.length && sourceGenerations.every(item => item.pendingBytes === 0) && !issues.some(item => item.source === source) && !this.cycleFailures.has(source)) this.successfulCollections[source].lastSuccessfulCollectionAt = stamp;
+    }
+    this.latest = { sources: structuredClone(this.successfulCollections), observedAt: stamp, transactionId: committed.transactionId, backfillComplete: generations.every((item) => item.pendingBytes === 0) && issues.length === 0, generations, issues, gaps,
       collectionLagSeconds: generations.some((item) => item.pendingBytes > 0) ? Math.max(0, (Date.parse(stamp) - Math.min(...[...assigned.keys()].filter((key) => checkpoints[key].offset < checkpoints[key].observedSize).map((key) => Date.parse(checkpoints[key].pendingSince ?? stamp)))) / 1000) : 0 };
     // A disappeared descriptor has been drained. Keep only its checkpoint;
     // retaining unlinked source FDs forever would defeat Docker disk rotation.
@@ -277,6 +283,7 @@ class Collector {
         const next = end === -1 ? chunk.length : end + 1;
         const piece = chunk.subarray(begin, next);
         if (checkpoint.lineTooLongFromOffset !== undefined || pendingBytes + piece.length > MAX_LINE_BYTES) {
+          this.cycleFailures.add(file.source);
           checkpoint.lineTooLongFromOffset ??= checkpoint.offset;
           for (const bytes of pending) consume(bytes);
           pending = [];
@@ -294,7 +301,7 @@ class Collector {
           const raw = Buffer.concat([...pending, piece], pendingBytes + piece.length);
           const nextOffset = checkpoint.offset + raw.length;
           const parsed = parseRecord(raw, file.kind);
-          if (!parsed.valid) this.gap(checkpoint, generation, 'unparseable-record-time', stamp, checkpoint.offset, nextOffset);
+          if (!parsed.valid) { this.cycleFailures.add(file.source); this.gap(checkpoint, generation, 'unparseable-record-time', stamp, checkpoint.offset, nextOffset); }
           const cutoff = Date.parse(stamp) - this.retention[file.source] * 86400000;
           if (parsed.eventTime === null || Date.parse(parsed.eventTime) >= cutoff) records.push({ source: file.source, raw, eventTime: parsed.eventTime, observedAt: stamp });
           consume(raw);

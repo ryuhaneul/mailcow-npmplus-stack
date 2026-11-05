@@ -7,7 +7,7 @@ export const statusThresholds = Object.freeze({ queueSeconds: 30 * 60, certifica
 const rejected = () => new AppError(502, 'MAILCOW_REJECTED', '운영 현황을 읽을 수 없어요.');
 const short = value => Array.from(String(value ?? '')).slice(0, 200).join('');
 function rows(value) { if (value === '') return []; if (Array.isArray(value)) return value; if (value && typeof value === 'object' && !Object.keys(value).length) return []; throw rejected(); }
-function queueItems(value, now) {
+export function queueItems(value, now) {
   return rows(value).map(row => {
     if (!row || !['active', 'deferred', 'hold'].includes(row.queue_name) || typeof row.queue_id !== 'string' || !Number.isFinite(Number(row.arrival_time)) || !Number.isFinite(new Date(Number(row.arrival_time) * 1000).getTime()) || !Number.isFinite(Number(row.message_size)) || Number(row.message_size) < 0 || !Array.isArray(row.recipients)) throw rejected();
     const reasons = [], recipients = row.recipients.map(recipient => {

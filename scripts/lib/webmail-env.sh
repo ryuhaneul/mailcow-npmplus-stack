@@ -465,7 +465,7 @@ PYBOUNCE
 
 webmail_reconcile_bounce_policy() {
     set +x
-    local scripts="$1" dest="$2" mode="${3:-apply}" api_key live_chain
+    local scripts="$1" dest="$2" mode="${3:-apply}" api_key live_chain mismatch=false
     api_key=$(webmail_mailcow_value API_KEY) || return 1
     if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] && [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] && [ -n "$api_key" ]; then
         # Called only after admin readiness. Addresses must agree with live peers.
@@ -473,8 +473,9 @@ webmail_reconcile_bounce_policy() {
             MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" bash "$scripts/apply-postfix-bounce-policy.sh" "$mode" -y || return 1
             return 0
         fi
-        echo '[webmail-env] WARNING: bounce policy addresses unavailable or differ; keeping hook absent' >&2
+        echo '[webmail-env] ERROR: bounce policy addresses unavailable or differ; removing old hook and stopping' >&2
         [ "$mode" != --check ] || return 1
+        mismatch=true
     fi
     if [ "$mode" = --check ]; then
         ! grep -q 'mailstack-bounce-policy' "$MAILCOW_DIR/data/conf/postfix/extra.cf" 2>/dev/null || return 1
@@ -485,8 +486,9 @@ webmail_reconcile_bounce_policy() {
     # Disabled/mismatched prerequisites must not leave a callback to an old listener.
     if grep -q 'mailstack-bounce-policy' "$MAILCOW_DIR/data/conf/postfix/extra.cf" 2>/dev/null; then
         MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" bash "$scripts/apply-postfix-bounce-policy.sh" --revert -y \
-            || echo '[webmail-env] WARNING: bounce policy revert failed; run verify and recover the retained hook' >&2
+            || { echo '[webmail-env] ERROR: bounce policy revert failed; run verify and recover the retained hook' >&2; return 1; }
     fi
+    [ "$mismatch" = false ] || return 1
     return 0
 }
 

@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import SMTPConnection from 'nodemailer/lib/smtp-connection';
 import { mailTlsOptions } from '../mail/imap-pool.js';
 import { notificationAddress } from './quota-notification-state.js';
 import { AppError } from '../errors.js';
@@ -10,7 +11,26 @@ export function monitorMessage(sender, recipient, events) {
   const text='메일 이상 감시 결과\n\n'+lines.join('\n\n');
   return {from:{address:sender},to:[{address:recipient}],envelope:{from:sender,to:[recipient]},subject:'[메일 이상 감시] 판정 결과',text,html:'<pre>'+escape(text)+'</pre>',disableFileAccess:true,disableUrlAccess:true};
 }
-export function createMonitorMailer({ config, transportFactory = nodemailer.createTransport }) {
+// One connection per notification: SMTPTransport.close() does not cancel its active I/O.
+export function createMonitorTransport(options) {
+  const connection=new SMTPConnection(options);
+  let closed=false,finish;
+  const abortError=()=>Object.assign(new Error('Monitor transport closed'),{monitorAbort:true});
+  return nodemailer.createTransport({name:'monitor-smtp',version:'1',
+    send(mail,callback) {
+      let returned=false;
+      finish=(error,result)=>{if(returned)return;returned=true;callback(error,result);};
+      if(closed)return finish(abortError());
+      connection.once('error',finish);
+      connection.connect(error=>{
+        if(error||closed)return finish(error??abortError());
+        connection.send(mail.message.getEnvelope(),mail.message.createReadStream(),finish);
+      });
+    },
+    close(){if(closed)return;closed=true;connection.close();finish?.(abortError());}
+  });
+}
+export function createMonitorMailer({ config, transportFactory = createMonitorTransport }) {
   return async (recipient, events, {signal}={}) => {
     let transport, started=false, aborted;
     try {

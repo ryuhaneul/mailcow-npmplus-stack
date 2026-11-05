@@ -90,6 +90,8 @@ test('settings and approved monitoring pages compile with existing admin compone
  const server=await createServer({root:fileURLToPath(new URL('../../web',import.meta.url)),configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),server:{middlewareMode:true,watch:null},appType:'custom'});
  try{
   for(const name of ['Settings','Monitor','Bounces'])assert.equal(typeof(await server.ssrLoadModule('/src/admin/pages/'+name+'.jsx')).default,'function');
+  const {monitorAlertItemCount}=await server.ssrLoadModule('/src/admin/pages/Monitor.jsx');
+  assert.equal(monitorAlertItemCount([{windows:[{complete:true,status:'warning'},{complete:true,status:'exceeded'}]},{windows:[{complete:true,status:'exceeded'}]},{windows:[{complete:true,status:'normal'}]},{windows:[{complete:false,status:'warning'}]}]),2);assert.equal(monitorAlertItemCount(),0);
   const Cards=(await server.ssrLoadModule('/src/admin/components/MonitoringStatusCards.jsx')).default;assert.equal(Cards({resource:{loading:true}}).props['aria-label'],'감시 상태');const disabled=Cards({resource:{data:{enabled:false}}});assert.ok(disabled);
   const settings=(await server.ssrLoadModule('/src/admin/pages/Settings.jsx')).default({parts:['bounces']});assert.equal(settings.props.children.at(-1).type.name,'Bounces');
   const overview=await readFile(new URL('../../web/src/admin/pages/Overview.jsx',import.meta.url),'utf8');assert.equal((overview.match(/<MonitoringStatusCards /g)||[]).length,1);assert.ok(overview.indexOf('<StatusCards ')<overview.indexOf('<MonitoringStatusCards '));assert.ok(overview.indexOf('<MonitoringStatusCards ')<overview.indexOf('<h2>인증서'));

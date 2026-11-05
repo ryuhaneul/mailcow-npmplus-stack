@@ -541,22 +541,24 @@ for scenario in disabled archive-off; do
     [ "$(head -n1 "$TMP/policy-calls")" = policy:--revert ] || fail late-policy-revert
     pass "$scenario removes existing callback before app changes"
 done
-policy_case mismatch || fail policy-mismatch
+if policy_case mismatch; then fail policy-mismatch-continued; fi
+! grep -q completed "$TMP/policy-calls" || fail mismatch-completed
 ! grep -q 'policy:apply' "$TMP/policy-calls" || fail mismatched-policy-apply
 grep -q 'policy:--revert' "$TMP/policy-calls" || fail mismatched-policy-not-reverted
-pass 'address mismatch warns and removes callback without applying'
+pass 'address mismatch removes old callback and stops update without applying'
 if policy_case apply-failure; then fail policy-failure-ignored; fi
 ! grep -q completed "$TMP/policy-calls" || fail policy-failure-continued
 pass 'normal apply failure stops update'
-policy_case revert-failure || fail disabled-policy-fatal
-grep -q completed "$TMP/policy-calls" || fail revert-failure-stopped
+if policy_case revert-failure; then fail disabled-revert-failure-ignored; fi
+! grep -q completed "$TMP/policy-calls" || fail revert-failure-completed
+grep -q mailstack-bounce-policy "$TMP/policy-mailcow/data/conf/postfix/extra.cf" || fail failed-revert-lost-config
 (
     source "$ROOT/scripts/lib/webmail-env.sh"
     WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"
     webmail_mailcow_value() { echo synthetic; }
     if webmail_reconcile_bounce_policy "$TMP/policy-scripts" "$TMP/app" --check; then exit 1; fi
 ) || fail retained-hook-hidden
-pass 'disabled revert failure warns, permits update and remains visible to verify'
+pass 'disabled revert failure stops update, preserves configuration and remains visible to verify'
 (
     source "$ROOT/scripts/lib/webmail-env.sh"
     WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"

@@ -858,6 +858,10 @@ setup_archive_sync || die "Log archive readiness failed before app changes"
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
+# Remove callbacks before changing apps when policy prerequisites were disabled.
+if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$LOG_ARCHIVE_ENABLE" != true ] || [ -z "$(webmail_mailcow_value API_KEY)" ]; then
+    webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy disable reconciliation failed"
+fi
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 
@@ -914,6 +918,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d --wait --wait-timeout 180 webmail-admin) || die "Webmail admin startup failed"
     fi
 fi
+webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"
 
 # ============================================================
 # Phase 6c: Junk/Trash retention (independent of Webmail)

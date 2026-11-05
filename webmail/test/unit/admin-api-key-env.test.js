@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,21 @@ async function fixture(t) {
         webmail_generate_override "$3"
       `, 'fixture', library, stack, dir], {
         encoding: 'utf8', timeout: 15000,
-        env: { PATH: process.env.PATH, HOME: dir, LC_ALL: 'C' }, cwd: dir,
+        env: { PATH: join(dir, "bin")+":"+process.env.PATH, HOME: dir, LC_ALL: 'C' }, cwd: dir,
       });
+    },
+    async policyFixture(patch = {}) {
+      await writeFile(stack, 'DOMAIN=example.test\nWEBMAIL_ENABLE=true\nWEBMAIL_ADMIN_ENABLE=true\nWEBMAIL_DB_PASSWORD=synthetic-db-only\nLOG_ARCHIVE_ENABLE=true\nLOG_ARCHIVE_KEY=synthetic-archive-key\n');
+      await mkdir(join(dir,'bin'));
+      const config = (service, ip) => ({services:{[service]:{networks:{mail:{ipv4_address:ip}}}},networks:{mail:{name:'mailcowdockerized_mailcow-network'}}});
+      await writeFile(join(dir,'compose-fixture.json'),JSON.stringify({postfix:config('postfix-mailcow','172.22.1.250'),admin:config('webmail-admin','172.22.1.241'),...patch}));
+      await writeFile(join(dir,'bin','docker'), `#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+assert 'config' in sys.argv and '--no-env-resolution' in sys.argv
+v=json.loads((Path(__file__).parent.parent/'compose-fixture.json').read_text())
+print(json.dumps(v['admin' if '--profile' in sys.argv else 'postfix']))
+`,{mode:0o755});
     },
     admin() { return readFile(join(dir, 'webmail-admin.env'), 'utf8'); },
     public() { return readFile(join(dir, 'webmail.env'), 'utf8'); },
@@ -138,3 +151,17 @@ for (const [label, value] of [
     assert.ok(!(await readdir(f.dir)).some(name => name.startsWith('.webmail-admin.env.')));
   });
 }
+
+test('bounce policy env uses declared Compose peers, remains private and is idempotent',async t=>{
+  const f=await fixture(t);await f.configure('API_KEY=synthetic-api-key\n');await f.policyFixture();
+  let result=f.generate(true);assert.equal(result.status,0,result.stderr);assertQuiet(result,'synthetic-api-key');assertQuiet(result,'synthetic-archive-key');
+  const admin=await f.admin();assert.match(admin,/^BOUNCE_POLICY_BIND="172\.22\.1\.241"$/m);assert.match(admin,/^BOUNCE_POLICY_PEER="172\.22\.1\.250"$/m);assert.match(admin,/^BOUNCE_POLICY_PORT="10040"$/m);assert.ok(!(await f.public()).includes('BOUNCE_POLICY'));
+  const before=await stat(join(f.dir,'webmail-admin.env'));result=f.generate();assert.equal(result.status,0,result.stderr);const after=await stat(join(f.dir,'webmail-admin.env'));assert.equal(before.ino,after.ino);assert.equal(before.mtimeMs,after.mtimeMs);assert.equal(after.mode&0o777,0o600);
+});
+test('missing Compose address disables policy without guessing or exposing credentials',async t=>{
+  const f=await fixture(t);await f.configure('API_KEY=synthetic-api-key\n');await f.policyFixture({postfix:{services:{'postfix-mailcow':{networks:{mail:{}}}},networks:{mail:{name:'mailcowdockerized_mailcow-network'}}}});
+  const result=f.generate(true);assert.equal(result.status,0,result.stderr);assert.match(result.stderr,/listener disabled/);assertQuiet(result,'synthetic-api-key');assert.match(await f.admin(),/^BOUNCE_POLICY_BIND=""$/m);assert.match(await f.admin(),/^BOUNCE_POLICY_PEER=""$/m);
+});
+test('absent server API key keeps policy disabled even with archive enabled',async t=>{
+  const f=await fixture(t);await f.configure();await f.policyFixture();const result=f.generate();assert.equal(result.status,0,result.stderr);assert.match(await f.admin(),/^BOUNCE_POLICY_BIND=""$/m);assert.match(await f.admin(),/^BOUNCE_POLICY_PEER=""$/m);
+});

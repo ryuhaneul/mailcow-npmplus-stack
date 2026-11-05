@@ -89,6 +89,33 @@ if log_archive_generate_env "$TMP/archive" 2>/dev/null; then fail guessed-volume
 rm "$TMP/no-npm-container" "$TMP/no-npm-volume"
 pass 'new install accepts only verified pre-created NPMplus volume, absent volume fails closed'
 
+# Compose/runtime declarations for bounce policy are synthetic and use a non-default peer.
+(
+    printf 'API_KEY=synthetic-policy-api\n' >> "$TMP/mailcow/mailcow.conf"
+    docker() {
+        case " $* " in
+            *' config --format json --no-env-resolution '*)
+                if [[ " $* " == *' --profile admin '* ]]; then
+                    printf '{"services":{"webmail-admin":{"networks":{"mail":{"ipv4_address":"172.22.1.241"}}}},"networks":{"mail":{"name":"mailcowdockerized_mailcow-network"}}}'
+                else
+                    printf '{"services":{"postfix-mailcow":{"networks":{"mail":{"ipv4_address":"172.22.1.250"}}}},"networks":{"mail":{"name":"mailcowdockerized_mailcow-network"}}}'
+                fi ;;
+            *' ps -q postfix-mailcow '*) printf '%064d\n' 1 ;;
+            *' ps -q webmail-admin '*) printf '%064d\n' 2 ;;
+            *' inspect --format '* )
+                if [[ " $* " == *"$(printf '%064d' 1)"* ]]; then printf '{"mailcowdockerized_mailcow-network":{"IPAddress":"172.22.1.250"}}';
+                else printf '{"mailcowdockerized_mailcow-network":{"IPAddress":"%s"}}' "${BOUNCE_TEST_RUNTIME_BIND:-172.22.1.241}"; fi ;;
+            *' exec -T webmail-admin node -e '*) printf '["172.22.1.241","172.22.1.250","10040"]' ;;
+            *) fail 'unexpected policy fixture command' ;;
+        esac
+    }
+    webmail_generate_admin_env "$TMP/app"
+    grep -qx 'BOUNCE_POLICY_PEER="172.22.1.250"' "$TMP/app/webmail-admin.env" || fail guessed-policy-peer
+    [ "$(webmail_bounce_addresses "$TMP/app" runtime)" = $'172.22.1.241\n172.22.1.250' ] || fail policy-runtime-match
+    if BOUNCE_TEST_RUNTIME_BIND=172.22.1.242 webmail_bounce_addresses "$TMP/app" runtime; then fail runtime-mismatch-accepted; fi
+)
+sed -i '/^API_KEY=synthetic-policy-api$/d' "$TMP/mailcow/mailcow.conf"
+pass 'policy env resolves Compose addresses and checks actual runtime peers without guessing'
 webmail_generate_admin_env "$TMP/app"
 grep -q '^LOG_ARCHIVE_URL="http://log-archiver:8080"' "$TMP/app/webmail-admin.env" || fail admin-url
 grep -q '^LOG_ARCHIVE_KEY=' "$TMP/app/webmail-admin.env" || fail admin-key

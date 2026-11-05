@@ -545,6 +545,10 @@ fi
 webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
+# Remove callbacks before changing apps when policy prerequisites were disabled.
+if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$LOG_ARCHIVE_ENABLE" != true ] || [ -z "$(webmail_mailcow_value API_KEY)" ]; then
+    webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy disable reconciliation failed"
+fi
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
@@ -552,6 +556,7 @@ edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects a
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
     edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --wait --wait-timeout 180 webmail-admin || die "Webmail admin startup failed"
+    webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"
     WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
 elif docker inspect webmail-admin >/dev/null 2>&1; then
     warn "Webmail admin disabled; existing container preserved — 끄려면 docs/guide.md 관리 화면 끄기(계획 7-6) 절차를 따르세요"

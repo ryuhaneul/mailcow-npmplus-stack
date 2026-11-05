@@ -412,11 +412,89 @@ webmail_generate_env() (
     chmod 600 "$tmp" && mv "$tmp" "$dest/webmail.env"
 )
 
+# Resolve static Compose declarations; never assume Postfix's upstream IP suffix.
+# Optional runtime mode also compares the running containers before policy apply.
+webmail_bounce_addresses() (
+    set +x
+    umask 077
+    local dest="$1" mode="${2:-compose}" work postfix_id admin_id
+    work=$(mktemp -d) || return 1
+    trap 'rm -rf "$work"' EXIT
+    (cd "$MAILCOW_DIR" && docker compose config --format json --no-env-resolution) > "$work/postfix" 2>"$work/errors" || return 1
+    (cd "$dest" && docker compose --profile admin config --format json --no-env-resolution) > "$work/admin" 2>"$work/errors" || return 1
+    if [ "$mode" = runtime ]; then
+        postfix_id=$(cd "$MAILCOW_DIR" && docker compose ps -q postfix-mailcow) || return 1
+        admin_id=$(cd "$dest" && docker compose --profile admin ps -q webmail-admin) || return 1
+        [[ "$postfix_id" =~ ^[a-f0-9]{12,64}$ && "$admin_id" =~ ^[a-f0-9]{12,64}$ ]] || return 1
+        docker inspect --format '{{json .NetworkSettings.Networks}}' "$postfix_id" > "$work/postfix.live" 2>"$work/errors" || return 1
+        docker inspect --format '{{json .NetworkSettings.Networks}}' "$admin_id" > "$work/admin.live" 2>"$work/errors" || return 1
+        (cd "$dest" && docker compose --profile admin exec -T webmail-admin node -e 'console.log(JSON.stringify([process.env.BOUNCE_POLICY_BIND,process.env.BOUNCE_POLICY_PEER,process.env.BOUNCE_POLICY_PORT??"10040"]))') > "$work/endpoint.live" 2>"$work/errors" || return 1
+    fi
+    python3 - "$work" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK" "$mode" <<'PYBOUNCE'
+from pathlib import Path
+import ipaddress,json,sys
+work,expected,network,mode=Path(sys.argv[1]),sys.argv[2],ipaddress.ip_network(sys.argv[3]+'.0/24'),sys.argv[4]
+try:
+    def addresses(path,service):
+        config=json.loads(path.read_text());row=config['services'][service]
+        if row.get('network_mode'): raise ValueError()
+        if any(str(p.get('target'))=='10040' and p.get('published') is not None for p in row.get('ports',[])): raise ValueError()
+        result={}
+        for logical,options in row['networks'].items():
+            if not isinstance(options,dict) or not options.get('ipv4_address'): continue
+            name=config['networks'][logical]['name']
+            if name in result: raise ValueError()
+            address=str(ipaddress.IPv4Address(options['ipv4_address']))
+            if ipaddress.ip_address(address) not in network or address in (str(network.network_address),str(network.broadcast_address)): continue
+            result[name]=address
+        return result
+    postfix=addresses(work/'postfix','postfix-mailcow');admin=addresses(work/'admin','webmail-admin')
+    shared=list(postfix.keys() & admin.keys())
+    if len(shared)!=1: raise ValueError()
+    name=shared[0];bind,peer=admin[name],postfix[name]
+    if bind!=expected or bind==peer: raise ValueError()
+    if mode=='runtime':
+        if json.loads((work/'endpoint.live').read_text())!=[bind,peer,'10040']: raise ValueError()
+        for label,address in [('postfix',peer),('admin',bind)]:
+            if json.loads((work/(label+'.live')).read_text())[name]['IPAddress']!=address: raise ValueError()
+    print(bind);print(peer)
+except (ValueError,KeyError,TypeError,AttributeError):
+    sys.exit(1)
+PYBOUNCE
+)
+
+webmail_reconcile_bounce_policy() {
+    set +x
+    local scripts="$1" dest="$2" mode="${3:-apply}" api_key live_chain
+    api_key=$(webmail_mailcow_value API_KEY) || return 1
+    if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] && [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] && [ -n "$api_key" ]; then
+        # Called only after admin readiness. Addresses must agree with live peers.
+        if webmail_bounce_addresses "$dest" runtime >/dev/null; then
+            MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" bash "$scripts/apply-postfix-bounce-policy.sh" "$mode" -y || return 1
+            return 0
+        fi
+        echo '[webmail-env] WARNING: bounce policy addresses unavailable or differ; keeping hook absent' >&2
+        [ "$mode" != --check ] || return 1
+    fi
+    if [ "$mode" = --check ]; then
+        ! grep -q 'mailstack-bounce-policy' "$MAILCOW_DIR/data/conf/postfix/extra.cf" 2>/dev/null || return 1
+        live_chain=$(cd "$MAILCOW_DIR" && docker compose exec -T postfix-mailcow postconf -h smtpd_recipient_restrictions 2>/dev/null) || return 1
+        [[ "$live_chain" != *mailstack_bounce_* && "$live_chain" != *mailstack-bounce* ]] || return 1
+        return 0
+    fi
+    # Disabled/mismatched prerequisites must not leave a callback to an old listener.
+    if grep -q 'mailstack-bounce-policy' "$MAILCOW_DIR/data/conf/postfix/extra.cf" 2>/dev/null; then
+        MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" bash "$scripts/apply-postfix-bounce-policy.sh" --revert -y \
+            || echo '[webmail-env] WARNING: bounce policy revert failed; run verify and recover the retained hook' >&2
+    fi
+    return 0
+}
+
 webmail_generate_admin_env() (
     set +x
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
     local dest="$1" tmp auto_days="" pin_file="" doveadm_url="" doveadm_key="" relay_files="" trusted_file=""
-    local mailcow_api_key
+    local mailcow_api_key bounce_bind="" bounce_peer="" bounce_addresses
     # Allow only printable non-space ASCII before the reader strips CR or Bash drops NUL.
     if sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1 | LC_ALL=C grep -a '[^!-~]' > /dev/null; then
         webmail_error "invalid mailcow API key"
@@ -429,6 +507,13 @@ webmail_generate_admin_env() (
         \"*|\'*) webmail_error "invalid mailcow API key"; return 1 ;;
     esac
     mailcow_api_key=$(webmail_mailcow_value API_KEY) || return 1
+    if [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] && [ -n "$mailcow_api_key" ]; then
+        if bounce_addresses=$(webmail_bounce_addresses "$dest"); then
+            bounce_bind=${bounce_addresses%%$'\n'*}; bounce_peer=${bounce_addresses#*$'\n'}
+        else
+            echo '[webmail-env] WARNING: bounce policy Compose addresses unavailable; listener disabled, hook will be removed' >&2
+        fi
+    fi
     if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
         [ -n "$WEBMAIL_ADMIN_DOVEADM_KEY" ] || { webmail_error "doveadm key is empty; call webmail_ensure_admin_key first"; return 1; }
         doveadm_url=http://dovecot:12346
@@ -451,6 +536,9 @@ webmail_generate_admin_env() (
         webmail_env_line DB_NAME mailstack_webmail &&
         webmail_env_line DB_USER webmail_notices_admin &&
         webmail_env_line DB_PASSWORD "${WEBMAIL_ADMIN_DB_PASSWORD:-}" &&
+        webmail_env_line BOUNCE_POLICY_BIND "$bounce_bind" &&
+        webmail_env_line BOUNCE_POLICY_PEER "$bounce_peer" &&
+        webmail_env_line BOUNCE_POLICY_PORT 10040 &&
         webmail_env_line ADMIN_MODE true &&
         webmail_env_line FTS_NIGHTLY_ENABLE "${MAIL_FTS_NIGHTLY_ENABLE:-false}" &&
         webmail_env_line FTS_NIGHTLY_START "${MAIL_FTS_NIGHTLY_START:-03:00}" &&

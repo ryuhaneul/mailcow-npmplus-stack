@@ -253,6 +253,29 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     fi
 fi
 
+# Read-only monitoring checks: never disclose addresses, API keys or stored recipients.
+admin_monitor_storage_and_auth() {
+    docker exec webmail-admin node --input-type=module -e '
+import {lstat} from "node:fs/promises";
+for (const name of ["", "settings.json", "state.json", "bounces.json"]) {
+  try { const s=await lstat("/data/mail-monitor"+(name?"/"+name:"")); if(s.isSymbolicLink() || s.uid!==1000 || (s.mode&511)!==(name?384:448) || (name?!s.isFile():!s.isDirectory())) process.exit(1); }
+  catch(e) { if(e.code!=="ENOENT") process.exit(1); }
+}
+for (const path of ["monitor","monitor/status","monitor/notifications","bounces"]) {
+  const r=await fetch("http://127.0.0.1:8080/api/admin/"+path);
+  if(r.status!==403 || r.headers.has("www-authenticate")) process.exit(1);
+}
+'
+}
+admin_monitor_archive_contract() {
+    docker exec webmail-admin node --input-type=module -e '
+const r=await fetch(new URL("/v1/status",process.env.LOG_ARCHIVE_URL),{headers:{"X-Log-Archive-Key":process.env.LOG_ARCHIVE_KEY},signal:AbortSignal.timeout(5000)});
+if(!r.ok)process.exit(1);
+const data=await r.json(), stamp=data.sources?.postfix?.lastSuccessfulCollectionAt;
+if(stamp===null)console.log("  WARM-UP: Postfix successful collection observation is not ready");
+else if(typeof stamp!=="string" || !Number.isFinite(Date.parse(stamp)))process.exit(1);
+'
+}
 # --- Webmail administration ---
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     echo "[Admin]"
@@ -261,6 +284,11 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         echo "  SKIP  https://$WEBMAIL_ADMIN_HOSTNAME/healthz (access list: $ADMIN_ACCESS_LIST)"
     else
         check "$WEBMAIL_ADMIN_HOSTNAME /healthz HTTPS 200" test "$ADMIN_HEALTH_CODE" = 200
+    fi
+    check "Monitor storage permissions and unauthenticated APIs: 403" admin_monitor_storage_and_auth
+    check "Bounce policy hook/runtime peers or verified disabled state" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
+    if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
+        check "Archive per-source successful collection field" admin_monitor_archive_contract
     fi
     check "Admin unauthenticated logout: 403, no WWW-Authenticate" admin_logout_unauthenticated
     check "Public Webmail admin routes: 404" public_admin_routes_absent
@@ -274,6 +302,10 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         check "Admin relay files visible/readable/writable" docker exec webmail-admin node -e 'const fs = require("node:fs"); if (process.getuid() !== 1000) throw new Error("Expected node UID 1000"); for (const p of process.argv.slice(1)) fs.closeSync(fs.openSync(p, "r+"));' /run/relay/postfix/extra.cf /run/relay/rspamd/options.inc
     fi
     echo ""
+fi
+
+if [ "$WEBMAIL_ADMIN_ENABLE" != true ]; then
+    check "Disabled bounce policy hook absent" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
 fi
 
 # --- Security ---

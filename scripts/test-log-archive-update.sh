@@ -475,6 +475,98 @@ if run_upstream; then fail conflicting-logging; fi
 no_replace
 [ "$(sha256sum "$TMP/mailcow/docker-compose.override.yml")" = "$before" ] || fail operator-logging-overwrite
 pass 'conflicting existing logging stops update before upstream or replacement without overwrite'
+# Monitoring policy boundaries use production setup/update snippets with synthetic helpers.
+python3 - "$ROOT" "$TMP" <<'POLICY_FLOW'
+from pathlib import Path
+import sys
+root,dest=map(Path,sys.argv[1:])
+u=(root/'scripts/update.sh').read_text();start=u.index('webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"');end=u.index('# ============================================================',u.index('elif docker inspect webmail-admin',start))
+(dest/'policy-update.sh').write_text(u[start:end])
+s=(root/'scripts/setup.sh').read_text();start=s.index('# Phase 6b: Webmail');start=s.index('if [ "$WEBMAIL_ENABLE"',start);end=s.index('# ============================================================',start)
+(dest/'policy-setup.sh').write_text(s[start:end])
+assert u.index('log_archive_prepare "$PROJECT_DIR"')<u.index('webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"')
+assert s.index('setup_archive_sync || die "Log archive readiness failed before admin changes"')<s.index('webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"')
+POLICY_FLOW
+mkdir -p "$TMP/policy-scripts" "$TMP/policy-mailcow/data/conf/postfix"
+cat > "$TMP/policy-scripts/apply-postfix-bounce-policy.sh" <<'POLICY_STUB'
+#!/bin/bash
+echo "policy:$1" >> "$TMP/policy-calls"
+if [ "$1" = apply ]; then [ ! -e "$TMP/policy-apply-fail" ] || exit 9;
+elif [ "$1" = --revert ]; then
+    [ ! -e "$TMP/policy-revert-fail" ] || exit 8
+    rm -f "$MAILCOW_DIR/data/conf/postfix/extra.cf"
+else exit 99; fi
+POLICY_STUB
+printf '#!/bin/bash\nexit 0\n' > "$TMP/policy-scripts/admin-app-link.sh"
+policy_case() (
+    source "$ROOT/scripts/lib/webmail-env.sh"
+    scenario="$1";flow="${2:-update}"
+    PROJECT_DIR="$ROOT";SCRIPT_DIR="$TMP/policy-scripts";MAILCOW_DIR="$TMP/policy-mailcow";WEBMAIL_DIR="$TMP/app";ENV_FILE="$TMP/stack.env";NPMPLUS_DIR="$TMP/npm";LOGFILE="$TMP/policy.log"
+    WEBMAIL_ENABLE=true;WEBMAIL_ADMIN_ENABLE=true;LOG_ARCHIVE_ENABLE=true
+    rm -f "$TMP/policy-apply-fail" "$TMP/policy-revert-fail"
+    printf '# BEGIN mailstack-bounce-policy (synthetic)\n' > "$MAILCOW_DIR/data/conf/postfix/extra.cf"
+    : > "$TMP/policy-calls"
+    case "$scenario" in disabled) WEBMAIL_ADMIN_ENABLE=false;; archive-off) LOG_ARCHIVE_ENABLE=false;; apply-failure) touch "$TMP/policy-apply-fail";; revert-failure) WEBMAIL_ADMIN_ENABLE=false;touch "$TMP/policy-revert-fail";; esac
+    webmail_mailcow_value() { echo synthetic; }
+    webmail_bounce_addresses() { [ "$scenario" != mismatch ]; }
+    webmail_load_config() { :; };edge_check_admin_db_address() { :; }
+    webmail_ensure_db_password() { :; };webmail_ensure_admin_db_password() { :; }
+    webmail_ensure_admin_key() { :; };webmail_reconcile_admin_api() { :; };webmail_reconcile_trusted_sender() { :; }
+    edge_prepare_apps() { echo apps-prepared >> "$TMP/policy-calls"; };edge_up_apps() { echo apps-up >> "$TMP/policy-calls"; }
+    edge_reconcile_npmplus() { :; };webmail_generate_admin_env() { :; }
+    edge_archive_apply() { echo admin-ready >> "$TMP/policy-calls"; }
+    setup_archive_sync() { echo archive-ready >> "$TMP/policy-calls"; }
+    setup_compose_will_replace() { echo false; };setup_compose_start() { echo admin-ready >> "$TMP/policy-calls"; }
+    docker() { return 1; };log() { :; };warn() { :; };die() { echo "$*" >&2;exit 1; }
+    # The two unrelated DB schema/grant scripts are safely stubbed in this fixture.
+    printf '#!/bin/bash\nexit 0\n' > "$SCRIPT_DIR/apply-webmail-notices-db.sh"
+    printf '#!/bin/bash\nexit 0\n' > "$SCRIPT_DIR/apply-webmail-dbuser.sh"
+    source "$TMP/policy-$flow.sh"
+    echo completed >> "$TMP/policy-calls"
+)
+for flow in update setup; do
+    policy_case enabled "$flow" || fail "policy-enabled-$flow"
+    python3 - "$TMP/policy-calls" "$flow" <<'ORDER'
+from pathlib import Path
+import sys
+c=Path(sys.argv[1]).read_text().splitlines()
+assert c.index('admin-ready')<c.index('policy:apply')<c.index('completed')
+if sys.argv[2]=='setup':assert c.index('archive-ready')<c.index('admin-ready')
+ORDER
+    pass "$flow starts admin after archive readiness and applies policy afterward"
+done
+for scenario in disabled archive-off; do
+    policy_case "$scenario" || fail "policy-$scenario"
+    ! grep -q 'policy:apply' "$TMP/policy-calls" || fail disabled-policy-apply
+    [ "$(head -n1 "$TMP/policy-calls")" = policy:--revert ] || fail late-policy-revert
+    pass "$scenario removes existing callback before app changes"
+done
+policy_case mismatch || fail policy-mismatch
+! grep -q 'policy:apply' "$TMP/policy-calls" || fail mismatched-policy-apply
+grep -q 'policy:--revert' "$TMP/policy-calls" || fail mismatched-policy-not-reverted
+pass 'address mismatch warns and removes callback without applying'
+if policy_case apply-failure; then fail policy-failure-ignored; fi
+! grep -q completed "$TMP/policy-calls" || fail policy-failure-continued
+pass 'normal apply failure stops update'
+policy_case revert-failure || fail disabled-policy-fatal
+grep -q completed "$TMP/policy-calls" || fail revert-failure-stopped
+(
+    source "$ROOT/scripts/lib/webmail-env.sh"
+    WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"
+    webmail_mailcow_value() { echo synthetic; }
+    if webmail_reconcile_bounce_policy "$TMP/policy-scripts" "$TMP/app" --check; then exit 1; fi
+) || fail retained-hook-hidden
+pass 'disabled revert failure warns, permits update and remains visible to verify'
+(
+    source "$ROOT/scripts/lib/webmail-env.sh"
+    WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"
+    rm -f "$MAILCOW_DIR/data/conf/postfix/extra.cf"
+    webmail_mailcow_value() { echo synthetic; }
+    docker() { printf '$mailstack_bounce_recipient_policy\n'; }
+    if webmail_reconcile_bounce_policy "$TMP/policy-scripts" "$TMP/app" --check; then exit 1; fi
+) || fail retained-live-hook-hidden
+pass 'verify detects a live callback even when the owned file block is absent'
+
 # Exercise real preparation with rsync spy: generated environments and the
 # independent archiver directory must survive --delete synchronization.
 reset_case

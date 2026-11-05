@@ -118,7 +118,7 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 .management input[type=checkbox],.management-modal input[type=checkbox]{accent-color:var(--accent)}
 
 .admin-settings{flex-direction:column}.admin-settings .set-body{padding:24px 32px 48px;max-width:1080px}.admin-settings .vs{grid-template-columns:minmax(0,1fr)}
-.admin-settings button{padding:0}.admin-settings .tcard{padding:8px}.admin-settings .seg button{padding:0 10px}.admin-settings .custom .btn{padding:0 13px}
+.admin-settings :where(.set-body) button{padding:0}.admin-settings .tcard{padding:8px}.admin-settings .seg button{padding:0 10px}.admin-settings .custom .btn{padding:0 13px}
 .admin-settings .inp{height:38px;padding:0 10px;border-radius:var(--r-ctl);border:1px solid var(--line-2);background:var(--surface);font-size:13.5px;min-width:0;color:var(--ink)}
 .admin-settings .btn.sm{height:28px;min-height:28px;font-size:12.5px;font-weight:var(--fw-strong);padding:0 10px}
 :root[data-theme=amber] .admin-settings .set-body{padding:16px 16px 40px}

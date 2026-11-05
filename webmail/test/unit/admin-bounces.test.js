@@ -49,6 +49,44 @@ test('same terminal event survives archive row-id replacement, no rescan TTL ext
   f.time(T+300000);f.rows([row('1'),row('2','Missing@example.net','5.1.1',T+60000)]);await f.service.runOnce();const after=(await f.service.list()).items[0];assert.equal(after.bounceCount,2);assert.ok(after.autoUntil>before.autoUntil);
   const count=f.calls();f.policy.action(fields(before.recipient));assert.equal(f.calls(),count);
 });
+test('first tick after an archived bounce collects and suppresses it without five-minute alignment',async t=>{
+  const f=await fixture(t);await f.service.runOnce();
+  const bounceAt=T+48000, tick=T+299000, collectedAt=T+298000;
+  f.time(tick);f.rows([row('firsttick','first@example.net','5.1.1',bounceAt)]);
+  let statusCalls=0;f.archive.status=async()=>{statusCalls++;return {sources:{postfix:{lastSuccessfulCollectionAt:iso(collectedAt)}}};};
+  const requests=[],search=f.archive.search;f.archive.search=async q=>{requests.push(q);return search(q);};
+  assert.deepEqual(await f.service.runOnce(),{complete:true,end:iso(collectedAt)});
+  assert.equal(statusCalls,1);assert.equal(requests[0].start,iso(T-300000));assert.equal(requests[0].end,iso(collectedAt));
+  const item=(await f.service.list()).items[0];assert.equal(item.bounceCount,1);assert.equal(item.autoUntil,iso(bounceAt+3600000));
+  assert.match(f.policy.action(fields(item.recipient)),/^450 4\.7\.1/);
+});
+test('archive success bounds the exclusive end; next tick resumes with overlap and no duplicate events',async t=>{
+  const f=await fixture(t);await f.service.runOnce();f.time(T+299000);
+  f.rows([row('before','same@example.net','5.1.1',T+48000),row('boundary','same@example.net','5.1.1',T+120000)]);
+  let successAt=iso(T+120000);f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:successAt}}});
+  assert.equal((await f.service.runOnce()).end,iso(T+120000));
+  let item=(await f.service.list()).items[0];assert.equal(item.bounceCount,1);assert.equal(item.autoUntil,iso(T+48000+3600000));
+  f.time(T+599000);successAt=iso(T+700000); // A future observation must still be capped by now.
+  assert.equal((await f.service.runOnce()).end,iso(T+599000));
+  item=(await f.service.list()).items[0];assert.equal(item.bounceCount,2);assert.equal(item.autoUntil,iso(T+120000+3600000));
+  assert.equal((await f.store.readBounces()).seen.length,2);
+  await f.service.runOnce();assert.equal((await f.service.list()).items[0].bounceCount,2);
+});
+test('unconfirmed or reversed collection clocks preserve the last complete watermark and suppression',async t=>{
+  const f=await fixture(t);f.rows([row('confirmed')]);await f.service.runOnce();const before=await f.store.readBounces();
+  f.time(T+299000);
+  for(const success of [null,'invalid']){
+    f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:success}}});
+    assert.equal((await f.service.runOnce()).reason,'COLLECTION_UNCONFIRMED');
+  }
+  f.archive.status=async()=>{throw Error('synthetic status unavailable');};assert.equal((await f.service.runOnce()).reason,'COLLECTION_UNAVAILABLE');
+  f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:iso(T-1)}}});
+  assert.equal((await f.service.runOnce()).reason,'CLOCK_REVERSED');
+  f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:iso(T+299000)}}});f.time(T-1);
+  assert.equal((await f.service.runOnce()).reason,'CLOCK_REVERSED');
+  const after=await f.store.readBounces();assert.equal(after.completedEnd,before.completedEnd);assert.deepEqual(after.recipients,before.recipients);assert.deepEqual(after.seen,before.seen);
+  assert.match(f.policy.action(fields('Missing@example.net')),/^450 /);
+});
 test('manual suppression, etags, release watermark, active deletion conflict and tombstones',async t=>{
   const f=await fixture(t);f.rows([row('1')]);await f.service.runOnce();let r=(await f.service.list()).items[0];
   await assert.rejects(f.service.remove(args(r)),{statusCode:409});r=await f.service.suppress(args(r,{mode:'manual'}));assert.match(f.policy.action(fields(r.recipient)),/^550 5\.7\.1/);

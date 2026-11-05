@@ -74,10 +74,6 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
   async function initialize() { try { await refreshDomains(); await publish(); } catch {} }
   async function settingsChanged() { await lock.run('mail-bounces', publish).catch(() => {}); }
   async function readChunk(start, end, signal) {
-    if (!logArchive?.enabled) fail('ARCHIVE_DISABLED');
-    const status = await logArchive.status({ signal });
-    const success = monitorTimestamp(status?.sources?.postfix?.lastSuccessfulCollectionAt);
-    if (success === null || success < monitorTimestamp(iso(end))) fail('COLLECTION_UNCONFIRMED');
     let pages=0, rows=0, bytes=0; const started=monotonicNow();
     for (let attempt=0;attempt<2;attempt++) {
       const events=[],senderFacts=[], ids=new Set(), cursors=new Set(); let cursor=null, coverage=null;
@@ -116,7 +112,11 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
     const timer=setTimeout(abort,cap.milliseconds); timer.unref?.();
     try {
       await refreshDomains(controller.signal);
-      const T=Math.floor(now()/300000)*300000;
+      if (!logArchive?.enabled) fail('ARCHIVE_DISABLED');
+      const status = await logArchive.status({ signal:controller.signal });
+      const success = monitorTimestamp(status?.sources?.postfix?.lastSuccessfulCollectionAt);
+      if (success === null) fail('COLLECTION_UNCONFIRMED');
+      const T=Math.min(now(),Number(success/1000000n));
       const initial=await lock.run('mail-bounces',async()=>{ const s=await readState(); if(s.startedAt===null){s.startedAt=iso(T-5*minute);await store.saveBounces(s);} return s; });
       const watermark=Date.parse(initial.completedEnd??initial.startedAt);
       if(watermark>T) fail('CLOCK_REVERSED');

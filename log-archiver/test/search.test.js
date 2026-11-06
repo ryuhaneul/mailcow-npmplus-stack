@@ -76,6 +76,42 @@ test('[start,end) filters each line including submillisecond instants and KST mo
   assert.deepEqual(boundary.lines.map(line => line.message), ['included']);
 });
 
+test('last five minutes of a 50000-line hour skip earlier members without scanning their bytes', async t => {
+  const store = await fixture(t, { memberBytes: 64 * 1024 });
+  const begin = Date.parse(base.start);
+  await store.commit({ records: Array.from({ length: 50000 }, (_, i) => row(`synthetic-${i} ${'x'.repeat(100)}`, new Date(begin + i * 72).toISOString())) });
+  const entry = (await store.snapshot()).catalog.hours[0], index = await store.readIndex(entry);
+  const query = params({ start: '2026-10-21T08:55:00Z', q: 'absent' });
+  const selected = index.members.filter(member => Date.parse(member.maxTime) >= Date.parse(query.start));
+  let opened = 0;
+  const wrapped = { snapshot: () => store.snapshot(), readIndex: entry => store.readIndex(entry), file: name => { opened++; return store.file(name); } };
+  const started = performance.now();
+  const response = await createSearch({ store: wrapped }).search(query);
+  const elapsed = performance.now() - started;
+  assert.ok(index.members.length > 100);
+  assert.ok(selected.length < index.members.length / 8);
+  assert.equal(opened, selected.length, 'only overlapping gzip members are opened');
+  assert.equal(response.scannedBytes, selected.reduce((sum, member) => sum + member.uncompressedBytes, 0));
+  assert.equal(response.returned, 0); assert.equal(response.complete, true); assert.equal(response.nextCursor, null); assert.equal(response.partialReason, null);
+  assert.equal(response.coverage.newest, entry.maxTime);
+  t.diagnostic(`50000 lines, ${index.members.length} members: opened ${opened}, scanned ${response.scannedBytes} of ${index.members.reduce((sum, member) => sum + member.uncompressedBytes, 0)} bytes in ${elapsed.toFixed(2)}ms`);
+});
+
+test('members at exclusive end are skipped but unknown-time members on either side remain cursor-readable', async t => {
+  const store = await fixture(t);
+  await store.commit({ records: [row('known-before', '2026-10-21T08:01:00Z')] });
+  await store.commit({ records: [{ source: 'postfix', raw: Buffer.from('unknown-before\n'), eventTime: null, observedAt: '2026-10-21T08:01:00Z' }] });
+  await store.commit({ records: [row('known-at-end', '2026-10-21T08:56:00Z')] });
+  await store.commit({ records: [{ source: 'postfix', raw: Buffer.from('unknown-after\n'), eventTime: null, observedAt: '2026-10-21T08:59:00Z' }] });
+  const engine = createSearch({ store });
+  const result = await pages(engine, params({ start: '2026-10-21T08:55:00Z', end: '2026-10-21T08:56:00Z', limit: '1' }));
+  assert.deepEqual(result.rows.map(line => line.message), ['unknown-before', 'unknown-after']);
+  assert.ok(result.rows.every(line => line.unknownTime));
+  assert.equal(result.responses.reduce((sum, page) => sum + page.scannedBytes, 0), Buffer.byteLength('unknown-before\nunknown-after\n'));
+  assert.equal(result.responses.at(-1).complete, true);
+  assert.equal(result.responses[0].coverage.unknownTimeCount, 2);
+});
+
 test('append cannot enter a pinned snapshot; new search sees committed members', async t => {
   const store = await fixture(t);
   await store.commit({ records: [row('first'), row('second')] });

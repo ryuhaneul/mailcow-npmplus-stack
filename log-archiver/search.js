@@ -201,6 +201,10 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
           if (resume.line >= member.lineCount || resume.byte > member.uncompressedBytes) throw invalid();
           position = { source: entry.source, hour: entry.hour, memberStart: member.start, line: resume.line, byte: resume.byte };
           const nextMember = () => m + 1 < index.members.length ? { source: entry.source, hour: entry.hour, memberStart: index.members[m + 1].start, line: 0, byte: 0 } : h + 1 < hours.length ? { source: hours[h + 1].source, hour: hours[h + 1].hour, memberStart: 0, line: 0, byte: 0 } : null;
+          if (member.unknownTimeCount === 0 && (timeKey(member.maxTime) < timeKey(query.start) || timeKey(member.minTime) >= timeKey(query.end))) {
+            position = nextMember(); progressed = true;
+            continue;
+          }
           const inputStream = createReadStream(store.file(entry.file), { start: member.start, end: member.end - 1, highWaterMark: 16384, signal: controller.signal });
           const gzip = createGunzip({ chunkSize: 16384 });
           inputStream.on('error', error => gzip.destroy(error));

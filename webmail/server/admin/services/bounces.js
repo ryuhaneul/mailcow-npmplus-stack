@@ -73,8 +73,8 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
   }
   async function initialize() { try { await refreshDomains(); await publish(); } catch {} }
   async function settingsChanged() { await lock.run('mail-bounces', publish).catch(() => {}); }
-  async function readChunk(start, end, signal) {
-    let pages=0, rows=0, bytes=0; const started=monotonicNow();
+  async function readChunk(start, end, signal, started) {
+    let pages=0, rows=0, bytes=0;
     for (let attempt=0;attempt<2;attempt++) {
       const events=[],senderFacts=[], ids=new Set(), cursors=new Set(); let cursor=null, coverage=null;
       try {
@@ -121,38 +121,44 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
       const watermark=Date.parse(initial.completedEnd??initial.startedAt);
       if(watermark>T) fail('CLOCK_REVERSED');
       if(T-watermark>90*day) fail('ARCHIVE_RETENTION_LOSS');
-      const start=Math.max(Date.parse(initial.startedAt),watermark-5*minute), end=Math.min(T,start+60*minute);
-      const events=await readChunk(start,end,controller.signal);
-      if(controller.signal.aborted) fail('COLLECTION_ABORTED');
-      await lock.run('mail-bounces',async()=>{
-        const state=await readState(), settings=await readSettings();
-        if(state.completedEnd!==initial.completedEnd) fail('COLLECTION_CHANGED');
-        const seen=new Set(state.seen.map(e=>e.key)), recipients=new Map(state.recipients.map(r=>[r.recipient,r]));
-        let checked=0;
-        for(const event of events){
-          if(checked++%256===0 && (controller.signal.aborted || monotonicNow()-runStarted>=cap.milliseconds))fail('COLLECTION_LIMIT');
-          if(seen.has(event.key))continue;
-          seen.add(event.key);state.seen.push({key:event.key,at:event.at});
-          let row=recipients.get(event.recipient);
-          if(!row){row={id:randomUUID(),recipient:event.recipient,firstSeenAt:event.at,lastSeenAt:event.at,bounceCount:0,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,internalExcluded:policy.internal(event.recipient),supported:event.supported,manual:null,autoUntil:null,releasedAt:null,sender:null,resolvedAt:null};state.recipients.push(row);recipients.set(event.recipient,row);}
-          row.bounceCount++;
-          if(row.resolvedAt!==null && monitorTimestamp(event.stamp)>monitorTimestamp(row.resolvedAt))row.resolvedAt=null;
-          if(Date.parse(event.at)<Date.parse(row.firstSeenAt))row.firstSeenAt=event.at;
-          if(Date.parse(event.at)>=Date.parse(row.lastSeenAt))Object.assign(row,{lastSeenAt:event.at,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,sender:event.sender});
-          const afterRelease=row.releasedAt===null || monitorTimestamp(event.stamp)>monitorTimestamp(row.releasedAt);
-          if(settings.bounceAuto.enabled && event.supported && !policy.internal(event.recipient) && ['5.1.1','5.1.10'].includes(event.dsn) && afterRelease){
-            const until=Date.parse(event.at)+settings.bounceAuto.durationMinutes*minute;
-            if(until>now() && until>Date.parse(row.autoUntil??'1970-01-01'))row.autoUntil=iso(until);
+      let start=Math.max(Date.parse(initial.startedAt),watermark-5*minute), end=Math.min(T,watermark+5*minute);
+      let completedEnd=initial.completedEnd;
+      do {
+        const events=await readChunk(start,end,controller.signal,runStarted);
+        if(controller.signal.aborted) fail('COLLECTION_ABORTED');
+        await lock.run('mail-bounces',async()=>{
+          const state=await readState(), settings=await readSettings();
+          if(state.completedEnd!==completedEnd) fail('COLLECTION_CHANGED');
+          const seen=new Set(state.seen.map(e=>e.key)), recipients=new Map(state.recipients.map(r=>[r.recipient,r]));
+          let checked=0;
+          for(const event of events){
+            if(checked++%256===0 && (controller.signal.aborted || monotonicNow()-runStarted>=cap.milliseconds))fail('COLLECTION_LIMIT');
+            if(seen.has(event.key))continue;
+            seen.add(event.key);state.seen.push({key:event.key,at:event.at});
+            let row=recipients.get(event.recipient);
+            if(!row){row={id:randomUUID(),recipient:event.recipient,firstSeenAt:event.at,lastSeenAt:event.at,bounceCount:0,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,internalExcluded:policy.internal(event.recipient),supported:event.supported,manual:null,autoUntil:null,releasedAt:null,sender:null,resolvedAt:null};state.recipients.push(row);recipients.set(event.recipient,row);}
+            row.bounceCount++;
+            if(row.resolvedAt!==null && monitorTimestamp(event.stamp)>monitorTimestamp(row.resolvedAt))row.resolvedAt=null;
+            if(Date.parse(event.at)<Date.parse(row.firstSeenAt))row.firstSeenAt=event.at;
+            if(Date.parse(event.at)>=Date.parse(row.lastSeenAt))Object.assign(row,{lastSeenAt:event.at,lastDsn:event.dsn,lastReason:event.reason,sourceEventKey:event.key,sender:event.sender});
+            const afterRelease=row.releasedAt===null || monitorTimestamp(event.stamp)>monitorTimestamp(row.releasedAt);
+            if(settings.bounceAuto.enabled && event.supported && !policy.internal(event.recipient) && ['5.1.1','5.1.10'].includes(event.dsn) && afterRelease){
+              const until=Date.parse(event.at)+settings.bounceAuto.durationMinutes*minute;
+              if(until>now() && until>Date.parse(row.autoUntil??'1970-01-01'))row.autoUntil=iso(until);
+            }
           }
-        }
-        for(const row of state.recipients)row.internalExcluded=policy.internal(row.recipient);
-        state.recipients=state.recipients.filter(r=>now()-Date.parse(r.lastSeenAt)<=30*day || r.manual && (r.manual.until===null || Date.parse(r.manual.until)>now()) || r.autoUntil && Date.parse(r.autoUntil)>now());
-        state.seen=state.seen.filter(e=>now()-Date.parse(e.at)<=30*day);
-        state.completedEnd=iso(end);state.revision++;state.collection={lastAttemptAt:iso(now()),reason:null};
-        if(controller.signal.aborted)fail('COLLECTION_ABORTED');
-        await store.saveBounces(state);policy.publish(state,settings);collectionError=null;
-      });
-      return {complete:true,end:iso(end)};
+          for(const row of state.recipients)row.internalExcluded=policy.internal(row.recipient);
+          state.recipients=state.recipients.filter(r=>now()-Date.parse(r.lastSeenAt)<=30*day || r.manual && (r.manual.until===null || Date.parse(r.manual.until)>now()) || r.autoUntil && Date.parse(r.autoUntil)>now());
+          state.seen=state.seen.filter(e=>now()-Date.parse(e.at)<=30*day);
+          state.completedEnd=iso(end);state.revision++;state.collection={lastAttemptAt:iso(now()),reason:null};
+          if(controller.signal.aborted)fail('COLLECTION_ABORTED');
+          if(monotonicNow()-runStarted>=cap.milliseconds)fail('COLLECTION_LIMIT');
+          await store.saveBounces(state);policy.publish(state,settings);collectionError=null;
+        });
+        completedEnd=iso(end);
+        start=end;end=Math.min(T,start+5*minute);
+      } while(start<T);
+      return {complete:true,end:completedEnd};
     } catch(e) {
       collectionError=typeof e.code==='string'&&/^[A-Z_]+$/.test(e.code)?e.code:'COLLECTION_UNAVAILABLE';
       // A failed chunk must not advance its durable watermark or publish partial policy.

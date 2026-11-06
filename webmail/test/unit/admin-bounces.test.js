@@ -102,8 +102,44 @@ test('automatic off is immediate, manual remains independent; turning on does no
 });
 test('failed chunks do not advance watermark; initial retry anchor and bounded catch-up are durable',async t=>{
   const f=await fixture(t);f.failure('archive');await f.service.runOnce();const failed=await f.store.readBounces();assert.equal(failed.completedEnd,null);assert.equal(failed.startedAt,iso(T-300000));
-  f.time(T+7200000);f.failure(null);const requests=[];const original=f.archive.search;f.archive.search=async q=>{requests.push(q);return original(q);};await f.service.runOnce();const state=await f.store.readBounces();assert.equal(state.completedEnd,iso(T-300000+3600000));assert.equal(Date.parse(requests[0].end)-Date.parse(requests[0].start),3600000);
+  f.time(T+7200000);f.failure(null);const requests=[];const original=f.archive.search;f.archive.search=async q=>{requests.push(q);return original(q);};await f.service.runOnce();const state=await f.store.readBounces();assert.equal(state.completedEnd,iso(T+7200000));assert.equal(requests.length,25);assert.ok(requests.every(q=>Date.parse(q.end)-Date.parse(q.start)===300000));
   f.archive.search=async()=>{throw Object.assign(Error(),{statusCode:429});};await f.service.runOnce();assert.equal((await f.store.readBounces()).completedEnd,state.completedEnd);
+});
+test('one-hour backlog commits twelve consecutive five-minute advances with overlap only in the first window',async t=>{
+  const f=await fixture(t);f.rows([row('prior')]);await f.service.runOnce();
+  const requests=[],saved=[],search=f.archive.search,save=f.store.saveBounces;
+  f.time(T+3600000);f.rows([row('prior'),...Array.from({length:12},(_,i)=>row('catch'+i,'same@example.net','5.1.1',T+i*300000+60000))]);
+  f.archive.search=async q=>{requests.push(q);return search(q);};
+  f.store.saveBounces=async state=>{await save(state);saved.push(state.completedEnd);};
+  assert.deepEqual(await f.service.runOnce(),{complete:true,end:iso(T+3600000)});
+  assert.equal(requests.length,12);
+  assert.deepEqual(saved,Array.from({length:12},(_,i)=>iso(T+(i+1)*300000)));
+  for(let i=0;i<12;i++){
+    assert.equal(requests[i].start,iso(i===0?T-300000:T+i*300000));
+    assert.equal(requests[i].end,iso(T+(i+1)*300000));
+  }
+  const state=await f.store.readBounces();assert.equal(state.seen.length,13);assert.equal(state.recipients.find(r=>r.recipient==='same@example.net').bounceCount,12);
+  await f.service.runOnce();assert.equal((await f.store.readBounces()).seen.length,13);
+});
+test('failure in a later window preserves earlier commits and the next tick resumes without duplicate bounces',async t=>{
+  const f=await fixture(t);await f.service.runOnce();f.time(T+3600000);
+  f.rows(Array.from({length:12},(_,i)=>row('resume'+i,'same@example.net','5.1.1',T+i*300000+60000)));
+  const search=f.archive.search;let calls=0;
+  f.archive.search=async q=>{if(++calls===4)throw Object.assign(Error(),{code:'LOG_ARCHIVE_UNAVAILABLE'});return search(q);};
+  assert.deepEqual(await f.service.runOnce(),{complete:false,reason:'LOG_ARCHIVE_UNAVAILABLE'});
+  const failed=await f.store.readBounces();assert.equal(failed.completedEnd,iso(T+900000));assert.equal(failed.seen.length,3);assert.equal(failed.recipients[0].bounceCount,3);
+  assert.match(f.policy.action(fields('same@example.net')),/^450 /);
+  const requests=[];f.archive.search=async q=>{requests.push(q);return search(q);};
+  assert.equal((await f.service.runOnce()).end,iso(T+3600000));assert.equal(requests.length,9);assert.equal(requests[0].start,iso(T+600000));assert.equal(requests[0].end,iso(T+1200000));
+  const resumed=await f.store.readBounces();assert.equal(resumed.seen.length,12);assert.equal(resumed.recipients[0].bounceCount,12);assert.equal(resumed.collection.reason,null);
+});
+test('all catch-up windows share the tick time budget and retain the last completed window at the deadline',async t=>{
+  let clock=0;const f=await fixture(t,{monotonicNow:()=>clock});await f.service.runOnce();f.time(T+3600000);
+  const search=f.archive.search;let requests=0;
+  f.archive.search=async q=>{requests++;const result=await search(q);clock+=50000;return result;};
+  assert.equal((await f.service.runOnce()).reason,'COLLECTION_LIMIT');assert.equal(requests,3);
+  assert.equal((await f.store.readBounces()).completedEnd,iso(T+600000));
+  f.archive.search=search;assert.equal((await f.service.runOnce()).end,iso(T+3600000));
 });
 test('partial page failure and store commit failure never publish partial suppression',async t=>{
   const f=await fixture(t);f.archive.search=async q=>q.cursor?Promise.reject(Error('synthetic')):{lines:[row('1')],nextCursor:'next',partialReason:'limit',incomplete:true,scannedBytes:100,coverage:{source:'postfix',oldest:null,newest:null,gaps:[]}};

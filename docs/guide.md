@@ -1337,3 +1337,51 @@ sudo journalctl -t mailcow-netfilter-watchdog
 설정·수집·알림·반송 상태는 admin 볼륨의 `/data/mail-monitor`에 보관합니다(디렉터리 0700, 파일 0600). 백업 시 볼륨과 Postfix 설정·적용 스크립트의 비공개 `.bak-bounce-policy-*` 백업을 함께 보존합니다. 반송 보관은 기본 최근 30일/10,000주소/16MiB이며 활성 수동 억제는 나이 때문에 지우지 않습니다. 용량 초과는 완료 시각 진전을 중단하고 오류로 표시합니다. 원본 로그·본문·제목은 이 상태 파일에 저장하지 않습니다.
 
 롤백은 새 스크립트가 남아 있을 때 `MAILCOW_DIR=... WEBMAIL_DIR=... bash scripts/apply-postfix-bounce-policy.sh --revert -y`를 먼저 실행하여 owned block과 live recipient chain을 복구·reload한 뒤 이전 admin 이미지로 돌아갑니다. 관리 데이터는 삭제하지 않습니다. 적용·제거 실패 시 원래 파일과 live 값을 함께 복구하며, 복구 reload까지 실패했다는 경고가 나오면 보존된 백업으로 수동 복구하고 정상 SMTP·기존 relay 거부를 확인해야 합니다. 런타임 주소 추가·해제·만료에는 Postfix reload/restart/postmap이 없습니다.
+61f91a6로 되돌릴 때에는 **이전 이미지로 바꾸기 전에**, 새 admin을 정지한 상태에서 `state.json`의 새 `collection` 필드만 제거해야 합니다. 구버전은 이 필드와 4MiB 초과 상태를 거부합니다. 아래는 root 셸에서 실행하는 예이며 `ROLLBACK_IMAGE`는 실제 보관한 **61f91a6 이미지 태그**로 지정합니다. 현재 Compose·소스·local 이미지 태그는 아직 새 버전인 상태여야 합니다. `settings.json`·`bounces.json`은 건드리지 않으며 incident/outbox/notifications와 발송 억제 시각을 그대로 보존합니다.
+
+```bash
+WEBMAIL_DIR=/home/webmail
+ROLLBACK_IMAGE=mailstack-webmail:before-7e2c269
+STATE_VOLUME=$(docker inspect webmail-admin --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')
+[ -n "$STATE_VOLUME" ] || { echo '중단: /data named volume을 확인하세요.'; exit 1; }
+ROLLBACK_BACKUP=$(mktemp -d /root/mail-monitor-rollback.XXXXXX)
+chmod 700 "$ROLLBACK_BACKUP"
+docker image inspect "$ROLLBACK_IMAGE" >/dev/null || exit 1
+docker compose --project-directory "$WEBMAIL_DIR" --profile admin stop webmail-admin || exit 1
+if ! docker run --rm -i --network none --user 0 --entrypoint node \
+  --mount "type=volume,src=$STATE_VOLUME,dst=/rollback-data" \
+  --mount "type=bind,src=$ROLLBACK_BACKUP,dst=/rollback-backup" \
+  "$ROLLBACK_IMAGE" --input-type=module <<'NODE'
+import * as fs from 'node:fs/promises';
+const file='/rollback-data/mail-monitor/state.json';
+const stat=await fs.lstat(file);
+if(!stat.isFile()||stat.isSymbolicLink())throw new Error('중단: state.json 일반 파일 필요');
+const raw=await fs.readFile(file);
+await fs.writeFile('/rollback-backup/state-new.json',raw,{mode:0o600,flag:'wx'});
+const state=JSON.parse(raw);
+delete state.collection;
+const body=Buffer.from(JSON.stringify(state)+'\n');
+if(Object.hasOwn(state,'collection')||body.length>4*1024*1024)
+  throw new Error('롤백 중단: collection 제거 뒤에도 구버전 4MiB 상한 초과');
+let valid;
+try{({validMonitorState:valid}=await import('/app/server/admin/mail-monitor-state.js'));}
+catch{console.error('구 검증 함수 사용 불가: collection 부재·직렬화 크기만 검사');}
+if(typeof valid==='function'&&!valid(state))throw new Error('롤백 중단: 구 상태 스키마 검사 실패');
+if(typeof valid!=='function')console.error('구 검증 함수 없음: 전체 스키마 검증은 미실행');
+const tmp=file+'.rollback-'+process.pid;
+const handle=await fs.open(tmp,'wx',0o600);
+try{await handle.chown(stat.uid,stat.gid);await handle.writeFile(body);await handle.sync();}
+finally{await handle.close();}
+await fs.rename(tmp,file);
+const dir=await fs.open('/rollback-data/mail-monitor','r');
+try{await dir.sync();}finally{await dir.close();}
+console.log('호환 상태 원자 저장 완료: 원본 별도 보존, 권한 0600·소유자 유지');
+NODE
+then
+  echo '롤백 중단: 상태 삭제·과거 상태 덮어쓰기 금지. 새 버전을 유지합니다.'
+  docker compose --project-directory "$WEBMAIL_DIR" --profile admin up -d --no-build webmail-admin
+  exit 1
+fi
+```
+
+구 검증 함수를 사용할 수 없으면 위 명령은 `collection` 키 부재와 직렬화 크기만 검사하며 전체 스키마 검증을 대신했다고 보지 않습니다. collection 제거 뒤에도 4MiB를 넘으면 **원본을 삭제하거나 과거 상태로 덮어쓰지 말고 롤백을 중단하여 새 버전을 유지**합니다. 실패 후 원본 복원이 필요하면 admin 정지 상태에서 `$ROLLBACK_BACKUP/state-new.json`을 같은 소유자·0600으로 원자 복원합니다. 이 호환화는 증분 칸/중복 키만 버리며, 새 버전으로 재업그레이드하면 warm-up부터 시작합니다. 성공한 경우에만 앞서 설명한 새 정책 스크립트의 `--revert -y`와 원래 restriction/callback 제거 확인을 수행하고 이전 소스·환경·이미지로 복귀합니다. 복귀 후 관리 인증을 거친 `/api/admin/monitor/status`·`/api/admin/monitor/notifications`의 200과 실제 감시 tick 완료를 확인합니다. 호환화 실패 시에는 정책 revert 및 이전 이미지 교체를 진행하지 않습니다.

@@ -1,3 +1,4 @@
+import { createLoginIpStore } from '../security/login-ip-store.js';
 import cookie from '@fastify/cookie';
 import { createImapPool } from '../mail/imap-pool.js';
 import { AppError } from '../errors.js';
@@ -7,10 +8,12 @@ import { checkOrigin, checkCsrf } from '../security/csrf.js';
 
 const changing = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-export async function installAuth(app, { config, verifyLogin, clientFactory, now = Date.now, tempRoot }) {
+export async function installAuth(app, { config, verifyLogin, clientFactory, now = Date.now, tempRoot, loginIps }) {
   await app.register(cookie);
   const sessions = await createSessionStore({ config, logger: app.log, now, tempRoot });
-  const rateLimiter = createRateLimiter({ now });
+  const loginIpStore = loginIps ?? createLoginIpStore({ config });
+  app.addHook('onClose', async () => { await loginIpStore.close?.(); });
+  const rateLimiter = createRateLimiter({ now, readLoginIps: () => loginIpStore.list() });
   const imap = createImapPool({ config, clientFactory, logger: app.log, destroySession: (session, code) => sessions.destroy(session, code) });
   app.decorate('imap', imap);
   verifyLogin ??= imap.verifyLogin;
@@ -55,6 +58,7 @@ async function authRoutes(app, { config, verifyLogin, sessions, rateLimiter }) {
     if (!email.includes('@')) throw new AppError(400, 'EMAIL_FORMAT', '메일 주소를 확인해 주세요.');
     if (typeof body?.password !== 'string' || !body.password) throw new AppError(403, 'AUTH_FAILED', '메일 주소나 암호가 맞지 않아요.');
     try {
+      await rateLimiter.refreshLoginIps();
       rateLimiter.checkLogin(request.ip, email);
     } catch (error) {
       request.log.warn({ code: 'RATE_LIMITED', email, ip: request.ip }, '로그인 시도 횟수가 제한됐습니다.');

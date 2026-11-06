@@ -1,8 +1,30 @@
+import { BlockList, isIP } from 'node:net';
 import { AppError } from '../errors.js';
 
 const MINUTE = 60_000;
 
-export function createRateLimiter({ now = Date.now } = {}) {
+export function createRateLimiter({ now = Date.now, readLoginIps = async () => ({ items: [] }) } = {}) {
+  let allowedIps = new BlockList(), nextRead = -Infinity, reading;
+  async function refreshLoginIps() {
+    if (reading) return reading;
+    if (now() < nextRead) return;
+    nextRead = now() + MINUTE;
+    reading = (async () => {
+      try {
+        const { items } = await readLoginIps();
+        const next = new BlockList();
+        for (const { ip } of items) {
+          const [address, bits] = ip.split('/');
+          const family = isIP(address) === 4 ? 'ipv4' : 'ipv6';
+          if (bits === undefined) next.addAddress(address, family);
+          else next.addSubnet(address, Number(bits), family);
+        }
+        allowedIps = next;
+      } catch { /* Retain the last successfully read list, or the empty default. */ }
+    })();
+    try { await reading; } finally { reading = undefined; }
+  }
+  const ipAllowed = ip => allowedIps.check(ip, isIP(ip) === 4 ? 'ipv4' : 'ipv6');
   const ips = new Map();
   const emails = new Map();
   const passwords = new Map();
@@ -23,16 +45,18 @@ export function createRateLimiter({ now = Date.now } = {}) {
     throw error;
   }
   function checkLogin(ip, email) {
-    const ipRecord = prune(ips, ip, 10 * MINUTE);
+    const ipRecord = ipAllowed(ip) ? null : prune(ips, ip, 10 * MINUTE);
     const emailRecord = prune(emails, email, 15 * MINUTE);
     const until = Math.max(ipRecord?.blockedUntil ?? 0, emailRecord?.blockedUntil ?? 0);
     if (until > now()) limited(until);
   }
   function recordFailure(ip, email) {
-    for (const [map, key, window] of [[ips, ip, 10 * MINUTE], [emails, email, 15 * MINUTE]]) {
+    const limits = [[emails, email, 15 * MINUTE, 5]];
+    if (!ipAllowed(ip)) limits.push([ips, ip, 10 * MINUTE, 30]);
+    for (const [map, key, window, threshold] of limits) {
       const record = prune(map, key, window) ?? { times: [], blockedUntil: 0 };
       record.times.push(now());
-      if (record.times.length >= 5) record.blockedUntil = now() + 15 * MINUTE;
+      if (record.times.length >= threshold) record.blockedUntil = now() + 15 * MINUTE;
       map.set(key, record);
     }
   }
@@ -47,5 +71,5 @@ export function createRateLimiter({ now = Date.now } = {}) {
       for (const key of map.keys()) prune(map, key, window);
     }
   }
-  return { checkLogin, recordFailure, checkPassword, sweep };
+  return { refreshLoginIps, checkLogin, recordFailure, checkPassword, sweep };
 }

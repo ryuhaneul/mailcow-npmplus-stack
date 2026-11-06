@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS mailstack_webmail.public_template_files (
   data MEDIUMBLOB NOT NULL,
   FOREIGN KEY (template_id) REFERENCES mailstack_webmail.public_templates(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS mailstack_webmail.login_ip_allowlist (
+  ip VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  note VARCHAR(200) NOT NULL DEFAULT '',
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  created_by VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 INSERT IGNORE INTO mailstack_webmail.notice_counter (id, next_seq) VALUES (1, 0);
 SQL
 fi
@@ -89,6 +95,7 @@ mysql_root <<'SQL' >/dev/null || die 'notices schema is missing or incompatible'
 SELECT id,title,body_html,category,audience_all,pinned,state,publish_seq,published_at,created_at,updated_at,updated_by FROM mailstack_webmail.notices LIMIT 0;
 SELECT notice_id,domain FROM mailstack_webmail.notice_domains LIMIT 0;
 SELECT email,last_seen_seq,updated_at FROM mailstack_webmail.notice_reads LIMIT 0;
+SELECT ip,note,created_at,created_by FROM mailstack_webmail.login_ip_allowlist LIMIT 0;
 SELECT id,next_seq FROM mailstack_webmail.notice_counter LIMIT 0;
 SELECT id,name,subject,body_html,audience_all,updated_at,updated_by FROM mailstack_webmail.public_templates LIMIT 0;
 SELECT template_id,domain FROM mailstack_webmail.public_template_domains LIMIT 0;

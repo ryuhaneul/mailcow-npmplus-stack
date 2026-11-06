@@ -72,6 +72,11 @@
       "relay"
     ],
     [
+      "login-ips",
+      "웹메일 로그인 예외 IP",
+      "shield"
+    ],
+    [
       "trusted",
       "신뢰 발신 장비",
       "shield"

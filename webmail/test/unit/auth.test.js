@@ -343,16 +343,16 @@ test('session: shutdown clears secrets and a new process store rejects old cooki
   assertFailure(await fresh.app.inject({ url: '/api/auth/session', headers: credentials(first) }), 403, 'SESSION_EXPIRED');
 });
 
-test('rate limit: sixth IP failure blocked across different email addresses; another IP can log in', async t => {
+test('rate limit: 31st IP attempt blocked across different email addresses; another IP can log in', async t => {
   const f = await fixture(t, { verifyLogin: async ({ email }) => {
     if (email !== 'good@example.com') throw Object.assign(new Error(secret), { code: 'AUTH_FAILED' });
     return { name: '예제', connection: { async logout() {} } };
   } });
-  for (let i = 0; i < 5; i++) assertFailure(await login(f.app, { email: `user${i}@example.com` }), 403, 'AUTH_FAILED');
+  for (let i = 0; i < 30; i++) assertFailure(await login(f.app, { email: `user${i}@example.com` }), 403, 'AUTH_FAILED');
   const blocked = await login(f.app, { email: 'good@example.com' });
   assertFailure(blocked, 429, 'RATE_LIMITED');
   assert.equal(blocked.headers['retry-after'], '900');
-  assert.equal(f.calls.length, 5);
+  assert.equal(f.calls.length, 30);
   assert.equal((await login(f.app, { email: 'good@example.com', remoteAddress: '198.51.100.10' })).statusCode, 200);
   f.advance(15 * 60_000);
   assert.equal((await login(f.app, { email: 'good@example.com' })).statusCode, 200);
@@ -369,16 +369,51 @@ test('rate limit: sixth email failure blocked across different IPs', async t => 
 
 test('rate limit: corrected XFF IP isolates clients and forged left entries cannot bypass block', async t => {
   const f = await fixture(t, { verifyLogin: async () => { throw Object.assign(new Error(secret), { code: 'AUTH_FAILED' }); } });
-  for (let i = 0; i < 5; i++) assertFailure(await login(f.app, { email: `user${i}@example.com`, remoteAddress: '172.22.1.2', headers: { 'x-forwarded-for': `203.0.113.${i},198.51.100.9,192.0.2.10` } }), 403, 'AUTH_FAILED');
+  for (let i = 0; i < 30; i++) assertFailure(await login(f.app, { email: `user${i}@example.com`, remoteAddress: '172.22.1.2', headers: { 'x-forwarded-for': `203.0.113.${i},198.51.100.9,192.0.2.10` } }), 403, 'AUTH_FAILED');
   assertFailure(await login(f.app, { email: 'fresh@example.com', remoteAddress: '172.22.1.2', headers: { 'x-forwarded-for': '203.0.113.99,198.51.100.9,192.0.2.10' } }), 429, 'RATE_LIMITED');
   assertFailure(await login(f.app, { email: 'fresh@example.com', remoteAddress: '172.22.1.2', headers: { 'x-forwarded-for': '198.51.100.10,192.0.2.10' } }), 403, 'AUTH_FAILED');
-  assert.equal(f.calls.length, 6);
+  assert.equal(f.calls.length, 31);
+});
+
+test('rate limit: allowlisted addresses and CIDRs skip IP limits but retain account limits', async t => {
+  for (const [rule, address, outside] of [
+    ['192.0.2.10', '192.0.2.10', '192.0.2.11'],
+    ['192.0.2.0/24', '192.0.2.255', '198.51.100.9'],
+    ['2001:db8::10', '2001:db8:0:0:0:0:0:10', '2001:db8::11'],
+    ['2001:db8:1::/48', '2001:db8:1:ffff::1', '2001:db8:2::1'],
+  ]) {
+    await t.test(rule, async t => {
+      const f = await fixture(t, { auth: { loginIps: { async list() { return { items: [{ ip: rule }] }; } } },
+        verifyLogin: async () => { throw Object.assign(new Error(secret), { code: 'AUTH_FAILED' }); } });
+      for (let i = 0; i < 35; i++) {
+        assertFailure(await login(f.app, { email: `user${i}@example.com`, remoteAddress: address }), 403, 'AUTH_FAILED');
+      }
+      for (let i = 0; i < 5; i++) assertFailure(await login(f.app, { remoteAddress: address }), 403, 'AUTH_FAILED');
+      const blocked = await login(f.app, { remoteAddress: address });
+      assertFailure(blocked, 429, 'RATE_LIMITED');
+      assert.equal(blocked.headers['retry-after'], '900');
+      for (let i = 0; i < 30; i++) {
+        assertFailure(await login(f.app, { email: `outside${i}@example.com`, remoteAddress: outside }), 403, 'AUTH_FAILED');
+      }
+      assertFailure(await login(f.app, { email: 'fresh@example.com', remoteAddress: outside }), 429, 'RATE_LIMITED');
+    });
+  }
+});
+
+test('rate limit: empty allowlist uses the 30-failure IP boundary', async () => {
+  const limiter = createRateLimiter();
+  await limiter.refreshLoginIps();
+  for (let i = 0; i < 30; i++) {
+    assert.doesNotThrow(() => limiter.checkLogin('192.0.2.10', `user${i}@example.com`));
+    limiter.recordFailure('192.0.2.10', `user${i}@example.com`);
+  }
+  assert.throws(() => limiter.checkLogin('192.0.2.10', 'fresh@example.com'), { statusCode: 429 });
 });
 
 test('rate limit: IP 10-minute and email 15-minute sliding windows and password 5/hour policy', () => {
   let time = 0;
   const limiter = createRateLimiter({ now: () => time });
-  for (let i = 0; i < 4; i++) limiter.recordFailure('198.51.100.9', `user${i}@example.com`);
+  for (let i = 0; i < 29; i++) limiter.recordFailure('198.51.100.9', `user${i}@example.com`);
   time = 10 * 60_000;
   limiter.recordFailure('198.51.100.9', 'new@example.com');
   assert.doesNotThrow(() => limiter.checkLogin('198.51.100.9', 'new@example.com'));

@@ -75,10 +75,12 @@ from pathlib import Path
 u=json.loads(Path(sys.argv[1]).read_text())
 assert set(u)=={'webmail_ro@172.22.1.240','webmail_notices_admin@172.22.1.241'}
 web=u['webmail_ro@172.22.1.240']; admin=u['webmail_notices_admin@172.22.1.241']
-assert len(web['grants'])==11 and len(admin['grants'])==6
+assert len(web['grants'])==12 and len(admin['grants'])==7
 for table in ('public_templates','public_template_domains','public_template_files'):
     assert sum(('GRANT SELECT ON mailstack_webmail.'+table+' TO ') in g for g in web['grants'])==1
     assert sum(('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.'+table+' TO ') in g for g in admin['grants'])==1
+assert any('GRANT SELECT ON mailstack_webmail.login_ip_allowlist TO ' in g for g in web['grants'])
+assert any('GRANT SELECT, INSERT, DELETE ON mailstack_webmail.login_ip_allowlist TO ' in g for g in admin['grants'])
 assert not any('notice_counter' in g for g in web['grants'])
 assert not any('notice_reads' in g or '`mailcow`.' in g for g in admin['grants'])
 assert sum('GRANT SELECT (' in g for g in web['grants'])==5

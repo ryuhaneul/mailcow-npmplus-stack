@@ -1,3 +1,6 @@
+import { createLoginIpStore } from '../security/login-ip-store.js';
+import { createLoginIpsService } from './services/login-ips.js';
+import loginIpsRoutes from './routes/login-ips.js';
 import { createBouncePolicy, createBouncePolicyListener } from './bounce-policy.js';
 import { createBouncesService } from './services/bounces.js';
 import bouncesRoutes from './routes/bounces.js';
@@ -93,7 +96,7 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {} } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {}, loginIps = {} } = {}) {
   if (logger !== false) {
     const base = logOptions(config.logLevel);
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
@@ -185,6 +188,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const domains = createDomainsService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('domains', domains);
   await app.register(domainsRoutes, { service: domains });
+  const loginIpStore = loginIps.store ?? createLoginIpStore({ ...loginIps, config, mode: 'admin' });
+  app.addHook('onClose', async () => { await loginIpStore.close?.(); });
+  await app.register(loginIpsRoutes, { service: createLoginIpsService({ store: loginIpStore, audit, lock: adminLock }) });
   const noticesStore = notices.store ?? createNoticesStore({ ...notices, config, mode: 'admin' });
   const noticesService = createNoticesService({ store: noticesStore, domains, audit });
   app.decorate('notices', noticesService);

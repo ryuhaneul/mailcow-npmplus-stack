@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { queueItems } from './services/status.js';
 import { archiveCoverage } from './services/logs.js';
 import { readRelayFiles, relayNetwork } from './relay-files.js';
+import { emptyMonitorCollection, monitorSeenMax, monitorStateMaxBytes } from './mail-monitor-state.js';
 import { notificationAddress } from './quota-notification-state.js';
 
 const minute = 60000;
@@ -35,81 +36,106 @@ export function monitorEvent(row) {
   return null;
 }
 const emptyCounts = () => ({ account:new Map(), total:new Map(), relayReceived:new Map(), relayRejected:new Map() });
-const add=(map,key)=>map.set(key,(map.get(key)??0)+1);
+const add=(map,key,value=1)=>map.set(key,(map.get(key)??0)+value);
+const bucketCounts=()=>({account:[],total:0,relayReceived:[],relayRejected:[],relayUnauthenticated:[]});
 function unknownMetric(item,rules,reason){return {item,windows:rules.map(r=>({windowMinutes:r.windowMinutes??0,threshold:r.threshold,value:null,target:null,targets:[],complete:false,status:'unknown',reason}))};}
 function rulesFor(settings,item){return Array.isArray(settings.rules[item])?settings.rules[item]:[settings.rules[item]];}
 export function createMonitorCollector({ config, mailcow, logArchive, relayReader=readRelayFiles, now=Date.now, monotonicNow=()=>performance.now(), limits={} }) {
-  const cap={milliseconds:120000,pages:256,rows:200000,bytes:128*1024*1024,...limits};
-  let warmSince=now(),lastSuccess=null;
-  async function readArchive(T,signal) {
-    if(!logArchive?.enabled)return {complete:false,reason:'ARCHIVE_DISABLED'};
-    // This is the last successful observation, not a continuous coverage proof.
-    const status=await logArchive.status({signal});
-    const stamp=status?.sources?.postfix?.lastSuccessfulCollectionAt;
-    const success=typeof stamp==='string'&&monitorTimestamp(stamp)!==null?Date.parse(stamp):null;
-    if(success===null || lastSuccess!==null&&success<lastSuccess)warmSince=now();
-    lastSuccess=success;
-    if(success===null || success<T)return {complete:false,reason:'COLLECTION_UNCONFIRMED',lastSuccessfulCollectionAt:stamp??null};
-    const start=T-60*minute;
-    let pages=0,rows=0,bytes=0;const started=monotonicNow();
-    const run=async()=>{
-      const counts=new Map([5,15,60].map(w=>[w,emptyCounts()])), seenRows=new Set(), submissions=new Map(), rejections=new Set();
-      let cursor=null; const accountUnknown=new Set(),cursors=new Set(); let coverage=null;
-      do {
-        if(signal.aborted)throw Object.assign(new Error(),{code:'COLLECTION_ABORTED'});
-        if(++pages>cap.pages || monotonicNow()-started>=cap.milliseconds)throw Object.assign(new Error(),{code:'COLLECTION_LIMIT'});
-        const data=await logArchive.search({source:'postfix',start:iso(start),end:iso(T),q:'',limit:'1000',...(cursor?{cursor}:{})},{signal});
-        if(!object(data)||!Array.isArray(data.lines)||data.lines.length>1000||!(data.nextCursor===null||typeof data.nextCursor==='string'&&data.nextCursor.length>0&&data.nextCursor.length<=4096)||typeof data.incomplete!=='boolean'||![null,'limit','response_bytes','scan_bytes','timeout'].includes(data.partialReason)||!Number.isSafeInteger(data.scannedBytes)||data.scannedBytes<0)throw Object.assign(new Error(),{code:'INVALID_ARCHIVE_RESPONSE'});
-        bytes+=data.scannedBytes;rows+=data.lines.length;
-        if(bytes>cap.bytes||rows>cap.rows)throw Object.assign(new Error(),{code:'COLLECTION_LIMIT'});
-        const checked=archiveCoverage(data.coverage,'postfix');
-
-        if(coverage&&JSON.stringify(checked)!==JSON.stringify(coverage))throw Object.assign(new Error(),{code:'ARCHIVE_CHANGED'});
-        coverage=checked;
-        for(const row of data.lines){
-          if(!object(row)||typeof row.id!=='string'||!row.id||row.id.length>512||typeof row.program!=='string'||typeof row.message!=='string'||Array.from(row.message).length>=4000||['[민감 정보가 포함된 로그]','[구조화 로그 내용 생략]'].includes(row.message)||row.truncated||row.unknownTime)throw Object.assign(new Error(),{code:'ARCHIVE_LOSS'});
-          const stampKey=monitorTimestamp(row.time);if(stampKey===null)throw Object.assign(new Error(),{code:'ARCHIVE_LOSS'});
-          if(seenRows.has(row.id))throw Object.assign(new Error(),{code:'ARCHIVE_DUPLICATE_ROW'});seenRows.add(row.id);
-          if(stampKey<monitorTimestamp(iso(start))||stampKey>=monitorTimestamp(iso(T)))throw Object.assign(new Error(),{code:'ARCHIVE_TIME_RANGE'});
-          const event=monitorEvent(row);if(!event)continue;if(event.kind==='unparseable')throw Object.assign(new Error(),{code:'ARCHIVE_PARSE_LOSS'});
-          // A queue removal closes its lifecycle; ordinary delivery retry lines never count.
-          if(event.kind==='removed'){for(const k of submissions.keys())if(k.startsWith(event.qid+'|'))submissions.delete(k);for(const k of rejections)if(k.startsWith(event.qid+'|'))rejections.delete(k);continue;}
-          if(event.kind==='submission'){
-            const key=[event.qid,event.pid,event.client,event.account].join('|');
-            if(submissions.has(key))continue;submissions.set(key,stampKey);
-          }
-          if(event.kind==='rejection'&&event.qid){const key=[event.qid,event.pid,event.stage].join('|');if(rejections.has(key))continue;rejections.add(key);}
-          for(const [window,values] of counts)if(stampKey>=monitorTimestamp(iso(T-window*minute))){
-            if(event.kind==='removed'){for(const k of submissions.keys())if(k.startsWith(event.qid+'|'))submissions.delete(k);for(const k of rejections)if(k.startsWith(event.qid+'|'))rejections.delete(k);continue;}
-          if(event.kind==='submission'){
-              if(event.authenticated){add(values.total,'all');if(event.account)add(values.account,event.account);else accountUnknown.add(window);}
-              // Relay membership is applied after the complete snapshot is read.
-            }
-          }
-          // Compact parsed facts only; no raw log lines survive this page.
-          if(event.client){facts.push({event,stamp:row.time});}
-        }
-        cursor=data.nextCursor;
-        if(cursor){if(cursors.has(cursor))throw Object.assign(new Error(),{code:'ARCHIVE_CURSOR_LOOP'});cursors.add(cursor);}
-        else if(data.partialReason!==null||data.complete===false)throw Object.assign(new Error(),{code:'ARCHIVE_INCOMPLETE'});
-      }while(cursor);
-      return {complete:true,counts,accountUnknown,coverage,lastSuccessfulCollectionAt:stamp};
+  const cap={milliseconds:120000,pages:256,rows:200000,bytes:128*1024*1024,seen:monitorSeenMax,stateBytes:monitorStateMaxBytes,...limits};
+  let retained=null;
+  async function readArchive(T,signal,input,saveCollection) {
+    let state=structuredClone((input===undefined?retained:input)??emptyMonitorCollection(iso(T)));
+    const started=monotonicNow();let pages=0,rows=0,bytes=0;
+    const prune=()=>{state.bins=state.bins.filter(b=>Date.parse(b.end)>T-60*minute&&Date.parse(b.end)<=T);state.seen=state.seen.filter(e=>Date.parse(e.at)>T-60*minute);};
+    const checkpoint=async candidate=>{
+      if(candidate.seen.length>cap.seen||Buffer.byteLength(JSON.stringify(candidate))>cap.stateBytes)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});
+      await saveCollection?.(structuredClone(candidate));state=candidate;retained=structuredClone(candidate);
     };
-    let facts=[];
-    for(let attempt=0;attempt<2;attempt++)try{facts=[];return {...await run(),facts};}catch(e){if(e.status===410||e.statusCode===410){if(!attempt)continue;}return {complete:false,reason:typeof e.code==='string'&&/^[A-Z_]+$/.test(e.code)?e.code:'ARCHIVE_UNAVAILABLE',lastSuccessfulCollectionAt:stamp};}
+    let stamp=null;
+    const result=(complete,reason=null)=>({complete,reason,collection:state,lastSuccessfulCollectionAt:stamp});
+    try{
+      if(T<Date.parse(state.watermark))state=emptyMonitorCollection(iso(T));
+      prune();
+      if(!logArchive?.enabled){await checkpoint(state);return result(false,'ARCHIVE_DISABLED');}
+      const status=await logArchive.status({signal});stamp=status?.sources?.postfix?.lastSuccessfulCollectionAt??null;
+      const success=typeof stamp==='string'&&monitorTimestamp(stamp)!==null?Date.parse(stamp):null;
+      if(success===null||state.lastSuccessfulCollectionAt!==null&&success<Date.parse(state.lastSuccessfulCollectionAt))state.startedAt=iso(T);
+      state.lastSuccessfulCollectionAt=success===null?null:iso(success);
+      if(success===null){stamp=null;await checkpoint(state);return result(false,'COLLECTION_UNCONFIRMED');}
+      stamp=iso(success);await checkpoint(state);
+      const end=Math.floor(Math.min(T,success)/300000)*300000;
+      for(let from=Math.max(Date.parse(state.watermark),T-60*minute);from<end;from+=5*minute){
+        const to=from+5*minute;
+        let bin,seen;
+        for(let attempt=0;attempt<2;attempt++){
+          try{
+            bin={end:iso(to),complete:true,reason:null,counts:bucketCounts(),accountUnknown:false};
+            seen=new Map(state.seen.map(e=>[e.key,e.at]));
+            const account=new Map(),received=new Map(),rejected=new Map(),unauthenticated=new Map(),seenRows=new Set(),cursors=new Set();
+            let cursor=null,coverage=null;
+            do{
+              if(signal.aborted)throw Object.assign(new Error(),{code:'COLLECTION_ABORTED'});
+              if(++pages>cap.pages||monotonicNow()-started>=cap.milliseconds)throw Object.assign(new Error(),{code:'COLLECTION_LIMIT'});
+              const data=await logArchive.search({source:'postfix',start:iso(from),end:iso(to),q:'',limit:'1000',...(cursor?{cursor}:{})},{signal});
+              if(!object(data)||!Array.isArray(data.lines)||data.lines.length>1000||!(data.nextCursor===null||typeof data.nextCursor==='string'&&data.nextCursor.length>0&&data.nextCursor.length<=4096)||typeof data.incomplete!=='boolean'||![null,'limit','response_bytes','scan_bytes','timeout'].includes(data.partialReason)||!Number.isSafeInteger(data.scannedBytes)||data.scannedBytes<0)throw Object.assign(new Error(),{code:'INVALID_ARCHIVE_RESPONSE'});
+              if(signal.aborted)throw Object.assign(new Error(),{code:'COLLECTION_ABORTED'});
+              bytes+=data.scannedBytes;rows+=data.lines.length;
+              if(bytes>cap.bytes||rows>cap.rows)throw Object.assign(new Error(),{code:'COLLECTION_LIMIT'});
+              const checked=archiveCoverage(data.coverage,'postfix');
+              if(coverage&&JSON.stringify(checked)!==JSON.stringify(coverage))throw Object.assign(new Error(),{code:'ARCHIVE_CHANGED'});coverage=checked;
+              for(const row of data.lines){
+                if(!object(row)||typeof row.id!=='string'||!row.id||row.id.length>512||typeof row.program!=='string'||typeof row.message!=='string'||Array.from(row.message).length>=4000||['[민감 정보가 포함된 로그]','[구조화 로그 내용 생략]'].includes(row.message)||row.truncated||row.unknownTime)throw Object.assign(new Error(),{code:'ARCHIVE_LOSS'});
+                const stampKey=monitorTimestamp(row.time);if(stampKey===null)throw Object.assign(new Error(),{code:'ARCHIVE_LOSS'});
+                if(seenRows.has(row.id))throw Object.assign(new Error(),{code:'ARCHIVE_DUPLICATE_ROW'});seenRows.add(row.id);
+                if(stampKey<monitorTimestamp(iso(from))||stampKey>=monitorTimestamp(iso(to)))throw Object.assign(new Error(),{code:'ARCHIVE_TIME_RANGE'});
+                const event=monitorEvent(row);if(!event)continue;if(event.kind==='unparseable')throw Object.assign(new Error(),{code:'ARCHIVE_PARSE_LOSS'});
+                if(event.kind==='removed'){for(const key of seen.keys())if(key.startsWith('s|'+event.qid+'|')||key.startsWith('r|'+event.qid+'|'))seen.delete(key);continue;}
+                const key=event.kind==='submission'?['s',event.qid,event.pid,event.client,event.account].join('|'):event.qid?['r',event.qid,event.pid,event.stage].join('|'):null;
+                if(key){if(key.length>512)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});const duplicate=seen.has(key);seen.set(key,iso(to));if(seen.size>cap.seen)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});if(duplicate)continue;}
+                if(event.kind==='submission'){
+                  if(event.authenticated){bin.counts.total++;if(event.account)add(account,event.account);else bin.accountUnknown=true;}
+                  add(received,event.client);if(!event.authenticated)add(unauthenticated,event.client);
+                }else if(event.client)add(rejected,event.client);
+              }
+              cursor=data.nextCursor;
+              if(cursor){if(cursors.has(cursor))throw Object.assign(new Error(),{code:'ARCHIVE_CURSOR_LOOP'});cursors.add(cursor);}
+              else if(data.partialReason!==null||data.complete===false)throw Object.assign(new Error(),{code:'ARCHIVE_INCOMPLETE'});
+            }while(cursor);
+            Object.assign(bin.counts,{account:[...account],relayReceived:[...received],relayRejected:[...rejected],relayUnauthenticated:[...unauthenticated]});
+            if(coverage.gaps.some(g=>!g.from||!g.to||Date.parse(g.from)<to&&Date.parse(g.to)>from)){bin.complete=false;bin.reason='ARCHIVE_GAP';}
+            break;
+          }catch(e){if((e.status===410||e.statusCode===410)&&!attempt)continue;throw e;}
+        }
+        await checkpoint({...state,watermark:iso(to),bins:[...state.bins.filter(b=>b.end!==bin.end),bin].sort((a,b)=>a.end.localeCompare(b.end)).slice(-12),seen:[...seen].map(([key,at])=>({key,at}))});
+      }
+      return result(success>=T,success<T?'COLLECTION_UNCONFIRMED':null);
+    }catch(e){return result(false,typeof e.code==='string'&&/^[A-Z_]+$/.test(e.code)?e.code:'ARCHIVE_UNAVAILABLE');}
   }
-  async function collect(settings,{signal:parent}={}) {
+  async function collect(settings,{signal:parent,collection,saveCollection}={}) {
     const controller=new AbortController(),abort=()=>controller.abort();parent?.addEventListener('abort',abort,{once:true});if(parent?.aborted)abort();
     const timeout=setTimeout(abort,cap.milliseconds);timeout.unref?.();
     const T=Math.floor(now()/300000)*300000,signal=controller.signal;
     try {
-      const archivePromise=readArchive(T,signal).catch(()=>({complete:false,reason:'ARCHIVE_UNAVAILABLE'}));
+      const archivePromise=readArchive(T,signal,collection,saveCollection).catch(()=>({complete:false,reason:'ARCHIVE_UNAVAILABLE'}));
       const relayPromise=relayReader(config).then(v=>v.consistent?{...v,complete:true}:{complete:false,reason:'RELAY_MISMATCH'}).catch(e=>({complete:false,disabled:e.code==='RELAY_DISABLED',reason:e.code==='RELAY_DISABLED'?'RELAY_DISABLED':'RELAY_UNAVAILABLE'}));
       const queuePromise=(async()=>{try{const context=mailcow.createApiContext({permission:'read'});const items=queueItems(await mailcow.call(context,'GET','/api/v1/get/mailq/all',undefined,signal),now());if(items.some(r=>!r.id))throw new Error();return {complete:true,value:new Set(items.map(r=>r.id)).size,at:iso(now())};}catch{return {complete:false,reason:'QUEUE_UNAVAILABLE'};}})();
       const [archive,relay,queue]=await Promise.all([archivePromise,relayPromise,queuePromise]);
       const networks=relay.complete?relay.ips.map(relayNetwork):[];
       const matched=ip=>{if(!ip)return false;const n=relayNetwork(ip);return networks.some(r=>r.family===n.family&&r.start<=n.start&&r.end>=n.end);};
-      if(archive.complete)for(const {event,stamp}of archive.facts)if(matched(event.client))for(const [window,values]of archive.counts)if(monitorTimestamp(stamp)>=monitorTimestamp(iso(T-window*minute))){if(event.kind==='submission'){add(values.relayReceived,event.client);if(!event.authenticated)add(values.total,'all');}else add(values.relayRejected,event.client);}
+      const counts=new Map([5,15,60].map(w=>[w,emptyCounts()])),windowReasons=new Map();
+      for(const [window,values]of counts){
+        const bins=archive.collection?.bins.filter(b=>Date.parse(b.end)>T-window*minute)??[];
+        let reason=!archive.complete?archive.reason:null;
+        if(!reason&&bins.some(b=>!b.complete))reason=bins.find(b=>!b.complete).reason;
+        if(!reason&&(T-Date.parse(archive.collection.startedAt)<window*minute||bins.length!==window/5||!bins.some(b=>b.end===iso(T))))reason='WARMING_UP';
+        windowReasons.set(window,reason);
+        for(const b of bins){
+          for(const [target,value]of b.counts.account)add(values.account,target,value);
+          add(values.total,'all',b.counts.total);
+          for(const [ip,value]of b.counts.relayUnauthenticated)if(matched(ip))add(values.total,'all',value);
+          for(const item of ['relayReceived','relayRejected'])for(const [ip,value]of b.counts[item])if(matched(ip))add(values[item],ip,value);
+        }
+      }
       const metrics=[];
       for(const item of ['account','total','queue','relayReceived','relayRejected']){
         const rules=rulesFor(settings,item);
@@ -119,13 +145,12 @@ export function createMonitorCollector({ config, mailcow, logArchive, relayReade
           continue;
         }
         const needsRelay=item==='total'||item.startsWith('relay');
-        const reason=!archive.complete?archive.reason:needsRelay&&!relay.complete&&!relay.disabled?relay.reason:item.startsWith('relay')&&relay.disabled?'RELAY_DISABLED':null;
+        const reason=needsRelay&&!relay.complete&&!relay.disabled?relay.reason:item.startsWith('relay')&&relay.disabled?'RELAY_DISABLED':null;
         if(reason){metrics.push(unknownMetric(item,rules,reason));continue;}
         metrics.push({item,windows:rules.map(r=>{
-          if(item==='account'&&archive.accountUnknown.has(r.windowMinutes))return unknownMetric(item,[r],'ACCOUNT_UNKNOWN').windows[0];
-          if(archive.coverage.gaps.some(g=>!g.from||!g.to||Date.parse(g.from)<T&&Date.parse(g.to)>T-r.windowMinutes*minute))return unknownMetric(item,[r],'ARCHIVE_GAP').windows[0];
-          if(T-warmSince<r.windowMinutes*minute)return unknownMetric(item,[r],'WARMING_UP').windows[0];
-          const map=archive.counts.get(r.windowMinutes)[item];
+          if(windowReasons.get(r.windowMinutes))return unknownMetric(item,[r],windowReasons.get(r.windowMinutes)).windows[0];
+          if(item==='account'&&archive.collection.bins.some(b=>Date.parse(b.end)>T-r.windowMinutes*minute&&b.accountUnknown))return unknownMetric(item,[r],'ACCOUNT_UNKNOWN').windows[0];
+          const map=counts.get(r.windowMinutes)[item];
           const targets=[...map].map(([target,value])=>({target,value})).sort((a,b)=>b.value-a.value||a.target.localeCompare(b.target));
           if(item==='total'&&!targets.length)targets.push({target:'all',value:0});
           const top=targets[0]??{target:null,value:0};

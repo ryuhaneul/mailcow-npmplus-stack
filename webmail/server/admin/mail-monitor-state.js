@@ -10,7 +10,7 @@ export const monitorItems = Object.freeze(['account', 'total', 'queue', 'relayRe
 export const defaultMonitorSettings = () => ({ v: 1, enabled: false, recipients: [], repeatMinutes: 60, recoveryEnabled: true,
   rules: { account: [{ windowMinutes: 5, threshold: 50 }, { windowMinutes: 60, threshold: 200 }], total: [{ windowMinutes: 5, threshold: 600 }, { windowMinutes: 60, threshold: 2500 }], queue: { mode: 'snapshot', threshold: 100 }, relayReceived: { windowMinutes: 5, threshold: 300 }, relayRejected: { windowMinutes: 5, threshold: 20 } },
   bounceAuto: { enabled: false, durationMinutes: 60 } });
-export const emptyMonitorState = () => ({ v: 1, settingsEtag: null, relayEtag: null, lastAttemptAt: null, lastCompleteAt: null, asOf: null, snapshot: null, incidents: [], outbox: [], notifications: [] });
+export const emptyMonitorState = () => ({ v: 1, settingsEtag: null, relayEtag: null, lastAttemptAt: null, lastCompleteAt: null, asOf: null, snapshot: null, collection: null, incidents: [], outbox: [], notifications: [] });
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
 const keys = (v, names) => object(v) && Object.keys(v).sort().join(',') === [...names].sort().join(',');
 const integer = (v, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(v) && v > 0 && v <= max;
@@ -45,8 +45,19 @@ function validSnapshot(v) {
   }
   return true;
 }
+// Persist only numeric five-minute buckets and recent lifecycle keys, never log bodies.
+export const monitorStateMaxBytes = 16*1024*1024;
+export const monitorSeenMax = 50000;
+export const emptyMonitorCollection = at => ({v:1,startedAt:at,watermark:at,lastSuccessfulCollectionAt:null,bins:[],seen:[]});
+export function validMonitorCollection(v) {
+  const boundary=t=>monitorTime(t)&&t!==null&&Date.parse(t)%300000===0;
+  const pairs=v=>Array.isArray(v)&&v.length<=monitorSeenMax&&new Set(v.map(p=>p?.[0])).size===v.length&&v.every(p=>Array.isArray(p)&&p.length===2&&safeText(p[0])&&nonnegative(p[1]));
+  if(!keys(v,['v','startedAt','watermark','lastSuccessfulCollectionAt','bins','seen'])||v.v!==1||!boundary(v.startedAt)||!boundary(v.watermark)||!monitorTime(v.lastSuccessfulCollectionAt)||!Array.isArray(v.bins)||v.bins.length>12||!Array.isArray(v.seen)||v.seen.length>monitorSeenMax)return false;
+  if(new Set(v.bins.map(b=>b?.end)).size!==v.bins.length||!v.bins.every(b=>keys(b,['end','complete','reason','counts','accountUnknown'])&&boundary(b.end)&&typeof b.complete==='boolean'&&(b.reason===null||safeText(b.reason))&&b.complete===(b.reason===null)&&typeof b.accountUnknown==='boolean'&&keys(b.counts,['account','total','relayReceived','relayRejected','relayUnauthenticated'])&&nonnegative(b.counts.total)&&['account','relayReceived','relayRejected','relayUnauthenticated'].every(k=>pairs(b.counts[k]))))return false;
+  return new Set(v.seen.map(e=>e?.key)).size===v.seen.length&&v.seen.every(e=>keys(e,['key','at'])&&safeText(e.key)&&boundary(e.at));
+}
 export function validMonitorState(v) {
-  if (!keys(v, Object.keys(emptyMonitorState())) || v.v !== 1 || ![v.lastAttemptAt,v.lastCompleteAt,v.asOf].every(monitorTime) || ![v.settingsEtag,v.relayEtag].every(x => x === null || safeText(x)) || !Array.isArray(v.incidents) || !Array.isArray(v.outbox) || !Array.isArray(v.notifications) || v.notifications.length > 1000 || !(v.snapshot === null || validSnapshot(v.snapshot))) return false;
+  if (!(keys(v, Object.keys(emptyMonitorState()))||keys(v,Object.keys(emptyMonitorState()).filter(k=>k!=='collection'))) || !(v.collection===undefined||v.collection===null||validMonitorCollection(v.collection)) || v.v !== 1 || ![v.lastAttemptAt,v.lastCompleteAt,v.asOf].every(monitorTime) || ![v.settingsEtag,v.relayEtag].every(x => x === null || safeText(x)) || !Array.isArray(v.incidents) || !Array.isArray(v.outbox) || !Array.isArray(v.notifications) || v.notifications.length > 1000 || !(v.snapshot === null || validSnapshot(v.snapshot))) return false;
   for (const i of v.incidents) {
     if (!keys(i, ['id','key','item','target','openedAt','closedAt','phase','rules','deliveries']) || !safeText(i.id) || !safeText(i.key) || !monitorItems.includes(i.item) || !safeText(i.target) || !monitorTime(i.openedAt) || i.openedAt === null || !monitorTime(i.closedAt) || !['active','resolved','cancelled'].includes(i.phase) || !Array.isArray(i.rules) || !Array.isArray(i.deliveries)) return false;
     if (!i.rules.every(r => keys(r, ['windowMinutes','value','threshold']) && Number.isSafeInteger(r.value) && r.value >= 0 && integer(r.threshold) && [0,5,15,60].includes(r.windowMinutes))) return false;
@@ -68,12 +79,12 @@ export function validBounces(v) {
     if (r.manual!==null && (!keys(r.manual,['until','actor','at']) || !monitorTime(r.manual.until) || !monitorTime(r.manual.at) || r.manual.at===null || !safeText(r.manual.actor))) return false;
     ids.add(r.id);addresses.add(r.recipient);
   }
-  return v.seen.every(e=>keys(e,['key','at'])&&/^[a-f0-9]{64}$/.test(e.key)&&monitorTime(e.at)&&e.at!==null) && new Set(v.seen.map(e=>e.key)).size===v.seen.length;
+  return v.seen.every(e=>keys(e,['key','at'])&&/^[a-f0-9]{64}$/.test(e.key)&&monitorTime(e.at)&&e.at!==null) && new Set(v.seen.map(e=>e?.key)).size===v.seen.length;
 }
 export function normalizeBounces(value) { if(!validBounces(value))throw unavailable(); return {...value,recipients:value.recipients.map(r=>({sender:null,resolvedAt:null,...r}))}; }
 const unavailable = () => new AppError(503, 'MONITOR_STORE_UNAVAILABLE', '감시 저장소를 확인해 주세요.');
 export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem } = {}) {
-  const spec = { bounces: {max:16*1024*1024, fallback:emptyBounces, valid:validBounces}, settings: { max: 1024*1024, fallback: defaultMonitorSettings, valid: v => { try { return JSON.stringify(v) === JSON.stringify(validateMonitorSettings(v)); } catch { return false; } } }, state: { max: 4*1024*1024, fallback: emptyMonitorState, valid: validMonitorState } };
+  const spec = { bounces: {max:16*1024*1024, fallback:emptyBounces, valid:validBounces}, settings: { max: 1024*1024, fallback: defaultMonitorSettings, valid: v => { try { return JSON.stringify(v) === JSON.stringify(validateMonitorSettings(v)); } catch { return false; } } }, state: { max: monitorStateMaxBytes, fallback: emptyMonitorState, valid: validMonitorState } };
   async function read(name) {
     let handle;
     try {
@@ -84,7 +95,7 @@ export function createMonitorStore({ dir = '/data/mail-monitor', fs = filesystem
       if (!stat.isFile() || stat.size > spec[name].max || (stat.mode & 0o777) !== 0o600) throw unavailable();
       const value = JSON.parse(await handle.readFile('utf8'));
       if (!spec[name].valid(value)) throw unavailable();
-      return name==='bounces'?normalizeBounces(value):value;
+      return name==='bounces'?normalizeBounces(value):name==='state'?{collection:null,...value}:value;
     } catch (e) { if (e.code === 'ENOENT') return spec[name].fallback(); throw unavailable(); }
     finally { await handle?.close(); }
   }

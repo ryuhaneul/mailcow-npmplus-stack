@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { AppError } from '../../errors.js';
 import { etag, assertUnchanged } from '../lock.js';
-import { validateMonitorSettings, monitorItems } from '../mail-monitor-state.js';
+import { validateMonitorSettings, monitorItems, monitorStateMaxBytes } from '../mail-monitor-state.js';
 import { notificationAddress } from '../quota-notification-state.js';
 const iso=n=>new Date(n).toISOString();
 const key=(item,target)=>createHash('sha256').update(JSON.stringify([item,target])).digest('hex');
@@ -66,10 +66,14 @@ export function createMonitorService({ store, collector, config, mailcow, audit,
       await change(s=>{recover(s);s.lastAttemptAt=iso(now());trim(s);});
       const settings=await store.readSettings();
       if(!settings.enabled){await change(s=>{for(const i of s.incidents)if(i.phase==='active'){i.phase='cancelled';i.closedAt=iso(now());}s.outbox=[];});return {sent:0,failed:0};}
-      const snapshot=await collector.collect(settings,{signal:controller.signal});
+      const snapshot=await collector.collect(settings,{signal:controller.signal,collection:(await store.readState()).collection,saveCollection:collection=>change(s=>{
+        if(Buffer.byteLength(JSON.stringify({...s,collection}))>monitorStateMaxBytes)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});
+        s.collection=collection;
+      })});
       if(controller.signal.aborted)return {sent:0,failed:0};
-      const accepted=await change(async s=>{
+      const accept=async s=>{
         if(etag(await store.readSettings())!==etag(settings))return false;
+        if(Buffer.byteLength(JSON.stringify({...s,snapshot}))>monitorStateMaxBytes)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});
         const rulesTag=etag(settings.rules),relayChanged=s.relayEtag!==null&&snapshot.relayEtag!==null&&s.relayEtag!==snapshot.relayEtag;
         if(s.settingsEtag!==null&&s.settingsEtag!==rulesTag||relayChanged){for(const i of s.incidents)if((i.phase==='active'||s.outbox.some(e=>e.incidentId===i.id))&&(s.settingsEtag!==rulesTag||i.item==='total'||i.item.startsWith('relay'))){i.phase='cancelled';i.closedAt=iso(now());}}
         s.settingsEtag=rulesTag;if(snapshot.relayEtag!==null)s.relayEtag=snapshot.relayEtag;
@@ -91,8 +95,17 @@ export function createMonitorService({ store, collector, config, mailcow, audit,
           }else if(i.phase==='resolved'&&settings.recoveryEnabled&&d.alerted&&!d.recoveryDone)phase='recovery';
           if(phase&&!s.outbox.some(e=>e.incidentId===i.id&&e.recipient===recipient&&e.phase===phase))s.outbox.push({id:randomUUID(),incidentId:i.id,recipient,phase,at:iso(now()),pendingAt:null});
         }
-        trim(s);return true;
-      });
+        trim(s);
+        if(Buffer.byteLength(JSON.stringify(s))>monitorStateMaxBytes)throw Object.assign(new Error(),{code:'COLLECTION_STATE_LIMIT'});
+        return true;
+      };
+      let accepted;
+      try{accepted=await change(accept);}catch(e){
+        if(e.code!=='COLLECTION_STATE_LIMIT')throw e;
+        snapshot.sources.postfix.complete=false;snapshot.sources.postfix.reason='COLLECTION_STATE_LIMIT';
+        snapshot.metrics=snapshot.metrics.map(m=>m.item==='queue'?m:{...m,windows:m.windows.map(w=>({...w,value:null,target:null,targets:[],complete:false,status:'unknown',reason:'COLLECTION_STATE_LIMIT'}))});
+        accepted=await change(accept);
+      }
       if(!accepted||controller.signal.aborted)return {sent:0,failed:0};
       if(!(await store.readState()).outbox.length)return {sent:0,failed:0};
       // An invalid sender is recorded as an explicit unsent failure, not an ambiguous SMTP result.

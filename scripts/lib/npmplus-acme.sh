@@ -48,7 +48,7 @@ except (ValueError,KeyError,TypeError): sys.exit(1)
 import hashlib,pathlib,sys
 try:
  raw=pathlib.Path(sys.argv[1]).read_bytes()
- block=b'    if ($request_uri ~ ^/\\.well-known/acme-challenge/) {\n      break;\n    }\n'
+ block=b'    if ($uri ~ "^/\\.well-known/acme-challenge/[A-Za-z0-9_-]+$") {\n      break;\n    }\n'
  needle=b'  {% if ssl_forced %}\n'+block
  if raw.count(block)!=1 or raw.count(needle)!=1 or hashlib.sha256(raw.replace(block,b'',1)).hexdigest()!=sys.argv[2]:
   raise ValueError()

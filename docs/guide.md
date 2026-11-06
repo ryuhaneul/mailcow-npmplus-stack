@@ -1398,11 +1398,40 @@ fi
 
 ### Force SSL과 HTTP-01 갱신
 
-Force SSL을 켜도 `/.well-known/acme-challenge/`는 80에서 NPMplus의
-certbot webroot(`/data/tls/certbot/acme-challenge`)로 직접 응답합니다.
+Force SSL을 켜도 정규화된 URI가 `/.well-known/acme-challenge/` 아래의
+한 단계 토큰(`[A-Za-z0-9_-]+`)이면 80에서 NPMplus의 certbot webroot
+(`/data/tls/certbot/acme-challenge`)로 직접 응답합니다. 예외 조건은 다음과 같습니다.
+
+```nginx
+if ($uri ~ "^/\.well-known/acme-challenge/[A-Za-z0-9_-]+$") { break; }
+```
+
 없는 토큰은 404, 유효한 토큰은 200이며 HTTPS로 전환하지 않습니다.
+원본 `$request_uri`의 접두사가 아니라 location 선택에 쓰는 `$uri`를 검사합니다.
+경로 정규화 후 일반 앱 경로가 되거나 토큰이 여러 단계/빈 값/끝 슬래시를 포함하면
+301을 유지합니다. 정상 토큰의 query string은 `$uri`에 포함되지 않습니다.
 일반 HTTP 경로의 301, 기존 443 방화벽 정책, 앱 인증/ACL은 유지합니다.
 Advanced Config에 같은 location을 추가하지 마세요.
+
+아래는 정규화된 URI와 정규식에 대한 **정적 판정**이며 실 nginx HTTP 실측이 아닙니다.
+토큰 `token_1-2`가 존재한다고 가정합니다. upstream 0은 기대값이며 VM 로그로 확인해야 합니다.
+
+| 요청 경계 | 정규화된 URI | 기대 HTTP | 기대 처리 |
+|---|---|---|---|
+| `/.well-known/acme-challenge/token_1-2` | 동일 | 200 | challenge 파일만, upstream 0 |
+| `/.well-known/acme-challenge/missing-token` | 동일 | 404 | 파일 없음, upstream 0 |
+| `/.well-known/acme-challenge/../../admin` | `/admin` | 301 | 앱 경로 우회 차단, upstream 0 |
+| `/.well-known/acme-challenge/%2e%2e/%2e%2e/admin` | `/admin` | 301 | 앱 경로 우회 차단, upstream 0 |
+| `//.well-known/acme-challenge/token_1-2` | `/.well-known/acme-challenge/token_1-2` | 200/없는 토큰 404 | 정상 토큰 별칭 — challenge 파일만 응답, upstream 0 |
+| `/.well-known%2Facme-challenge/token_1-2` | `/.well-known/acme-challenge/token_1-2` | 200/없는 토큰 404 | 정상 토큰 별칭 — challenge 파일만 응답, upstream 0 |
+| `/.well-known/acme-challenge/token%2Fadmin` | `/.well-known/acme-challenge/token/admin` | 301 | 추가 경로 단계 차단, upstream 0 |
+| `/.well-known/acme-challenge/token_1-2/` | 동일 | 301 | 끝 슬래시 차단, upstream 0 |
+| `/.well-known/acme-challenge/token_1-2?check=1` | `/.well-known/acme-challenge/token_1-2` | 200 | challenge 파일만, upstream 0 |
+| `/.well-known/acme-challenge/` | 동일 | 301 | 빈 토큰 차단, upstream 0 |
+
+기본 `merge_slashes on`에서 정상 토큰이 되는 별칭을 거절하려고 `$request_uri` 조건을
+추가하지 않습니다. VM에서는 표의 모든 변형을 `curl --path-as-is`로 전송하고,
+실 HTTP 상태와 앱 upstream 접근 로그가 각각 0건인지 확인해야 합니다.
 
 setup/update는 `npmplus/templates/_common.conf`를 runtime의 `templates/`에
 배치하고, 관리되는 `docker-compose.override.yml`에서 읽기 전용으로 마운트합니다.

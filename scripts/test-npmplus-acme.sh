@@ -99,6 +99,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import tempfile
 import threading
 import unittest
@@ -191,6 +192,29 @@ class AcmeTests(unittest.TestCase):
           'a97ffe67ff769df42fec6be915bf0dc0476492e57a33189b9b54388fec55c8e7')
         self.assertIn('^/\\.well-known',api.ACME_BLOCK)
         self.assertNotIn('^/\\\\.well-known',api.ACME_BLOCK)
+        self.assertIn('$uri ~ "',api.ACME_BLOCK)
+        self.assertNotIn('$request_uri',api.ACME_BLOCK)
+        pattern=re.search(r'if \(\$uri ~ "([^"]+)"\)',api.ACME_BLOCK).group(1)
+        self.assertEqual(pattern,r'^/\.well-known/acme-challenge/[A-Za-z0-9_-]+$')
+        # Explicit normalized fixtures test the regex contract only. They do not
+        # emulate Nginx normalization or claim real HTTP/upstream measurements.
+        boundaries=[
+            ('normal-token','/.well-known/acme-challenge/token_1-2',True),
+            ('missing-token','/.well-known/acme-challenge/missing-token',True),
+            ('dotdot','/admin',False),
+            ('encoded-dotdot','/admin',False),
+            ('merged-leading-slashes','/.well-known/acme-challenge/token_1-2',True),
+            ('encoded-slash-adds-step','/.well-known/acme-challenge/token/admin',False),
+            ('encoded-slash-normal-token-alias','/.well-known/acme-challenge/token_1-2',True),
+            ('trailing-slash','/.well-known/acme-challenge/token_1-2/',False),
+            ('query-removed-from-uri','/.well-known/acme-challenge/token_1-2',True),
+            ('empty-token','/.well-known/acme-challenge/',False),
+            ('ordinary-admin','/admin',False),
+        ]
+        for label,normalized,allowed in boundaries:
+            with self.subTest(boundary=label):
+                self.assertEqual(re.fullmatch(pattern,normalized) is not None,allowed)
+
     def test_same_values_and_serial_nginx_checks(self):
         f=Fixture();original=copy.deepcopy(f.values);folder=self.run_fixture(f)
         self.assertEqual(f.puts,[('proxy-hosts',1),('proxy-hosts',2)])

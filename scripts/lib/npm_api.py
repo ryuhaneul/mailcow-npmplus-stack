@@ -214,7 +214,7 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
 
 
 # Literal generated Nginx text: one backslash before the dot (not a regex here).
-ACME_BLOCK = 'if ($request_uri ~ ^/\\.well-known/acme-challenge/) {\n      break;\n    }'
+ACME_BLOCK = 'if ($uri ~ "^/\\.well-known/acme-challenge/[A-Za-z0-9_-]+$") {\n      break;\n    }'
 ACME_HOST_TYPES = {'proxy-hosts': 'proxy_host', 'redirection-hosts': 'redirection_host',
                    'dead-hosts': 'dead_host'}
 

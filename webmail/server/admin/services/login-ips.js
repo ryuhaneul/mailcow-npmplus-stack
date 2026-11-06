@@ -7,7 +7,7 @@ export function createLoginIpsService({ store, audit, lock }) {
       kind: 'config', revertible: false, before: null, after: value }, () => store.change({ data: value, actor })));
   }
   async function remove({ address, actor, ip }) {
-    const value = normalizeLoginIp(address);
+    const value = normalizeLoginIp(address, { allowWide: true });
     return lock.run('login-ips', () => audit.run({ actor, ip, action: 'login-ip.delete', target: value,
       kind: 'config', revertible: false, before: { ip: value }, after: null }, () => store.change({ address: value, actor })));
   }

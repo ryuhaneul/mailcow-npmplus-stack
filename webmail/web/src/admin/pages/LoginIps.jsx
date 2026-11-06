@@ -45,7 +45,7 @@ export default function LoginIps({ address = '' }) {
     {dialog && <ManagementDialog title={dialog === 'delete' ? '로그인 예외 IP 삭제' : '로그인 예외 IP 추가'} close={() => setDialog(null)} busy={busy}>
       <form onSubmit={submit}>
         {dialog === 'delete' ? <p><strong>{selected?.ip}</strong>의 IP 단위 로그인 제한을 다시 적용합니다. 반영까지 최대 1분 걸립니다.</p> : <>
-          <label class="field">IP 주소·CIDR<input value={ip} onInput={event => setIp(event.target.value)} required maxLength={64} placeholder="192.0.2.10 또는 2001:db8::/48" autoFocus/></label>
+          <label class="field">IP 주소·CIDR<input value={ip} onInput={event => setIp(event.target.value)} required maxLength={64} placeholder="192.0.2.10 또는 2001:db8::/48" autoFocus/><small>단일 주소 또는 IPv4 /16 이상·IPv6 /48 이상의 대역을 입력하세요.</small></label>
           <label class="field">메모 (선택)<input value={note} onInput={event => setNote(event.target.value)} maxLength={200}/></label>
         </>}
         {error && <MutationError error={error}/>}

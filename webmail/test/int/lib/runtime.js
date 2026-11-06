@@ -24,10 +24,10 @@ export function cleanup(t, operation) {
 }
 const selected = (process.env.WEBMAIL_INT_GROUP || groups.join(',')).split(',');
 if (process.env.WEBMAIL_INT === '1') assert.ok(selected.every(value => groups.includes(value)), 'WEBMAIL_INT_GROUP 그룹 이름 확인');
-export function integration(group, name, body) {
+export function integration(group, name, body, { timeout = 300_000 } = {}) {
   test(`[${group}] ${name}`, {
     skip: process.env.WEBMAIL_INT !== '1' ? '건너뜀: WEBMAIL_INT=1 없음' : !selected.includes(group) ? '건너뜀: 그룹 제외' : false,
-    timeout: 300_000,
+    timeout,
   }, async t => {
     // Network/protocol exceptions may contain credentials. Do not report their bodies/stacks.
     try { await body(t); } catch (error) {

@@ -175,14 +175,18 @@ test('artifact listing reads only matching folders/draft envelopes and emits JSO
   assert.throws(() => parseArgs(['--delete', name]));
 });
 
-test('automatic IP limiter uses six distinct synthetic accounts and no spoofed XFF', async () => {
-  const attempts = [];
+test('automatic limiter checks five account failures and thirty IP failures without spoofed XFF', async () => {
+  const attempts = [], failures = new Map();
+  let ipFailures = 0;
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     attempts.push({ body: JSON.parse(Buffer.concat(chunks)), headers: req.headers });
-    res.writeHead(attempts.length < 6 ? 403 : 429, { 'content-type': 'application/json', ...(attempts.length === 6 ? { 'retry-after': '899' } : {}) });
-    res.end(JSON.stringify({ error: { code: attempts.length < 6 ? 'AUTH_FAILED' : 'RATE_LIMITED' } }));
+    const account = attempts.at(-1).body.email;
+    const limited = (failures.get(account) ?? 0) >= 5 || ipFailures >= 30;
+    if (!limited) { failures.set(account, (failures.get(account) ?? 0) + 1); ipFailures++; }
+    res.writeHead(limited ? 429 : 403, { 'content-type': 'application/json', ...(limited ? { 'retry-after': '899' } : {}) });
+    res.end(JSON.stringify({ error: { code: limited ? 'RATE_LIMITED' : 'AUTH_FAILED' } }));
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   try {
@@ -196,8 +200,11 @@ test('automatic IP limiter uses six distinct synthetic accounts and no spoofed X
     let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
     const [code] = await once(child, 'close');
     assert.equal(code, 0);
-    assert.equal(attempts.length, 6, output.replaceAll(credentials.password, '[redacted]'));
-    assert.equal(new Set(attempts.map(row => row.body.email)).size, 6);
+    assert.equal(attempts.length, 32, output.replaceAll(credentials.password, '[redacted]'));
+    assert.equal(new Set(attempts.map(row => row.body.email)).size, 27);
+    assert.equal(ipFailures, 30);
+    assert.equal(failures.get(attempts[0].body.email), 5);
+    assert.ok(attempts.slice(0, 6).every(row => row.body.email === attempts[0].body.email));
     assert.ok(attempts.every(row => row.body.email.startsWith('invalid-int-') && row.body.email.endsWith('@example.com') && row.headers['x-forwarded-for'] === undefined));
     assert.ok(output.includes('남은 시간: 899초') && !output.includes(credentials.password));
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

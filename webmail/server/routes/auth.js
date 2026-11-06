@@ -13,7 +13,7 @@ export async function installAuth(app, { config, verifyLogin, clientFactory, now
   const sessions = await createSessionStore({ config, logger: app.log, now, tempRoot });
   const loginIpStore = loginIps ?? createLoginIpStore({ config });
   app.addHook('onClose', async () => { await loginIpStore.close?.(); });
-  const rateLimiter = createRateLimiter({ now, readLoginIps: () => loginIpStore.list() });
+  const rateLimiter = createRateLimiter({ now, logger: app.log, readLoginIps: () => loginIpStore.list() });
   const imap = createImapPool({ config, clientFactory, logger: app.log, destroySession: (session, code) => sessions.destroy(session, code) });
   app.decorate('imap', imap);
   verifyLogin ??= imap.verifyLogin;

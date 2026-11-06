@@ -4,7 +4,7 @@ import { AppError } from '../errors.js';
 
 const table = 'mailstack_webmail.login_ip_allowlist';
 const invalid = () => new AppError(422, 'INVALID_INPUT', 'IPv4/IPv6 주소·CIDR과 200자 이하 메모를 확인해 주세요.');
-export function normalizeLoginIp(input) {
+export function normalizeLoginIp(input, { allowWide = false } = {}) {
   if (typeof input !== 'string') throw invalid();
   const [address, rawBits, ...extra] = input.trim().split('/');
   let family = !address.includes('%') && isIP(address), width = family === 4 ? 32 : 128;
@@ -18,6 +18,7 @@ export function normalizeLoginIp(input) {
     number = parts.reduce((n, part) => (n << 16n) | BigInt(`0x${part}`), 0n);
     if (number >> 32n === 65535n && bits >= 96) { family = 4; width = 32; bits -= 96; number &= 0xffffffffn; }
   }
+  if (!allowWide && bits < (family === 4 ? 16 : 48)) throw new AppError(422, 'INVALID_INPUT', '너무 넓은 대역은 넣을 수 없어요. IPv4는 /16 이상, IPv6는 /48 이상으로 입력해 주세요.');
   number = number >> BigInt(width - bits) << BigInt(width - bits);
   const normalized = family === 4 ? [24n, 16n, 8n, 0n].map(shift => String((number >> shift) & 255n)).join('.') :
     new URL(`http://[${Array.from({ length: 8 }, (_, i) => ((number >> BigInt((7 - i) * 16)) & 65535n).toString(16)).join(':')}]/`).hostname.slice(1, -1);
@@ -43,7 +44,7 @@ export function createLoginIpStore({ config = {}, db, mode = 'webmail' } = {}) {
   }
   async function change({ data, address, actor }) {
     assertAdmin();
-    const value = data === undefined ? { ip: normalizeLoginIp(address) } : loginIpInput(data);
+    const value = data === undefined ? { ip: normalizeLoginIp(address, { allowWide: true }) } : loginIpInput(data);
     if (!db) throw unavailable();
     let connection;
     try {

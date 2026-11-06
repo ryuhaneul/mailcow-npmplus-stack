@@ -1,9 +1,10 @@
+import { normalizeLoginIp } from './login-ip-store.js';
 import { BlockList, isIP } from 'node:net';
 import { AppError } from '../errors.js';
 
 const MINUTE = 60_000;
 
-export function createRateLimiter({ now = Date.now, readLoginIps = async () => ({ items: [] }) } = {}) {
+export function createRateLimiter({ now = Date.now, logger, readLoginIps = async () => ({ items: [] }) } = {}) {
   let allowedIps = new BlockList(), nextRead = -Infinity, reading;
   async function refreshLoginIps() {
     if (reading) return reading;
@@ -13,12 +14,16 @@ export function createRateLimiter({ now = Date.now, readLoginIps = async () => (
       try {
         const { items } = await readLoginIps();
         const next = new BlockList();
+        let ignored = 0;
         for (const { ip } of items) {
-          const [address, bits] = ip.split('/');
+          let normalized;
+          try { normalized = normalizeLoginIp(ip); } catch { ignored++; continue; }
+          const [address, bits] = normalized.split('/');
           const family = isIP(address) === 4 ? 'ipv4' : 'ipv6';
           if (bits === undefined) next.addAddress(address, family);
           else next.addSubnet(address, Number(bits), family);
         }
+        if (ignored) logger?.warn({ code: 'LOGIN_IP_RULES_IGNORED', count: ignored }, '허용 범위를 벗어난 로그인 예외 IP 행을 무시했습니다.');
         allowedIps = next;
       } catch { /* Retain the last successfully read list, or the empty default. */ }
     })();

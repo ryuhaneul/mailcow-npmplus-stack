@@ -33,7 +33,7 @@ test('login IP input normalizes addresses, network bits and equivalent spellings
   for (const [raw, expected] of [
     [' 192.0.2.10/32 ', '192.0.2.10'], ['192.0.2.129/24', '192.0.2.0/24'],
     ['2001:0DB8:0:0:0:0:0:1', '2001:db8::1'], ['2001:db8:1:ffff::1/48', '2001:db8:1::/48'],
-    ['::ffff:192.0.2.10', '192.0.2.10'], ['::ffff:192.0.2.129/120', '192.0.2.0/24'], ['::/0', '::/0'],
+    ['::ffff:192.0.2.10', '192.0.2.10'], ['::ffff:192.0.2.129/120', '192.0.2.0/24'],
   ]) assert.equal(normalizeLoginIp(raw), expected);
   for (const value of ['', null, 42, '*', 'example.test', '192.0.2.256', '192.0.2.1/33', '192.0.2.1/-1',
     '192.0.2.1/1.5', '192.0.2.1/', '192.0.2.1/24/1', '192.0.2.1,192.0.2.2', '2001:db8::/129', 'fe80::1%eth0']) {
@@ -42,6 +42,44 @@ test('login IP input normalizes addresses, network bits and equivalent spellings
   assert.deepEqual(loginIpInput({ ip: '192.0.2.1' }), { ip: '192.0.2.1', note: '' });
   for (const data of [null, [], { ip: '192.0.2.1', extra: true }, { ip: '192.0.2.1', note: 'x'.repeat(201) },
     { ip: '192.0.2.1', note: 'line\nbreak' }, { ip: '192.0.2.1', note: 42 }]) assert.throws(() => loginIpInput(data), { statusCode: 422 });
+});
+
+test('login IP ranges enforce IPv4 /16 and IPv6 /48 minimum prefixes after normalization', () => {
+  for (const value of ['192.0.2.1/15', '2001:db8::/47', '0.0.0.0/0', '::/0', '::ffff:192.0.2.1/111']) {
+    assert.throws(() => normalizeLoginIp(value), error => error.statusCode === 422 && error.code === 'INVALID_INPUT' && /너무 넓은.*IPv4.*\/16.*IPv6.*\/48/.test(error.message));
+  }
+  for (const value of ['192.0.2.1/16', '192.0.2.1/17', '192.0.2.1', '2001:db8::/48', '2001:db8::/49', '2001:db8::1', '::ffff:192.0.2.1/112']) {
+    assert.doesNotThrow(() => normalizeLoginIp(value));
+  }
+  assert.equal(normalizeLoginIp('0.0.0.0/0', { allowWide: true }), '0.0.0.0/0');
+  assert.equal(normalizeLoginIp('::/0', { allowWide: true }), '::/0');
+});
+
+test('webmail ignores broad rows already in the database, retains valid rows and logs only their count', async () => {
+  const f = database(), warnings = [];
+  for (const ip of ['192.0.2.0/15', '2001:db8::/47', '0.0.0.0/0', '::/0', '192.0.2.10', '2001:db8:1::/48']) {
+    f.rows.set(ip, { ip, date: '2026-11-06 00:00:00.000000' });
+  }
+  const store = createLoginIpStore({ db: f.db });
+  const limiter = createRateLimiter({ readLoginIps: () => store.list(), logger: { warn(...args) { warnings.push(args); } } });
+  await limiter.refreshLoginIps();
+  for (const ip of ['198.51.100.1', '2001:db8:2::1']) {
+    for (let i = 0; i < 30; i++) limiter.recordFailure(ip, `blocked${i}@example.test`);
+    assert.throws(() => limiter.checkLogin(ip, 'fresh@example.test'), { statusCode: 429 });
+  }
+  for (const ip of ['192.0.2.10', '2001:db8:1::1']) {
+    for (let i = 0; i < 35; i++) {
+      limiter.checkLogin(ip, `allowed${i}@example.test`);
+      limiter.recordFailure(ip, `allowed${i}@example.test`);
+    }
+  }
+  await limiter.refreshLoginIps();
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(warnings[0][0], { code: 'LOGIN_IP_RULES_IGNORED', count: 4 });
+  for (const ip of f.rows.keys()) assert.ok(!JSON.stringify(warnings).includes(ip));
+  const admin = createLoginIpStore({ db: f.db, mode: 'admin' });
+  await admin.change({ address: '0.0.0.0/0', actor: 'synthetic-admin' });
+  assert.equal(f.rows.has('0.0.0.0/0'), false);
 });
 
 test('login IP store permits admin writes only, rejects duplicates and enforces 100 within its own transaction', async () => {
@@ -79,7 +117,7 @@ test('login IP cache coalesces refresh, keeps last list on failure and removes e
   for (let i = 0; i < 30; i++) limiter.recordFailure('192.0.2.1', `user${i}@example.test`);
   assert.throws(() => limiter.checkLogin('192.0.2.1', 'fresh@example.test'), { statusCode: 429 });
   await limiter.refreshLoginIps(); assert.equal(reads, 1);
-  now = 60_000; failed = false; items = [{ ip: '192.0.2.0/24' }, { ip: '2001:db8::/32' }]; finish = null;
+  now = 60_000; failed = false; items = [{ ip: '192.0.2.0/24' }, { ip: '2001:db8::/48' }]; finish = null;
   const first = limiter.refreshLoginIps(), second = limiter.refreshLoginIps(); finish(); await Promise.all([first, second]); assert.equal(reads, 2);
   for (const ip of ['192.0.2.1', '2001:db8::1']) {
     for (let i = 0; i < 35; i++) { limiter.checkLogin(ip, `allow${i}@example.test`); limiter.recordFailure(ip, `allow${i}@example.test`); }
@@ -123,6 +161,14 @@ test('login IP admin API requires session/CSRF, validates input, records audit a
   assert.equal((await f.request('POST', '', { ip: '192.0.2.10' }, { 'x-mailadmin-csrf': '' })).statusCode, 403);
   assert.equal((await f.request('POST', '', { ip: '192.0.2.10' }, { origin: 'https://foreign.example.test' })).statusCode, 403);
   assert.equal((await f.request('POST', '', { ip: '*' })).statusCode, 422);
+  for (const ip of ['192.0.2.1/15', '2001:db8::/47', '0.0.0.0/0', '::/0']) {
+    const response = await f.request('POST', '', { ip });
+    assert.equal(response.statusCode, 422); assert.match(response.json().error.message, /너무 넓은/);
+  }
+  f.rows.set('::/0', { ip: '::/0', date: '2026-11-06 00:00:00.000000' });
+  assert.equal((await f.request('DELETE', `/${encodeURIComponent('::/0')}`, {})).statusCode, 200);
+  assert.equal(f.rows.has('::/0'), false);
+
   assert.equal((await f.request('POST', '', { ip: '192.0.2.10', note: '합성 예외' })).statusCode, 200);
   assert.equal((await f.request('POST', '', { ip: '192.0.2.10/32' })).statusCode, 409);
   assert.equal((await f.request('GET')).json().items[0].actor, 'admin');

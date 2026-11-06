@@ -522,7 +522,7 @@ integration('core', 'user4 공유 폴더 읽기·쓰기 동작 403', async t => 
   await web.request('POST', `/api/folders/${encodeURIComponent(shared.path)}/empty`, { confirmName: shared.name }, 403);
 });
 
-integration('core', '같은 출발 IP의 합성 계정 5회 실패→6회째 429 (위조 XFF는 바깥 R-XFF 수동 게이트)', async t => {
+integration('core', '같은 출발 IP의 계정 5회 실패→6회째 429·IP 30회 실패→다음 429 (위조 XFF는 바깥 R-XFF 수동 게이트)', async t => {
   // Trusted internal sources cannot prove spoofed-XFF rejection. Do not send XFF.
   // Distinct non-existent accounts separate IP limiting from account limiting.
   const web = await api();
@@ -536,13 +536,18 @@ integration('core', '같은 출발 IP의 합성 계정 5회 실패→6회째 429
   const nonce = unique().toLowerCase();
   const interval = Number(process.env.WEBMAIL_INT_AUTH_INTERVAL_MS ?? 17000);
   assert.ok(Number.isSafeInteger(interval) && interval >= 0 && interval <= 17000, 'AUTH_INTERVAL_MS는 0~17000 정수');
-  for (let i = 0; i < 6; i++) {
-    if (i > 0) await new Promise(resolve => setTimeout(resolve, interval));
-    const account = `invalid-${nonce}-${i}@${required('WEBMAIL_INT_DOMAIN')}`;
-    const body = await web.request('POST', '/api/auth/login', { email: account, password: 'synthetic-invalid-password' }, i < 5 ? 403 : 429);
-    assert.equal(body.error.code, i < 5 ? 'AUTH_FAILED' : 'RATE_LIMITED');
+  let attempts = 0;
+  async function attempt(account, expected) {
+    if (attempts++ > 0) await new Promise(resolve => setTimeout(resolve, interval));
+    const body = await web.request('POST', '/api/auth/login', { email: account, password: 'synthetic-invalid-password' }, expected);
+    assert.equal(body.error.code, expected === 403 ? 'AUTH_FAILED' : 'RATE_LIMITED');
   }
+  const limitedAccount = `invalid-${nonce}-account@${required('WEBMAIL_INT_DOMAIN')}`;
+  for (let i = 0; i < 5; i++) await attempt(limitedAccount, 403);
+  await attempt(limitedAccount, 429); // Account block does not add an IP failure.
+  for (let i = 0; i < 25; i++) await attempt(`invalid-${nonce}-${i}@${required('WEBMAIL_INT_DOMAIN')}`, 403);
+  await attempt(`invalid-${nonce}-fresh@${required('WEBMAIL_INT_DOMAIN')}`, 429);
   assert.ok(web.retryAfter > 0 && web.retryAfter <= 900, 'Retry-After 남은 시간');
   t.diagnostic(`실패 제한 출발 IP: ${sourceIP}, 남은 시간: ${web.retryAfter}초`);
   t.diagnostic('위조 XFF 무시는 내부망 안에서 자동으로 확인 불가 — 수동 게이트 R-XFF(바깥 주소)로 확인');
-});
+}, { timeout: 600_000 });

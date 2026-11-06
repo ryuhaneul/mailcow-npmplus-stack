@@ -105,11 +105,12 @@ test('failed chunks do not advance watermark; initial retry anchor and bounded c
   f.time(T+7200000);f.failure(null);const requests=[];const original=f.archive.search;f.archive.search=async q=>{requests.push(q);return original(q);};await f.service.runOnce();const state=await f.store.readBounces();assert.equal(state.completedEnd,iso(T+7200000));assert.equal(requests.length,25);assert.ok(requests.every(q=>Date.parse(q.end)-Date.parse(q.start)===300000));
   f.archive.search=async()=>{throw Object.assign(Error(),{statusCode:429});};await f.service.runOnce();assert.equal((await f.store.readBounces()).completedEnd,state.completedEnd);
 });
-test('one-hour backlog commits twelve consecutive five-minute advances with overlap only in the first window',async t=>{
+test('one-hour backlog crosses a closed gap, commits all readable bounces and records the gap only once',async t=>{
   const f=await fixture(t);f.rows([row('prior')]);await f.service.runOnce();
   const requests=[],saved=[],search=f.archive.search,save=f.store.saveBounces;
   f.time(T+3600000);f.rows([row('prior'),...Array.from({length:12},(_,i)=>row('catch'+i,'same@example.net','5.1.1',T+i*300000+60000))]);
-  f.archive.search=async q=>{requests.push(q);return search(q);};
+  const gap={from:iso(T+599000),to:iso(T+601000),reason:'source-disappeared'};
+  f.archive.search=async q=>{requests.push(q);const result=await search(q);return {...result,coverage:{...result.coverage,gaps:[gap,gap]}};};
   f.store.saveBounces=async state=>{await save(state);saved.push(state.completedEnd);};
   assert.deepEqual(await f.service.runOnce(),{complete:true,end:iso(T+3600000)});
   assert.equal(requests.length,12);
@@ -119,7 +120,9 @@ test('one-hour backlog commits twelve consecutive five-minute advances with over
     assert.equal(requests[i].end,iso(T+(i+1)*300000));
   }
   const state=await f.store.readBounces();assert.equal(state.seen.length,13);assert.equal(state.recipients.find(r=>r.recipient==='same@example.net').bounceCount,12);
+  assert.deepEqual(state.collection.gaps,[gap]);
   await f.service.runOnce();assert.equal((await f.store.readBounces()).seen.length,13);
+  const list=await f.service.list();assert.equal(list.collection.gapCount,1);assert.equal(list.collection.lastGapAt,gap.to);assert.deepEqual(list.collection.gaps,[gap]);
 });
 test('failure in a later window preserves earlier commits and the next tick resumes without duplicate bounces',async t=>{
   const f=await fixture(t);await f.service.runOnce();f.time(T+3600000);
@@ -194,9 +197,9 @@ test('1001 archive rows, one snapshot restart, nanosecond dedup and catch-up res
   const precise={...row('nanos'),time:'2026-11-05T09:59:00.000000001Z'};assert.notEqual(bounceEvent(precise).key,bounceEvent({...precise,time:'2026-11-05T09:59:00.000000002Z'}).key);
   const service=createBouncesService({store:f.store,policy:f.policy,mailcow:f.mailcow,logArchive:f.archive,audit:f.audit,lock:f.lock,now:()=>T});await service.initialize();await service.runOnce();assert.equal((await service.list()).items[0].bounceCount,1001);
 });
-test('gaps, missing observation, cursor loops and collection caps preserve the last complete end',async t=>{
+test('open gaps, missing observation, cursor loops and collection caps preserve the last complete end',async t=>{
   const f=await fixture(t);await f.service.runOnce();const end=(await f.store.readBounces()).completedEnd;
-  const normal=f.archive.search;f.archive.search=async q=>{const value=await normal(q);value.coverage.gaps=[{from:iso(T-300000),to:iso(T),reason:'synthetic gap'}];return value;};assert.equal((await f.service.runOnce()).reason,'ARCHIVE_GAP');
+  const normal=f.archive.search;f.archive.search=async q=>{const value=await normal(q);value.coverage.gaps=[{from:iso(T-300000),to:null,reason:'synthetic open gap'}];return value;};assert.equal((await f.service.runOnce()).reason,'ARCHIVE_GAP');
   f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:null}}});assert.equal((await f.service.runOnce()).reason,'COLLECTION_UNCONFIRMED');
   f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:iso(T)}}});f.archive.search=async q=>({...await normal(q),nextCursor:'same',partialReason:'limit'});assert.equal((await f.service.runOnce()).reason,'ARCHIVE_CURSOR_LOOP');
   const limited=createBouncesService({store:f.store,policy:f.policy,mailcow:f.mailcow,logArchive:f.archive,audit:f.audit,lock:f.lock,now:()=>T,limits:{pages:1}});assert.equal((await limited.runOnce()).reason,'COLLECTION_LIMIT');assert.equal((await f.store.readBounces()).completedEnd,end);
@@ -287,4 +290,31 @@ test('effective auto/manual/resolved filters retain the previous enum and priori
  const f=await fixture(t);f.rows([row('1','auto@example.net'),row('2','manual@example.net'),row('3','clear@example.net','5.2.2'),row('4','inside@example.com')]);await f.service.runOnce();let r=(await f.service.list({q:'manual@'})).items[0];r=await f.service.suppress(args(r,{mode:'manual'}));await f.service.resolve(args(r,{resolved:true}));
  for(const [state,count] of [['all',4],['auto',1],['manual',1],['resolved',1],['suppressed',2],['unsuppressed',1],['internal',1]])assert.equal((await f.service.list({state})).total,count,state);
  const settings=await f.store.readSettings();settings.bounceAuto.enabled=false;await f.store.saveSettings(settings);await f.service.settingsChanged();assert.equal((await f.service.list({state:'auto'})).total,0);assert.equal((await f.service.list({state:'manual'})).total,1);assert.equal((await f.service.list({state:'resolved'})).total,1);
+});
+
+
+test('closed gap history retains the latest twenty without duplicates and survives later failures',async t=>{
+ const f=await fixture(t);const search=f.archive.search;
+ const gaps=Array.from({length:25},(_,i)=>({from:iso(T-250000+i*1000),to:iso(T-249500+i*1000),reason:'source-disappeared'}));
+ f.archive.search=async q=>{const result=await search(q);return {...result,coverage:{...result.coverage,gaps:[...gaps].reverse().concat(gaps)}};};
+ assert.equal((await f.service.runOnce()).complete,true);
+ assert.deepEqual((await f.store.readBounces()).collection.gaps,gaps.slice(-20));
+ await f.service.runOnce();let list=await f.service.list();assert.equal(list.collection.gapCount,20);assert.equal(list.collection.lastGapAt,gaps.at(-1).to);
+ f.failure('archive');assert.equal((await f.service.runOnce()).complete,false);assert.deepEqual((await f.store.readBounces()).collection.gaps,gaps.slice(-20));
+});
+test('legacy bounce collection normalizes empty gaps and invalid gap state is rejected',async t=>{
+ const f=await fixture(t);const old=emptyBounces();delete old.collection.gaps;await f.store.saveBounces(old);
+ assert.deepEqual((await createMonitorStore({dir:f.dir}).readBounces()).collection.gaps,[]);
+ const list=await f.service.list();assert.equal(list.collection.gapCount,0);assert.equal(list.collection.lastGapAt,null);
+ const gap={from:iso(T-2000),to:iso(T-1000),reason:'source-disappeared'};
+ for(const gaps of [[gap,gap],[{...gap,to:null}],Array.from({length:21},(_,i)=>({...gap,reason:'gap-'+i}))]){
+  assert.throws(()=>f.store.saveBounces({...emptyBounces(),collection:{lastAttemptAt:null,reason:null,gaps}}),{statusCode:503});
+ }
+});
+test('open gaps with either boundary missing still halt collection without changing completed end',async t=>{
+ const f=await fixture(t);await f.service.runOnce();const before=await f.store.readBounces(),search=f.archive.search;f.time(T+3600000);f.rows([row('uncommitted','missing@example.net','5.1.1',T+1000)]);
+ for(const gap of [{from:null,to:iso(T+2000),reason:'open'},{from:iso(T+1000),to:null,reason:'open'}]){
+  f.archive.search=async q=>{const result=await search(q);return {...result,coverage:{...result.coverage,gaps:[gap]}};};
+  assert.equal((await f.service.runOnce()).reason,'ARCHIVE_GAP');const state=await f.store.readBounces();assert.equal(state.completedEnd,before.completedEnd);assert.deepEqual(state.recipients,before.recipients);assert.deepEqual(state.collection.gaps,[]);
+ }
 });

@@ -87,7 +87,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           if(rows>cap.rows || bytes>cap.bytes) fail('COLLECTION_LIMIT');
           const checked=archiveCoverage(result.coverage,'postfix');
           if (coverage && JSON.stringify(coverage)!==JSON.stringify(checked)) fail('ARCHIVE_CHANGED'); coverage=checked;
-          if (coverage.gaps.some(g=>!g.from || !g.to || Date.parse(g.from)<end && Date.parse(g.to)>start)) fail('ARCHIVE_GAP');
+          if (coverage.gaps.some(g=>!g.from || !g.to)) fail('ARCHIVE_GAP');
           for (const row of result.lines) {
             if (!object(row) || typeof row.id!=='string' || !row.id || row.id.length>512 || ids.has(row.id) || typeof row.program!=='string' || typeof row.message!=='string' || Array.from(row.message).length>=4000 || ['[민감 정보가 포함된 로그]','[구조화 로그 내용 생략]'].includes(row.message) || row.truncated || row.unknownTime) fail('ARCHIVE_LOSS');
             ids.add(row.id); const stamp=monitorTimestamp(row.time);
@@ -101,7 +101,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           else if(result.partialReason!==null || result.complete===false) fail('ARCHIVE_INCOMPLETE');
         } while(cursor);
         if (signal.aborted || monotonicNow()-started>=cap.milliseconds) fail('COLLECTION_LIMIT');
-        return correlateBounceSenders(events,senderFacts);
+        return {events:correlateBounceSenders(events,senderFacts),gaps:coverage.gaps.filter(g=>Date.parse(g.from)<end && Date.parse(g.to)>start)};
       } catch(e) { if ((e.status===410 || e.statusCode===410) && attempt===0) continue; throw e; }
     }
   }
@@ -124,7 +124,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
       let start=Math.max(Date.parse(initial.startedAt),watermark-5*minute), end=Math.min(T,watermark+5*minute);
       let completedEnd=initial.completedEnd;
       do {
-        const events=await readChunk(start,end,controller.signal,runStarted);
+        const {events,gaps}=await readChunk(start,end,controller.signal,runStarted);
         if(controller.signal.aborted) fail('COLLECTION_ABORTED');
         await lock.run('mail-bounces',async()=>{
           const state=await readState(), settings=await readSettings();
@@ -150,7 +150,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           for(const row of state.recipients)row.internalExcluded=policy.internal(row.recipient);
           state.recipients=state.recipients.filter(r=>now()-Date.parse(r.lastSeenAt)<=30*day || r.manual && (r.manual.until===null || Date.parse(r.manual.until)>now()) || r.autoUntil && Date.parse(r.autoUntil)>now());
           state.seen=state.seen.filter(e=>now()-Date.parse(e.at)<=30*day);
-          state.completedEnd=iso(end);state.revision++;state.collection={lastAttemptAt:iso(now()),reason:null};
+          state.completedEnd=iso(end);state.revision++;state.collection={lastAttemptAt:iso(now()),reason:null,gaps:[...new Map([...(state.collection.gaps??[]),...gaps].map(g=>[JSON.stringify([g.from,g.to,g.reason]),g])).values()].sort((a,b)=>Date.parse(a.to)-Date.parse(b.to)||a.from.localeCompare(b.from)||a.reason.localeCompare(b.reason)).slice(-20)};
           if(controller.signal.aborted)fail('COLLECTION_ABORTED');
           if(monotonicNow()-runStarted>=cap.milliseconds)fail('COLLECTION_LIMIT');
           await store.saveBounces(state);policy.publish(state,settings);collectionError=null;
@@ -163,7 +163,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
       collectionError=typeof e.code==='string'&&/^[A-Z_]+$/.test(e.code)?e.code:'COLLECTION_UNAVAILABLE';
       // A failed chunk must not advance its durable watermark or publish partial policy.
       if(!policy.domainsReady() || collectionError==='MONITOR_STORE_UNAVAILABLE')policy.invalidate(collectionError);
-      try{await lock.run('mail-bounces',async()=>{const s=await readState();s.collection={lastAttemptAt:iso(now()),reason:collectionError};await store.saveBounces(s);});}catch{policy.invalidate('STORE_UNAVAILABLE');}
+      try{await lock.run('mail-bounces',async()=>{const s=await readState();s.collection={...s.collection,lastAttemptAt:iso(now()),reason:collectionError};await store.saveBounces(s);});}catch{policy.invalidate('STORE_UNAVAILABLE');}
       return {complete:false,reason:collectionError};
     } finally {clearTimeout(timer);parent?.removeEventListener('abort',abort);running=false;}
   }
@@ -174,7 +174,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
     let index=0;
     if(query.before!==undefined){if(typeof query.before!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(query.before))throw invalid();const id=Buffer.from(query.before,'base64url').toString();if(Buffer.from(id).toString('base64url')!==query.before)throw invalid();index=rows.findIndex(r=>r.id===id)+1;if(!index)throw invalid();}
     const limit=Number(query.limit??50),items=rows.slice(index,index+limit);
-    return {items,total:rows.length,nextBefore:index+limit<rows.length?Buffer.from(items.at(-1).id).toString('base64url'):null,collection:{...state.collection,completedEnd:state.completedEnd,reason:collectionError??state.collection.reason},policy:policyStatus()};
+    return {items,total:rows.length,nextBefore:index+limit<rows.length?Buffer.from(items.at(-1).id).toString('base64url'):null,collection:{...state.collection,gapCount:(state.collection.gaps??[]).length,lastGapAt:state.collection.gaps?.at(-1)?.to??null,completedEnd:state.completedEnd,reason:collectionError??state.collection.reason},policy:policyStatus()};
   }
   async function mutate({id,data,actor,ip},kind) {
     const names=kind==='resolution'?['resolved','etag']:kind==='suppress'?(data?.mode==='duration'?['mode','minutes','etag']:['mode','etag']):['etag'];

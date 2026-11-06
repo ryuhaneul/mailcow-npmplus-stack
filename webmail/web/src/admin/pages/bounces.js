@@ -5,6 +5,7 @@ export function bounceStatus(row,now=Date.now()) {
   if(row.state==='auto'&&row.autoUntil&&Date.parse(row.autoUntil)>now)return {state:'auto',text:'자동 억제',detail:`${Math.max(1,Math.ceil((Date.parse(row.autoUntil)-now)/60000))}분 남음 · ${kst(row.autoUntil)}까지`};
   return {state:'none',text:'억제 없음',detail:row.releasedAt?'해제 '+kst(row.releasedAt):'—'};
 }
+export const bounceGapWarning = collection => collection?.gapCount>0 ? `보관 로그 빈 구간 ${collection.gapCount}개 — 그 사이 반송은 빠졌을 수 있음` : '';
 export const bounceQuery = ({q='',state='all',before=null}) => '/api/admin/bounces?limit=50&q='+encodeURIComponent(q)+'&state='+encodeURIComponent(state)+(before?'&before='+encodeURIComponent(before):'');
 export const bounceMinutesValid = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value)>=1 && Number(value)<=525600;
 const csvCell = value => {let text=String(value??'');if(/^[=+\-@\t\r]/.test(text))text="'"+text;return '"'+text.replaceAll('"','""')+'"';};

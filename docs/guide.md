@@ -1328,7 +1328,7 @@ sudo journalctl -t mailcow-netfilter-watchdog
 초기에는 감시와 자동 억제가 모두 꺼져 있습니다. 처음 관측하거나 보관기 성공 시각의 null·역행을 관측하면 5분/1시간 창을 각각 준비합니다. 부분 조회·자료 손실·수집 실패를 0건이나 해소로 바꾸지 않습니다. 마지막 성공 수집 시각은 연속 수집의 증명이 아니므로, 관측 사이에 보관기 재시작을 놓치면 집계가 적어지고 알림이 늦거나 빠질 수 있습니다. 무사건 구간에서도 성공 관측이 창 끝에 도달하고 관련 공백이 없을 때만 정상 0으로 판정합니다.
 감시는 새로 완료된 5분 칸만 읽고 최근 12칸을 상태에 저장해 5분·15분·1시간 값을 합산합니다. 처음 관측할 때는 백필하지 않으며, 재시작 뒤 밀린 칸은 최근 60분 안에서 오래된 순서로 읽어 칸마다 저장합니다. 보관기 성공 시각이 현재 창 끝에 도달하지 않으면 이전 정상값으로 판정하지 않습니다. 최근 QID 중복 키는 최대 50,000건, 감시 상태 파일은 최대 16MiB이며 상한 초과는 `COLLECTION_STATE_LIMIT`(확인 불가)입니다. 첫 등장이 창 밖으로 밀려난 뒤에도 최근에 같은 QID 키가 관측되었다면 다시 세지 않으므로, 이 경우에는 1시간 로그를 매번 다시 읽는 방식보다 1건 적을 수 있습니다.
 
-반송은 출력 로그의 `status=bounced`와 별도 `dsn=5.x.x`를 수신자별로 수집합니다. 자동 일시 억제는 **5.1.1(주소 없음), 5.1.10(null MX로 메일을 받지 않는 도메인)** 두 코드에만 적용하며 기본 1시간입니다. 5.1.6·용량·정책 오류는 자동 대상이 아닙니다. 기간은 새 반송 사건 시각부터 계산하고 재수집으로 늘리지 않습니다. 반송 수집은 5분마다 실행하며 끝 시각은 현재 시각과 보관기 Postfix 마지막 성공 수집 시각 중 이른 값입니다(5분 경계로 내리지 않음). 보관기 성공 시각이 반송 사건을 지난 첫 정상 주기에 수집하며, 다음 주기는 5분 겹침과 중복 제거를 적용합니다. 성공 시각 null·확인 불가 또는 완료 시각보다 역행한 경우 완료 시각을 진전시키지 않습니다. 최초 수집 끝 직전 5분부터 시작하며 과거 자료를 일괄 재생하지 않습니다. 해제하면 현재 수동·자동 억제를 풀지만 이후 새 반송이 생기면 다시 자동 억제될 수 있습니다. 활성 억제 항목은 해제한 뒤 삭제합니다.
+반송은 출력 로그의 `status=bounced`와 별도 `dsn=5.x.x`를 수신자별로 수집합니다. 자동 일시 억제는 **5.1.1(주소 없음), 5.1.10(null MX로 메일을 받지 않는 도메인)** 두 코드에만 적용하며 기본 1시간입니다. 5.1.6·용량·정책 오류는 자동 대상이 아닙니다. 기간은 새 반송 사건 시각부터 계산하고 재수집으로 늘리지 않습니다. 반송 수집은 5분마다 실행하며 끝 시각은 현재 시각과 보관기 Postfix 마지막 성공 수집 시각 중 이른 값입니다(5분 경계로 내리지 않음). 보관기 성공 시각이 반송 사건을 지난 첫 정상 주기에 수집하며, 다음 주기는 5분 겹침과 중복 제거를 적용합니다. 시작·끝 시각이 있는 보관 로그 빈 구간과 겹쳐도 읽을 수 있는 반송은 처리하고 완료 시각을 진전시킵니다. 겹친 빈 구간은 시작·끝·사유가 같은 기록을 중복 없이 최근 최대 20개 보관하며, 반송 목록 API의 `collection.gaps`·`gapCount`·`lastGapAt`과 반송 탭 경고로 알립니다. 빈 구간 사이의 반송은 빠졌을 수 있습니다. 시작 또는 끝이 없는 열린 빈 구간은 `ARCHIVE_GAP`으로 중단하고, 그 밖의 로그 손실·시각 범위·자료 변경 오류도 완료 시각을 진전시키지 않습니다. 성공 시각 null·확인 불가 또는 완료 시각보다 역행한 경우 완료 시각을 진전시키지 않습니다. 최초 수집 끝 직전 5분부터 시작하며 과거 자료를 일괄 재생하지 않습니다. 해제하면 현재 수동·자동 억제를 풀지만 이후 새 반송이 생기면 다시 자동 억제될 수 있습니다. 활성 억제 항목은 해제한 뒤 삭제합니다.
 
 수동 억제는 RCPT별 `550 5.7.1`, 자동 억제는 재시도 가능한 `450 4.7.1`을 반환합니다. 수동이 우선하며 자동 설정을 꺼도 수동 억제는 유지됩니다. localpart의 대소문자·plus 주소를 합치지 않고 정확한 주소에만 적용합니다. 지원하지 않는 SMTPUTF8/따옴표 주소는 자동 억제하지 않습니다. 내부·alias 도메인 전체와 localhost는 제외하며 내부 도메인 캐시는 5분마다 갱신합니다. 실패·만료·자료 미준비 시에는 `DUNNO`로 다른 Postfix 규칙을 계속 평가합니다. 이미 큐에 들어간 메일과 내부 주소를 통한 외부 forwarding은 이 RCPT 억제의 대상이 아닙니다. 일부 SMTP 클라이언트는 한 수신자 거부에도 전송을 취소할 수 있고, 기존 SMTP 오류 한도를 넘으면 연결이 종료될 수 있으므로 모든 BCC의 부분 배달을 보장하지는 않습니다. 기존 오류 보안 한도는 변경하지 않습니다.
 
@@ -1339,7 +1339,7 @@ sudo journalctl -t mailcow-netfilter-watchdog
 설정·수집·알림·반송 상태는 admin 볼륨의 `/data/mail-monitor`에 보관합니다(디렉터리 0700, 파일 0600). 백업 시 볼륨과 Postfix 설정·적용 스크립트의 비공개 `.bak-bounce-policy-*` 백업을 함께 보존합니다. 반송 보관은 기본 최근 30일/10,000주소/16MiB이며 활성 수동 억제는 나이 때문에 지우지 않습니다. 용량 초과는 완료 시각 진전을 중단하고 오류로 표시합니다. 원본 로그·본문·제목은 이 상태 파일에 저장하지 않습니다.
 
 롤백은 새 스크립트가 남아 있을 때 `MAILCOW_DIR=... WEBMAIL_DIR=... bash scripts/apply-postfix-bounce-policy.sh --revert -y`를 먼저 실행하여 owned block과 live recipient chain을 복구·reload한 뒤 이전 admin 이미지로 돌아갑니다. 관리 데이터는 삭제하지 않습니다. 적용·제거 실패 시 원래 파일과 live 값을 함께 복구하며, 복구 reload까지 실패했다는 경고가 나오면 보존된 백업으로 수동 복구하고 정상 SMTP·기존 relay 거부를 확인해야 합니다. 런타임 주소 추가·해제·만료에는 Postfix reload/restart/postmap이 없습니다.
-61f91a6로 되돌릴 때에는 **이전 이미지로 바꾸기 전에**, 새 admin을 정지한 상태에서 `state.json`의 새 `collection` 필드만 제거해야 합니다. 구버전은 이 필드와 4MiB 초과 상태를 거부합니다. 아래는 root 셸에서 실행하는 예이며 `ROLLBACK_IMAGE`는 실제 보관한 **61f91a6 이미지 태그**로 지정합니다. 현재 Compose·소스·local 이미지 태그는 아직 새 버전인 상태여야 합니다. `settings.json`·`bounces.json`은 건드리지 않으며 incident/outbox/notifications와 발송 억제 시각을 그대로 보존합니다.
+61f91a6로 되돌릴 때에는 **이전 이미지로 바꾸기 전에**, 새 admin을 정지한 같은 구간 안에서 `state.json`의 새 `collection` 필드와 `bounces.json`의 `collection.gaps` 필드만 제거해야 합니다. 구버전은 이 필드와 4MiB 초과 상태를 거부합니다. 아래는 root 셸에서 실행하는 예이며 `ROLLBACK_IMAGE`는 실제 보관한 **61f91a6 이미지 태그**로 지정합니다. 현재 Compose·소스·local 이미지 태그는 아직 새 버전인 상태여야 합니다. `settings.json`은 건드리지 않으며, 두 상태 파일의 incident/outbox/notifications·반송 이력·발송 억제 시각을 그대로 보존합니다. 반송의 빈 구간 기록을 모르는 이전 버전(297e15c 포함)도 `collection.gaps`를 거부하므로 이 필드 제거가 필요합니다.
 
 ```bash
 WEBMAIL_DIR=/home/webmail
@@ -1355,29 +1355,35 @@ if ! docker run --rm -i --network none --user 0 --entrypoint node \
   --mount "type=bind,src=$ROLLBACK_BACKUP,dst=/rollback-backup" \
   "$ROLLBACK_IMAGE" --input-type=module <<'NODE'
 import * as fs from 'node:fs/promises';
-const file='/rollback-data/mail-monitor/state.json';
-const stat=await fs.lstat(file);
-if(!stat.isFile()||stat.isSymbolicLink())throw new Error('중단: state.json 일반 파일 필요');
-const raw=await fs.readFile(file);
-await fs.writeFile('/rollback-backup/state-new.json',raw,{mode:0o600,flag:'wx'});
-const state=JSON.parse(raw);
-delete state.collection;
-const body=Buffer.from(JSON.stringify(state)+'\n');
-if(Object.hasOwn(state,'collection')||body.length>4*1024*1024)
-  throw new Error('롤백 중단: collection 제거 뒤에도 구버전 4MiB 상한 초과');
-let valid;
-try{({validMonitorState:valid}=await import('/app/server/admin/mail-monitor-state.js'));}
-catch{console.error('구 검증 함수 사용 불가: collection 부재·직렬화 크기만 검사');}
-if(typeof valid==='function'&&!valid(state))throw new Error('롤백 중단: 구 상태 스키마 검사 실패');
-if(typeof valid!=='function')console.error('구 검증 함수 없음: 전체 스키마 검증은 미실행');
-const tmp=file+'.rollback-'+process.pid;
-const handle=await fs.open(tmp,'wx',0o600);
-try{await handle.chown(stat.uid,stat.gid);await handle.writeFile(body);await handle.sync();}
-finally{await handle.close();}
-await fs.rename(tmp,file);
+let schema={};
+try{schema=await import('/app/server/admin/mail-monitor-state.js');}
+catch{console.error('구 검증 함수 사용 불가: 제거한 키 부재·직렬화 크기만 검사');}
+const staged=[];
+for(const [name,max,valid] of [['state',4*1024*1024,schema.validMonitorState],['bounces',16*1024*1024,schema.validBounces]]){
+  const file='/rollback-data/mail-monitor/'+name+'.json';
+  const stat=await fs.lstat(file);
+  if(!stat.isFile()||stat.isSymbolicLink())throw new Error('중단: '+name+'.json 일반 파일 필요');
+  const raw=await fs.readFile(file);
+  await fs.writeFile('/rollback-backup/'+name+'-new.json',raw,{mode:0o600,flag:'wx'});
+  const value=JSON.parse(raw);
+  if(name==='state')delete value.collection;
+  else if(value.collection)delete value.collection.gaps;
+  const body=Buffer.from(JSON.stringify(value)+'\n');
+  if((name==='state'?Object.hasOwn(value,'collection'):Object.hasOwn(value.collection??{},'gaps'))||body.length>max)
+    throw new Error('롤백 중단: '+name+' 호환 필드 제거 또는 구버전 크기 상한 확인 필요');
+  if(typeof valid==='function'){
+    if(!valid(value))throw new Error('롤백 중단: '+name+' 구 상태 스키마 검사 실패');
+  }else console.error(name+' 구 검증 함수 없음: 키 부재·크기만 검사, 전체 스키마 검증 미실행');
+  const tmp=file+'.rollback-'+process.pid;
+  const handle=await fs.open(tmp,'wx',0o600);
+  try{await handle.chown(stat.uid,stat.gid);await handle.writeFile(body);await handle.sync();}
+  finally{await handle.close();}
+  staged.push({file,tmp});
+}
+for(const {file,tmp} of staged)await fs.rename(tmp,file);
 const dir=await fs.open('/rollback-data/mail-monitor','r');
 try{await dir.sync();}finally{await dir.close();}
-console.log('호환 상태 원자 저장 완료: 원본 별도 보존, 권한 0600·소유자 유지');
+console.log('두 호환 상태 각각 원자 저장 완료: 원본 별도 보존, 권한 0600·소유자 유지');
 NODE
 then
   echo '롤백 중단: 상태 삭제·과거 상태 덮어쓰기 금지. 새 버전을 유지합니다.'
@@ -1386,4 +1392,4 @@ then
 fi
 ```
 
-구 검증 함수를 사용할 수 없으면 위 명령은 `collection` 키 부재와 직렬화 크기만 검사하며 전체 스키마 검증을 대신했다고 보지 않습니다. collection 제거 뒤에도 4MiB를 넘으면 **원본을 삭제하거나 과거 상태로 덮어쓰지 말고 롤백을 중단하여 새 버전을 유지**합니다. 실패 후 원본 복원이 필요하면 admin 정지 상태에서 `$ROLLBACK_BACKUP/state-new.json`을 같은 소유자·0600으로 원자 복원합니다. 이 호환화는 증분 칸/중복 키만 버리며, 새 버전으로 재업그레이드하면 warm-up부터 시작합니다. 성공한 경우에만 앞서 설명한 새 정책 스크립트의 `--revert -y`와 원래 restriction/callback 제거 확인을 수행하고 이전 소스·환경·이미지로 복귀합니다. 복귀 후 관리 인증을 거친 `/api/admin/monitor/status`·`/api/admin/monitor/notifications`의 200과 실제 감시 tick 완료를 확인합니다. 호환화 실패 시에는 정책 revert 및 이전 이미지 교체를 진행하지 않습니다.
+구 검증 함수를 사용할 수 없으면 위 명령은 state의 `collection`·bounces의 `collection.gaps` 키 부재와 직렬화 크기(각 4MiB·16MiB)만 검사하며 전체 스키마 검증을 대신했다고 보지 않습니다. 두 파일을 모두 백업·검사한 뒤 같은 관리 앱 정지 구간 안에서 각각 원자 저장합니다. collection 제거 뒤에도 4MiB를 넘으면 **원본을 삭제하거나 과거 상태로 덮어쓰지 말고 롤백을 중단하여 새 버전을 유지**합니다. 실패 후 원본 복원이 필요하면 admin 정지 상태에서 `$ROLLBACK_BACKUP/state-new.json`과 `$ROLLBACK_BACKUP/bounces-new.json`을 각각 같은 소유자·0600으로 원자 복원합니다. 이 호환화는 감시 증분 칸/중복 키와 반송 빈 구간 기록만 버리며, 새 버전으로 재업그레이드하면 warm-up부터 시작합니다. 성공한 경우에만 앞서 설명한 새 정책 스크립트의 `--revert -y`와 원래 restriction/callback 제거 확인을 수행하고 이전 소스·환경·이미지로 복귀합니다. 복귀 후 관리 인증을 거친 `/api/admin/monitor/status`·`/api/admin/monitor/notifications`의 200과 실제 감시 tick 완료를 확인합니다. 호환화 실패 시에는 정책 revert 및 이전 이미지 교체를 진행하지 않습니다.

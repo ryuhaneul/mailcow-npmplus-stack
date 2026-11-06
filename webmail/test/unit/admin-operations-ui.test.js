@@ -106,3 +106,13 @@ test('bounce auto/manual/resolved filters and sender search are wired to the new
  const {readFile}=await import('node:fs/promises');const page=await readFile(new URL('../../web/src/admin/pages/Bounces.jsx',import.meta.url),'utf8');
  for(const [state,label] of [['auto','자동 억제'],['manual','수동 억제'],['resolved','정리 완료']])assert.ok(page.includes("['"+state+"','"+label+"']"));assert.ok(page.includes("Object.hasOwn(row,'resolvedAt')"));assert.ok(page.includes("row.sender||'확인 불가'"));
 });
+
+
+test('bounce collection gap warning supports legacy responses and shows retained gap count',async()=>{
+ const {bounceGapWarning}=await import('../../web/src/admin/pages/bounces.js');
+ assert.equal(bounceGapWarning(undefined),'');assert.equal(bounceGapWarning({completedEnd:null}),'');assert.equal(bounceGapWarning({gapCount:0}),'');
+ assert.equal(bounceGapWarning({gapCount:1}),'보관 로그 빈 구간 1개 — 그 사이 반송은 빠졌을 수 있음');
+ assert.equal(bounceGapWarning({gapCount:20}),'보관 로그 빈 구간 20개 — 그 사이 반송은 빠졌을 수 있음');
+ const {readFile}=await import('node:fs/promises');const page=await readFile(new URL('../../web/src/admin/pages/Bounces.jsx',import.meta.url),'utf8');
+ assert.ok(page.includes('bounceGapWarning(resource.data?.collection)'));assert.ok(page.includes('{gapWarning&&<span>{gapWarning}</span>}'));
+});

@@ -21,7 +21,7 @@
 .monitor-ui .rule-line .sub{margin-top:2px}
 .monitor-ui .unit-input{display:flex;align-items:center;gap:8px}
 .monitor-ui .unit-input>span{font-size:12px;color:var(--ink-3);white-space:nowrap}
-.monitor-ui .notification-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:28px}
+.monitor-ui .monitor-recipients{margin-top:20px}
 .monitor-ui .recipient-list{display:grid;gap:8px;margin-top:12px}
 .monitor-ui .recipient{display:flex;gap:8px;align-items:center}
 .monitor-ui .recipient .btn{padding:0 10px}
@@ -32,7 +32,7 @@
 .monitor-ui .validation.error{color:var(--danger)}
 .monitor-ui .repeat{max-width:240px}
 .monitor-ui .helper-box{padding:12px 14px;border-radius:var(--r-ctl);background:var(--sunken);font-size:12px;color:var(--ink-2);margin-top:16px}
-.monitor-ui .savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 0 8px;border-top:1px solid var(--line);margin-top:8px}
+.monitor-ui .savebar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 18px;border-bottom:1px solid var(--line);margin-bottom:20px}
 .monitor-ui .savebar b{font-size:12px;font-weight:500;color:var(--ink-2)}
 .monitor-ui .savebar small{display:block;margin-top:2px}
 .monitor-ui .history{margin-top:28px}
@@ -86,7 +86,6 @@
 .monitor-ui .panel{padding:16px}
 .monitor-ui .rule-line{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 14px;padding:16px 0}
 .monitor-ui .rule-line>div:first-child{grid-column:1/-1;margin-bottom:2px}
-.monitor-ui .notification-grid{grid-template-columns:minmax(0,1fr);gap:22px}
 .monitor-ui .repeat{max-width:none}
 .monitor-ui .recipient-form input{font-size:14px}
 .monitor-ui .recipient .btn{min-height:36px}
@@ -229,4 +228,4 @@
 }
 .monitor-ui.current-section{margin-bottom:22px}
 
-.monitor-ui .enable-row + .run-summary{margin:18px 0 0}
+.monitor-ui .monitor-recipients + .run-summary{margin:18px 0 0}

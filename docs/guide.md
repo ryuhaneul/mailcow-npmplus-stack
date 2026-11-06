@@ -1395,3 +1395,83 @@ fi
 구 검증 함수를 사용할 수 없으면 위 명령은 state의 `collection`·bounces의 `collection.gaps` 키 부재와 직렬화 크기(각 4MiB·16MiB)만 검사하며 전체 스키마 검증을 대신했다고 보지 않습니다. 두 파일을 모두 백업·검사한 뒤 같은 관리 앱 정지 구간 안에서 각각 원자 저장합니다. collection 제거 뒤에도 4MiB를 넘으면 **원본을 삭제하거나 과거 상태로 덮어쓰지 말고 롤백을 중단하여 새 버전을 유지**합니다. 실패 후 원본 복원이 필요하면 admin 정지 상태에서 `$ROLLBACK_BACKUP/state-new.json`과 `$ROLLBACK_BACKUP/bounces-new.json`을 각각 같은 소유자·0600으로 원자 복원합니다. 이 호환화는 감시 증분 칸/중복 키와 반송 빈 구간 기록만 버리며, 새 버전으로 재업그레이드하면 warm-up부터 시작합니다. 성공한 경우에만 앞서 설명한 새 정책 스크립트의 `--revert -y`와 원래 restriction/callback 제거 확인을 수행하고 이전 소스·환경·이미지로 복귀합니다. 복귀 후 관리 인증을 거친 `/api/admin/monitor/status`·`/api/admin/monitor/notifications`의 200과 실제 감시 tick 완료를 확인합니다. 호환화 실패 시에는 정책 revert 및 이전 이미지 교체를 진행하지 않습니다.
 이전 이미지·소스·환경으로 복귀한 뒤 verify 전에 `MAILCOW_DIR=/home/mailcow-dockerized WEBMAIL_ENV_FILE=/home/rocky/mailcow-npmplus-stack/.env bash /home/rocky/mailcow-npmplus-stack/scripts/apply-webmail-dbuser.sh`로 구버전의 정확한 DB 권한 집합을 복원합니다(표·자료는 삭제하지 않음).
 61f91a6 이상의 감시 포함 버전으로 되돌릴 때는 새 정책 `--revert` → 이전 이미지·소스·환경·DB 권한 복원 → 그 버전의 `apply-postfix-bounce-policy.sh` 실행(apply) → 해당 버전 verify·SMTP 정상 배달 확인 순서로 진행합니다. 감시가 없는 버전으로 되돌릴 때는 정책 revert만 수행합니다.
+
+### Force SSL과 HTTP-01 갱신
+
+Force SSL을 켜도 `/.well-known/acme-challenge/`는 80에서 NPMplus의
+certbot webroot(`/data/tls/certbot/acme-challenge`)로 직접 응답합니다.
+없는 토큰은 404, 유효한 토큰은 200이며 HTTPS로 전환하지 않습니다.
+일반 HTTP 경로의 301, 기존 443 방화벽 정책, 앱 인증/ACL은 유지합니다.
+Advanced Config에 같은 location을 추가하지 마세요.
+
+setup/update는 `npmplus/templates/_common.conf`를 runtime의 `templates/`에
+배치하고, 관리되는 `docker-compose.override.yml`에서 읽기 전용으로 마운트합니다.
+기본 compose의 사용자 설정을 통째로 복사하지 않습니다. 이미지 digest와
+**마운트 없는 이미지 원본**의 SHA256이 승인 값과 다르면 적용 전에 중단합니다.
+이미지 업그레이드 때 새 원본을 검토하고 템플릿·허용 digest·원본 SHA256을 함께
+갱신해야 합니다. 경고를 무시하거나 직접 compose up으로 검증을 우회하지 마세요.
+기존 override가 관리 파일이 아니거나 같은 target에 다른 mount가 있으면 중단합니다.
+SELinux에서 bind 읽기가 거부되면 중단하고 정책을 확인하세요. permissive로 바꾸지 않습니다.
+
+템플릿 내용 변경만으로 NPMplus가 기존 호스트를 재생성하지는 않습니다.
+최초 적용/변경 때 활성 proxy·redirection·dead host를 기존 cookie API로 하나씩
+동일 값 재저장합니다. **적용 중 NPM 설정을 동시에 편집하지 마세요.**
+호스트마다 GET 전체를 0700 백업 디렉터리의 0600 파일로 저장하고,
+PUT 뒤 GET에서 최상위 `modified_on` 외 모든 필드가 같은지 확인합니다.
+ACL·locations·meta 차이나 nginx 검사 실패가 있으면 그 호스트를 복원하고 중단합니다.
+복원 자체가 실패하면 수동 복구가 필요하다고 보고합니다. 로그에는 자격/호스트
+설정 본문을 남기지 않으며, 백업을 공개 저장소나 외부 시스템으로 옮기지 않습니다.
+
+전체 성공 후 runtime의 `.acme80-state.json`을 기록합니다. 같은 템플릿/이미지의
+재실행은 GET과 conf 검사만 하며 PUT이나 추가 컨테이너 교체를 하지 않습니다.
+파일 변경 때는 기존 archive drain/WAF compose 경로로 NPMplus를 재생성하므로
+짧은 웹 중단이 있습니다. 기존 update의 마지막 DNS 캐시 재시작은 별개입니다.
+`REGENERATE_ALL=true`나 env 해시 파일 삭제는 custom conf까지 지울 수 있어 사용하지
+않습니다. 기존 설치에서 env+TV 해시가 다르면 전체 재생성을 유발할 수 있으므로
+이 작업은 중단하고 운영자가 원인을 확인해야 합니다.
+
+stream·default·disabled host는 재저장 대상이 아닙니다. default host의 별도 HTTPS
+전환은 바뀌지 않으므로 미등록 Host의 HTTP-01 지원을 보장하지 않습니다.
+mailcow의 acme 컨테이너는 기존처럼 비활성 상태이고, NPM 인증서 공유/갱신 후
+재적용 경로를 그대로 씁니다. 이 경로를 mailcow ACME로 프록시하지 않습니다.
+
+적용 후 시험 환경에서 443을 외부에 차단한 채 다음을 확인하세요.
+`HOST`, `SERVER_IP`, `CERT_ID`는 비공개 실행 환경에서 지정합니다.
+
+```bash
+curl --noproxy '*' --max-time 10 --resolve "$HOST:80:$SERVER_IP" -sS -D - -o /dev/null \
+  "http://$HOST/.well-known/acme-challenge/missing-token"
+# 404, Location/WWW-Authenticate 없음. 시험 토큰은 200과 정확한 본문 확인 후 삭제.
+curl --noproxy '*' --max-time 10 --resolve "$HOST:80:$SERVER_IP" -sS -D - -o /dev/null \
+  "http://$HOST/ordinary-path?check=1"
+# 301, Location은 같은 경로/query의 https URL.
+docker exec npmplus certbot --config /etc/certbot.ini renew \
+  --cert-name "npm-$CERT_ID" --dry-run --no-random-sleep-on-renew
+```
+
+모든 대상 HTTP-01 lineage에서 dry-run exit 0이어야 합니다. 차단된 외부 위치에서
+443 연결 실패도 함께 확인하고, 시험 때문에 443을 임시 개방하지 마세요.
+GET/HEAD·query·X-Forwarded-Proto와 `curl --path-as-is`의 정규화/인코딩 경계도
+검증해야 합니다. NPM의 Renew API는 먼저 인증서 revoke를 시도하므로 dry-run
+대용으로 쓰지 마세요. 같은 조건의 실제 발급 및 롤백 시험 전 운영 검증 완료로
+처리하지 않습니다.
+
+실패 시 출력한 `/root/npmplus-acme80-backup-<timestamp>-<unique>/`를 보존하세요.
+실패 호스트 복원 확인 여부를 검토한 뒤, 기존 스택 환경과 WAF/archive helper를
+로드한 관리 셸에서 다음 함수를 사용합니다(`BACKUP_DIR`은 해당 백업 경로).
+
+```bash
+# setup/update와 같은 환경 및 WAF key 선택을 사용한 관리 셸에서 실행.
+# WEBMAIL_STACK_ENV, webmail_options/webmail_load_config, waf_options와
+# WAF_BOUNCER_KEY_RESOLVED를 기존 관리 절차대로 준비해야 합니다.
+source scripts/lib/webmail-env.sh
+source scripts/lib/waf.sh
+npmplus_acme_rollback "${NPMPLUS_DIR:-/home/npmplus}" "$BACKUP_DIR"
+```
+
+롤백은 파일이 적용 직후 기록한 해시와 같은지 확인하여 다른 운영자 변경을
+덮지 않습니다. 이전 override·템플릿·state를 복원하고 archive 경유로 NPMplus를
+재생성한 뒤, 처리했던 호스트만 백업 값으로 순차 복원·GET 비교·nginx 검사합니다.
+API로 복원이 안 되면 DB를 직접 편집하지 말고 백업과 실패 type/ID로 수동 복구를
+진행하세요. 일반 301/HTTPS·ACL과 stream/default hash도 전후 비교합니다.
+최초 도입을 롤백하면 challenge의 원래 301 문제도 돌아옵니다.

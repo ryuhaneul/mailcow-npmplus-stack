@@ -143,6 +143,8 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     edge_check_admin_db_address || die "Admin DB address conflict; update stopped before container changes"
 fi
 
+npmplus_acme_preflight "$NPMPLUS_DIR" || die "ACME preflight failed before container changes"
+
 # Existing installations must be fully backfilled before any replacement path,
 # including the upstream updater (which owns its own container recreation).
 WEBMAIL_STACK_ENV="$ENV_FILE"
@@ -258,6 +260,7 @@ compose_pull() {
 }
 
 compose_pull "$NPMPLUS_DIR" "npmplus"
+npmplus_acme_preflight "$NPMPLUS_DIR" || die "ACME image validation failed after pull"
 
 # Install logging limits before the upstream updater can recreate containers.
 # Runtime compose/override settings outside logging stay operator-managed.
@@ -607,6 +610,8 @@ if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
     docker restart npmplus 2>&1 | tee -a "$LOGFILE" | tail -1 || \
         warn "Failed to restart NPMplus — mailcow upstream may stay 502 until manual restart"
 fi
+
+npmplus_acme_wait && npmplus_acme_verify "$NPMPLUS_DIR" || die "ACME verification failed after final restart"
 
 # Maintain the certificate reload job before verification.
 admin_access apply || die "Admin access-list application failed"

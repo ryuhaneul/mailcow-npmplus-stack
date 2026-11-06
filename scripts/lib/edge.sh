@@ -1,6 +1,10 @@
 #!/bin/bash
 # Public relay/subnet output variables are consumed by callers.
 # shellcheck disable=SC2034
+# shellcheck source=./npmplus-acme.sh
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/npmplus-acme.sh"
+
 # Shared N1 configuration. Source webmail-env.sh for mailcow.conf value reading.
 edge_error() { echo "[edge] ERROR: $*" >&2; return 1; }
 
@@ -326,6 +330,7 @@ edge_generate_npmplus_override() (
                 printf '      mailstack-%s-edge:\n        ipv4_address: %s\n' "$app" "$address"
             fi
         done
+        printf '    volumes:\n      - type: bind\n        source: ./templates/_common.conf\n        target: /app/templates/_common.conf\n        read_only: true\n        bind:\n          create_host_path: false\n'
         if [ "${WEBMAIL_ENABLE:-true}" = true ]; then
             printf 'networks:\n'
             for app in webmail admin; do
@@ -535,12 +540,15 @@ PY
 
 edge_reconcile_npmplus() {
     local dir="$1" before="" after networks
+    npmplus_acme_prepare "$dir" || return 1
     edge_ensure_admin_network || return 1
     [ ! -f "$dir/docker-compose.override.yml" ] || before=$(sha256sum "$dir/docker-compose.override.yml")
     edge_generate_npmplus_override "$dir" || return 1
     after=$(sha256sum "$dir/docker-compose.override.yml") || return 1
+    npmplus_acme_guard "$dir" || return 1
+    npmplus_acme_record_written "$dir" || return 1
     networks=$(docker inspect npmplus --format '{{json .NetworkSettings.Networks}}' 2>/dev/null) || networks='{}'
-    if [ "$before" = "$after" ] && python3 - "$networks" "$WEBMAIL_ENABLE" "${WEBMAIL_ADMIN_ENABLE:-false}" "$WEBMAIL_EDGE_SUBNET" "${ADMIN_EDGE_SUBNET:-172.22.12.0/24}" <<'PY'
+    if [ "${NPMPLUS_ACME_CHANGED:-false}" = false ] && [ "$before" = "$after" ] && python3 - "$networks" "$WEBMAIL_ENABLE" "${WEBMAIL_ADMIN_ENABLE:-false}" "$WEBMAIL_EDGE_SUBNET" "${ADMIN_EDGE_SUBNET:-172.22.12.0/24}" <<'PY'
 import ipaddress, json, sys
 networks = json.loads(sys.argv[1])
 expected = {f'mailstack-{app}-edge': str(ipaddress.ip_network(subnet).network_address + 2) for app, enabled, subnet in zip(('webmail','admin'), sys.argv[2:4], sys.argv[4:6]) if enabled == 'true'}
@@ -549,11 +557,13 @@ sys.exit(0 if networks and actual == set(expected) and all(networks[name].get('I
 PY
     then
         edge_archive_apply "$dir" false edge_npmplus_up up -d npmplus || return 1
+        npmplus_acme_apply "$dir" && npmplus_acme_record_written "$dir" || return 1
         edge_log 'step 3: NPMplus edge attachments unchanged; recreation skipped'
         return 0
     fi
     edge_log 'step 3: applying NPMplus edge override (brief web interruption)'
     edge_archive_apply "$dir" false edge_npmplus_up up -d --force-recreate npmplus || return 1
+    npmplus_acme_apply "$dir" && npmplus_acme_record_written "$dir" || return 1
     edge_log 'step 3 complete: NPMplus override applied'
 }
 

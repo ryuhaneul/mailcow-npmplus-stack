@@ -880,6 +880,7 @@ NPMENV
 chmod 600 "$NPMPLUS_DIR/.env"
 
 cd "$NPMPLUS_DIR"
+npmplus_acme_preflight "$NPMPLUS_DIR" || die "ACME preflight failed before NPMplus startup"
 log_archive_check_logging "$NPMPLUS_DIR" || die "NPMplus service logging policy is incomplete"
 edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects are up, NPMplus may need recovery"
 
@@ -1446,6 +1447,8 @@ if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
     docker restart npmplus 2>&1 | tee -a "$LOGFILE" | tail -1 || \
         warn "Failed to restart NPMplus — mailcow.${DOMAIN} may stay 502 until manual restart"
 fi
+
+npmplus_acme_wait && npmplus_acme_verify "$NPMPLUS_DIR" || die "ACME verification failed after final restart"
 
 # ============================================================
 # Done

@@ -4,6 +4,12 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$ROOT/scripts/lib/webmail-env.sh"
+# This suite isolates archive transactions; ACME's real guards/API and failure
+# paths are exercised in test-npmplus-acme.sh without a Docker daemon.
+npmplus_acme_prepare() { NPMPLUS_ACME_CHANGED=false; }
+npmplus_acme_guard() { :; }
+npmplus_acme_record_written() { :; }
+npmplus_acme_apply() { :; }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export TMP

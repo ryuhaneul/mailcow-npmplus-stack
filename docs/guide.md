@@ -1393,3 +1393,5 @@ fi
 ```
 
 구 검증 함수를 사용할 수 없으면 위 명령은 state의 `collection`·bounces의 `collection.gaps` 키 부재와 직렬화 크기(각 4MiB·16MiB)만 검사하며 전체 스키마 검증을 대신했다고 보지 않습니다. 두 파일을 모두 백업·검사한 뒤 같은 관리 앱 정지 구간 안에서 각각 원자 저장합니다. collection 제거 뒤에도 4MiB를 넘으면 **원본을 삭제하거나 과거 상태로 덮어쓰지 말고 롤백을 중단하여 새 버전을 유지**합니다. 실패 후 원본 복원이 필요하면 admin 정지 상태에서 `$ROLLBACK_BACKUP/state-new.json`과 `$ROLLBACK_BACKUP/bounces-new.json`을 각각 같은 소유자·0600으로 원자 복원합니다. 이 호환화는 감시 증분 칸/중복 키와 반송 빈 구간 기록만 버리며, 새 버전으로 재업그레이드하면 warm-up부터 시작합니다. 성공한 경우에만 앞서 설명한 새 정책 스크립트의 `--revert -y`와 원래 restriction/callback 제거 확인을 수행하고 이전 소스·환경·이미지로 복귀합니다. 복귀 후 관리 인증을 거친 `/api/admin/monitor/status`·`/api/admin/monitor/notifications`의 200과 실제 감시 tick 완료를 확인합니다. 호환화 실패 시에는 정책 revert 및 이전 이미지 교체를 진행하지 않습니다.
+이전 이미지·소스·환경으로 복귀한 뒤 verify 전에 `MAILCOW_DIR=/home/mailcow-dockerized WEBMAIL_ENV_FILE=/home/rocky/mailcow-npmplus-stack/.env bash /home/rocky/mailcow-npmplus-stack/scripts/apply-webmail-dbuser.sh`로 구버전의 정확한 DB 권한 집합을 복원합니다(표·자료는 삭제하지 않음).
+61f91a6 이상의 감시 포함 버전으로 되돌릴 때는 새 정책 `--revert` → 이전 이미지·소스·환경·DB 권한 복원 → 그 버전의 `apply-postfix-bounce-policy.sh` 실행(apply) → 해당 버전 verify·SMTP 정상 배달 확인 순서로 진행합니다. 감시가 없는 버전으로 되돌릴 때는 정책 revert만 수행합니다.

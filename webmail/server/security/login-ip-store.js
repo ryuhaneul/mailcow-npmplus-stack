@@ -16,6 +16,9 @@ export function normalizeLoginIp(input, { allowWide = false } = {}) {
     const [left, right] = canonical.split('::'), start = left ? left.split(':') : [], end = right ? right.split(':') : [];
     const parts = right === undefined ? start : [...start, ...Array(8 - start.length - end.length).fill('0'), ...end];
     number = parts.reduce((n, part) => (n << 16n) | BigInt(`0x${part}`), 0n);
+    if (!allowWide && bits < 96 && (number >> BigInt(128 - bits)) === ((65535n << 32n) >> BigInt(128 - bits))) {
+      throw new AppError(422, 'INVALID_INPUT', 'IPv4 대역은 IPv4 표기로 입력해 주세요.');
+    }
     if (number >> 32n === 65535n && bits >= 96) { family = 4; width = 32; bits -= 96; number &= 0xffffffffn; }
   }
   if (!allowWide && bits < (family === 4 ? 16 : 48)) throw new AppError(422, 'INVALID_INPUT', '너무 넓은 대역은 넣을 수 없어요. IPv4는 /16 이상, IPv6는 /48 이상으로 입력해 주세요.');

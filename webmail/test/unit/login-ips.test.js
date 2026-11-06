@@ -45,7 +45,7 @@ test('login IP input normalizes addresses, network bits and equivalent spellings
 });
 
 test('login IP ranges enforce IPv4 /16 and IPv6 /48 minimum prefixes after normalization', () => {
-  for (const value of ['192.0.2.1/15', '2001:db8::/47', '0.0.0.0/0', '::/0', '::ffff:192.0.2.1/111']) {
+  for (const value of ['192.0.2.1/15', '2001:db8::/47', '0.0.0.0/0', '::ffff:192.0.2.1/111']) {
     assert.throws(() => normalizeLoginIp(value), error => error.statusCode === 422 && error.code === 'INVALID_INPUT' && /너무 넓은.*IPv4.*\/16.*IPv6.*\/48/.test(error.message));
   }
   for (const value of ['192.0.2.1/16', '192.0.2.1/17', '192.0.2.1', '2001:db8::/48', '2001:db8::/49', '2001:db8::1', '::ffff:192.0.2.1/112']) {
@@ -53,6 +53,62 @@ test('login IP ranges enforce IPv4 /16 and IPv6 /48 minimum prefixes after norma
   }
   assert.equal(normalizeLoginIp('0.0.0.0/0', { allowWide: true }), '0.0.0.0/0');
   assert.equal(normalizeLoginIp('::/0', { allowWide: true }), '::/0');
+});
+
+test('mapped overlap regression matrix validates registration and enforces family-specific 30-failure boundaries', async t => {
+  const clients = ['192.0.2.1', '198.51.100.1', '2001:db8::1', '::ffff:192.0.2.1'];
+  const cases = [
+    ['::ffff:0:0/95', 422, null, []],
+    ['::/48', 422, null, []],
+    ['::/0', 422, null, []],
+    ['::ffff:0:0/96', 422, null, []],
+    ['::ffff:c000:200/120', 200, '192.0.2.0/24', [clients[0], clients[3]]],
+    ['2001:db8::/48', 200, '2001:db8::/48', [clients[2]]],
+  ];
+  for (const [rule, status, normalized, exempt] of cases) await t.test(rule, async () => {
+    const f = database(), admin = createLoginIpStore({ db: f.db, mode: 'admin' });
+    if (status === 422) {
+      await assert.rejects(admin.change({ data: { ip: rule }, actor: 'synthetic-admin' }), error =>
+        error.statusCode === 422 && error.code === 'INVALID_INPUT' &&
+        (rule === '::ffff:0:0/96' ? /너무 넓은/.test(error.message) : /IPv4 대역은 IPv4 표기로/.test(error.message)));
+    } else {
+      await admin.change({ data: { ip: rule }, actor: 'synthetic-admin' });
+      assert.equal([...f.rows.keys()][0], normalized);
+    }
+    // Reproduce legacy DB rows even when current registration rejects the rule.
+    f.rows.clear(); f.rows.set(rule, { ip: rule, date: '2026-11-06 00:00:00.000000' });
+    const reader = createLoginIpStore({ db: f.db }), results = {};
+    for (const client of clients) {
+      const warnings = [], limiter = createRateLimiter({ readLoginIps: () => reader.list(), logger: { warn(...args) { warnings.push(args); } } });
+      await limiter.refreshLoginIps();
+      for (let i = 0; i < 30; i++) {
+        assert.doesNotThrow(() => limiter.checkLogin(client, `user${i}@example.test`));
+        limiter.recordFailure(client, `user${i}@example.test`);
+      }
+      if (exempt.includes(client)) {
+        for (let i = 30; i < 35; i++) {
+          assert.doesNotThrow(() => limiter.checkLogin(client, `user${i}@example.test`));
+          limiter.recordFailure(client, `user${i}@example.test`);
+        }
+        assert.doesNotThrow(() => limiter.checkLogin(client, 'fresh@example.test'));
+        results[client] = 'exempt after 35 failures';
+      } else {
+        assert.throws(() => limiter.checkLogin(client, 'fresh@example.test'), { statusCode: 429 });
+        results[client] = 'blocked on attempt 31';
+      }
+      assert.equal(warnings.length, status === 422 ? 1 : 0);
+      if (warnings.length) {
+        assert.deepEqual(warnings[0][0], { code: 'LOGIN_IP_RULES_IGNORED', count: 1 });
+        assert.ok(!JSON.stringify(warnings).includes(rule));
+      }
+    }
+    // Deletion remains possible for the normalized form of rejected legacy rows.
+    const key = normalizeLoginIp(rule, { allowWide: true });
+    f.rows.clear(); f.rows.set(key, { ip: key });
+    await admin.change({ address: key, actor: 'synthetic-admin' });
+    assert.equal(f.rows.size, 0);
+    t.diagnostic(JSON.stringify({ rule, registration: status, normalized, clients: results }));
+  });
 });
 
 test('webmail ignores broad rows already in the database, retains valid rows and logs only their count', async () => {
@@ -163,7 +219,7 @@ test('login IP admin API requires session/CSRF, validates input, records audit a
   assert.equal((await f.request('POST', '', { ip: '*' })).statusCode, 422);
   for (const ip of ['192.0.2.1/15', '2001:db8::/47', '0.0.0.0/0', '::/0']) {
     const response = await f.request('POST', '', { ip });
-    assert.equal(response.statusCode, 422); assert.match(response.json().error.message, /너무 넓은/);
+    assert.equal(response.statusCode, 422); assert.match(response.json().error.message, ip === '::/0' ? /IPv4 대역은 IPv4 표기로/ : /너무 넓은/);
   }
   f.rows.set('::/0', { ip: '::/0', date: '2026-11-06 00:00:00.000000' });
   assert.equal((await f.request('DELETE', `/${encodeURIComponent('::/0')}`, {})).statusCode, 200);

@@ -5,7 +5,7 @@ import { AppError } from '../errors.js';
 const MINUTE = 60_000;
 
 export function createRateLimiter({ now = Date.now, logger, readLoginIps = async () => ({ items: [] }) } = {}) {
-  let allowedIps = new BlockList(), nextRead = -Infinity, reading;
+  let allowedIps = { ipv4: new BlockList(), ipv6: new BlockList() }, nextRead = -Infinity, reading;
   async function refreshLoginIps() {
     if (reading) return reading;
     if (now() < nextRead) return;
@@ -13,15 +13,15 @@ export function createRateLimiter({ now = Date.now, logger, readLoginIps = async
     reading = (async () => {
       try {
         const { items } = await readLoginIps();
-        const next = new BlockList();
+        const next = { ipv4: new BlockList(), ipv6: new BlockList() };
         let ignored = 0;
         for (const { ip } of items) {
           let normalized;
           try { normalized = normalizeLoginIp(ip); } catch { ignored++; continue; }
           const [address, bits] = normalized.split('/');
           const family = isIP(address) === 4 ? 'ipv4' : 'ipv6';
-          if (bits === undefined) next.addAddress(address, family);
-          else next.addSubnet(address, Number(bits), family);
+          if (bits === undefined) next[family].addAddress(address, family);
+          else next[family].addSubnet(address, Number(bits), family);
         }
         if (ignored) logger?.warn({ code: 'LOGIN_IP_RULES_IGNORED', count: ignored }, '허용 범위를 벗어난 로그인 예외 IP 행을 무시했습니다.');
         allowedIps = next;
@@ -29,7 +29,12 @@ export function createRateLimiter({ now = Date.now, logger, readLoginIps = async
     })();
     try { await reading; } finally { reading = undefined; }
   }
-  const ipAllowed = ip => allowedIps.check(ip, isIP(ip) === 4 ? 'ipv4' : 'ipv6');
+  function ipAllowed(ip) {
+    let address;
+    try { address = normalizeLoginIp(ip); } catch { return false; }
+    const family = isIP(address) === 4 ? 'ipv4' : 'ipv6';
+    return allowedIps[family].check(address, family);
+  }
   const ips = new Map();
   const emails = new Map();
   const passwords = new Map();

@@ -121,8 +121,12 @@ def host(identity=1, forced=True):
         owner=dict(id=1),certificate=dict(id=7))
 
 
+# Captured NPMplus output after nginxbeautifier -s 2; no addresses in this excerpt.
+RENDERED_ACME_BLOCK = '  if ($uri ~ "^/\\.well-known/acme-challenge/[A-Za-z0-9_-]+$") {\n    break;\n  }'
+
+
 def conf(value, patched=True):
-    start=api.ACME_BLOCK+'\n' if patched and value['certificate_id']>0 and value['ssl_forced'] else ''
+    start=RENDERED_ACME_BLOCK+'\n' if patched and value['certificate_id']>0 and value['ssl_forced'] else ''
     if value['certificate_id']>0 and value['ssl_forced']:
         start+='if ($scheme = "http") { return 301 https://$host$request_uri; }\n'
         start+='if ($http_x_forwarded_proto = "http") { return 301 https://$host$request_uri; }\n'
@@ -295,9 +299,45 @@ class AcmeTests(unittest.TestCase):
     def test_literal_normal_block_detected_and_order_checked(self):
         f=Fixture();h=host();f.generated[('proxy-hosts',1)]=conf(h)
         with mock.patch.object(api,'acme_docker',side_effect=f.docker): api.acme_config('proxy-hosts',h)
-        f.generated[('proxy-hosts',1)]=conf(h).replace(api.ACME_BLOCK+'\n','')+api.ACME_BLOCK
+        f.generated[('proxy-hosts',1)]=conf(h).replace(RENDERED_ACME_BLOCK+'\n','')+RENDERED_ACME_BLOCK
         with mock.patch.object(api,'acme_docker',side_effect=f.docker):
             with self.assertRaisesRegex(RuntimeError,'redirect order'): api.acme_config('proxy-hosts',h)
+    def test_vm_rendered_indentation_and_outer_whitespace(self):
+        variants=[RENDERED_ACME_BLOCK,
+                  '\n'.join('\t'+line.strip()+'\t' for line in RENDERED_ACME_BLOCK.splitlines()),
+                  '\n'.join('    '+line.strip()+'  ' for line in RENDERED_ACME_BLOCK.splitlines())]
+        for block in variants:
+            with self.subTest(block=repr(block)):
+                f=Fixture();h=host()
+                text=conf(h).replace(RENDERED_ACME_BLOCK,block)
+                f.generated[('proxy-hosts',1)]=text
+                with mock.patch.object(api,'acme_docker',side_effect=f.docker):
+                    self.assertEqual(api.acme_config('proxy-hosts',h),text)
+    def test_block_content_order_and_consecutive_lines_are_strict(self):
+        mutations=[RENDERED_ACME_BLOCK.replace('+$', '*$'),
+                   RENDERED_ACME_BLOCK.replace('break;', 'return;'),
+                   RENDERED_ACME_BLOCK.replace('\n    break;', '\n\n    break;'),
+                   '\n'.join(reversed(RENDERED_ACME_BLOCK.splitlines())),
+                   RENDERED_ACME_BLOCK+'\n'+RENDERED_ACME_BLOCK,
+                   RENDERED_ACME_BLOCK.replace('if ($uri', '# if ($uri'),
+                   RENDERED_ACME_BLOCK.replace('if ($uri', 'if  ($uri')]
+        for block in mutations:
+            with self.subTest(block=repr(block)):
+                f=Fixture();h=host();f.generated[('proxy-hosts',1)]=conf(h).replace(RENDERED_ACME_BLOCK,block)
+                with mock.patch.object(api,'acme_docker',side_effect=f.docker):
+                    with self.assertRaisesRegex(RuntimeError,'invalid challenge block'):
+                        api.acme_config('proxy-hosts',h)
+    def test_original_config_rejects_block_at_any_indentation(self):
+        f=Fixture();h=host();f.generated[('proxy-hosts',1)]=conf(h,False)
+        with mock.patch.object(api,'acme_docker',side_effect=f.docker):
+            api.acme_config('proxy-hosts',h,patched=False)
+        for prefix in ['  ','\t','    ']:
+            with self.subTest(prefix=repr(prefix)):
+                block='\n'.join(prefix+line.strip() for line in RENDERED_ACME_BLOCK.splitlines())
+                f.generated[('proxy-hosts',1)]=conf(h).replace(RENDERED_ACME_BLOCK,block)
+                with mock.patch.object(api,'acme_docker',side_effect=f.docker):
+                    with self.assertRaisesRegex(RuntimeError,'invalid challenge block'):
+                        api.acme_config('proxy-hosts',h,patched=False)
     def test_cookie_transport_uses_existing_login_and_no_authorization(self):
         seen=[]
         class Handler(http.server.BaseHTTPRequestHandler):

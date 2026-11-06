@@ -262,12 +262,19 @@ def acme_config(endpoint, host, patched=True):
     acme_docker('nginx', '-t')
     text = acme_docker('sh', '-c', 'test ! -e "$1.err" && cat "$1"', 'acme-check', path)
     expected = bool(patched and host.get('certificate_id', 0) > 0 and host.get('ssl_forced'))
-    if text.count(ACME_BLOCK) != int(expected):
+    # NPMplus runs nginxbeautifier after rendering. Ignore only each line's
+    # outer whitespace; the exact three lines must remain consecutive/in order.
+    lines = [line.strip() for line in text.splitlines()]
+    block = [line.strip() for line in ACME_BLOCK.splitlines()]
+    positions = [index for index in range(len(lines) - len(block) + 1)
+                 if lines[index:index + len(block)] == block]
+    if len(positions) != int(expected):
         raise RuntimeError(f'ACME {endpoint}/{identity}: invalid challenge block')
     if expected:
-        position = text.index(ACME_BLOCK)
+        position = positions[0]
         for directive in ('if ($scheme = "http")', 'if ($http_x_forwarded_proto = "http")'):
-            if text.count(directive) != 1 or position >= text.index(directive):
+            redirects = [index for index, line in enumerate(lines) if directive in line]
+            if text.count(directive) != 1 or position >= redirects[0]:
                 raise RuntimeError(f'ACME {endpoint}/{identity}: invalid redirect order')
     return text
 

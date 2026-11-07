@@ -218,12 +218,24 @@ try:
   assert s.get("backfillComplete") is True and not s.get("issues")
   assert all(any(g.get("source")==source and g.get("visible") is True for g in s["generations"]) for source in required)
  else:
-  source,instance,count,after=sys.argv[2:]
+  source,instance,manifest,after=sys.argv[2:]
   stamp=datetime.datetime.fromisoformat(s["observedAt"].replace("Z","+00:00")).timestamp()
   assert stamp>float(after)+2
   generations=[g for g in s["generations"] if g.get("source")==source and g.get("instance")==instance]
   assert generations and all(g.get("pendingBytes")==0 and g.get("offset")==g.get("observedSize") for g in generations)
-  assert sum(g.get("visible") is True for g in generations)==int(count)
+  physical=json.loads(manifest)
+  assert isinstance(physical,list) and physical
+  files=[f for f in s["drainFiles"] if f.get("source")==source and f.get("instance")==instance]
+  names=[f["basename"] for f in files]
+  assert len(names)==len(set(names))
+  expected={f["basename"]:f["size"] for f in physical}
+  assert len(expected)==len(physical) and set(names)==set(expected)
+  for f in files:
+   size=expected[f["basename"]]
+   assert type(size) is int and size>=0
+   assert type(f.get("closed")) is bool
+   assert type(f.get("offset")) is int and type(f.get("observedSize")) is int
+   assert f["offset"]==f["observedSize"]==size
   assert not any(i.get("source")==source for i in s.get("issues",[]))
 except Exception: sys.exit(1)
 ' "$@"
@@ -256,22 +268,22 @@ log_archive_restore() {
 }
 log_archive_release() { LOG_ARCHIVE_RUNNING_IDS=(); }
 
-# Count only the exact numeric uncompressed rotations the collector supports.
-log_archive_file_count() {
+# Describe only the exact numeric uncompressed rotations the collector supports.
+log_archive_file_manifest() {
     python3 - "$1" <<'PY'
-import pathlib,re,sys
+import json,pathlib,re,sys
 try:
  p=pathlib.Path(sys.argv[1])
  files=[f for f in p.parent.iterdir() if f.is_file() and (f.name==p.name or re.fullmatch(re.escape(p.name)+r'\.[1-9][0-9]*',f.name))]
  if not files: raise ValueError()
- print(len(files))
+ print(json.dumps([{"basename":f.name,"size":f.stat().st_size} for f in sorted(files)]))
 except Exception: sys.exit(1)
 PY
 }
 
 log_archive_stop_and_drain() {
     [ "${LOG_ARCHIVE_ENABLE:-false}" = true ] || return 0
-    local dir="$1" service source ids id running path count after deadline instance
+    local dir="$1" service source ids id running path manifest after deadline instance
     shift
     log_archive_wait_backfill || { log_archive_restore; return 1; }
     for service in "$@"; do
@@ -297,15 +309,15 @@ log_archive_stop_and_drain() {
             else
                 path=$(docker inspect "$id" --format '{{.LogPath}}') || { log_archive_restore; return 1; }
             fi
-            count=$(log_archive_file_count "$path") || { log_archive_error 'source files unavailable'; log_archive_restore; return 1; }
+            manifest=$(log_archive_file_manifest "$path") || { log_archive_error 'source files unavailable'; log_archive_restore; return 1; }
             deadline=$((SECONDS + 30))
             while [ "$SECONDS" -lt "$deadline" ]; do
-                if log_archive_status "$((deadline - SECONDS))" | log_archive_check_status drain "$source" "$instance" "$count" "$after"; then break; fi
+                if log_archive_status "$((deadline - SECONDS))" | log_archive_check_status drain "$source" "$instance" "$manifest" "$after"; then break; fi
                 if [ "$SECONDS" -lt "$deadline" ]; then sleep 1; fi
             done
             if [ "$SECONDS" -ge "$deadline" ]; then log_archive_error 'drain not confirmed within 30 seconds'; log_archive_restore; return 1; fi
         done
     done
-    # Count + fresh status cannot prove identity when rotation exactly overlaps
-    # the stop boundary. Managed replacement has this explicit limitation.
+    # Name/size + fresh status cannot prove identity for a same-name, same-size
+    # rewrite overlapping the stop boundary; this limitation remains explicit.
 }

@@ -261,6 +261,40 @@ test('fully drained historical rotation removal leaves a tombstone without false
   assert.equal(checkpoints.filter((item) => item.closed).length, 1);
 });
 
+test('drain files include only observed matching tombstones and retain partial offsets', async t => {
+  const f = await fixture(t);
+  const file = await container(f), rotation = `${file}.1`, hidden = `${file}.saved`;
+  const historical = json('historical'), active = json('active');
+  await fs.writeFile(rotation, historical); await fs.writeFile(file, active);
+  await f.collector.collect();
+  // Hide the same inode for a cycle so it closes, then expose it again.
+  await fs.rename(rotation, hidden); await f.collector.collect();
+  await fs.rename(hidden, rotation); await f.collector.collect();
+  let state = await f.collector.status();
+  assert.equal(state.generations.length, 1); // Existing generation semantics stay unchanged.
+  assert.deepEqual(state.drainFiles.find(row => row.basename.endsWith('.1')), {
+    source: 'postfix', instance: id('a'), basename: path.basename(rotation),
+    offset: historical.length, observedSize: historical.length, closed: true,
+  });
+  assert.equal(state.drainFiles.length, 2);
+  assert.ok(state.drainFiles.every(row => Object.keys(row).sort().join(',') === 'basename,closed,instance,observedSize,offset,source'));
+  assert.ok(!JSON.stringify(state.drainFiles).includes(f.root));
+  assert.ok(!JSON.stringify(state.drainFiles).includes('synthetic-do-not-persist'));
+  await f.restart(); await f.collector.collect();
+  assert.equal((await f.collector.status()).drainFiles.find(row => row.basename.endsWith('.1')).closed, true);
+  // Same basename and bytes, different inode must not qualify as that tombstone.
+  await fs.rename(rotation, hidden); await fs.writeFile(rotation, historical);
+  await f.collector.collect();
+  state = await f.collector.status();
+  assert.equal(state.drainFiles.find(row => row.basename.endsWith('.1')).closed, false);
+  await fs.appendFile(rotation, 'unfinished'); await f.collector.collect();
+  const partial = (await f.collector.status()).drainFiles.find(row => row.basename.endsWith('.1'));
+  assert.equal(partial.offset, historical.length); assert.equal(partial.observedSize, historical.length + 10);
+  // Undiscovered files do not appear in the last published observation.
+  await fs.writeFile(`${file}.2`, json('unknown'));
+  assert.ok(!(await f.collector.status()).drainFiles.some(row => row.basename.endsWith('.2')));
+});
+
 for (const restart of [false, true]) {
   test(`stopped container observed twice then replaced retires without gaps (restart=${restart})`, async (t) => {
     const f = await fixture(t);

@@ -222,7 +222,13 @@ pending=int(os.path.exists(sys.argv[1]))
 names=['webmail','webmail-admin','postfix-mailcow','dovecot-mailcow','rspamd-mailcow','php-fpm-mailcow','nginx-mailcow']
 generations=[dict(source=name.removesuffix('-mailcow'),instance='id-'+name,offset=10-pending,observedSize=10,pendingBytes=pending,visible=True) for name in names]
 generations.append(dict(source='npmplus',instance='npmplus',offset=10-pending,observedSize=10,pendingBytes=pending,visible=True))
-print(json.dumps(dict(backfillComplete=True,observedAt='2099-01-01T00:00:00Z',generations=generations,issues=[])))
+from pathlib import Path
+root=Path(sys.argv[1]).parent/'logs'
+drainFiles=[]
+for g in generations:
+ p=root/('access.log' if g['source']=='npmplus' else g['instance']+'-json.log');size=p.stat().st_size
+ drainFiles.append(dict(source=g['source'],instance=g['instance'],basename=p.name,offset=size-pending,observedSize=size,closed=False))
+print(json.dumps(dict(backfillComplete=True,observedAt='2099-01-01T00:00:00Z',generations=generations,drainFiles=drainFiles,issues=[])))
 PY
 }
 # NPMplus mock path matches its real /data/nginx/logs/access.log contract.

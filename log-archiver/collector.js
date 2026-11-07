@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSources, discoverSources, parseRecord, utcTime, SOURCE_NAMES, MAX_LINE_BYTES } from './sources.js';
 import { DEFAULT_RETENTION } from './store.js';
@@ -69,7 +70,7 @@ class Collector {
     this.closed = false;
     this.failed = false;
     this.successfulCollections = Object.fromEntries(this.requiredSources.map(source => [source, { lastSuccessfulCollectionAt: null }]));
-    this.latest = { backfillComplete: false, generations: [], issues: [], collectionLagSeconds: null, sources: structuredClone(this.successfulCollections) };
+    this.latest = { backfillComplete: false, generations: [], drainFiles: [], issues: [], collectionLagSeconds: null, sources: structuredClone(this.successfulCollections) };
   }
 
   collect() {
@@ -163,12 +164,13 @@ class Collector {
         }
       }
     }
+    const tombstones = new Map();
     for (const file of descriptors) {
       if (used.has(file)) continue;
       // A closed generation remains a tombstone so retention cannot reimport it.
       let archived = false;
       for (const item of Object.values(checkpoints)) {
-        if (item.closed && item.identity === file.identity && item.source === file.source && item.instance === file.instance && await matches(file.handle, item, (await file.handle.stat()).size)) archived = true;
+        if (item.closed && item.identity === file.identity && item.source === file.source && item.instance === file.instance && await matches(file.handle, item, (await file.handle.stat()).size)) { archived = true; tombstones.set(file, item); }
       }
       if (archived) continue;
       const generation = `${file.source}:${file.instance}:${randomUUID()}`;
@@ -232,12 +234,26 @@ class Collector {
       const checkpoint = this.checkpoint.generations[generation];
       return { generation, source: checkpoint.source, instance: checkpoint.instance, path: checkpoint.path, offset: checkpoint.offset, size: checkpoint.observedSize, active: checkpoint.active, visible: file.visible, pendingBytes: Math.max(0, checkpoint.observedSize - checkpoint.offset) };
     });
+    // Only currently discovered descriptors qualify; old checkpoints cannot
+    // stand in for an unknown physical file at a managed replacement boundary.
+    const drainFiles = [];
+    for (const [generation, file] of assigned) {
+      if (!file.visible) continue;
+      const checkpoint = this.checkpoint.generations[generation];
+      drainFiles.push({ source: file.source, instance: file.instance, basename: path.basename(file.path),
+        offset: checkpoint.offset, observedSize: checkpoint.observedSize, closed: checkpoint.closed === true });
+    }
+    for (const [file, checkpoint] of tombstones) {
+      if (!file.visible) continue;
+      drainFiles.push({ source: file.source, instance: file.instance, basename: path.basename(file.path),
+        offset: checkpoint.offset, observedSize: (await file.handle.stat()).size, closed: true });
+    }
     const gaps = Object.values(this.checkpoint.generations).flatMap((item) => item.gaps ?? []);
     for (const source of this.requiredSources) {
       const sourceGenerations = generations.filter(item => item.source === source);
       if (sourceGenerations.length && sourceGenerations.every(item => item.pendingBytes === 0) && !issues.some(item => item.source === source) && !this.cycleFailures.has(source)) this.successfulCollections[source].lastSuccessfulCollectionAt = stamp;
     }
-    this.latest = { sources: structuredClone(this.successfulCollections), observedAt: stamp, transactionId: committed.transactionId, backfillComplete: generations.every((item) => item.pendingBytes === 0) && issues.length === 0, generations, issues, gaps,
+    this.latest = { sources: structuredClone(this.successfulCollections), observedAt: stamp, transactionId: committed.transactionId, drainFiles, backfillComplete: generations.every((item) => item.pendingBytes === 0) && issues.length === 0, generations, issues, gaps,
       collectionLagSeconds: generations.some((item) => item.pendingBytes > 0) ? Math.max(0, (Date.parse(stamp) - Math.min(...[...assigned.keys()].filter((key) => checkpoints[key].offset < checkpoints[key].observedSize).map((key) => Date.parse(checkpoints[key].pendingSince ?? stamp)))) / 1000) : 0 };
     // A disappeared descriptor has been drained. Keep only its checkpoint;
     // retaining unlinked source FDs forever would defeat Docker disk rotation.

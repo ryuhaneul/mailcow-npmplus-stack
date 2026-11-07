@@ -148,8 +148,10 @@ status_json() {
 import json,sys
 mode=sys.argv[1] if len(sys.argv)>1 else 'ready'
 g={'source':'webmail','instance':'id-web','offset':3,'observedSize':3,'pendingBytes':0,'visible':True}
-s={'backfillComplete':True,'observedAt':'2099-01-01T00:00:00Z','generations':[g],'issues':[]}
+s={'backfillComplete':True,'observedAt':'2099-01-01T00:00:00Z','generations':[g],'issues':[],'drainFiles':[dict(source='webmail',instance='id-web',basename='id-web-json.log',offset=3,observedSize=3,closed=False)]}
 if mode=='pending': g['pendingBytes']=1
+if mode in ('tombstone','partial-rotation'):
+ s['drainFiles'].append(dict(source='webmail',instance='id-web',basename='id-web-json.log.1',offset=2 if mode=='partial-rotation' else 3,observedSize=3,closed=True))
 if mode=='stale': s['observedAt']='2000-01-01T00:00:00Z'
 if mode=='issue': s['issues']=[{'source':'webmail','reason':'source-unavailable'}]
 if mode=='incomplete': s['backfillComplete']=False
@@ -157,19 +159,28 @@ print(json.dumps(s))
 PY
 }
 status_json | log_archive_check_status backfill webmail
-status_json | log_archive_check_status drain webmail id-web 1 1800000000
+manifest='[{"basename":"id-web-json.log","size":3}]'
+status_json | log_archive_check_status drain webmail id-web "$manifest" 1800000000
 for mode in pending stale issue; do
-    if status_json "$mode" | log_archive_check_status drain webmail id-web 1 1800000000; then fail "$mode"; fi
+    if status_json "$mode" | log_archive_check_status drain webmail id-web "$manifest" 1800000000; then fail "$mode"; fi
 done
-if status_json | log_archive_check_status drain webmail id-web 2 1800000000; then fail count; fi
+rotations='[{"basename":"id-web-json.log","size":3},{"basename":"id-web-json.log.1","size":3}]'
+status_json tombstone | log_archive_check_status drain webmail id-web "$rotations" 1800000000 || fail tombstone
+pass 'closed EOF rotation plus current EOF file confirms drain'
+if status_json partial-rotation | log_archive_check_status drain webmail id-web "$rotations" 1800000000; then fail partial-rotation; fi
+pass 'closed rotation with unread bytes cannot confirm drain'
+if status_json | log_archive_check_status drain webmail id-web "$rotations" 1800000000; then fail unknown-file; fi
+if status_json | log_archive_check_status drain webmail id-web '[{"basename":"id-web-json.log.9","size":3}]' 1800000000; then fail wrong-name; fi
+if status_json | log_archive_check_status drain webmail id-web '[{"basename":"id-web-json.log","size":4}]' 1800000000; then fail wrong-size; fi
+pass 'unknown physical file, wrong name and changed size all refuse drain'
 if status_json incomplete | log_archive_check_status backfill webmail; then fail incomplete; fi
 if printf 'bad' | log_archive_check_status backfill webmail; then fail malformed; fi
-pass 'fresh status, all committed offsets, visible generation count, backfill, malformed/error checks'
+pass 'fresh status, all committed offsets, per-file manifest, backfill, malformed/error checks'
 printf 'a\n' > "$TMP/docker/id-web-json.log"
 printf 'b\n' > "$TMP/docker/id-web-json.log.1"
 printf 'ignored\n' > "$TMP/docker/id-web-json.log.1.gz"
-[ "$(log_archive_file_count "$TMP/docker/id-web-json.log")" = 2 ] || fail rotation-count
-pass 'exact supported uncompressed rotation count'
+log_archive_file_manifest "$TMP/docker/id-web-json.log" | python3 -c 'import json,sys;assert json.load(sys.stdin)==[{"basename":"id-web-json.log","size":2},{"basename":"id-web-json.log.1","size":2}]' || fail rotation-manifest
+pass 'exact supported uncompressed rotation names and sizes'
 # Stateful function mocks use files because command substitutions are subshells.
 : > "$TMP/calls"
 docker() {
@@ -204,7 +215,8 @@ log_archive_status() {
 import json,sys,os
 pending=int(os.path.exists(sys.argv[1]))
 generations=[{'source':'webmail' if instance=='id-web' else 'webmail-admin','instance':instance,'offset':3-pending,'observedSize':3,'pendingBytes':pending,'visible':True} for instance in ('id-web','id-admin') for rotation in range(2)]
-print(json.dumps({'backfillComplete':True,'observedAt':'2099-01-01T00:00:00Z','generations':generations,'issues':[]}))
+drainFiles=[dict(source=g['source'],instance=g['instance'],basename='id-web-json.log'+('.1' if i%2 else ''),offset=2-pending,observedSize=2,closed=bool(i%2)) for i,g in enumerate(generations)]
+print(json.dumps({'backfillComplete':True,'observedAt':'2099-01-01T00:00:00Z','generations':generations,'drainFiles':drainFiles,'issues':[]}))
 PYJSON
 }
 # Advance the shell timer without waiting 30 seconds in negative tests.

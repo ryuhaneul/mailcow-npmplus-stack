@@ -25,7 +25,7 @@ const env = {
 const query = { source: 'postfix', from: '2026-10-21T00:00:00+09:00', to: '2026-10-21T01:00:00+09:00' };
 const coverage = source => ({ source, oldest: '2026-10-20T15:00:00.000Z', newest: '2026-10-20T16:00:00.000Z', gaps: [] });
 const searchResult = () => ({ source: 'postfix', lines: [{ id: 'private-id', time: '2026-10-20T15:30:00.000Z', program: 'postfix/smtpd', priority: '', message: 'sender@example.com 2001:db8::7 [a+b].*', private: 'synthetic-excluded' }], nextCursor: null, partialReason: null, incomplete: false, coverage: coverage('postfix') });
-const statusResult = () => ({ generations: [{ source: 'postfix', pendingBytes: 0, path: '/synthetic-private-source', generation: 'private-generation' }], issues: [], collectionLagSeconds: 3, backfillComplete: true });
+const statusResult = () => ({ generations: [{ source: 'postfix', pendingBytes: 0, path: '/synthetic-private-source', generation: 'private-generation' }], issues: [], collectionLagSeconds: 3, backfillComplete: true, drainFiles: [{ source: 'postfix', instance: 'private-instance', basename: 'private-json.log.1', offset: 3, observedSize: 3, closed: true }] });
 function fixture(overrides = {}) {
   const calls = [], data = { search: searchResult(), status: statusResult(), coverage: { sources: [coverage('postfix')] } };
   const logArchive = { enabled: true, ...Object.fromEntries(['search', 'status', 'coverage'].map(name => [name, async args => { calls.push([name, args]); return structuredClone(data[name]); }])), ...overrides };

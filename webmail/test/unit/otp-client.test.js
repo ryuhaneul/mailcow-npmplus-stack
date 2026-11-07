@@ -6,6 +6,7 @@ import { session, sessionReady, verifiedSession, authUnavailable, authGeneration
 import { loadSessionPrefs, prefs, updatePrefs } from '../../web/src/state/prefs.js';
 import { signatureRequest } from '../../web/src/signatures.js';
 import { getSignatureImageContent } from '../../web/src/signature-images.js';
+const fixtureFetch = globalThis.fetch;
 const auth = (step = 'done', csrf = 'synthetic') => ({ step, user: { email: 'user@example.com', name: '예시' }, csrf, expiresAt: '2030-01-01T00:00:00.000Z', otp: { enabled: step === 'otp', version: '0'.repeat(32), registeredAt: null, forced: step === 'enroll', policyRevision: '0' } });
 function setup(t, handler) {
   const previous = globalThis.fetch, storage = globalThis.localStorage;
@@ -100,4 +101,51 @@ test('expired pending and reset explain password reauthentication even during si
   handleAuthFailure({ code: 'SESSION_EXPIRED', message: '인증 설정이 바뀌었어요. 다시 로그인해 주세요.' }, { notify: false });
   assert.equal(session.value, null); assert.equal(toast.value.message, '인증 설정이 바뀌었어요. 다시 로그인해 주세요.');
   toast.value = null;
+});
+
+test('OTP settings bootstrap follows the actual fixture session/prefs/status responses to the off-state DOM', async t => {
+  const { registerHooks } = await import('node:module');
+  const { readFileSync } = await import('node:fs');
+  const { transformSync } = await import('@babel/core');
+  const { default: jsx } = await import('@babel/plugin-transform-react-jsx');
+  const { JSDOM } = await import('jsdom');
+  const { h, render } = await import('preact');
+  const { act } = await import('preact/test-utils');
+  const { createServer } = await import('node:http');
+  const { createFakeApi } = await import('../../web/dev/fake-api.js');
+  const hooks = registerHooks({ load(url, context, next) {
+    if (url.endsWith('.css')) return { format: 'module', shortCircuit: true, source: '' };
+    if (url.endsWith('.jsx')) return { format: 'module', shortCircuit: true, source: transformSync(readFileSync(new URL(url), 'utf8'), { filename: new URL(url).pathname, configFile: false, babelrc: false, plugins: [[jsx, { runtime: 'automatic', importSource: 'preact' }]] }).code };
+    return next(url, context);
+  } });
+  const fake = createFakeApi({ authenticated: true });
+  const server = createServer((request, response) => fake.middleware(request, response, () => { response.statusCode = 404; response.end(); }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`, realFetch = fixtureFetch;
+  setup(t, (path, options) => realFetch(origin + path, options));
+  const dom = new JSDOM('<main></main>', { pretendToBeVisual: true, url: origin + '/#otp' });
+  const globals = new Map(['window', 'document', 'requestAnimationFrame', 'cancelAnimationFrame'].map(name => [name, globalThis[name]]));
+  for (const name of globals.keys()) globalThis[name] = typeof dom.window[name] === 'function' ? dom.window[name].bind(dom.window) : dom.window[name];
+  const root = document.querySelector('main');
+  const { route } = await import('../../web/src/router.js'), previousRoute = route.value;
+  t.after(async () => {
+    act(() => render(null, root)); route.value = previousRoute; hooks.deregister(); dom.window.close();
+    for (const [name, value] of globals) globalThis[name] = value;
+    fake.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+  });
+  await api('/api/auth/session'); await loadSessionPrefs();
+  assert.equal(session.value.step, 'done'); assert.equal(sessionReady.value, true);
+  route.value = { name: 'otp', value: '', title: '2단계 인증' };
+  const { default: OtpPage } = await import('../../web/src/pages/OtpPage.jsx');
+  await act(async () => { render(h(OtpPage), root); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
+  assert.equal(root.querySelector('.otp-badge').textContent, '꺼짐');
+  assert.equal(root.querySelector('.tabs [aria-current="page"]').textContent, '2단계 인증');
+  assert.equal(fake.state.requests.filter(row => row.path === '/api/otp').length, 1);
+  assert.equal(root.querySelector('#otp-code'), null);
+  const { OtpCodeForm } = await import('../../web/src/components/OtpEnrollment.jsx');
+  await act(async () => render(h(OtpCodeForm, { submit: async () => { throw { code: 'OTP_INVALID', message: '합성 인증 오류' }; } }), root));
+  await act(async () => root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
+  assert.equal(root.querySelector('input').disabled, false);
+  assert.equal(document.activeElement, root.querySelector('input'));
 });

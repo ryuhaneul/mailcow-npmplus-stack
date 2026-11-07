@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import preact from '@preact/preset-vite';
@@ -9,18 +11,31 @@ import { createFakeApi } from '../../web/dev/fake-api.js';
 import { createFakeAdminApi } from '../../web/dev/fake-admin-api.js';
 const captures=process.env.OTP_CAPTURE_DIR||'/tmp/otp-ui';
 await test('A OTP screens, pending preload boundary, dialogs and responsive states',async t=>{
+ const diagnostics=[];
+ await mkdir(captures,{recursive:true});
+ const cache=await mkdtemp(join(tmpdir(),'otp-ui-vite-'));
  const fake=createFakeApi({authenticated:true}),admin=createFakeAdminApi(),root=fileURLToPath(new URL('../../web',import.meta.url));
- const web=await createServer({configFile:false,root,logLevel:'error',plugins:[preact(),{name:'otp-public-fixture',configureServer:s=>{s.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
- const management=await createServer({root,configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),logLevel:'error',plugins:[{name:'otp-admin-fixture',configureServer:s=>{s.middlewares.use(admin.middleware);}}],server:{host:'127.0.0.1',port:0}});
- await web.listen();await management.listen();t.after(()=>web.close());t.after(()=>management.close());t.after(()=>fake.close());
- const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});t.after(()=>browser.close());await mkdir(captures,{recursive:true});
+ const web=await createServer({cacheDir:join(cache,'public'),configFile:false,root,logLevel:'error',plugins:[preact(),{name:'otp-public-fixture',configureServer:s=>{s.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
+ const management=await createServer({cacheDir:join(cache,'admin'),root,configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),logLevel:'error',plugins:[{name:'otp-admin-fixture',configureServer:s=>{s.middlewares.use(admin.middleware);}}],server:{host:'127.0.0.1',port:0}});
+ let browser;
+ t.after(async()=>{
+  for(const context of browser?.contexts()??[])for(const page of context.pages()){
+    diagnostics.push({unfinishedPage:page.url(),body:await page.locator('body').innerText().catch(()=>'(unavailable)'),dom:await page.content().catch(()=>'(unavailable)')});
+    await page.screenshot({path:`${captures}/failure-unfinished.png`,fullPage:true}).catch(()=>{});
+  }
+  await writeFile(`${captures}/diagnostics.json`,JSON.stringify(diagnostics,null,2)+'\n');
+  await browser?.close();fake.close();await web.close();await management.close();await rm(cache,{recursive:true,force:true});
+ });
+ await web.listen();await management.listen();
+ browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});await mkdir(captures,{recursive:true});
  const origin=`http://127.0.0.1:${web.httpServer.address().port}`,adminOrigin=`http://127.0.0.1:${management.httpServer.address().port}`;
  const defaults={step:'done',enabled:false,registeredAt:null,forced:false,version:'a'.repeat(32),policyRevision:'0',draft:null,error:null};
  async function open(screen,width=1280,mode='light',prepare){
   Object.assign(fake.state.otp,defaults,{enabled:screen==='on'||screen==='otp',registeredAt:screen==='on'||screen==='otp'?'2026-11-01T00:00:00.000Z':null,step:screen==='otp'?'otp':screen==='forced'?'enroll':'done',forced:screen==='forced'});fake.state.prefs.mode=mode;fake.state.prefs.theme='ink';fake.state.authenticated=true;fake.state.requests.length=0;
-  const context=await browser.newContext({viewport:{width,height:1000},colorScheme:mode});const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));page.setDefaultTimeout(10000);
+  const context=await browser.newContext({viewport:{width,height:1000},colorScheme:mode});const page=await context.newPage(),errors=[],consoleErrors=[],httpErrors=[];const diagnostic={screen,width,mode,errors,consoleErrors,httpErrors};diagnostics.push(diagnostic);page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text());});page.on('response',response=>{if(response.status()>=400)httpErrors.push({url:response.url(),status:response.status(),statusText:response.statusText()});});page.setDefaultTimeout(10000);
   if(prepare)await prepare(page);
   const isAdmin=['policy','account'].includes(screen);
+  try {
   await page.goto(isAdmin?adminOrigin+'/admin.html#'+(screen==='policy'?'settings/otp':'accounts/person%40example.com'):origin+'/#otp');
   if(screen==='enrollment'){await page.getByRole('button',{name:'2단계 인증 켜기',exact:true}).click();await expect(page.locator('.qr')).toBeVisible();}
   else if(screen==='forced')await expect(page.locator('.qr')).toBeVisible();
@@ -29,14 +44,20 @@ await test('A OTP screens, pending preload boundary, dialogs and responsive stat
   else if(screen==='account')await expect(page.locator('[data-admin-otp="account"] .kv')).toBeVisible();
   else await expect(page.locator('.otp-state')).toBeVisible();
   await page.evaluate(()=>document.fonts.ready);
-  return {page,context,errors};
+  return {page,context,errors,consoleErrors};
+  } catch(error) {
+    diagnostic.body=await page.locator('body').innerText().catch(()=>'(body unavailable)');
+    diagnostic.dom=await page.content().catch(()=>'(DOM unavailable)');
+    await page.screenshot({path:`${captures}/failure-${screen}-${width}-${mode}.png`,fullPage:true}).catch(()=>{});
+    console.error(JSON.stringify(diagnostic));throw error;
+  }
  }
  for(const width of [1280,768,375])for(const mode of ['light','dark'])for(const screen of ['off','enrollment','on','otp','forced','policy','account']){
   const view=await open(screen,width,mode);
   assert.equal(await view.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${screen} ${width} ${mode} overflow`);
   if(['otp','forced'].includes(screen))assert.equal(fake.state.requests.some(row=>row.path==='/api/prefs'||row.path==='/api/messages'||row.path==='/api/compose/identities'),false);
   if(mode==='light'&&width!==768)await view.page.screenshot({path:`${captures}/${screen}-${width}-${mode}.png`,fullPage:true});
-  assert.deepEqual(view.errors,[]);await view.context.close();
+  assert.deepEqual(view.errors,[]);assert.deepEqual(view.consoleErrors,[]);await view.context.close();
  }
  // Self-service enrollment, error focus, local rate-limit timer, cancellation and disable.
  let view=await open('enrollment');let page=view.page;
@@ -62,5 +83,5 @@ await test('A OTP screens, pending preload boundary, dialogs and responsive stat
  view=await open('enrollment',1280,'light',async page=>page.route('**/api/otp/enrollment',async route=>{const response=await route.fetch();const value=await response.json();await route.fulfill({json:{...value,expiresAt:new Date(Date.now()+1500).toISOString()}});}));await expect(view.page.getByText('등록 시간이 지났어요. 새 QR 코드로 다시 시작해 주세요.')).toBeVisible();assert.equal(await view.page.locator('.qr').count(),0);assert.equal(await view.page.locator('.manual-key').count(),0);await view.context.close();
  // Query outage cannot masquerade as zero/unregistered or leave controls enabled.
  admin.state.otp.error='OTP_UNAVAILABLE';view=await openError('settings/otp');await expect(view.page.getByRole('alert')).toBeVisible();assert.equal(await view.page.getByRole('checkbox',{name:'전체 강제'}).count(),0);await view.context.close();
- async function openError(hash){const context=await browser.newContext({viewport:{width:375,height:900}}),page=await context.newPage();await page.goto(adminOrigin+'/admin.html#'+hash);return{page,context};}
+ async function openError(hash){const context=await browser.newContext({viewport:{width:375,height:900}}),page=await context.newPage(),errors=[],consoleErrors=[];diagnostics.push({screen:hash,width:375,errors,consoleErrors});page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text());});await page.goto(adminOrigin+'/admin.html#'+hash);return{page,context};}
 });

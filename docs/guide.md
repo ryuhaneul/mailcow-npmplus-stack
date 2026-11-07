@@ -1547,6 +1547,27 @@ OTP 두 표·정책·암호문·스택의 새 키/버전은 삭제하지 않습�
 추가 권한을 회수해도 표의 자료는 남겨 둡니다. 스택 env 복원 시 OTP 키 두 항목은 보존합니다.
 이전 앱이 OTP를 지원하지 않으면 공개 웹메일은 정지/유지보수 상태를 유지합니다.
 OTP 지원 앱으로 다시 배포하거나 보호 해제의 명시 승인을 받기 전에는 구버전 공개 앱을 열지 않습니다.
+
+재업그레이드 전에 롤백으로 정지한 관리 앱을 먼저 시작하고 healthy 상태를 확인합니다.
+update의 Compose dry-run도 `--wait`를 사용하므로 관리 앱이 정지된 채로 있으면
+`container webmail-admin exited (0)`으로 중단될 수 있습니다. `docker start`는 기존
+컨테이너의 이미지·환경으로 시작하므로, 먼저 롤백 대상 이미지·렌더 env가 해당 컨테이너에
+반영됐는지 확인합니다. 공개 웹메일은 위의 정지/유지보수 상태를 유지합니다.
+스택 저장소 루트의 호스트 셸에서 실행합니다.
+
+```bash
+sudo docker start webmail-admin
+sudo docker inspect --format '{{.State.Health.Status}}' webmail-admin
+```
+
+출력이 `healthy`인지 확인합니다. `starting`이면 기동 완료 후 inspect 명령을 다시 실행하고,
+`healthy` 이외 상태에서는 재업그레이드를 진행하지 않습니다. 확인 뒤 정상 업데이트 경로로
+OTP 지원 버전을 다시 적용합니다.
+
+```bash
+sudo bash scripts/update.sh --skip-mailcow-update
+```
+
 재적용 시 같은 키로 남아 있는 등록을 복원하고 정책을 자동 OFF로 바꾸지 않습니다.
 
 키가 사라졌으면 먼저 백업의 원래 키를 복원합니다. 복원이 불가능하면 관리자 승인 하에

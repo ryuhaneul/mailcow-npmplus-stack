@@ -82,4 +82,48 @@ pass 'disabled webmail does not create a key'
 # No key or provider credential may be included in diagnostic output.
 ! grep -qF "$saved" "$TMP/result" || fail secret-output
 ! grep -qF 'synthetic-root' "$TMP/result" || fail root-output
+# Run the actual verify helper/call in verify startup order, without a preloaded path.
+python3 - "$ROOT/scripts/verify.sh" "$TMP/verify-block.sh" <<'PYTEST'
+from pathlib import Path
+import sys
+source=Path(sys.argv[1]).read_text()
+start=source.index('webmail_otp_key_prepared() {')
+helper=source[start:source.index('\n}\n',start)+3]
+start=source.index('if [ "$WEBMAIL_ENABLE" = true ]; then\n    echo "[Webmail]"')
+end=source.index('\n# --- Edge network isolation ---',start)
+Path(sys.argv[2]).write_text(helper+'\n'+source[start:end])
+PYTEST
+for scenario in ready wrong-mode missing-key missing-file; do
+    printf 'DOMAIN=example.test\nWEBMAIL_ENABLE=true\nWEBMAIL_OTP_KEY=%s\nWEBMAIL_OTP_KEY_VERSION=1\n' "$saved" > "$TMP/verify.env"
+    chmod 600 "$TMP/verify.env"
+    if [ "$scenario" = wrong-mode ]; then chmod 644 "$TMP/verify.env"; fi
+    if [ "$scenario" = missing-key ]; then sed -i '/^WEBMAIL_OTP_KEY=/d' "$TMP/verify.env"; fi
+    cp "$TMP/verify.env" "$TMP/verify.before"
+    (
+        unset WEBMAIL_STACK_ENV
+        ENV_FILE="$TMP/verify.env" SCRIPT_DIR="$ROOT/scripts" WEBMAIL_DIR="$TMP/app"
+        set -a; source "$ENV_FILE"; set +a
+        webmail_options
+        if [ "$scenario" = missing-file ]; then ENV_FILE="$TMP/absent.env"; fi
+        checked=0; outcome=1
+        check() {
+            local label="$1"; shift
+            if [ "$label" = 'Webmail OTP key prepared privately' ]; then
+                checked=$((checked+1))
+                if "$@"; then outcome=0; else outcome=1; fi
+            fi
+        }
+        source "$TMP/verify-block.sh"
+        [ "$checked" = 1 ] || fail verify-key-call
+        if [ "$scenario" = ready ]; then
+            [ "$outcome" = 0 ] && [ "$WEBMAIL_STACK_ENV" = "$ENV_FILE" ] || fail verify-key-path
+        else
+            [ "$outcome" != 0 ] || fail "verify accepted $scenario"
+        fi
+    ) > "$TMP/result" 2>&1 || fail "verify startup $scenario"
+    cmp -s "$TMP/verify.before" "$TMP/verify.env" || fail verify-mutated-env
+    ! grep -qF "$saved" "$TMP/result" || fail verify-key-output
+    ! grep -qF 'synthetic-root' "$TMP/result" || fail verify-root-output
+done
+pass 'actual verify startup loads its stack path before read-only key checks; private key passes, bad mode/missing key/file fail without secret output'
 echo "1..$n"

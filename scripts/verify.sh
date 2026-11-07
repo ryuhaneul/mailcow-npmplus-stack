@@ -78,6 +78,12 @@ check_container_healthy() {
 }
 # Called indirectly by check.
 # shellcheck disable=SC2329
+webmail_otp_key_prepared() {
+    webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" && webmail_ensure_otp_key --check
+}
+
+# Called indirectly by check.
+# shellcheck disable=SC2329
 webmail_logout_unauthenticated() {
     (cd "$WEBMAIL_DIR" && docker compose exec -T webmail node --input-type=module -e '
 const response = await fetch("http://127.0.0.1:8080/api/auth/logout", {method:"POST"});
@@ -217,7 +223,7 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     check "Template domain groups (block + doveconf)" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-template-groups.sh" --check
     check "Dovecot Webmail blocks" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" --check
     check "Webmail notices schema and counter" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" --check
-    check "Webmail OTP key prepared privately" webmail_ensure_otp_key --check
+    check "Webmail OTP key prepared privately" webmail_otp_key_prepared
     check "Webmail directory/notices and enabled admin DB grants" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" --check
     check "Unauthenticated logout: 403, no WWW-Authenticate" webmail_logout_unauthenticated
     if [ "${WEBMAIL_MAIL_TLS_MODE:-verify}" = pin ]; then

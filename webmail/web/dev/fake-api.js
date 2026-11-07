@@ -42,7 +42,8 @@ export function createFakeApi({ variant = 'a', authenticated = false, contrastMe
   const state = { rules: rulesFixture(), rulesError: null, mail:fixtureMail(), actionError:null, actionGate:null, actionFailures:[], identities: structuredClone(exampleIdentities), prefs: {...structuredClone(examplePrefs),sharedView:{'sales@example.com':{mode:'custom',folders:['Shared/sales@example.com/거래처','Shared/sales@example.com/거래처/2026','Shared/sales@example.com/견적'],hidden:false}},theme:fakeConfigs[variant].defaultTheme,mode:fakeConfigs[variant].defaultMode}, prefsError: null, authenticated, config: structuredClone(fakeConfigs[variant]), folders: structuredClone(fixtureFolders), loginError: null, sessionError: null, protectedError: null, csrf: 'synthetic-csrf-token', requests: [], storage: { quota: {usedBytes:16.6*1024**3,limitBytes:20*1024**3},level:'warn',folders:fixtureFolders.filter(folder=>!folder.shared).map((folder,index)=>({path:folder.path,name:folder.name,messages:index === 5 ? 1204 : 20+index*100,sizeBytes:[6.2,3.1,.2,2.4,.4,2.1,.4,.5,.3,.2,.7,.1][index]*1024**3})).sort((a,b)=>b.sizeBytes-a.sizeBytes) }, vacation: {enabled:true,until:'2026-10-17'} };
   if(contrastMessages)state.mail.unshift(...mailContrastFixtures.map((fixture,index)=>({...fakeMessage('INBOX',index),...fixture,hasAttachment:false})));
   function emit(type,value){for(const response of streams)response.write(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);}
-  const publicSession = () => ({step:'done',otp:{enabled:false,registeredAt:null,forced:false,version:'00000000000000000000000000000001',policyRevision:'0'},user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
+  state.otp = {step:'done',enabled:false,registeredAt:null,forced:false,version:'00000000000000000000000000000001',policyRevision:'0',draft:null,error:null};
+  const publicSession = () => ({step:state.otp.step,otp:{enabled:state.otp.enabled,registeredAt:state.otp.registeredAt,forced:state.otp.forced,version:state.otp.version,policyRevision:state.otp.policyRevision},user:{email:'user@example.com',name:'이서윤'},csrf:state.csrf,expiresAt:Date.now()+8*60*60*1000});
   function send(response,status,payload) {
     response.statusCode=status;response.setHeader('Content-Type','application/json; charset=utf-8');response.setHeader('Cache-Control','no-store');response.end(payload===undefined ? undefined : JSON.stringify(payload));
   }
@@ -66,6 +67,22 @@ export function createFakeApi({ variant = 'a', authenticated = false, contrastMe
     if(['POST','PUT','PATCH','DELETE'].includes(request.method) && request.headers['x-webmail-csrf']!==state.csrf)return fail(response,'CSRF');
     if(path==='/api/auth/session')return send(response,200,publicSession());
     if(path==='/api/auth/logout'){state.authenticated=false;state.compose?.attachments.clear();return send(response,204);}
+    if(path==='/api/otp' && request.method==='GET')return send(response,200,state.otp);
+    if(path.startsWith('/api/otp/') || path==='/api/auth/otp') {
+      let raw='';for await(const chunk of request)raw+=chunk;
+      const body=raw?JSON.parse(raw):{};recorded.body=body;
+      if(state.otp.error)return send(response,state.otp.error==='OTP_RATE_LIMITED'?429:403,{error:{code:state.otp.error,message:'합성 인증 오류. 이미 사용한 코드는 다음 코드로 다시 시도해 주세요.',retryAfter:2}});
+      if(path==='/api/otp/enrollment' && request.method==='DELETE'){state.otp.draft=null;return send(response,204);}
+      if(path==='/api/otp/enrollment' && request.method==='POST') {
+        state.otp.draft??={draftId:'a'.repeat(32),manualKey:'A'.repeat(32),qrDataUrl:'data:image/svg+xml;base64,'+Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160"><rect width="160" height="160" fill="white"/><path d="M10 10h40v40H10zm100 0h40v40h-40zM10 110h40v40H10zm60-40h20v20H70zm40 40h20v20h-20z" fill="black"/></svg>').toString('base64'),expiresAt:new Date(Date.now()+300000).toISOString()};
+        return send(response,200,state.otp.draft);
+      }
+      if(body.code!=='123456')return send(response,403,{error:{code:'OTP_INVALID',message:'인증 코드를 확인해 주세요. 이미 사용한 코드는 다음 코드로 다시 시도해 주세요.'}});
+      if(path==='/api/otp/disable' && state.otp.forced)return send(response,403,{error:{code:'OTP_FORCED',message:'필수 적용 중에는 끌 수 없습니다.'}});
+      if(path==='/api/otp/enrollment/confirm'){state.otp.enabled=true;state.otp.registeredAt='2026-11-01T00:00:00.000Z';state.otp.draft=null;}
+      if(path==='/api/otp/disable'){state.otp.enabled=false;state.otp.registeredAt=null;}
+      state.otp.step='done';state.csrf+='-next';return send(response,200,publicSession());
+    }
     if(await fakeCompose(request,response,state,send,recorded))return;
     if(await fakeReader(request,response,state,send))return;
     if(path==='/api/prefs'&&request.method==='PUT') {

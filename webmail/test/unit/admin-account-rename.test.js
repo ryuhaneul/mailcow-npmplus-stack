@@ -1,3 +1,4 @@
+import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -76,8 +77,19 @@ async function fixture(t, populated = true) {
       if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
     },
   };
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
-  return { dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, aclFolders, service, audit, history };
+  const otpRows = new Map([[old, { email: old, enabled: true, registeredAt: '2026-11-01T00:00:00.000Z', version: 'a'.repeat(32) }]]);
+  const otpStore = {
+    async readAccountStatus(email) { return otpRows.get(email) ?? { email, enabled: false, registeredAt: null, version: null }; },
+    async cleanup({ email, version }) {
+      if (options.otpFailure) throw new AppError(503, 'OTP_UNAVAILABLE', '합성 OTP 저장소 장애');
+      const row = otpRows.get(email);
+      if ((row?.version ?? null) !== version) throw new AppError(409, 'OTP_STATE_CHANGED', '합성 충돌');
+      otpRows.delete(email); return { unchanged: !row };
+    }, async close() {},
+  };
+  const otp = createOtpAdminService({ store: otpStore, mailcow, audit, lock });
+  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
+  return { otpRows, otpStore, dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, aclFolders, service, audit, history };
 }
 const rename = (f, data) => f.service.rename({ ...context, addr: old, data: { newLocal: 'new', keepOldAsAlias: true, ...data } });
 const preview = f => rename(f, { action: 'preview' });
@@ -205,7 +217,7 @@ test('rename: stale etag, missing etag and concurrent duplicate flows produce no
 });
 
 test('rename HTTP: guard protects preview/run and permits successful rename without challenge headers', async t => {
-  const f = await fixture(t, false); const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t, false); const app = await createAdminApp({ otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${old}/rename`, payload = { action: 'preview', newLocal: 'new', keepOldAsAlias: true };
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
@@ -317,4 +329,20 @@ test('rename: unrelated inactive owner is skipped and warned in preview and resu
 for (const [before, after] of [[0, 1], [1, 0], [1, 2]]) test(`rename: unrelated owner active ${before}→${after} invalidates preview`, async t => {
   const f = await fixture(t, false); f.boxes[2].active = before; const initial = await preview(f); f.boxes[2].active = after;
   await assert.rejects(run(f, initial.etag), { statusCode: 409, code: 'CHANGED_ELSEWHERE' }); assert.equal(writes(f).length, 0);
+});
+
+test('OTP rename cleanup removes the old row without migrating to the new address', async t => {
+  const f = await fixture(t, false), result = await run(f, (await preview(f)).etag);
+  assert.equal(result.result, 'ok'); assert.equal(f.otpRows.has(old), false); assert.equal(f.otpRows.has(next), false);
+  assert.equal(result.steps[1].stage, 'otp');
+  const records = (await f.audit.read()).rows, intent = records.find(row => row.action === 'webmail-otp.cleanup');
+  assert.equal(intent.target, old); assert.equal(records.filter(row => row.id === intent.id).length, 2);
+});
+
+test('OTP rename cleanup failure stops later cascades, reports partial and preserves changed address', async t => {
+  const f = await fixture(t, false); f.options.otpFailure = true;
+  const result = await run(f, (await preview(f)).etag);
+  assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'otp'); assert.equal(result.steps.at(-1).code, 'OTP_UNAVAILABLE');
+  assert.equal(f.boxes[0].username, next); assert.equal(f.otpRows.has(old), true);
+  assert.ok(result.recovery.find(row => row.stage === 'otp').message.includes('초기화'));
 });

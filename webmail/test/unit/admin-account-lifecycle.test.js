@@ -1,3 +1,4 @@
+import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -75,8 +76,19 @@ async function fixture(t, populated = true) {
       if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
     },
   };
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
-  return { dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
+  const otpRows = new Map([[user, { email: user, enabled: true, registeredAt: '2026-11-01T00:00:00.000Z', version: 'a'.repeat(32) }]]);
+  const otpStore = {
+    async readAccountStatus(email) { return otpRows.get(email) ?? { email, enabled: false, registeredAt: null, version: null }; },
+    async cleanup({ email, version }) {
+      if (options.otpFailure) throw new AppError(503, 'OTP_UNAVAILABLE', '합성 OTP 저장소 장애');
+      const row = otpRows.get(email);
+      if ((row?.version ?? null) !== version) throw new AppError(409, 'OTP_STATE_CHANGED', '합성 충돌');
+      otpRows.delete(email); return { unchanged: !row };
+    }, async close() {},
+  };
+  const otp = createOtpAdminService({ store: otpStore, mailcow, audit, lock });
+  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
+  return { otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
 }
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
@@ -265,7 +277,7 @@ test('lifecycle: intent failure prevents every write', async t => {
 
 test('lifecycle HTTP: preview/delete and leave use auth, JSON, Origin, CSRF guard and no challenge header', async t => {
   const f = await fixture(t, false);
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const app = await createAdminApp({ otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${user}`;
   assert.equal((await app.inject({ method: 'POST', url: `${url}/delete-preview`, headers: { origin: 'https://mailadmin.example.com' }, payload: {} })).statusCode, 403);
@@ -566,4 +578,20 @@ for (const mode of ['disable', 'delete']) test(`lifecycle: ${mode} detects anoth
   const result = await leave(f, { action: 'run', mode, cleanRefs: true, etag: initial.etag, ...(mode === 'delete' ? { confirmAddress: user } : {}) });
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'CHANGED_ELSEWHERE');
   assert.ok(!writes(f).some(call => call.path === '/api/v1/delete/mailbox'));
+});
+
+test('OTP delete cleanup removes the old generation after mailbox deletion and records an intent/result pair', async t => {
+  const f = await fixture(t, false), result = await remove(f, confirmed((await preview(f)).etag));
+  assert.equal(result.result, 'ok'); assert.equal(f.otpRows.has(user), false); assert.equal(f.boxes.some(row => row.username === user), false);
+  assert.equal(result.steps.at(-1).stage, 'otp');
+  const records = (await f.audit.read()).rows;
+  const intent = records.find(row => row.action === 'webmail-otp.cleanup');
+  assert.equal(intent.actor, 'admin'); assert.equal(intent.target, user); assert.equal(records.filter(row => row.id === intent.id).length, 2);
+});
+
+test('OTP delete cleanup failure returns partial stage otp, preserving the completed mailbox deletion', async t => {
+  const f = await fixture(t, false); f.options.otpFailure = true;
+  const result = await remove(f, confirmed((await preview(f)).etag));
+  assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'otp'); assert.equal(result.steps.at(-1).code, 'OTP_UNAVAILABLE');
+  assert.equal(f.boxes.some(row => row.username === user), false); assert.equal(f.otpRows.has(user), true); assert.ok(result.recovery[0].message.includes('초기화'));
 });

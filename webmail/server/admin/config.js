@@ -1,3 +1,4 @@
+import { parseOtpKey } from '../security/otp.js';
 import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -126,9 +127,14 @@ export function loadAdminConfig(env = process.env) {
   if (typeof dbName !== 'string' || !/^[a-zA-Z0-9_]+$/.test(dbName)) invalid('DB_NAME');
   if (typeof dbUser !== 'string' || !dbUser || /[\x00-\x1f\x7f-\x9f]/.test(dbUser)) invalid('DB_USER');
   if (typeof dbPassword !== 'string' || /[\x00-\x1f\x7f-\x9f]/.test(dbPassword)) invalid('DB_PASSWORD');
+  let otpKey, otpKeyVersion;
+  if (env.OTP_KEY || env.OTP_KEY_VERSION) {
+    const otp = parseOtpKey(env.OTP_KEY, env.OTP_KEY_VERSION);
+    otpKey = otp.key; otpKeyVersion = otp.keyVersion;
+  }
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    otpKey, otpKeyVersion, bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly, dbHost, dbName, dbUser, dbPassword,

@@ -12,6 +12,7 @@ import { mergeSenderAcl } from '../../server/admin/services/senders.js';
 import { parseCsv } from '../../server/admin/services/batch.js';
 export function createFakeAdminApi() {
   const state = { session: { step: 'done', user: { username: '합성관리자' }, csrf: 'synthetic-admin-csrf', expiresAt: '2099-01-01T00:00:00Z' }, features: { cleanup: true, relay: true, trusted: true }, failure: null, auth: { mode: 'password', loginError: null, totpError: null }, requests: [] };
+  state.otp = {forceAll:false,revision:'0',updatedAt:null,updatedBy:'합성관리자',error:null,writes:[],accounts:{'person@example.com':{email:'person@example.com',enabled:true,registeredAt:'2026-11-01T00:00:00.000Z',version:'a'.repeat(32)}}};
   state.status = {
     queue: { count: 9, longestDelaySeconds: 240 }, blocked: { count: 4 },
     certificates: [{ port: 993, daysRemaining: 42, expiresAt: '2026-11-27T00:00:00Z', valid: true }, { port: 465, daysRemaining: 18, expiresAt: '2026-11-03T00:00:00Z', valid: false, reason: 'SYNTHETIC_TLS_UNVERIFIED' }],
@@ -393,6 +394,16 @@ export function createFakeAdminApi() {
       if (body.lines.some(line => !parsed.rows.find(row => row.line === line)?.valid)) return fail({ status: 422, code: 'INVALID_INPUT', message: '오류 줄은 실행하지 않았어요.' });
       const results = body.lines.map(line => { const row = parsed.rows.find(item => item.line === line), partial = line === state.flow.partialLine, failed = line === state.flow.failedLine && body.action !== 'retry'; return { line, email: row.email, address: row.address, result: partial ? 'partial' : failed ? 'failed' : 'ok', steps: partial ? [{ stage: 'mailbox', status: 'ok' }, { stage: 'team', status: 'failed' }] : [{ stage: 'mailbox', status: failed ? 'failed' : 'ok' }], ...(partial ? { recovery: ['메일함은 만들어졌고 팀 배정만 실패 — 계정 화면이나 팀 화면에서 마저 하기'] } : {}), ...(!failed && kind === 'mailboxes' ? { password: 'Batch-Initial-Aa1234!' } : {}) }; });
       return response.end(JSON.stringify({ results, result: results.some(row => row.result !== 'ok') ? 'partial' : 'ok' }));
+    }
+    if(url.pathname.startsWith('/api/admin/otp/')) {
+      if(state.otp.error){response.statusCode=503;return response.end(JSON.stringify({error:{code:'OTP_UNAVAILABLE',message:'합성 인증 상태를 확인할 수 없어요.'}}));}
+      if(url.pathname==='/api/admin/otp/policy') {
+        if(request.method==='PUT'){let raw='';for await(const chunk of request)raw+=chunk;const body=JSON.parse(raw);state.otp.writes.push(body);if(body.revision!==state.otp.revision){response.statusCode=409;return response.end(JSON.stringify({error:{code:'CONFLICT',message:'다른 곳에서 정책이 바뀌었어요.'}}));}state.otp.forceAll=body.forceAll;state.otp.revision=String(Number(state.otp.revision)+1);}
+        const registered=state.accounts.items.filter(item=>state.otp.accounts[item.address]?.enabled).length;
+        return response.end(JSON.stringify({forceAll:state.otp.forceAll,revision:state.otp.revision,counts:{total:state.accounts.items.length,registered,unregistered:state.accounts.items.length-registered},updatedAt:null,updatedBy:'합성관리자',auditId:'a'.repeat(32)}));
+      }
+      const match=url.pathname.match(/^\/api\/admin\/otp\/accounts\/([^/]+)(\/reset)?$/);
+      if(match){const email=decodeURIComponent(match[1]);let row=state.otp.accounts[email]??{email,enabled:false,registeredAt:null,version:null};if(match[2]){let raw='';for await(const chunk of request)raw+=chunk;const body=JSON.parse(raw);state.otp.writes.push(body);row={email,enabled:false,registeredAt:null,version:'b'.repeat(32)};state.otp.accounts[email]=row;}return response.end(JSON.stringify(row));}
     }
     if (url.pathname === '/api/admin/status') return response.end(JSON.stringify(state.status));
     if (url.pathname === '/api/admin/queue') return response.end(JSON.stringify(state.queue));

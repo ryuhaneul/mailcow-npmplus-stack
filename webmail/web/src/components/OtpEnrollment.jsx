@@ -4,9 +4,10 @@ import { api } from '../api.js';
 import { session } from '../state/session.js';
 import './otp.css';
 
-export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabel = '확인 중…', children, onBusy = () => {}, disabled = false }) {
+export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabel = '확인 중…', codeLabel = '6자리 인증 코드', children, onBusy = () => {}, disabled = false }) {
   const [code, setCode] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false), [until, setUntil] = useState(0), [clock, setClock] = useState(Date.now());
   const input = useRef(), running = useRef(false);
+  useEffect(() => { if (error && !busy) input.current?.focus(); }, [error, busy]);
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -20,12 +21,12 @@ export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabe
     catch (failure) {
       setCode(''); setError(failure.message || '인증을 완료하지 못했어요. 다시 시도해 주세요.');
       if (failure.code === 'OTP_RATE_LIMITED') { setUntil(Date.now() + (failure.retryAfter || 300) * 1000); setClock(Date.now()); }
-      input.current?.focus();
     } finally { running.current = false; setBusy(false); onBusy(false); }
   }
   return <form class="otp-form" onSubmit={confirm} aria-busy={busy}>
-    <label for="otp-code">6자리 인증 코드</label>
-    <input ref={input} id="otp-code" class="inp" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onInput={event => setCode(event.currentTarget.value)} disabled={busy || disabled}/>
+    <label for="otp-code">{codeLabel}</label>
+    <input ref={input} id="otp-code" class="inp" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="000000" required value={code} onInput={event => setCode(event.currentTarget.value)} disabled={busy || disabled}/>
+    <p class="otp-note">인증 앱에 표시된 숫자 6자리를 입력해 주세요.</p>
     <div class="otp-feedback" aria-live="polite">
       {error && <p class="otp-error" role="alert">{error}</p>}
       {retry > 0 && <p role="status">{retry}초 뒤 다시 시도해 주세요.</p>}
@@ -35,7 +36,7 @@ export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabe
   </form>;
 }
 
-export default function OtpEnrollment({ onComplete, onCancel, onBusy = () => {} }) {
+export default function OtpEnrollment({ onComplete, onCancel, onLogout, onBusy = () => {} }) {
   const [draft, setDraft] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false), [copyNotice, setCopyNotice] = useState('');
   const generation = useRef(0), starting = useRef(false);
   useEffect(() => { void begin(); return () => { generation.current++; onBusy(false); }; }, []);
@@ -73,13 +74,13 @@ export default function OtpEnrollment({ onComplete, onCancel, onBusy = () => {} 
   }
   if (!draft) return <div aria-busy={busy}><p class="otp-error" role="alert">{error}</p>{busy ? <p role="status">QR 코드를 준비하고 있어요…</p> : <button class="btn" onClick={begin}>새 QR 코드로 다시 시작</button>}{onCancel && <button class="btn ghost" onClick={onCancel} disabled={busy}>취소</button>}</div>;
   return <div class="otp-enroll">
-    <section class="qr-side"><h3>1. 인증 앱에 추가</h3><p>인증 앱에서 QR 코드를 스캔해 주세요.</p>
+    <section class="qr-side"><h3>1. 인증 앱에 추가하세요</h3><p>인증 앱에서 QR 코드를 스캔하거나<br/>아래 키를 직접 입력해 주세요.</p>
       <img class="qr" src={draft.qrDataUrl} alt="인증 앱 등록용 QR 코드" width="156" height="156" referrerPolicy="no-referrer"/>
       <span class="qr-caption">QR 코드는 5분 동안 유효합니다</span>
-      <label>스캔할 수 없다면 수동 입력 키</label><div class="key-row"><code class="manual-key">{draft.manualKey}</code><button class="btn" type="button" onClick={copy}>복사</button></div><p role="status">{copyNotice}</p>
+      <label class="otp-note">QR을 읽을 수 없나요? 수동 입력 키</label><div class="key-row"><code class="manual-key">{draft.manualKey}</code><button class="btn" type="button" onClick={copy}>복사</button></div><p role="status">{copyNotice}</p>
     </section>
-    <section><h3>2. 인증 코드 확인</h3><p>앱에 표시되는 코드를 입력하면 등록이 완료됩니다.</p>
-      <OtpCodeForm submit={confirm} label="등록 완료" busyLabel="등록 중…" onBusy={onBusy}>{onCancel && <button class="btn" type="button" onClick={onCancel}>취소</button>}</OtpCodeForm>
+    <section><h3>2. 코드를 확인해 주세요</h3><p>앱에 계정을 추가한 뒤 코드를 입력하면<br/>2단계 인증이 켜집니다.</p>
+      <OtpCodeForm submit={confirm} label={session.value?.step === 'enroll' ? '등록하고 웹메일 이용' : '확인하고 켜기'} busyLabel="등록 중…" onBusy={onBusy}>{onCancel && <button class="btn" type="button" onClick={onCancel}>취소</button>}{onLogout && <button class="btn ghost" type="button" onClick={onLogout}>로그아웃</button>}</OtpCodeForm><p class="otp-note">휴대폰을 잃어버리면 관리자에게 초기화를 요청해 주세요.</p>
     </section>
   </div>;
 }

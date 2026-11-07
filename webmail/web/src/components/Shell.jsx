@@ -1,3 +1,4 @@
+import OtpPage from '../pages/OtpPage.jsx';
 import { useEffect, useLayoutEffect, useState, useRef } from 'preact/hooks';
 import { prefs } from '../state/prefs.js';
 import { folders } from '../state/folders.js';
@@ -100,7 +101,7 @@ export default function Shell() {
           {receiptResults.length>0&&<><ol style={{maxHeight:'45vh',overflowY:'auto'}}>{receiptResults.map(item=><li key={item.composeId}>{item.message} {item.ref&&<a href={`#read/${encodeURIComponent(item.ref)}`}>사본 보기</a>}</li>)}</ol><button class="btn sm" type="button" onClick={()=>setReceiptResults([])}>결과 닫기</button></>}
           {receiptError&&<small>{receiptError}</small>}
         </div>}
-        <div class="stage">{(isListRoute(current)||['read','compose'].includes(current.name))?<MailView/>:current.name === 'templates' ? <TemplatesPage/> : current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'shared' ? <SharedSettingsPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
+        <div class="stage">{(isListRoute(current)||['read','compose'].includes(current.name))?<MailView/>:current.name === 'templates' ? <TemplatesPage/> : current.name === 'filters' ? <FiltersPage/> : current.name === 'rule' ? <RuleBuilder key={`${current.value}?${current.query ?? ''}`} id={current.value} query={current.query}/> : current.name === 'storage' ? <StoragePage/> : current.name === 'otp' ? <OtpPage/> : current.name === 'password' ? <PasswordPage/> : current.name === 'shared' ? <SharedSettingsPage/> : current.name === 'settings' ? <SettingsPage/> : <section class="placeholder-view" aria-labelledby="page-title"><div class="head"><div><div class="eyebrow">{current.name === 'inbox' ? 'INBOX' : ''}</div><h1 id="page-title">{folder?.name || current.title}</h1></div></div></section>}</div>
         <Composer/>
       </main>
     </div>

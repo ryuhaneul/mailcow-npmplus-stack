@@ -21,3 +21,12 @@
 .otp-feedback .otp-error,.otp-error{color:var(--danger);font-size:13px;margin-top:8px}
 .otp-feedback p{font-size:13px;line-height:1.6;overflow-wrap:anywhere}
 @media(max-width:760px){.otp-login{padding:20px 16px}.otp-login .login-card{padding:24px 20px}.otp-enroll{grid-template-columns:minmax(0,1fr);gap:18px}.otp-enroll .qr-side{border-right:0;padding-right:0;border-bottom:1px solid var(--line);padding-bottom:20px}.otp-enroll .qr{margin-left:auto;margin-right:auto}.qr-caption{text-align:center}}
+
+.otp-view .otp-wrap{max-width:780px}.otp-heading{font-size:18px;margin:0 0 12px}
+.otp-state{padding:24px;border:1px solid var(--line);border-radius:var(--r-card);margin-bottom:22px}.otp-state h3{font-size:16px;margin:0}.otp-state p{margin:8px 0 0;color:var(--ink-2);font-size:13px}.otp-state .actions{margin-top:20px}
+.otp-badge{display:inline-flex;border-radius:var(--r-chip);padding:3px 8px;font-size:12px;background:var(--sunken);color:var(--ink-2);margin-left:8px}.otp-badge.on{color:var(--ok)}
+.otp-view .otp-enroll{padding:24px;border:1px solid var(--line);border-radius:var(--r-card)}.otp-view .otp-form .inp{max-width:270px}.otp-info{padding:18px 0;border-top:1px solid var(--line);margin-top:22px}.otp-info h3{font-size:14px;margin:0 0 6px}.otp-info p{font-size:13px;line-height:1.7;color:var(--ink-2);margin:0}.otp-disable{max-width:400px}
+@media(max-width:760px){.otp-state,.otp-view .otp-enroll{padding:18px}.otp-view .otp-form .inp{max-width:none}}
+
+.otp-steps{display:flex;list-style:none;padding:0;margin:0 0 26px;gap:24px;font-size:12.5px}.otp-steps li{display:flex;align-items:center;gap:7px;font-weight:600}.otp-steps span{display:grid;place-items:center;width:23px;height:23px;border-radius:50%;background:var(--accent);color:var(--on-accent);font-size:12px}
+@media(max-width:760px){.otp-steps{gap:14px;flex-wrap:wrap}.otp-steps li{font-size:12px}}

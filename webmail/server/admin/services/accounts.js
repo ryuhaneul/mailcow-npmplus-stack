@@ -45,7 +45,7 @@ function snapshot(row) {
 }
 const kindOf = (row, groups) => groups.has(normalize(row.username)) ? 'team' : Number(row.quota) === 3 * GB ? 'admin' : 'personal';
 const summary = (row, groups) => ({ ...snapshot(row), kind: kindOf(row, groups), usedBytes: Number(row.quota_used ?? 0), messages: Number(row.messages ?? 0) });
-export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders = {
+export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, aclFolders = {
   enabled: false,
   readOwned: async owner => (await dockerapi.getAcl(owner)).filter(row => normalize(row.user) === owner && row.mailbox === 'INBOX'),
   assertExist: async () => {},
@@ -478,6 +478,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
             });
             success(stage, addr);
+            stage = 'otp';
+            const clearedOtp = await otp.cleanup({ email: addr, actor, ip });
+            success(stage, addr, clearedOtp.auditId);
           }
           if (mode === 'disable' && cleanRefs) {
             stage = 'shares';
@@ -490,7 +493,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         } catch (error) {
           if (!touched) throw error;
           if (error instanceof MailcowAuthLost) lostSession = error;
-          const recovery = stage === 'aliases' ? [{ stage, message: '별칭 대상과 대상 메일함의 보내기 권한을 mailcow에서 확인하고 원래 권한을 복원해 주세요.' }] : [];
+          const recovery = stage === 'otp' ? [{ stage, message: '메일함 삭제는 적용됐어요. 관리 2단계 인증 초기화 API로 이전 주소의 남은 등록을 정리해 주세요.' }] : stage === 'aliases' ? [{ stage, message: '별칭 대상과 대상 메일함의 보내기 권한을 mailcow에서 확인하고 원래 권한을 복원해 주세요.' }] : [];
           steps.push({ stage: stage ?? 'verify', status: 'failed', code: safeCode(error), auditId: null, ...(recovery.length ? { recovery: recovery[0].message } : {}) });
           return { result: 'partial', steps, ...(recovery.length ? { recovery } : {}), detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps, ...(recovery.length ? { recovery } : {}) }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
         }
@@ -569,6 +572,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       const plan = await renamePlan(session, old, next); assertUnchanged(data.etag, plan.state);
       const steps = [], recovery = [
         { stage: 'mailbox', message: `현재 ${next} 함을 확인해 주세요. 주소를 다시 바꾸려면 mailcow에서 모든 연결도 함께 확인해 주세요.` },
+        { stage: 'otp', message: '주소 변경은 적용됐어요. 관리 2단계 인증 초기화 API로 이전 주소의 남은 등록을 정리하고 새 주소로 다시 등록해 주세요.' },
         { stage: 'teamFilters', message: `필터 화면에서 ${old} 대신 ${next}로 팀 전달 주소를 확인해 주세요.` },
         { stage: 'aliases', message: `별칭 대상에서 ${old}를 ${next}로 바꾸고 대상 메일함의 원래 보내기 권한을 확인해 주세요.` },
         { stage: 'senders', message: '새 주소의 보내기 권한과 새 주소로 보낼 수 있는 사람을 권한 화면에서 확인해 주세요.' },
@@ -610,6 +614,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               await verifyMailbox();
             });
           }));
+          stage = 'otp';
+          const clearedOtp = await otp.cleanup({ email: old, actor, ip });
+          steps.push({ stage, target: old, status: 'ok', auditId: clearedOtp.auditId });
           for (const filter of plan.filters) {
             stage = 'teamFilters';
             const applied = await teams.renameFilter({ session, actor, ip, filter, oldAddress: old, newAddress: next });

@@ -111,3 +111,20 @@ docker compose -f webmail/test/int/compose.int.yml run --rm --entrypoint node in
 기본 대상은 M02 계정 10개다. `Int-<uuid>`/`Int-<uuid>-한글`·`IntExcluded` 폴더와 Drafts의 `Int-<uuid>`, `합성 WAF` 접두 제목 및 정확히 `plain`/`full`/`noscript`인 제목을 후보로 출력한다. `--subject`는 추가 정확한 제목이며 여러 번 지정할 수 있다. 이름으로 찾은 **후보**이므로 삭제 여부는 main이 판단한다. 명령은 삭제·플래그 변경을 하지 않으며 Drafts는 EXAMINE, 본문 없이 UID/제목만 조회한다. 앱 임시 첨부 파일은 IMAP 목록 대상이 아니다.
 
 출력은 계정·종류·경로·메일 수 또는 UIDVALIDITY/UID/제목의 JSON Lines와 계정별 합계다. 일치 항목이 없어도 합계 0을 출력한다. 조회 실패는 `LIST_FAILED` 행과 종료 코드 1로 표시하고, 암호·쿠키·메일 본문·연결 오류 원문은 출력하지 않는다.
+
+
+## 웹메일 OTP 격리 VM 시험
+
+`otp.test.js`는 기본 실행에서 미실행이며 `WEBMAIL_INT=1`과 `WEBMAIL_INT_OTP=1`을 모두 명시해야 한다. 기존 그룹 선택과 runner를 변경하지 않는다. 그룹을 명시하면 account 그룹에 속하며 core 단독 실행에서는 제외된다. 다른 통합시험과 동시 실행하지 않는다. 전용 합성 계정만 사용하며 원래 정책이 OFF·계정 OTP 미등록이 아니면 변경 전에 중단한다.
+
+추가 runtime 변수는 `WEBMAIL_INT_OTP_EMAIL`, `WEBMAIL_INT_OTP_ADMIN_URL`, `WEBMAIL_INT_OTP_ADMIN_ORIGIN`, `WEBMAIL_INT_OTP_ADMIN_KEY`(full 권한)다. 기존 `WEBMAIL_INT_URL`, `WEBMAIL_INT_ORIGIN`, `WEBMAIL_INT_PASSWORD`도 필요하다. env 파일은 VM `/dev/shm`에0600, 상위0700으로 준비하고 값/원문을 출력하지 않는다. Node24와 고정 의존성이 있는 VM 환경에서 다음 파일만 실행한다.
+
+```sh
+node --env-file=/dev/shm/webmail-otp-test.env --test test/int/otp.test.js
+```
+
+두 세션의 등록 경쟁(성공1·후발 거부), 등록 확인 코드 재사용 거부, 동일 step20개 검증의 성공1, 관리자 reset을 검사한다. 계산은 production OTP 모듈을 import하지 않는 독립 RFC6238 계산이며 QR의 수동 입력 키를 사용한다. 실제 인증 앱 QR스캔을 검증했다고 표시하지 않는다. 기본 암호의 OTP 로그인 대기 진입을 확인하며 POP3/IMAP/SMTP 영향은 별도 D-live 프로토콜 시험이 필요하다.
+
+실패 시 finally에서 관리자 reset으로 등록을 해제한다. 정리 실패도 실패다. 정책은 변경하지 않는다. 전용 계정의 기존 행을 삭제하거나 세대/last_step을 과거로 되돌리지 않는다. 성공/실패 뒤 남은 대기 세션은 만료 또는 승인된 VM 앱 재시작으로 폐기한다. 시험 후 관리자 상태에서 미등록·정책OFF를 확인하고 `/dev/shm` 파일을 `sudo shred -u`로 제거한다. 코드·시드·쿠키·암호·API 키·QR 원문은 결과/로그에 남기지 않는다.
+
+V01~V12 중 VM 장애주입, 키누락 격리기동, 실제 GRANT negative test, lifecycle/ABA, rollback/reupgrade, HTTPS WAF 및 목록 성능(각10회 warmup+100회 median/p95)은 별도 수동 게이트다. 자동시험의 opt-in 미설정 건너뜀을 통과로 보고하지 않는다. 실제 인증 앱을 독립 계산기로 대체한 경우 그 승인과 수동 키 사용 사실을 D-live 기록에 명시한다. 등록/정책/키는 함께 백업하고 구버전 rollback 시 공개 앱 정지를 유지해 OTP 우회를 막는다.

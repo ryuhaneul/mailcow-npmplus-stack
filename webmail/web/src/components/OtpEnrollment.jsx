@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { session } from '../state/session.js';
 import './otp.css';
 
-export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabel = '확인 중…', codeLabel = '6자리 인증 코드', children, onBusy = () => {}, disabled = false }) {
+export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabel = '확인 중…', codeLabel = '6자리 인증 코드', buttonClass = 'btn pri', children, onBusy = () => {}, disabled = false }) {
   const [code, setCode] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false), [until, setUntil] = useState(0), [clock, setClock] = useState(Date.now());
   const input = useRef(), running = useRef(false);
   useEffect(() => { if (error && !busy) input.current?.focus(); }, [error, busy]);
@@ -32,7 +32,7 @@ export function OtpCodeForm({ submit, label = '인증하고 로그인', busyLabe
       {retry > 0 && <p role="status">{retry}초 뒤 다시 시도해 주세요.</p>}
       {busy && <p role="status">{busyLabel}</p>}
     </div>
-    <div class="actions"><button type="submit" class="btn pri" disabled={busy || retry > 0 || disabled}>{busy ? busyLabel : label}</button>{toChildArray(children).map(child => typeof child === 'object' ? cloneElement(child, { disabled: busy || disabled || child.props.disabled }) : child)}</div>
+    <div class="actions"><button type="submit" class={buttonClass} disabled={busy || retry > 0 || disabled}>{busy ? busyLabel : label}</button>{toChildArray(children).map(child => typeof child === 'object' ? cloneElement(child, { disabled: busy || disabled || child.props.disabled }) : child)}</div>
   </form>;
 }
 

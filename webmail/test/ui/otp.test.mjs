@@ -56,6 +56,16 @@ await test('A OTP screens, pending preload boundary, dialogs and responsive stat
   const view=await open(screen,width,mode);
   assert.equal(await view.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${screen} ${width} ${mode} overflow`);
   if(['otp','forced'].includes(screen))assert.equal(fake.state.requests.some(row=>row.path==='/api/prefs'||row.path==='/api/messages'||row.path==='/api/compose/identities'),false);
+  if(['off','on'].includes(screen))assert.equal(await view.page.locator('.otp-state h3').evaluate(node=>getComputedStyle(node).fontSize),'18px');
+  if(screen==='on')assert.equal(await view.page.getByRole('button',{name:'인증하고 끄기',exact:true}).evaluate(node=>node.className),'btn');
+  if(width===375&&['off','enrollment','on'].includes(screen)){
+    const bounds=await view.page.locator('.tabs [aria-current=page]').evaluate(node=>{const tab=node.getBoundingClientRect(),nav=node.parentElement.getBoundingClientRect();return{left:tab.left,right:tab.right,navLeft:nav.left,navRight:nav.right};});
+    assert.ok(bounds.left>=bounds.navLeft&&bounds.right<=Math.min(375,bounds.navRight),'selected OTP tab is fully visible');
+  }
+  if(width===375&&screen==='otp'){
+    const card=await view.page.locator('.login-card').boundingBox();assert.equal(card.x,16);assert.equal(card.width,343);
+  }
+
   if(mode==='light'&&width!==768)await view.page.screenshot({path:`${captures}/${screen}-${width}-${mode}.png`,fullPage:true});
   assert.deepEqual(view.errors,[]);await view.context.close();
  }

@@ -144,8 +144,9 @@ test('OTP settings bootstrap follows the actual fixture session/prefs/status res
   assert.equal(fake.state.requests.filter(row => row.path === '/api/otp').length, 1);
   assert.equal(root.querySelector('#otp-code'), null);
   const { OtpCodeForm } = await import('../../web/src/components/OtpEnrollment.jsx');
-  await act(async () => render(h(OtpCodeForm, { submit: async () => { throw { code: 'OTP_INVALID', message: '합성 인증 오류' }; } }), root));
+  await act(async () => render(h(OtpCodeForm, { buttonClass: 'btn', submit: async () => { throw { code: 'OTP_INVALID', message: '합성 인증 오류' }; } }), root));
   await act(async () => root.querySelector('form').dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })));
+  assert.equal(root.querySelector('button[type=submit]').className, 'btn');
   assert.equal(root.querySelector('input').disabled, false);
   assert.equal(document.activeElement, root.querySelector('input'));
 });

@@ -20,19 +20,19 @@ MAILCOW_DIR=${MAILCOW_DIR:-/home/mailcow-dockerized}
 WEBMAIL_DIR=${WEBMAIL_DIR:-/home/webmail}
 CONF="$MAILCOW_DIR/data/conf"
 POSTFIX="$CONF/postfix/mailstack-relay"
-RSPAMD="$CONF/rspamd/custom/mailstack-relay"
+RSPAMD="$CONF/rspamd/mailstack-relay"
 MARKER="$POSTFIX/conversion.json"
 log() { echo "[relay-file-mode] $*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 if [ "$MODE" != revert ] && [ -f "$MARKER" ]; then
-    python3 - "$CONF" <<'PYCHECK'
+    python3 - "$CONF" "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" <<'PYCHECK'
 from pathlib import Path
 import ipaddress,json,re,sys
-c=Path(sys.argv[1]); p=c/'postfix/mailstack-relay'; r=c/'rspamd/custom/mailstack-relay'
+c=Path(sys.argv[1]); p=c/'postfix/mailstack-relay'; r=c/'rspamd/mailstack-relay'
 try:
     assert json.loads((p/'conversion.json').read_text())['version']==2
     assert re.search(r'^mynetworks\s*=.*?/opt/postfix/conf/mailstack-relay/mynetworks(?:[\s,]|$)', (c/'postfix/extra.cf').read_text(), re.M)
-    assert re.search(r'^\s*local_addrs\s*=\s*["\']?/etc/rspamd/custom/mailstack-relay/local_addrs.map["\']?\s*;', (c/'rspamd/local.d/options.inc').read_text(), re.M)
+    assert re.search(r'^\s*local_addrs\s*=\s*["\']?/etc/rspamd/mailstack-relay/local_addrs.map["\']?\s*;', (c/'rspamd/local.d/options.inc').read_text(), re.M)
     def ips(path):
         assert path.is_file() and not path.is_symlink()
         result=set()
@@ -43,7 +43,9 @@ try:
                 result.add(n)
         return result
     a,b=ips(p/'mynetworks'),ips(r/'local_addrs.map')
-    assert a.issubset(b)
+    fixed=[ipaddress.ip_network(n) for n in ['127.0.0.0/8','::ffff:127.0.0.0/104','::1/128','fe80::/10',sys.argv[2]+'.0/24',*([sys.argv[3]] if sys.argv[3] else [])]]
+    def users(values): return {n for n in values if not any(n.version==f.version and n.subnet_of(f) for f in fixed)}
+    assert users(a)==users(b)
 except Exception:
     sys.exit('relay conversion marker conflicts with files/references; manual review required')
 PYCHECK
@@ -88,7 +90,7 @@ import ipaddress, json, re, sys
 from pathlib import Path
 conf, work, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 pf = conf/'postfix/extra.cf'; ro = conf/'rspamd/local.d/options.inc'
-for p in (pf, ro, conf/'postfix/mailstack-relay', conf/'rspamd/custom/mailstack-relay'):
+for p in (pf, ro, conf/'postfix/mailstack-relay', conf/'rspamd/mailstack-relay'):
     if p.is_symlink(): sys.exit('relay path must not be a symlink')
 extra, options = pf.read_text(), ro.read_text()
 if '\\' in extra: sys.exit('unsupported extra.cf escape')
@@ -125,12 +127,12 @@ if len(matches)!=1 or len(opts)!=1: sys.exit('unsupported relay layout')
 m,o=matches[0],opts[0]
 start=a+m.start(1); finish=a+m.end(1)
 ref='/opt/postfix/conf/mailstack-relay/mynetworks'
-rref='/etc/rspamd/custom/mailstack-relay/local_addrs.map'
+rref='/etc/rspamd/mailstack-relay/local_addrs.map'
 if mode=='revert':
     if extra[start:finish].count(ref)!=1 or o[2].strip().strip('"\'')!=rref: sys.exit('converted references differ')
     static=tokens(extra[start:finish].replace(ref,''))
     pe=tokens((conf/'postfix/mailstack-relay/mynetworks').read_text())
-    re_=tokens((conf/'rspamd/custom/mailstack-relay/local_addrs.map').read_text())
+    re_=tokens((conf/'rspamd/mailstack-relay/local_addrs.map').read_text())
     if any(f for _,_,f in pe) or user(pe)!=user(re_): sys.exit('relay maps differ')
     pvalue=', '.join([raw for raw,_,_ in static]+[formatted(n) for _,n,_ in pe])
     rvalue='['+', '.join(json.dumps(formatted(n)) for _,n,_ in re_)+']'
@@ -139,7 +141,7 @@ else:
     pe=tokens(extra[start:finish]); value=o[2].strip()
     if value.strip('"\'') in ('/etc/rspamd/custom/mailcow_networks.map','etc/rspamd/custom/mailcow_networks.map'):
         if user(pe): sys.exit('default map with nonempty relay list')
-        re_=[(formatted(n),n,True) for n in fixed]
+        re_=tokens((conf/'rspamd/custom/mailcow_networks.map').read_text())
     elif value.startswith('['): re_=tokens(value[1:-1])
     else: sys.exit('unsupported local_addrs')
     if user(pe)!=user(re_): sys.exit('relay lists differ')
@@ -199,14 +201,27 @@ for value in sys.argv[1:]:
         finally: os.close(fd)
 PYSYNC
 (cd "$MAILCOW_DIR" && docker compose exec -T postfix-mailcow postfix check)
-(cd "$MAILCOW_DIR" && docker compose exec -T rspamd-mailcow rspamadm configtest)
 log_archive_stop_and_drain "$MAILCOW_DIR" postfix-mailcow rspamd-mailcow
-(cd "$MAILCOW_DIR" && docker compose restart postfix-mailcow rspamd-mailcow)
+(cd "$MAILCOW_DIR" && docker compose restart postfix-mailcow)
+if [ "$MODE" = apply ]; then
+    (cd "$MAILCOW_DIR" && docker compose up -d --no-deps --force-recreate --wait --wait-timeout 60 rspamd-mailcow)
+else
+    (cd "$MAILCOW_DIR" && docker compose restart rspamd-mailcow)
+fi
 for service in postfix-mailcow rspamd-mailcow; do
     id=$(cd "$MAILCOW_DIR" && docker compose ps -q "$service")
     [ -n "$id" ] && [ "$(docker inspect --format '{{.State.Running}}' "$id")" = true ] || die 'relay service is not running'
 done
+(cd "$MAILCOW_DIR" && docker compose exec -T rspamd-mailcow rspamadm configtest)
 if [ "$MODE" = apply ]; then
+    # Check as the app's real UID after recreation; same-byte atomic replacements must succeed.
+    docker exec --user 1000:64250 webmail-admin node --input-type=module -e 'import {readFile} from "node:fs/promises"; import {writeRelayFiles} from "/app/server/admin/relay-files.js"; if(process.getuid()!==1000) throw Error("expected app UID"); const paths=["/run/relay/postfix/mynetworks","/run/relay/rspamd/local_addrs.map"]; const bytes=await Promise.all(paths.map(p=>readFile(p))); await writeRelayFiles(paths,bytes);' || die 'admin relay read/atomic replacement failed'
+    # The image runs workers as _rspamd. This checks traversal, ownership/mode and actual read, not only running.
+    (cd "$MAILCOW_DIR" && docker compose exec -T --user _rspamd rspamd-mailcow sh -ec '
+        test "$(stat -c %u:%g:%a /etc/rspamd/mailstack-relay)" = "0:64250:2775"
+        test "$(stat -c %u:%g:%a /etc/rspamd/mailstack-relay/local_addrs.map)" = "1000:64250:664"
+        cat /etc/rspamd/mailstack-relay/local_addrs.map > /dev/null
+    ') || die 'rspamd relay map ownership/permissions/read failed'
     python3 - "$WORK/conversion.json" "$BACKUP" <<'PY'
 import json,sys,datetime
 from pathlib import Path

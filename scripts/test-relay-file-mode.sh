@@ -3,27 +3,55 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'chmod -R u+rwX "$TMP"; rm -rf "$TMP"' EXIT
 export MAILCOW_DIR="$TMP/mailcow" WEBMAIL_DIR="$TMP/webmail" WEBMAIL_ENV_FILE="$TMP/empty.env" RELAY_TEST_TMP="$TMP"
-mkdir -p "$TMP/bin" "$MAILCOW_DIR/data/conf/postfix/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/custom/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/local.d" "$WEBMAIL_DIR"
+mkdir -p "$TMP/bin" "$MAILCOW_DIR/data/conf/postfix/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/local.d" "$MAILCOW_DIR/data/conf/rspamd/custom" "$WEBMAIL_DIR"
 : > "$WEBMAIL_ENV_FILE"
 export PATH="$TMP/bin:$PATH"
 cat > "$TMP/bin/docker" <<'MOCK'
 #!/usr/bin/env python3
 from pathlib import Path
-import os,sys
+import os,sys,subprocess
 p=Path(os.environ['RELAY_TEST_TMP']); args=sys.argv[1:]
 with (p/'calls').open('a') as f: f.write(' '.join(args)+'\n')
+conf=Path(os.environ['MAILCOW_DIR'])/'data/conf'
+def fault(name):
+ if (p/name).exists(): (p/name).unlink(); return True
+ return False
 if args[:3]==['exec','webmail-admin','id']: print('1000')
+elif args[:3]==['exec','--user','1000:64250']:
+ if fault('fail-app-access'): sys.exit(10)
+ # Real read + same-directory replace as the unprivileged fixture user.
+ for path in [conf/'postfix/mailstack-relay/mynetworks',conf/'rspamd/mailstack-relay/local_addrs.map']:
+  data=path.read_bytes(); temp=path.parent/'.atomic-probe'; temp.write_bytes(data); temp.chmod(0o664); temp.replace(path)
+ assert not (conf/'postfix/mailstack-relay/conversion.json').exists()
+ (p/'app-access-checked').touch()
 elif args[:2]==['exec','webmail-admin']: pass
 elif args[:2]==['inspect','--format']: print('true')
 elif args[:3]==['compose','ps','-q']: print(args[3]+'-id')
 elif args[:3]==['compose','restart','postfix-mailcow']:
- if (p/'fail-restart').exists():
-  (p/'fail-restart').unlink(); sys.exit(7)
+ if fault('fail-restart'): sys.exit(7)
+elif args[:3]==['compose','restart','rspamd-mailcow']: pass
+elif args[:2]==['compose','up']:
+ assert args[2:]==['-d','--no-deps','--force-recreate','--wait','--wait-timeout','60','rspamd-mailcow']
+ assert './data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z' in (conf.parent.parent/'docker-compose.override.yml').read_text()
+ # Match the image entrypoint's recursive chmod under custom, including a control directory.
+ custom=conf/'rspamd/custom'
+ subprocess.run(['chown','-R','82:82',*[str(x) for x in custom.iterdir()]],check=True)
+ for root,dirs,files in os.walk(custom,topdown=False):
+  for name in files: (Path(root)/name).chmod(0o644)
+  for name in dirs: (Path(root)/name).chmod(0o644)
+ (p/'entrypoint-simulated').touch()
+elif args[:5]==['compose','exec','-T','--user','_rspamd']:
+ if fault('fail-rspamd-access'): sys.exit(11)
+ directory=conf/'rspamd/mailstack-relay'; path=directory/'local_addrs.map'
+ assert directory.stat().st_mode & 0o005==0o005
+ assert path.stat().st_mode & 0o004==0o004
+ path.read_bytes()
+ assert not (conf/'postfix/mailstack-relay/conversion.json').exists()
+ (p/'rspamd-access-checked').touch()
 elif args[:2]==['compose','exec']:
- if (p/'fail-configtest').exists() and 'configtest' in args:
-  (p/'fail-configtest').unlink(); sys.exit(8)
+ if 'configtest' in args and fault('fail-configtest'): sys.exit(8)
 elif args[:1] in (['stop'],['start']): pass
 else: raise AssertionError(args)
 MOCK
@@ -36,7 +64,9 @@ chmod +x "$TMP/bin/docker" "$TMP/bin/chown"
 CONF="$MAILCOW_DIR/data/conf"
 printf 'IPV4_NETWORK=172.22.1\nIPV6_NETWORK=fd4d:6169:6c63:6f77::/64\n' > "$MAILCOW_DIR/mailcow.conf"
 reset_case() {
-    rm -f "$CONF/postfix/mailstack-relay/"* "$CONF/rspamd/custom/mailstack-relay/"* "$TMP/fail-restart" "$TMP/fail-configtest"
+    chmod -R u+rwX "$CONF/rspamd/custom"
+    rm -f "$TMP/entrypoint-simulated" "$TMP/app-access-checked" "$TMP/rspamd-access-checked" "$TMP/fail-app-access" "$TMP/fail-rspamd-access"
+    rm -f "$CONF/postfix/mailstack-relay/"* "$CONF/rspamd/mailstack-relay/"* "$TMP/fail-restart" "$TMP/fail-configtest"
     cat > "$CONF/postfix/extra.cf" <<'CF'
 # operator setting
 other = keep
@@ -51,6 +81,11 @@ local_addrs = [127.0.0.0/8, ::1/128, 172.22.1.0/24, fd4d:6169:6c63:6f77::/64, 20
 CF
     cp "$CONF/postfix/extra.cf" "$TMP/original-extra"
     cp "$CONF/rspamd/local.d/options.inc" "$TMP/original-options"
+    chmod 2775 "$CONF/postfix/mailstack-relay" "$CONF/rspamd/mailstack-relay"
+    mkdir -p "$CONF/rspamd/custom/entrypoint-control"
+    printf 'control\n' > "$CONF/rspamd/custom/entrypoint-control/control.map"
+    printf '172.22.1.0/24\nfd4d:6169:6c63:6f77::/64\n' > "$CONF/rspamd/custom/mailcow_networks.map"
+    cp "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
     : > "$TMP/calls"
 }
 run() { bash "$ROOT/scripts/apply-relay-file-mode.sh" "$@" > "$TMP/result" 2>&1; }
@@ -60,13 +95,18 @@ pass() { n=$((n+1)); echo "ok $n - $*"; }
 reset_case
 run apply -y || fail 'initial conversion'
 grep -q '/opt/postfix/conf/mailstack-relay/mynetworks' "$CONF/postfix/extra.cf" || fail 'Postfix reference'
-grep -q '/etc/rspamd/custom/mailstack-relay/local_addrs.map' "$CONF/rspamd/local.d/options.inc" || fail 'Rspamd reference'
+grep -q '/etc/rspamd/mailstack-relay/local_addrs.map' "$CONF/rspamd/local.d/options.inc" || fail 'Rspamd reference'
 grep -qF '# mailstack-fixed !172.22.1.248' "$CONF/postfix/mailstack-relay/mynetworks" || fail 'fixed exclusion metadata'
 grep -qF '[2001:db8:1::8]' "$CONF/postfix/mailstack-relay/mynetworks" || fail 'IPv6 pattern'
-[ "$(grep -c 'compose restart postfix-mailcow rspamd-mailcow' "$TMP/calls")" = 1 ] || fail 'one restart batch'
+[ "$(grep -c 'compose restart postfix-mailcow$' "$TMP/calls")" = 1 ] || fail 'one Postfix restart'
+[ "$(grep -c 'compose up.*force-recreate.*rspamd-mailcow' "$TMP/calls")" = 1 ] || fail 'one Rspamd recreation'
 [ "$(stat -c %a "$CONF/postfix/mailstack-relay/mynetworks")" = 664 ] || fail 'map mode'
 [ -f "$CONF/postfix/mailstack-relay/conversion.json" ] || fail 'marker'
-pass 'initial conversion preserves addresses, exclusions, other settings and creates marker after one restart'
+[ -f "$TMP/entrypoint-simulated" ] && [ -f "$TMP/app-access-checked" ] && [ -f "$TMP/rspamd-access-checked" ] || fail 'post-recreate access checks missing'
+grep -q 'chown -R 82:82 .*rspamd/custom/' "$TMP/calls" || fail 'entrypoint ownership step missing'
+[ ! -x "$CONF/rspamd/custom/entrypoint-control" ] || fail 'entrypoint control did not lose traversal'
+[ -x "$CONF/rspamd/mailstack-relay" ] || fail 'safe map directory lost traversal'
+pass 'entrypoint chown/chmod model leaves the outside map accessible; UID read/atomic checks precede marker'
 cp "$CONF/postfix/mailstack-relay/mynetworks" "$TMP/converted-map"
 : > "$TMP/calls"
 run apply -y || fail 'idempotent conversion'
@@ -80,7 +120,7 @@ if run apply -y; then fail 'missing map accepted'; fi
 pass 'marker with missing dedicated file fails closed'
 reset_case
 run apply -y || fail 'reference drift baseline'
-sed -i 's@/etc/rspamd/custom/mailstack-relay/local_addrs.map@/etc/other.map@' "$CONF/rspamd/local.d/options.inc"
+sed -i 's@/etc/rspamd/mailstack-relay/local_addrs.map@/etc/other.map@' "$CONF/rspamd/local.d/options.inc"
 : > "$TMP/calls"
 if run apply -y; then fail 'reference drift accepted'; fi
 [ ! -s "$TMP/calls" ] || fail 'reference drift side effect'
@@ -106,7 +146,7 @@ if run apply -y; then fail 'duplicate legacy syntax accepted'; fi
 [ ! -s "$TMP/calls" ] || fail 'invalid syntax Docker call'
 cmp "$CONF/postfix/extra.cf" "$TMP/preflight-extra" || fail 'invalid syntax write'
 pass 'duplicate legacy mynetworks fails before writes and restart'
-for fault in fail-restart fail-configtest; do
+for fault in fail-restart fail-configtest fail-app-access fail-rspamd-access; do
     reset_case
     touch "$TMP/$fault"
     if run apply -y; then fail 'injected failure accepted'; fi
@@ -119,7 +159,7 @@ done
 reset_case
 run apply -y || fail 'revert baseline'
 printf '203.0.113.9\n' >> "$CONF/postfix/mailstack-relay/mynetworks"
-printf '203.0.113.9\n' >> "$CONF/rspamd/custom/mailstack-relay/local_addrs.map"
+printf '203.0.113.9\n' >> "$CONF/rspamd/mailstack-relay/local_addrs.map"
 run --revert -y || fail 'revert'
 grep -q '203.0.113.9' "$CONF/postfix/extra.cf" || fail 'current addition lost'
 grep -q '203.0.113.9' "$CONF/rspamd/local.d/options.inc" || fail 'current local addition lost'
@@ -130,5 +170,54 @@ reset_case
 sed -i 's/, 203.0.113.8, \[2001:db8:1::8\]//' "$CONF/postfix/extra.cf"
 printf 'local_addrs = /etc/rspamd/custom/mailcow_networks.map;\n' > "$CONF/rspamd/local.d/options.inc"
 run apply -y || fail 'empty default map'
-pass 'empty default mailcow map can migrate without modifying mailcow_networks.map'
+python3 - "$CONF/rspamd/custom/mailcow_networks.map" "$CONF/rspamd/mailstack-relay/local_addrs.map" <<'PYFIXED'
+import ipaddress,re,sys
+from pathlib import Path
+def networks(path):
+ return {ipaddress.ip_network(re.sub(r'^\[([^\]]+)\](.*)$',r'\1\2',s)) for s in Path(path).read_text().splitlines() if s.strip()}
+assert networks(sys.argv[1])==networks(sys.argv[2])
+PYFIXED
+pass 'default map conversion has zero symmetric difference in effective fixed networks'
+for side in postfix rspamd; do
+    reset_case
+    run apply -y || fail 'asymmetric baseline'
+    if [ "$side" = postfix ]; then path="$CONF/postfix/mailstack-relay/mynetworks"; else path="$CONF/rspamd/mailstack-relay/local_addrs.map"; fi
+    printf '203.0.113.9\n' >> "$path"
+    cp "$path" "$TMP/asymmetric-before"
+    : > "$TMP/calls"
+    if run apply -y; then fail 'asymmetric map accepted'; fi
+    cmp "$path" "$TMP/asymmetric-before" || fail 'asymmetric map was changed'
+    [ ! -s "$TMP/calls" ] || fail 'asymmetric Docker call'
+    pass "$side-only user address fails marker verification without mutation"
+done
+# Reconcile only the approved mount, preserving all unrelated override bytes.
+cat > "$MAILCOW_DIR/docker-compose.override.yml" <<'YAML'
+services:
+  rspamd-mailcow:
+    environment:
+      OPERATOR_SETTING: keep
+    volumes:
+      - ./operator:/operator:ro
+  other:
+    image: synthetic
+YAML
+bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume' bash "$ROOT" || fail 'override reconciliation'
+cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-first"
+bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume' bash "$ROOT" || fail 'override repeated'
+cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-first" || fail 'override not idempotent'
+grep -q 'OPERATOR_SETTING: keep' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'operator setting lost'
+grep -q './operator:/operator:ro' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'operator volume lost'
+[ "$(grep -c '/etc/rspamd/mailstack-relay:ro,z' "$MAILCOW_DIR/docker-compose.override.yml")" = 1 ] || fail 'duplicate managed volume'
+pass 'override mount is added once while operator environment and volumes remain intact'
+sed -i 's@./data/conf/rspamd/mailstack-relay:@./other-map:@' "$MAILCOW_DIR/docker-compose.override.yml"
+cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-conflict"
+if bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume' bash "$ROOT" 2>/dev/null; then fail 'conflicting mount accepted'; fi
+cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-conflict" || fail 'conflicting mount modified'
+pass 'operator mount conflict fails without overwriting override'
+
+printf 'services:\n  rspamd-mailcow: *operator_anchor\n' > "$MAILCOW_DIR/docker-compose.override.yml"
+cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-inline"
+if bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume' bash "$ROOT" 2>/dev/null; then fail 'unsupported inline service accepted'; fi
+cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-inline" || fail 'inline operator service modified'
+pass 'unsupported inline service syntax fails without adding a duplicate service'
 echo "1..$n"

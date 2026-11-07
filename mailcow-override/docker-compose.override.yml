@@ -141,6 +141,8 @@ services:
         compress: "false"
 
   rspamd-mailcow:
+    volumes:
+      - ./data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z
     logging:
       driver: json-file
       options:

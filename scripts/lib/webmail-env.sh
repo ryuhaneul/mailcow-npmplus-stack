@@ -322,6 +322,61 @@ webmail_ensure_admin_key() {
     if ! chmod 600 "$tmp" || ! mv "$tmp" "$WEBMAIL_STACK_ENV"; then rm -f "$tmp"; return 1; fi
 }
 
+# Add only the relay bind mount; preserve unrelated operator settings like logging reconciliation.
+webmail_reconcile_relay_volume() {
+    python3 - "$MAILCOW_DIR/docker-compose.override.yml" <<'PYRELAYVOLUME'
+import os,re,shutil,sys,tempfile
+from pathlib import Path
+p=Path(sys.argv[1])
+line='      - ./data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z\n'
+try:
+    if p.is_symlink(): raise ValueError()
+    original=p.read_text() if p.exists() else 'services:\n'
+    sections=list(re.finditer(r'^services:[ \t]*(?:#[^\n]*)?\n',original,re.M))
+    if len(sections)!=1: raise ValueError()
+    start=sections[0].end()
+    end=re.search(r'^[^ \t#\r\n]',original[start:],re.M)
+    end=start+end.start() if end else len(original)
+    headers=0
+    for entry in original[start:end].splitlines():
+        if not entry.strip() or entry.lstrip().startswith('#'): continue
+        if len(entry)-len(entry.lstrip(' '))<=2:
+            if not re.fullmatch(r'  [\w.-]+:[ \t]*(?:#[^\n]*)?',entry): raise ValueError()
+            headers+=1
+    entries=list(re.finditer(r'^  ([\w.-]+):[ \t]*(?:#[^\n]*)?\n',original[start:end],re.M))
+    if len(entries)!=headers: raise ValueError()
+    selected=[(i,m) for i,m in enumerate(entries) if m[1]=='rspamd-mailcow']
+    if len(selected)>1: raise ValueError()
+    if selected:
+        i,m=selected[0]; a=start+m.start(); b=start+entries[i+1].start() if i+1<len(entries) else end
+        block=original[a:b]
+        if '/etc/rspamd/mailstack-relay' in block:
+            if block.count(line)!=1 or block.count('/etc/rspamd/mailstack-relay')!=1: raise ValueError()
+            sys.exit(0)
+        volumes=list(re.finditer(r'^    volumes:[ \t]*(?:#[^\n]*)?\n',block,re.M))
+        if len(volumes)>1: raise ValueError()
+        if volumes:
+            offset=a+volumes[0].end(); addition=line
+        else:
+            if re.search(r'^    volumes\s*:',block,re.M): raise ValueError()
+            offset=start+m.end(); addition='    volumes:\n'+line
+    else:
+        offset=end; addition=('' if original[:end].endswith('\n') else '\n')+'  rspamd-mailcow:\n    volumes:\n'+line
+    result=original[:offset]+addition+original[offset:]
+    if p.exists():
+        fd,backup=tempfile.mkstemp(prefix=p.name+'.relay-volume.bak-',dir=p.parent);os.close(fd);shutil.copy2(p,backup)
+    fd,tmp=tempfile.mkstemp(prefix=p.name+'.relay-volume-',dir=p.parent)
+    try:
+        with os.fdopen(fd,'w') as stream: stream.write(result)
+        if p.exists(): shutil.copymode(p,tmp)
+        os.replace(tmp,p)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+except (OSError,ValueError,UnicodeError):
+    sys.exit('[webmail-env] relay volume conflicts with override; manual review required')
+PYRELAYVOLUME
+}
+
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
@@ -347,8 +402,9 @@ webmail_reconcile_admin_api() {
                 return 1
             fi
         done
+        webmail_reconcile_relay_volume || return 1
         # Grant relay writes only inside the two dedicated directories.
-        for file in "$MAILCOW_DIR/data/conf/postfix/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/custom/mailstack-relay"; do
+        for file in "$MAILCOW_DIR/data/conf/postfix/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/mailstack-relay"; do
             [ ! -L "$file" ] || { webmail_error "relay directory must not be a symlink"; return 1; }
             mkdir -p "$file" && chown 0:64250 "$file" && chmod 2775 "$file" || return 1
             for map in "$file/mynetworks" "$file/local_addrs.map"; do
@@ -641,7 +697,7 @@ else:
 mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z']
 if relay_ready == 'true':
     mounts.extend([f'{mailcow}/data/conf/postfix/mailstack-relay:/run/relay/postfix:rw,z',
-                   f'{mailcow}/data/conf/rspamd/custom/mailstack-relay:/run/relay/rspamd:rw,z',
+                   f'{mailcow}/data/conf/rspamd/mailstack-relay:/run/relay/rspamd:rw,z',
                    f'{mailcow}/data/conf/postfix:/run/relay/legacy/postfix:ro,z',
                    f'{mailcow}/data/conf/rspamd/local.d:/run/relay/legacy/rspamd:ro,z'])
 if trusted == 'true': mounts.append(f'{mailcow}/data/conf/rspamd/override.d/mailstack-trusted:/run/trusted:rw,z')

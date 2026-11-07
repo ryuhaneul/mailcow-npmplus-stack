@@ -23,6 +23,13 @@ for (const ip of ['203.0.113.8', '203.0.113.0/24', '2001:db8:1::8', '2001:db8:2:
   assert.deepEqual(removed, [baseExtra, baseOptions]);
   for (const item of fixed) assert.ok(contents[0].includes(`# mailstack-fixed ${item}`));
 });
+test('relay default map retains exactly its original internal fixed networks', () => {
+  const internal = '172.22.1.0/24\n[fd4d:6169:6c63:6f77::]/64\n';
+  const parsed = parseRelayFiles(baseExtra, internal, config);
+  const rendered = renderRelayFiles(parsed, ['203.0.113.8']);
+  assert.equal(rendered[1], internal + '203.0.113.8\n');
+  assert.deepEqual(renderRelayFiles(parseRelayFiles(...rendered, config), []), [baseExtra, internal]);
+});
 test('relay validates prefix bounds, duplicates, overlap and alternate IPv6 spelling', () => {
   const parsed = parseRelayFiles(baseExtra, baseOptions, config);
   for (const ip of ['0.0.0.0/0', '192.0.2.0/23', '2001:db8::/63', '127.1.2.3', '169.254.0.1/999', 'fe80::7', '172.22.1.7', 'fd4d:6169:6c63:6f77::7', '192.0.2.7', '2001:db8:ffff::7', 'bad', '1.2.3.4\nfoo']) assert.throws(() => validateRelayIp(ip, parsed, config), { statusCode: 422 });

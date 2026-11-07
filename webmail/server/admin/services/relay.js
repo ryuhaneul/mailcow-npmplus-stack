@@ -18,13 +18,17 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
   }
   async function reload(session) {
     await dockerapi.reload('postfix-mailcow');
-    const deadline = now() + 60_000;
-    while (true) {
-      const value = await mailcow.call(session, 'GET', '/api/v1/get/status/containers');
-      const rows = value && typeof value === 'object' ? Object.values(value) : [];
-      if (['postfix-mailcow', 'rspamd-mailcow'].every(name => rows.some(row => row?.container === name && row.state === 'running'))) return;
-      if (now() >= deadline) throw Object.assign(applyFailed(), { relayFailure: 'service_not_running' });
-      await wait(Math.min(1000, deadline - now()));
+    try {
+      const deadline = now() + 60_000;
+      while (true) {
+        const value = await mailcow.call(session, 'GET', '/api/v1/get/status/containers');
+        const rows = value && typeof value === 'object' ? Object.values(value) : [];
+        if (['postfix-mailcow', 'rspamd-mailcow'].every(name => rows.some(row => row?.container === name && row.state === 'running'))) return;
+        if (now() >= deadline) throw applyFailed();
+        await wait(Math.min(1000, deadline - now()));
+      }
+    } catch {
+      throw Object.assign(applyFailed(), { relayFailure: 'service_not_running' });
     }
   }
   async function apply(session, contents, backup) {

@@ -51,6 +51,7 @@ async function setup(t, overrides = {}) {
   const dockerapi = { reload: async name => { calls.push(name); await overrides.onReload?.(); if (overrides.reloadFail && (!failed || overrides.alwaysFail)) { failed = true; throw new Error('synthetic'); } } };
   const mailcow = { call: async (_session, _method, path) => {
     if (path.includes('/logs/')) return overrides.logRows ?? [];
+    if (overrides.statusError) throw overrides.statusError;
     if (overrides.stopped) return { a: { container: 'postfix-mailcow', state: 'exited' } };
     return { a: { container: 'postfix-mailcow', state: 'running' }, b: { container: 'rspamd-mailcow', state: 'running' } };
   } };
@@ -86,6 +87,19 @@ for (const failure of ['reloadFail', 'stopped', 'alwaysFail']) test(`relay ${fai
   await assert.rejects(f.service.create(await f.args()), { statusCode: 502, code: 'RELAY_APPLY_FAILED' });
   assert.equal(await readFile(f.paths[0], 'utf8'), baseExtra); assert.equal(await readFile(f.paths[1], 'utf8'), baseOptions);
   const { rows } = await f.audit.read(); assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, failure === 'reloadFail'); if (failure !== 'reloadFail') assert.equal(rows.at(-1).detail.restoreReason, failure === 'stopped' ? 'service_not_running' : 'reload_failed'); assert.ok(f.calls.length >= 2);
+});
+for (const [name, statusError] of [
+  ['timeout', new Error('status query timeout')],
+  ['502', Object.assign(new Error('status query failed'), { statusCode: 502 })],
+  ['authentication', Object.assign(new Error('status query unauthorized'), { statusCode: 403 })],
+]) test(`relay successful reload then ${name} status exception records service_not_running`, async t => {
+  const f = await setup(t, { statusError });
+  await assert.rejects(f.service.create(await f.args()), { statusCode: 502, code: 'RELAY_APPLY_FAILED' });
+  assert.deepEqual(f.calls, ['postfix-mailcow', 'postfix-mailcow']);
+  assert.equal(await readFile(f.paths[0], 'utf8'), baseExtra); assert.equal(await readFile(f.paths[1], 'utf8'), baseOptions);
+  const { rows } = await f.audit.read();
+  assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, false);
+  assert.equal(rows.at(-1).detail.restoreReason, 'service_not_running');
 });
 test('relay audit intent failure performs no writes or restart', async t => {
   const f = await setup(t), audit = { read: () => f.audit.read(), run: async () => { throw new Error('intent failed'); } };

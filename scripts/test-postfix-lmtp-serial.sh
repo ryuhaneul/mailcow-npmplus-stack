@@ -297,6 +297,20 @@ WEBMAIL_RELAY_IPV4=172.22.1.241 edge apply -y || fail 'changed relay apply'
 grep -q '!172.22.1.241' "$CONF/extra.cf" || fail 'relay not updated'
 run --check || fail 'content change damaged LMTP block'
 pass 'changed edge block content still updates and restarts once, preserving LMTP state'
+# File-mode relay reference must survive edge apply/check/revert.
+python3 - "$CONF/extra.cf" <<'PYREF'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text(); s=''.join(line.rstrip('\n')+', /opt/postfix/conf/mailstack-relay/mynetworks\n' if line.startswith('mynetworks =') else line for line in s.splitlines(keepends=True)); p.write_text(s)
+PYREF
+: > "$TMP/calls"
+WEBMAIL_RELAY_IPV4=172.22.1.241 edge apply -y || fail 'file-mode edge apply'
+WEBMAIL_RELAY_IPV4=172.22.1.241 edge --check || fail 'file-mode edge check'
+grep -q '/opt/postfix/conf/mailstack-relay/mynetworks' "$CONF/extra.cf" || fail 'file-mode reference removed'
+! grep -q restart "$TMP/calls" || fail 'file-mode unnecessary restart'
+edge --revert -y || fail 'file-mode edge revert'
+grep -q '/opt/postfix/conf/mailstack-relay/mynetworks' "$CONF/extra.cf" || fail 'file-mode revert reference removed'
+pass 'file-mode reference survives edge apply/check/revert without per-change restart'
 # Exercise the actual verify check function and its LMTP invocation with the
 # real --check script, rather than reaching unrelated live verification paths.
 python3 - "$ROOT/scripts/verify.sh" "$TMP/verify-lmtp.sh" <<'PYVERIFY'

@@ -91,6 +91,8 @@ def block_entries(body):
     for raw in re.split(rb'[,\s]+', value.strip()):
         if not raw: continue
         token = raw.strip(b'\"\'')
+        if token == b'/opt/postfix/conf/mailstack-relay/mynetworks':
+            entries.append(raw); extras.append(raw); continue
         excluded = token.startswith(b'!')
         if excluded: token = token[1:]
         token = re.sub(rb'^\[([^\]]+)\](.*)$', rb'\1\2', token)

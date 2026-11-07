@@ -920,6 +920,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         (cd "$WEBMAIL_DIR" && docker compose --profile admin up -d --wait --wait-timeout 180 webmail-admin) || die "Webmail admin startup failed"
     fi
 fi
+if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && { [ "$WEBMAIL_ADMIN_RELAY_READY" = true ] || [ -f "$MAILCOW_DIR/data/conf/postfix/mailstack-relay/conversion.json" ]; }; then MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-relay-file-mode.sh" apply -y || die "Relay file conversion failed"; fi
 webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"
 
 # ============================================================

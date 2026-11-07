@@ -108,7 +108,7 @@ export function loadAdminConfig(env = process.env) {
   if (ftsStart === ftsEnd) invalid('FTS_NIGHTLY_END');
   const ftsNightly = Object.freeze({ enabled: ftsEnabled === 'true', start: ftsStart, end: ftsEnd, stateDir: '/data/fts-nightly' });
   const trustedSenderFile = choice('TRUSTED_SENDER_FILE', ['', '/run/trusted/trusted_senders.map']);
-  const relayRaw = choice('RELAY_FILES', ['', '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc']);
+  const relayRaw = choice('RELAY_FILES', ['', '/run/relay/postfix/mynetworks,/run/relay/rspamd/local_addrs.map']);
   const mailcowIpv4Network = value('MAILCOW_IPV4_NETWORK');
   if (mailcowIpv4Network.split('.').length !== 3 || isIP(`${mailcowIpv4Network}.0`) !== 4) invalid('MAILCOW_IPV4_NETWORK');
   const mailcowIpv6Network = value('MAILCOW_IPV6_NETWORK', true);

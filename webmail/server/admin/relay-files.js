@@ -1,7 +1,7 @@
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { open, readFile, mkdir, chmod } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, readFile, mkdir, chmod, rename, unlink, lstat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { AppError } from '../errors.js';
 import { etag } from './lock.js';
 
@@ -47,7 +47,7 @@ function tokens(value, config) {
   const values = [...clean.matchAll(/"[^"\r\n]*"|'[^'\r\n]*'|!?\[[^\]]+\](?:\/\d+)?|[^\s,]+/g)];
   return values.map(match => ({ ...classify(match[0].replace(/^(["'])(.*)\1$/, '$2'), config), start: match.index, end: match.index + match[0].length }));
 }
-export function parseRelayFiles(extra, options, config) {
+function parseLegacyRelayFiles(extra, options, config) {
   const begin = '# BEGIN mailstack-edge mynetworks (apply-postfix-edge.sh)', end = '# END mailstack-edge mynetworks';
   let from = 0, to = extra.length;
   if (extra.includes(begin) || extra.includes(end)) {
@@ -71,6 +71,28 @@ export function parseRelayFiles(extra, options, config) {
     etag: etag([extra, options]), valueStart, valueEnd: valueStart + match[1].length,
     optionStart: option.index + option[1].length, optionEnd: option.index + option[0].length - 1 };
 }
+
+export function parseRelayFiles(extra, options, config) {
+  function entries(text, metadata = false) {
+    const result = [];
+    for (const line of text.split(/\r?\n/)) {
+      const fixed = metadata && line.startsWith('# mailstack-fixed ');
+      const value = (fixed ? line.slice(18) : line.replace(/#.*$/, '')).trim();
+      if (!value || !fixed && line.trimStart().startsWith('#')) continue;
+      if (/[,\s"'$]/.test(value) || !fixed && value.startsWith('!')) throw layout();
+      let item; try { item = classify(value, config); } catch { throw layout(); }
+      if (fixed && !item.fixed) throw layout();
+      result.push({ ...item, metadata: fixed });
+    }
+    return result;
+  }
+  const postfix = entries(extra, true), rspamd = entries(options);
+  if (postfix.some(item => item.fixed && !item.metadata)) throw layout();
+  const ips = list => [...new Set(list.filter(item => !item.fixed).map(item => item.network.ip))].sort();
+  const postfixIps = ips(postfix), rspamdIps = ips(rspamd);
+  return { extra, options, postfix, rspamd, ips: postfixIps,
+    consistent: JSON.stringify(postfixIps) === JSON.stringify(rspamdIps), etag: etag([extra, options]) };
+}
 export function validateRelayIp(input, parsed, config) {
   const network = relayNetwork(input);
   if (network.bits < (network.family === 4 ? 24 : 64)) throw invalid();
@@ -78,34 +100,27 @@ export function validateRelayIp(input, parsed, config) {
   if (fixed.some(item => overlaps(network, item)) || parsed.ips.includes(network.ip)) throw new AppError(422, 'RELAY_OVERLAP', '고정 항목과 겹치거나 이미 등록한 IP예요.');
   return network.ip;
 }
-function editList(value, entries, ips, format) {
-  const kept = entries.filter(item => item.fixed || ips.includes(item.network.ip));
-  const additions = ips.filter(ip => !entries.some(item => !item.fixed && item.network.ip === ip));
-  const edits = [];
-  for (const item of entries.filter(item => !kept.includes(item))) {
-    let start = item.start, end = item.end;
-    const following = /^[ \t\r\n]*,[ \t\r\n]*/.exec(value.slice(end));
-    if (following && kept.some(next => next.start > item.start)) end += following[0].length;
-    else { const preceding = /,[ \t\r\n]*$/.exec(value.slice(0, start)); if (preceding) start = preceding.index; }
-    edits.push({ start, end, text: '' });
-  }
-  if (additions.length) {
-    const point = kept.length ? kept.at(-1).end : 0;
-    edits.push({ start: point, end: point, text: `${kept.length ? ', ' : ''}${additions.map(format).join(', ')}` });
-  }
-  // Descending offsets keep whitespace, comments and retained token spellings intact.
-  for (const edit of edits.sort((a, b) => b.start - a.start || b.end - a.end)) value = value.slice(0, edit.start) + edit.text + value.slice(edit.end);
-  return value;
-}
 export function renderRelayFiles(parsed, ips) {
-  const postfixFormat = ip => { const n = relayNetwork(ip); return n.family === 6 ? `[${ip.split('/')[0]}]${ip.includes('/') ? `/${n.bits}` : ''}` : ip; };
-  const postfix = editList(parsed.extra.slice(parsed.valueStart, parsed.valueEnd), parsed.postfix, ips, postfixFormat);
-  const rspamd = parsed.map ? `[${[...parsed.rspamd.map(item => item.raw), ...ips].map(ip => JSON.stringify(ip)).join(', ')}]` :
-    `[${editList(parsed.options.slice(parsed.optionStart + 1, parsed.optionEnd - 1), parsed.rspamd, ips, JSON.stringify)}]`;
-  return [parsed.extra.slice(0, parsed.valueStart) + postfix + parsed.extra.slice(parsed.valueEnd), parsed.options.slice(0, parsed.optionStart) + rspamd + parsed.options.slice(parsed.optionEnd)];
+  const format = ip => { const n = relayNetwork(ip); return n.family === 6 ? `[${ip.split('/')[0]}]${ip.includes('/') ? `/${n.bits}` : ''}` : ip; };
+  const comments = text => text.split(/\r?\n/).filter(line => line.trimStart().startsWith('#'));
+  const postfix = [...comments(parsed.extra), ...ips.map(format)].join('\n') + '\n';
+  const rspamd = [...comments(parsed.options), ...parsed.rspamd.filter(item => item.fixed).map(item => item.raw), ...ips.map(format)].join('\n') + '\n';
+  return [postfix, rspamd];
+}
+export async function relayConversionPending(config) {
+  if (!config.relayFiles?.length) return false;
+  try { return JSON.parse(await readFile(join(dirname(config.relayFiles[0]), 'conversion.json'), 'utf8')).version !== 2; }
+  catch (error) { if (error.code === 'ENOENT') return true; throw layout(); }
+}
+export function relayConversionPendingError() {
+  return new AppError(409, 'RELAY_CONVERSION_PENDING', '파일 방식으로 전환 중이에요. 전환이 끝난 뒤 다시 시도해 주세요.');
 }
 export async function readRelayFiles(config) {
   if (!config.relayFiles?.length) throw new AppError(404, 'RELAY_DISABLED', '릴레이 허용 IP 기능이 꺼져 있어요.');
+  if (await relayConversionPending(config)) {
+    const [extra, options] = await Promise.all(['/run/relay/legacy/postfix/extra.cf', '/run/relay/legacy/rspamd/options.inc'].map(path => readFile(path, 'utf8')));
+    return { ...parseLegacyRelayFiles(extra, options, config), conversionPending: true };
+  }
   const results = await Promise.allSettled(config.relayFiles.map(path => readFile(path, 'utf8')));
   const missing = results.filter(result => result.status === 'rejected' && result.reason.code === 'ENOENT');
   if (missing.length === 2) throw new AppError(404, 'RELAY_DISABLED', '릴레이 설정 파일을 찾을 수 없어요.');
@@ -114,11 +129,22 @@ export async function readRelayFiles(config) {
   if (failed) throw failed.reason;
   return parseRelayFiles(results[0].value, results[1].value, config);
 }
-export async function writeRelayInPlace(paths, contents) {
+export async function writeRelayFiles(paths, contents) {
   for (let i = 0; i < paths.length; i++) {
-    const handle = await open(paths[i], 'r+');
-    try { const bytes = Buffer.from(contents[i]); await handle.writeFile(bytes); await handle.truncate(bytes.length); await handle.sync(); }
-    finally { await handle.close(); }
+    const path = paths[i], info = await lstat(path);
+    if (!info.isFile()) throw layout();
+    const temp = join(dirname(path), `.relay-${randomBytes(12).toString('hex')}.tmp`);
+    try {
+      const handle = await open(temp, 'wx', 0o664);
+      try {
+        await handle.chown(info.uid, info.gid);
+        await handle.chmod(0o664);
+        await handle.writeFile(contents[i]); await handle.sync();
+      } finally { await handle.close(); }
+      await rename(temp, path);
+      const directory = await open(dirname(path), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    } finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
   }
   const actual = await Promise.all(paths.map(path => readFile(path)));
   if (actual.some((bytes, i) => !bytes.equals(Buffer.from(contents[i])))) throw new AppError(502, 'RELAY_WRITE_VERIFY_FAILED', '릴레이 설정 저장 결과가 예상과 달라요.');
@@ -127,7 +153,7 @@ export async function backupRelayFiles(parsed, root = '/data/relay-backup') {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const dir = join(root, `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomBytes(8).toString('hex')}`);
   await mkdir(dir, { mode: 0o700 });
-  for (const [name, content] of [['extra.cf', parsed.extra], ['options.inc', parsed.options]]) {
+  for (const [name, content] of [['mynetworks', parsed.extra], ['local_addrs.map', parsed.options]]) {
     const handle = await open(join(dir, name), 'wx', 0o600);
     try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
     await chmod(join(dir, name), 0o600);

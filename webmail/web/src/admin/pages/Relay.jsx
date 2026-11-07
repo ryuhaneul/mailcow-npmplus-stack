@@ -12,14 +12,14 @@ export function RelayAvailability({ state }) {
   if (state.loading) return <Loading/>;
   if (state.error?.code === 'RELAY_DISABLED') return <Notice>{state.error.message}</Notice>;
   if (state.error) return <LoadError error={state.error} retry={state.reload}/>;
-  return state.data?.consistent === false ? <Notice tone="danger"><p>{relayMismatch}</p><button class="btn" type="button" onClick={state.reload}>다시 읽기</button></Notice> : null;
+  return state.data?.consistent === false ? <Notice tone="danger"><p>{state.data.notice || relayMismatch}</p><button class="btn" type="button" onClick={state.reload}>다시 읽기</button></Notice> : null;
 }
 export function RelayRecent({ data }) {
   return <div class="relay-recent"><b>{data.notice} · {data.count}건 발송</b><p class="muted">마지막 발송 {kst(data.lastSeen)}</p>{data.range && <p class="hint">조회 범위 {kst(data.range.oldest)} ~ {kst(data.range.newest)} · {data.range.count}줄</p>}{data.examples.length > 0 && <><p class="hint">최근 발송 IP 예시</p>{data.examples.map((ip, index) => <div class="mini-row" key={index}><code>{ip}</code></div>)}</>}{data.count === 0 && <Empty><b>조회한 로그 범위 안에서 발송이 없습니다</b>이 IP를 사용하는 서비스가 없는지 별도로 확인하세요.</Empty>}</div>;
 }
 function RelayDetail({ row, canWrite }) {
   const recent = useAdminData(`/api/admin/relay/${encodeURIComponent(row.ip)}/recent`);
-  return <><div class="detail-head"><div><h2>{row.ip}</h2><p>{row.note}</p></div><span class="chip ok">허용 중</span></div><dl class="kv"><dt>추가한 사람</dt><dd>{row.actor}</dd><dt>추가한 날짜</dt><dd>{row.date ? kst(row.date) : ''}</dd><dt>용도</dt><dd>{row.note}</dd></dl><div class="detail-section"><h3>이 IP의 최근 발송</h3>{recent.loading ? <Loading/> : recent.error ? <LoadError error={recent.error} retry={recent.reload}/> : <RelayRecent data={recent.data}/>}</div><Notice tone="warn"><strong>저장하면 메일 발송 서버가 몇 초 재시작합니다.</strong><p>재시작 중 발송이 잠시 지연될 수 있습니다. 변경 전 설정을 보관하며 변경 후 다시 확인합니다.</p></Notice><div class="footer-actions"><button class="btn dan" disabled={!canWrite} onClick={() => { location.hash = `flow/removeRelay/${encodeURIComponent(row.ip)}`; }}>이 IP 허용 빼기</button></div></>;
+  return <><div class="detail-head"><div><h2>{row.ip}</h2><p>{row.note}</p></div><span class="chip ok">허용 중</span></div><dl class="kv"><dt>추가한 사람</dt><dd>{row.actor}</dd><dt>추가한 날짜</dt><dd>{row.date ? kst(row.date) : ''}</dd><dt>용도</dt><dd>{row.note}</dd></dl><div class="detail-section"><h3>이 IP의 최근 발송</h3>{recent.loading ? <Loading/> : recent.error ? <LoadError error={recent.error} retry={recent.reload}/> : <RelayRecent data={recent.data}/>}</div><Notice tone="warn"><strong>저장하면 메일 발송 서버가 설정을 다시 읽습니다.</strong><p>스팸 필터 반영은 최대 1분 걸려요. 변경 전 설정을 보관하며 변경 후 파일 내용을 다시 확인합니다.</p></Notice><div class="footer-actions"><button class="btn dan" disabled={!canWrite} onClick={() => { location.hash = `flow/removeRelay/${encodeURIComponent(row.ip)}`; }}>이 IP 허용 빼기</button></div></>;
 }
 export default function Relay({ address = '' }) {
   const state = useAdminData('/api/admin/relay'), rows = state.data?.items ?? [], selected = rows.find(row => row.ip === (address || rows[0]?.ip)), canWrite = !!state.data?.consistent && !state.loading && !state.error;

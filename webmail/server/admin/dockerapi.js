@@ -94,5 +94,12 @@ export function createDockerApi({ config, ca }) {
     if (!data || data.type !== 'success') throw rejected();
     return { type: 'success' };
   }
-  return { call, restart, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee, mailbox = 'INBOX') => call('set_acl', owner, grantee, mailbox), deleteAcl: (owner, grantee, mailbox = 'INBOX') => call('delete_acl', owner, grantee, mailbox) };
+  async function reload(service) {
+    if (service !== 'postfix-mailcow') throw new AppError(422, 'DOCKERAPI_TASK_NOT_ALLOWED', '허용되지 않은 dockerapi 작업이에요.');
+    const container = await containerIdentity(service);
+    const data = await request('POST', `/containers/${container.id}/exec`, { cmd: 'reload', task: 'postfix' });
+    if (!data || data.type !== 'success') throw rejected();
+    return { type: 'success' };
+  }
+  return { call, restart, reload, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee, mailbox = 'INBOX') => call('set_acl', owner, grantee, mailbox), deleteAcl: (owner, grantee, mailbox = 'INBOX') => call('delete_acl', owner, grantee, mailbox) };
 }

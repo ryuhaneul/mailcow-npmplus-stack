@@ -325,7 +325,7 @@ webmail_ensure_admin_key() {
 # Run before env/override generation and container recreation. Empty defaults do no work.
 webmail_reconcile_admin_api() {
     set +x
-    local scripts="$1" file group mode group_status tool acl acl_entry
+    local scripts="$1" file map group group_status tool acl
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then
         if ! command -v getent >/dev/null 2>&1; then
             webmail_error "host group 64250 lookup unavailable (getent missing); refusing relay file access"
@@ -347,40 +347,25 @@ webmail_reconcile_admin_api() {
                 return 1
             fi
         done
-        # Check both files before changing ownership, modes or ACL masks.
-        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
-            acl=$(getfacl -n "$file") || return 1
-            while IFS= read -r acl_entry; do
-                case "$acl_entry" in
-                    group:64250:*) ;;
-                    user:[!:]*:*|group:[!:]*:*)
-                        webmail_error "host group 64250 ACL contains other named entries; refusing relay file access"
-                        return 1 ;;
-                esac
-            done <<< "$acl"
-        done
-        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
-            group=$(stat -c %g "$file") || return 1
-            if [ "$group" != 64250 ]; then chgrp 64250 "$file" || return 1; fi
-            mode=$(stat -c %a "$file") || return 1
-            if (( (8#$mode & 0020) == 0 )); then chmod g+w "$file" || return 1; fi
-            acl=$(getfacl -n "$file") || return 1
-            if ! grep -qFx 'group:64250:rw-' <<< "$acl"; then setfacl -m g:64250:rw "$file" || return 1; fi
-        done
-    elif [ "$WEBMAIL_ADMIN_RELAY_ENABLE" != true ]; then
-        for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
-            [ -f "$file" ] || continue
-            if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
-                acl=$(getfacl -n "$file") || return 1
-                if grep -q '^group:64250:' <<< "$acl"; then setfacl -n -x g:64250 "$file" || return 1; fi
-            fi
-            group=$(stat -c %g "$file") || return 1
-            if [ "$group" = 64250 ]; then
-                mode=$(stat -c %a "$file") || return 1
-                if (( (8#$mode & 0020) != 0 )); then chmod g-w "$file" || return 1; fi
-            fi
+        # Grant relay writes only inside the two dedicated directories.
+        for file in "$MAILCOW_DIR/data/conf/postfix/mailstack-relay" "$MAILCOW_DIR/data/conf/rspamd/custom/mailstack-relay"; do
+            [ ! -L "$file" ] || { webmail_error "relay directory must not be a symlink"; return 1; }
+            mkdir -p "$file" && chown 0:64250 "$file" && chmod 2775 "$file" || return 1
+            for map in "$file/mynetworks" "$file/local_addrs.map"; do
+                [ ! -e "$map" ] || { [ -f "$map" ] && [ ! -L "$map" ] && chown 1000:64250 "$map" && chmod 664 "$map"; } || return 1
+            done
         done
     fi
+    # Remove the old relay-only write grants; the app now sees these folders read-only.
+    for file in "$MAILCOW_DIR/data/conf/postfix/extra.cf" "$MAILCOW_DIR/data/conf/rspamd/local.d/options.inc"; do
+        [ -f "$file" ] || continue
+        if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+            acl=$(getfacl -n "$file") || return 1
+            if grep -q '^group:64250:' <<< "$acl"; then setfacl -n -x g:64250 "$file" || return 1; fi
+        fi
+        group=$(stat -c %g "$file") || return 1
+        if [ "$group" = 64250 ]; then chmod g-w "$file" || return 1; fi
+    done
     if [ "$WEBMAIL_ADMIN_DOVEADM_ENABLE" = true ]; then
         MAIL_FTS_NIGHTLY_ENABLE="${MAIL_FTS_NIGHTLY_ENABLE:-false}" \
         WEBMAIL_ADMIN_DOVEADM_KEY="$WEBMAIL_ADMIN_DOVEADM_KEY" MAILCOW_DIR="$MAILCOW_DIR" \
@@ -579,7 +564,7 @@ webmail_generate_admin_env() (
         doveadm_url=http://dovecot:12346
         doveadm_key="$WEBMAIL_ADMIN_DOVEADM_KEY"
     fi
-    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then relay_files=/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc; fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then relay_files=/run/relay/postfix/mynetworks,/run/relay/rspamd/local_addrs.map; fi
     if [ "${MAIL_TRUSTED_SENDER_ENABLE:-false}" = true ]; then trusted_file=/run/trusted/trusted_senders.map; fi
     mkdir -p "$dest" || return 1
     tmp=$(mktemp "$dest/.webmail-admin.env.XXXXXX") || return 1
@@ -655,8 +640,10 @@ else:
     text = text.replace('services:\n', 'services:\n  webmail:\n    volumes:\n' + brand, 1)
 mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z']
 if relay_ready == 'true':
-    mounts.extend([f'{mailcow}/data/conf/postfix:/run/relay/postfix:z',
-                   f'{mailcow}/data/conf/rspamd/local.d:/run/relay/rspamd:z'])
+    mounts.extend([f'{mailcow}/data/conf/postfix/mailstack-relay:/run/relay/postfix:rw,z',
+                   f'{mailcow}/data/conf/rspamd/custom/mailstack-relay:/run/relay/rspamd:rw,z',
+                   f'{mailcow}/data/conf/postfix:/run/relay/legacy/postfix:ro,z',
+                   f'{mailcow}/data/conf/rspamd/local.d:/run/relay/legacy/rspamd:ro,z'])
 if trusted == 'true': mounts.append(f'{mailcow}/data/conf/rspamd/override.d/mailstack-trusted:/run/trusted:rw,z')
 if mode == 'pin': mounts.append(f'{dest}/mail-tls-pin.pem:/run/mail-tls-pin.pem:ro,z')
 admin = '  webmail-admin:\n'

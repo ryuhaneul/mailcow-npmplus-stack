@@ -4,21 +4,20 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppError } from '../../errors.js';
 import { assertUnchanged, etag } from '../lock.js';
-import { readRelayFiles, relayNetwork, relayMismatch, validateRelayIp, renderRelayFiles, backupRelayFiles, writeRelayInPlace } from '../relay-files.js';
+import { readRelayFiles, relayNetwork, relayMismatch, validateRelayIp, renderRelayFiles, backupRelayFiles, writeRelayFiles, relayConversionPending, relayConversionPendingError } from '../relay-files.js';
 
-const invalid = () => new AppError(422, 'INVALID_INPUT', 'IP 주소와 재시작 확인을 살펴봐 주세요.');
+const invalid = () => new AppError(422, 'INVALID_INPUT', 'IP 주소와 다시 읽기 확인을 살펴봐 주세요.');
 const applyFailed = () => new AppError(502, 'RELAY_APPLY_FAILED', '릴레이 설정을 적용하지 못했어요. 변경 기록에서 복원 결과를 확인해 주세요.');
 const digest = text => createHash('sha256').update(text).digest('hex');
-const snapshot = parsed => ({ ips: parsed.ips, files: [digest(parsed.extra), digest(parsed.options)] });
+const snapshot = parsed => ({ version: 2, ips: parsed.ips, files: [digest(parsed.extra), digest(parsed.options)] });
 export function createRelayService({ config, audit, lock, mailcow, dockerapi, logs, history, backupDir = '/data/relay-backup', now = Date.now, wait = delay }) {
   async function read(consistent = false) {
     const parsed = await readRelayFiles(config);
     if (consistent && !parsed.consistent) throw relayMismatch();
     return parsed;
   }
-  async function restart(session) {
-    await dockerapi.restart('postfix-mailcow');
-    await dockerapi.restart('rspamd-mailcow');
+  async function reload(session) {
+    await dockerapi.reload('postfix-mailcow');
     const deadline = now() + 60_000;
     while (true) {
       const value = await mailcow.call(session, 'GET', '/api/v1/get/status/containers');
@@ -30,15 +29,15 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
   }
   async function apply(session, contents, backup) {
     try {
-      await writeRelayInPlace(config.relayFiles, contents);
-      await restart(session);
+      await writeRelayFiles(config.relayFiles, contents);
+      await reload(session);
       return { result: 'ok', restored: false };
     } catch {
       let restored = false;
       try {
-        const original = await Promise.all(['extra.cf', 'options.inc'].map(name => readFile(join(backup, name))));
-        await writeRelayInPlace(config.relayFiles, original);
-        await restart(session);
+        const original = await Promise.all(['mynetworks', 'local_addrs.map'].map(name => readFile(join(backup, name))));
+        await writeRelayFiles(config.relayFiles, original);
+        await reload(session);
         restored = true;
       } catch { /* Both failures are represented in the result record, without raw upstream errors. */ }
       return { result: 'partial', restored };
@@ -53,19 +52,21 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
       for (const ip of row.before?.ips ?? []) if (!row.after?.ips?.includes(ip)) additions.delete(ip);
       for (const ip of row.after?.ips ?? []) if (!row.before?.ips?.includes(ip)) additions.set(ip, { note: result.detail?.added?.ip === ip ? result.detail.added.note : '', actor: row.actor, date: row.ts });
     }
-    return { items: parsed.ips.map(ip => ({ ip, note: '', actor: '', date: '', ...additions.get(ip) })), etag: parsed.etag, consistent: parsed.consistent,
+    return { items: parsed.ips.map(ip => ({ ip, note: '', actor: '', date: '', ...additions.get(ip) })), etag: parsed.etag, consistent: parsed.consistent && !parsed.conversionPending,
+      ...(parsed.conversionPending ? { notice: relayConversionPendingError().message } : {}),
       ...(parsed.consistent ? {} : { notice: relayMismatch().message }) };
   }
   async function change({ session, actor, ip, data, address, remove = false }) {
     if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !(remove ? ['etag', 'confirmRestart'] : ['ip', 'note', 'etag', 'confirmRestart']).includes(key)) || data.confirmRestart !== true || typeof data.etag !== 'string' || !remove && (typeof data.note !== 'string' || Array.from(data.note).length > 500 || /[\x00-\x1f\x7f]/.test(data.note))) throw invalid();
     return lock.run('relay', async () => {
+      if (await relayConversionPending(config)) throw relayConversionPendingError();
       const parsed = await read(true);
       assertUnchanged(data.etag, [parsed.extra, parsed.options]);
       const chosen = remove ? relayNetwork(address).ip : validateRelayIp(data.ip, parsed, config);
       if (remove && !parsed.ips.includes(chosen)) throw new AppError(404, 'NOT_FOUND', '릴레이 허용 IP를 찾을 수 없어요.');
       const ips = remove ? parsed.ips.filter(item => item !== chosen) : [...parsed.ips, chosen].sort();
       const contents = renderRelayFiles(parsed, ips), backup = await backupRelayFiles(parsed, backupDir);
-      const after = { ips, files: contents.map(digest) };
+      const after = { version: 2, ips, files: contents.map(digest) };
       const result = await audit.run({ actor, ip, action: 'relay.change', target: 'relay', kind: 'config', revertible: true, before: snapshot(parsed), after }, async intent => {
         const applied = await apply(session, contents, backup);
         return { result: applied.result, auditId: intent.id, etag: etag(contents), detail: { backup, restored: applied.restored, ...(remove ? {} : { added: { ip: chosen, note: data.note } }) } };
@@ -88,7 +89,7 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
   }
   history.register('relay.change', {
     label: '릴레이 허용 IP를 바꿨어요',
-    read: async () => snapshot(await read(true)),
+    read: async () => { if (await relayConversionPending(config)) throw relayConversionPendingError(); return snapshot(await read(true)); },
     prepare: async ({ record }) => {
       const parsed = await read(true); assertUnchanged(etag(record.after), snapshot(parsed));
       await backupRelayFiles(parsed, backupDir);
@@ -102,7 +103,7 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
       for (const entry of names) {
         if (!entry.isDirectory()) continue;
         try {
-          const candidate = await Promise.all(['extra.cf', 'options.inc'].map(name => readFile(join(backupDir, entry.name, name), 'utf8')));
+          const candidate = await Promise.all(['mynetworks', 'local_addrs.map'].map(name => readFile(join(backupDir, entry.name, name), 'utf8')));
           if (candidate.every((text, i) => digest(text) === value.files[i])) contents = candidate;
           if (candidate.every((text, i) => digest(text) === expected.files[i])) restoreBackup = join(backupDir, entry.name);
           if (contents && restoreBackup) break;

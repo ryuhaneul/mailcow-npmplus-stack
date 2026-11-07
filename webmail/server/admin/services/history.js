@@ -5,17 +5,19 @@ const notRevertible = () => new AppError(409, 'NOT_REVERTIBLE', '이 변경은 �
 const oldShareMessage = '이 공유 기록은 이전 형식이라 되돌릴 수 없어요. 공유 화면에서 직접 바꿔 주세요.';
 const isOldShare = record => ['share.grant', 'share.revoke'].includes(record.action) && (record.before?.version !== 2 || record.after?.version !== 2);
 const changed = () => new AppError(409, 'CHANGED_ELSEWHERE', '다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.');
+const isOldRelay = record => record.action === 'relay.change' && (record.before?.version !== 2 || record.after?.version !== 2);
+const oldRelayMessage = '이전 방식 기록은 되돌릴 수 없어요. 릴레이 허용 IP 화면에서 직접 바꿔 주세요.';
 export function createHistoryService({ audit, lock }) {
   const adapters = new Map();
   function register(action, adapter) { adapters.set(action, adapter); }
   function decorate(record) {
     const adapter = adapters.get(record.action);
     // 목록 시점의 가능 여부이며 실행 직전 현재 값이 바뀌면 409로 멈춘다.
-    const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter) && !isOldShare(record);
+    const canRevert = record.kind === 'config' && record.revertible === true && record.result === 'ok' && Boolean(adapter) && !isOldShare(record) && !isOldRelay(record);
     const countsKnown = [record.detail?.sent, record.detail?.failed].every(value => Number.isSafeInteger(value) && value >= 0);
     const label = record.action === 'quota.notifications.send' ? countsKnown ? `쿼터 알림 발송 ${record.detail.sent}건/실패 ${record.detail.failed}건` : '쿼터 알림 발송 건수 확인 안 됨' : adapter?.label ?? '설정을 바꿨어요';
     const suffix = !record.result ? ' (결과 확인 안 됨)' : record.result === 'failed' ? ' (실패)' : record.result === 'partial' ? ' (일부 적용)' : record.kind === 'irreversible' ? ' (되돌리기 불가)' : '';
-    return { ...record, ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.action.startsWith('trusted.') ? '' : `${record.target} `}${label}${suffix}` };
+    return { ...record, ...(isOldRelay(record) ? { revertCode: 'NOT_REVERTIBLE', revertReason: oldRelayMessage } : {}), ...(isOldShare(record) ? { revertCode: 'RECORD_FORMAT_OLD', revertReason: oldShareMessage } : {}), ...(adapter?.prepareRevert && record.detail?.skipped ? { skipped: record.detail.skipped } : {}), canRevert, summary: `${record.actor}님이 ${record.action.startsWith('trusted.') ? '' : `${record.target} `}${label}${suffix}` };
   }
   async function records() {
     const entries = new Map();
@@ -51,6 +53,7 @@ export function createHistoryService({ audit, lock }) {
     if (confirm !== true) throw new AppError(422, 'INVALID_INPUT', '되돌리기를 확인해 주세요.');
     const record = await detail(id);
     if (isOldShare(record)) throw new AppError(409, 'RECORD_FORMAT_OLD', oldShareMessage);
+    if (isOldRelay(record)) throw new AppError(409, 'NOT_REVERTIBLE', oldRelayMessage);
     if (!record.canRevert) throw notRevertible();
     const adapter = adapters.get(record.action);
     const runLocked = adapter.runLocked ?? ((target, operation) => lock.run(target, operation));

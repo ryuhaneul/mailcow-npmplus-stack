@@ -306,7 +306,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         check "Admin doveadm API block" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --check
     fi
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ]; then
-        check "Admin relay files visible/readable/writable" docker exec webmail-admin node -e 'const fs = require("node:fs"); if (process.getuid() !== 1000) throw new Error("Expected node UID 1000"); for (const p of process.argv.slice(1)) fs.closeSync(fs.openSync(p, "r+"));' /run/relay/postfix/extra.cf /run/relay/rspamd/options.inc
+        check "Admin relay files visible/readable/writable" docker exec webmail-admin node -e 'const fs = require("node:fs"); if (process.getuid() !== 1000) throw new Error("Expected node UID 1000"); for (const p of process.argv.slice(1)) fs.closeSync(fs.openSync(p, "r+"));' /run/relay/postfix/mynetworks /run/relay/rspamd/local_addrs.map
     fi
     echo ""
 fi

@@ -171,10 +171,10 @@ test('admin config: optional feature pairs and mailcow networks retain agreed fo
     { DOVEADM_URL: 'http://dovecot:0', DOVEADM_KEY: 'synthetic-doveadm-key' },
   ]) assert.throws(() => loadAdminConfig({ ...env, ...pair }), /DOVEADM_/);
   const config = loadAdminConfig({ ...env, DOVEADM_URL: 'http://dovecot:12346', DOVEADM_KEY: 'synthetic-doveadm-key',
-    RELAY_FILES: '/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc', TRUST_PROXY: '192.0.2.1,2001:db8::/32', AUTOEXPUNGE_DAYS: '' });
+    RELAY_FILES: '/run/relay/postfix/mynetworks,/run/relay/rspamd/local_addrs.map', TRUST_PROXY: '192.0.2.1,2001:db8::/32', AUTOEXPUNGE_DAYS: '' });
   assert.equal(config.doveadmUrl, 'http://dovecot:12346');
   assert.equal(config.doveadmKey, 'synthetic-doveadm-key');
-  assert.deepEqual(config.relayFiles, ['/run/relay/postfix/extra.cf', '/run/relay/rspamd/options.inc']);
+  assert.deepEqual(config.relayFiles, ['/run/relay/postfix/mynetworks', '/run/relay/rspamd/local_addrs.map']);
   assert.equal(config.mailcowIpv4Network, '192.0.2');
   assert.equal(config.mailcowIpv6Network, '2001:db8::/64');
   assert.equal(config.autoexpungeDays, null);

@@ -1067,13 +1067,15 @@ mailcow 판을 바꿀 때는 관리자 로그인과 TOTP 판별, 관리자 JSON 
 | `WEBMAIL_ADMIN_DOVEADM_KEY` | 빈 값 | 위 기능이 켜졌을 때만 64자리 hex 키를 생성해 스택 `.env`에 권한600으로 저장. 출력·커밋 금지 |
 | `WEBMAIL_ADMIN_RELAY_ENABLE` | `false` | Postfix/Rspamd 릴레이 파일 두 개 연결 |
 
-사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 열린 IMAP·POP 연결을 한 번 끊습니다(`Server shutting down.`). 메일 프로그램은 다시 연결합니다. 릴레이 목록 변경은 Postfix·Rspamd를 재시작하므로 짧은 SMTP 중단이 있습니다. 운영 반영은 시간대를 정해 진행합니다.
+사용자 공지와 변경 시간대를 정하고 Dovecot `extra.conf`, Postfix `extra.cf`, Rspamd `options.inc`, 스택 `.env`를 비공개 백업에 보관합니다. 시험 VM에서 확인한 Dovecot 2.3.21.1은 `doveadm reload`로 API를 켜고 끌 수 있으며 열린 IMAP·POP 연결을 한 번 끊습니다(`Server shutting down.`). 메일 프로그램은 다시 연결합니다. 릴레이의 최초 파일 방식 전환은 Postfix·Rspamd를 한 번 재시작하므로 시간대를 정해 진행합니다. 이후 목록 변경은 Postfix reload와 Rspamd map 자동 갱신을 사용합니다.
 
 `.env`에서 원하는 선택값을 true로 바꾼 뒤 저장소 루트에서 실행합니다. 관리 컨테이너는 같은 이미지이며 서버 코드를 새로 반영했다면 먼저 이미지를 빌드합니다.
 
 ```bash
 sudo bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_prepare "$1/.env" /home/mailcow-dockerized /home/webmail' bash "$PWD"
-(cd /home/webmail && sudo docker compose --profile admin up -d webmail-admin)
+(cd /home/webmail && sudo docker compose --profile admin up -d --wait --wait-timeout 180 webmail-admin)
+# 릴레이 기능을 켰다면 새 앱이 healthy가 된 뒤 최초 전환 (이미 전환했으면 검사만)
+sudo bash scripts/apply-relay-file-mode.sh apply -y
 sudo bash scripts/verify.sh
 ```
 
@@ -1087,13 +1089,13 @@ sudo bash scripts/verify.sh
 
 릴레이는 `/home/mailcow-dockerized/data/conf/postfix/extra.cf`와 `data/conf/rspamd/local.d/options.inc`가 모두 있을 때만 연결합니다. 특히 mailcow 기본 상태에서 `options.inc`가 없으면 빈 파일을 만들지 않고 두 마운트와 `RELAY_FILES`를 비운 뒤 경고합니다. 기능은 `RELAY_DISABLED`로 꺼지고 verify의 파일 검사는 실패로 표시됩니다. 설정을 검토해 두 파일을 준비하거나 선택값을 false로 되돌립니다.
 
-릴레이를 켜면 Postfix 설정 디렉터리를 `/run/relay/postfix`, Rspamd `local.d` 디렉터리를 `/run/relay/rspamd`에 `rw,z`로 연결합니다. 관리 env의 `RELAY_FILES`는 `/run/relay/postfix/extra.cf,/run/relay/rspamd/options.inc`입니다. 관리 서버가 쓰는 대상은 두 파일뿐이지만 컨테이너에는 두 설정 디렉터리 전체의 쓰기 권한이 노출됩니다. 이 범위 때문에 릴레이 기능은 기본 꺼짐(`WEBMAIL_ADMIN_RELAY_ENABLE=false`)이며 승인된 관리 작업에만 사용합니다. mailcow Postfix 시작 스크립트는 `sed -i`로 `extra.cf` inode를 바꿉니다. 디렉터리를 연결하면 서비스 재시작 뒤 다음 파일 열기에서도 새 inode를 찾아 읽고 쓸 수 있습니다. mailcow는 Postfix 디렉터리에 `rw,z`, Rspamd `local.d` 디렉터리에 `rw,Z`를 사용하므로 단순히 모든 경로의 라벨을 같은 방식으로 바꿔도 안전하다고 가정할 수 없습니다. 시험 VM은 도커 SELinux가 꺼져 있어 충돌을 검증하지 못했습니다. **운영 서버 반영 전 도커 SELinux 설정과 AVC(`ausearch -m avc --input-logs`) 확인 필수**입니다. 거부가 있으면 적용을 중단하고 mount/컨테이너 라벨을 확인합니다. 운영 반영 전 node UID로 두 파일에 쓸 수 있는지, Postfix 재시작으로 inode가 바뀐 뒤에도 관리 쪽에서 새 내용을 읽고 쓰는지, Rspamd 재시작 뒤에도 같은지 확인합니다. 두 파일에 그룹 64250 쓰기 권한을 붙이며, mailcow update가 파일을 새로 쓰면 권한이 빠질 수 있어 우리 스택 update가 매번 다시 맞춥니다(그 사이 저장은 '쓰기 권한 없음'으로 실패하며 파일은 바뀌지 않습니다). Rspamd는 시작할 때 `local.d`의 소유자·그룹을 다시 바꾸므로, 두 파일에 그룹 64250의 POSIX ACL(`g:64250:rw`)도 붙여 재시작 뒤 그룹 쓰기 권한을 유지합니다.
+릴레이를 켜면 `postfix/mailstack-relay`와 `rspamd/custom/mailstack-relay` 전용 하위폴더만 `/run/relay/postfix`와 `/run/relay/rspamd`에 `rw,z`로 연결합니다. 원래 설정 폴더는 `/run/relay/legacy/postfix`와 `/run/relay/legacy/rspamd`에 RO로 연결해 전환 전 목록만 읽습니다. `RELAY_FILES`는 `/run/relay/postfix/mynetworks,/run/relay/rspamd/local_addrs.map`입니다. 폴더는 `root:64250`·2775, map은 `1000:64250`·0664로 setup/update가 맞춥니다. 예전 extra/options 쓰기 ACL은 제거하고 전용 폴더 안에서만 원자 교체합니다. SELinux는 공유 `:z` 라벨을 사용하며 실제 Rocky enforcing 환경에서 AVC와 두 서비스의 읽기, 앱의 교체 권한을 검증해야 합니다. 자세한 전환·실패·원복 절차는 아래 “관리 화면 릴레이 IP의 파일 방식 전환” 절을 따릅니다.
 
 검증은 `apply-dovecot-admin-api.sh --check`, 관리 컨테이너 안 두 릴레이 파일의 존재·읽기, 시험 메일함 개수·용량, 두 릴레이 목록의 일치 여부를 포함합니다. 메일 정리의 삭제는 휴지통으로 옮기지 않으므로 기준일·대상·개수를 확인해야 합니다.
 
 ### 2단계 끄기와 릴레이 항목 보존
 
-원하는 선택값을 false로 바꾼 뒤 같은 `webmail_prepare` → 관리 profile up → verify 순서로 실행합니다. doveadm 관리 블록은 `--revert -y`로 제거하고 reload합니다. 릴레이는 파일 연결만 해제하며 이미 저장한 허용 IP는 자동 삭제하지 않습니다. 릴레이 목록의 원복은 연결을 끄기 전에 변경 기록 또는 `/data/relay-backup/`의 두 파일을 검토해 제자리로 복원한 뒤 Postfix·Rspamd를 재시작합니다.
+원하는 선택값을 false로 바꾼 뒤 같은 `webmail_prepare` → 관리 profile up → verify 순서로 실행합니다. doveadm 관리 블록은 `--revert -y`로 제거하고 reload합니다. 릴레이는 파일 연결만 해제하며 이미 저장한 허용 IP는 자동 삭제하지 않습니다. 연결을 끄기 전 새 형식의 변경 기록으로 IP를 되돌릴 수 있습니다. 전체 레이아웃 원복은 아래 전용 전환 스크립트의 명시적 `--revert -y` 절차를 따릅니다.
 
 `apply-postfix-edge.sh apply`는 기본 고정 목록 뒤에 관리 화면이 더한 릴레이 IP를 보존합니다. `--revert`는 망 분리 표식과 중계 제외 항목만 제거합니다. 관리 릴레이 IP가 있으면 기본 허용 목록과 함께 표식 밖 `mynetworks`로 남기므로 관리 항목을 지우지 않습니다. 관리 릴레이 IP가 없으면 기존 되돌리기 동작을 유지합니다. 해석할 수 없는 항목이나 별도 `mynetworks`와의 충돌은 자동 병합하지 않고 멈춥니다. 전체 teardown도 Dovecot 관리 블록을 먼저 제거하며 관리 기록·로고 볼륨은 보존합니다.
 
@@ -1583,3 +1585,35 @@ DB 장애의 즉시 차단 범위가 모든 보호 API로 넓어집니다. `/hea
 웹메일 설정의 **2단계 인증**에서 인증 앱을 등록하고 6자리 코드로 확인합니다. 설정에서 끌 때에도 현재 코드가 필요합니다. 관리 설정에서 **전체 강제**를 켜면 미등록 사용자는 다음 웹메일 요청/로그인에서 등록을 마쳐야 합니다. 강제를 해제해도 이미 등록한 사용자의 2단계 인증은 유지됩니다. 인증 앱을 사용할 수 없으면 관리자가 계정 상세에서 초기화합니다. 관리 사람 로그인과 full API 키는 정책 변경·초기화를 할 수 있고 read 키는 조회만 가능합니다. 변경 기록에는 관리자 또는 API 키 이름이 남습니다.
 
 사용자 정의 관리 화면/API에서 계정을 삭제하거나 주소를 바꾼 뒤에는 이전 주소의 OTP 등록을 정리합니다. 새 주소로 인증 앱 등록을 이관하지 않습니다. OTP 정리만 실패하면 이미 수행한 삭제/주소 변경은 유지되고 결과는 `partial`, 실패 단계는 `otp`로 표시됩니다. 관리 OTP 상태 API로 이전 주소를 조회한 뒤 `POST /api/admin/otp/accounts/:addr/reset`에 현재 `version`과 `confirm:true`를 보내 재시도합니다. 현재 메일함이 없으면 남은 OTP 행을 정리하고, 같은 주소의 메일함이 다시 생겼으면 그 계정의 OTP를 초기화합니다. 대상 계정의 존재를 먼저 확인하세요. mailcow 기본 화면/API에서 직접 삭제·주소 변경한 경우와 별칭 전환은 이 자동 정리 범위에 없으므로 주소 재사용 전에 관리 OTP 초기화로 남은 등록을 정리해야 합니다.
+
+### 관리 화면 릴레이 IP의 파일 방식 전환
+
+setup/update는 새 관리 앱이 healthy가 된 뒤 기존 릴레이 설정을 전용 파일로 한 번 전환합니다.
+이 최초 전환에는 Postfix와 Rspamd 재시작으로 짧은 SMTP 중단이 있습니다. 원본 설정은
+`data/conf/postfix/.relay-file-mode-backup.*`에 권한/ACL과 함께 보관합니다. 전환 전에는 목록만
+읽을 수 있고 변경 요청은 `409 RELAY_CONVERSION_PENDING`으로 막습니다.
+
+전환 뒤 Postfix의 `extra.cf` 관리 블록은 `/opt/postfix/conf/mailstack-relay/mynetworks` 패턴
+파일을 참조하고, Rspamd `local_addrs`는 `/etc/rspamd/custom/mailstack-relay/local_addrs.map`을
+참조합니다. 이후 추가·삭제·새 기록 되돌리기는 파일을 원자 교체하고 Postfix만 reload합니다.
+Rspamd는 map을 자동 갱신하며 반영·복원은 최대 1분 걸릴 수 있습니다. 기존 연결에는 이전
+정책이 남을 수 있으므로 삭제 검증은 새 SMTP 연결에서 인증 없는 외부 릴레이 거부로 확인합니다.
+`mailcow_networks.map`은 mailcow 시작 시 재생성되므로 이 기능에서 수정하지 않습니다.
+
+앱의 성공 확인은 파일 내용 대조, reload 명령 exit 0, 두 컨테이너 running입니다. Rspamd 메모리
+반영 증명은 아닙니다. `postconf -h mynetworks`는 파일 참조를 확인하며 IP 확장 결과를 보여주지
+않습니다. 배포 검증에서는 컨테이너 StartedAt 불변, 실제 SMTP 허용/거부 및 Rspamd local 판정을
+별도로 확인해야 합니다. 파일 쓰기 권한은 두 전용 하위폴더에만 주고 legacy 설정 폴더는 RO입니다.
+
+`postfix/mailstack-relay/conversion.json`이 있으면 전환을 반복하지 않습니다. marker와 map 또는
+참조가 다르면 자동으로 덮어쓰지 않고 실패하므로 운영 담당자가 확인해야 합니다. 전환 실패 시
+원본 설정과 신규 파일 존재 상태를 복원하고 두 서비스를 재시작하며 setup/update는 실패합니다.
+일반 IP 변경 실패 시에는 백업 map 복원과 Postfix reload만 시도하고 감사 기록에 partial 및
+restored 결과를 남깁니다. 자동 restart 대체 경로는 없습니다.
+
+전환 전 방식의 변경 기록은 보존하지만 되돌릴 수 없습니다(`409 NOT_REVERTIBLE`). 새 기록만
+현재 hash를 대조하여 되돌립니다. 전체 레이아웃을 원복할 때는 유지보수 시간에
+`MAILCOW_DIR=<mailcow 경로> WEBMAIL_DIR=<관리 앱 경로> bash scripts/apply-relay-file-mode.sh --revert -y`
+를 사용합니다. 이 절차는 최초 백업의 과거 IP가 아니라 **현재 map의 IP**를 인라인 설정으로
+옮기고 두 서비스를 재시작합니다. 그 뒤 이전 앱의 이미지/env/mount로 되돌리세요. 감사 기록과
+백업은 삭제하지 않습니다. `--check`는 전환 완료와 참조·파일 일관성을 읽기만 검사합니다.

@@ -52,7 +52,10 @@ PYCHECK
     log 'already converted; no changes'; exit 0
 fi
 if [ "$MODE" = check ]; then die 'file conversion pending'; fi
-if [ "$MODE" = revert ] && [ ! -f "$MARKER" ]; then log 'already inline; no changes'; exit 0; fi
+if [ "$MODE" = revert ] && [ ! -f "$MARKER" ]; then
+    webmail_reconcile_relay_volume remove
+    log 'already inline; relay volume removed if present'; exit 0
+fi
 WORK=$(mktemp -d)
 PENDING=false
 ADMIN_STOPPED=false
@@ -72,6 +75,7 @@ cleanup() {
         if [ -f "$BACKUP/conversion.json" ]; then cp --preserve=all "$BACKUP/conversion.json" "$MARKER" || rc=1
         else rm -f "$MARKER" || rc=1; fi
         rm -f "$POSTFIX/.conversion.tmp"
+        if [ "$MODE" = apply ]; then webmail_reconcile_relay_volume remove || rc=1; fi
         log_archive_restore || rc=1
         (cd "$MAILCOW_DIR" && docker compose restart postfix-mailcow rspamd-mailcow) || rc=1
         log 'conversion failed; original configuration restored; inspect services before retrying'
@@ -240,6 +244,7 @@ for target in (p,p.parent):
     finally: os.close(fd)
 PYMARKER
 else
+    webmail_reconcile_relay_volume remove
     rm -f "$MARKER"
 fi
 PENDING=false

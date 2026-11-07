@@ -322,16 +322,19 @@ webmail_ensure_admin_key() {
     if ! chmod 600 "$tmp" || ! mv "$tmp" "$WEBMAIL_STACK_ENV"; then rm -f "$tmp"; return 1; fi
 }
 
-# Add only the relay bind mount; preserve unrelated operator settings like logging reconciliation.
+# Reconcile only the relay bind mount, preserving unrelated override bytes.
 webmail_reconcile_relay_volume() {
-    python3 - "$MAILCOW_DIR/docker-compose.override.yml" <<'PYRELAYVOLUME'
+    python3 - "$MAILCOW_DIR/docker-compose.override.yml" "${1:-add}" <<'PYRELAYVOLUME'
 import os,re,shutil,sys,tempfile
 from pathlib import Path
-p=Path(sys.argv[1])
-line='      - ./data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z\n'
+p=Path(sys.argv[1]); mode=sys.argv[2]
+mount='./data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z'
+tag=' # mailstack-relay-managed'
 try:
-    if p.is_symlink(): raise ValueError()
+    if mode not in ('add','remove') or p.is_symlink(): raise ValueError()
+    if not p.exists() and mode=='remove': sys.exit(0)
     original=p.read_text() if p.exists() else 'services:\n'
+    if not original.endswith('\n'): raise ValueError()
     sections=list(re.finditer(r'^services:[ \t]*(?:#[^\n]*)?\n',original,re.M))
     if len(sections)!=1: raise ValueError()
     start=sections[0].end()
@@ -350,19 +353,44 @@ try:
     if selected:
         i,m=selected[0]; a=start+m.start(); b=start+entries[i+1].start() if i+1<len(entries) else end
         block=original[a:b]
-        if '/etc/rspamd/mailstack-relay' in block:
-            if block.count(line)!=1 or block.count('/etc/rspamd/mailstack-relay')!=1: raise ValueError()
-            sys.exit(0)
         volumes=list(re.finditer(r'^    volumes:[ \t]*(?:#[^\n]*)?\n',block,re.M))
         if len(volumes)>1: raise ValueError()
         if volumes:
-            offset=a+volumes[0].end(); addition=line
+            v=volumes[0]; tail=block[v.end():]
+            boundary=re.search(r'^    [\w.-]+\s*:',tail,re.M)
+            ve=v.end()+(boundary.start() if boundary else len(tail))
+            body=block[v.end():ve]; depth=None
+            for entry in body.splitlines():
+                if not entry.strip() or entry.lstrip().startswith('#'): continue
+                item=re.fullmatch(r'( {4}| {6})- ([^\s].*)',entry)
+                if not item or re.search(r':\s',item[2]) or item[2].startswith(('{','[','*','&','!','|','>')): raise ValueError()
+                if depth is not None and depth!=len(item[1]): raise ValueError()
+                depth=len(item[1])
+            if depth is None:
+                if mode=='remove' and '/etc/rspamd/mailstack-relay' not in block: sys.exit(0)
+                raise ValueError()
+            line=' '*depth+'- '+mount+'\n'
+            if '/etc/rspamd/mailstack-relay' in block:
+                if body.count(line)!=1 or block.count('/etc/rspamd/mailstack-relay')!=1: raise ValueError()
+                if mode=='add': sys.exit(0)
+                remaining=body.replace(line,'',1)
+                # Remove only keys that this helper created and that are now empty.
+                if not any(s.strip() and not s.lstrip().startswith('#') for s in remaining.splitlines()) and v[0]=='    volumes:'+tag+'\n':
+                    block=block[:v.start()]+remaining+block[ve:]
+                else: block=block[:v.end()]+remaining+block[ve:]
+                if block=='  rspamd-mailcow:'+tag+'\n': block=''
+            elif mode=='remove': sys.exit(0)
+            else: block=block[:v.end()]+line+block[v.end():]
         else:
-            if re.search(r'^    volumes\s*:',block,re.M): raise ValueError()
-            offset=start+m.end(); addition='    volumes:\n'+line
+            if re.search(r'^    volumes\s*:',block,re.M) or '/etc/rspamd/mailstack-relay' in block: raise ValueError()
+            if mode=='remove': sys.exit(0)
+            offset=m.end()-m.start()
+            block=block[:offset]+'    volumes:'+tag+'\n      - '+mount+'\n'+block[offset:]
+        result=original[:a]+block+original[b:]
     else:
-        offset=end; addition=('' if original[:end].endswith('\n') else '\n')+'  rspamd-mailcow:\n    volumes:\n'+line
-    result=original[:offset]+addition+original[offset:]
+        if mode=='remove': sys.exit(0)
+        addition='  rspamd-mailcow:'+tag+'\n    volumes:'+tag+'\n      - '+mount+'\n'
+        result=original[:end]+addition+original[end:]
     if p.exists():
         fd,backup=tempfile.mkstemp(prefix=p.name+'.relay-volume.bak-',dir=p.parent);os.close(fd);shutil.copy2(p,backup)
     fd,tmp=tempfile.mkstemp(prefix=p.name+'.relay-volume-',dir=p.parent)

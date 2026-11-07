@@ -86,6 +86,7 @@ CF
     printf 'control\n' > "$CONF/rspamd/custom/entrypoint-control/control.map"
     printf '172.22.1.0/24\nfd4d:6169:6c63:6f77::/64\n' > "$CONF/rspamd/custom/mailcow_networks.map"
     cp "$ROOT/mailcow-override/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml"
+    printf '  operator-storage:\n    volumes:\n      - /srv/operator-vmail:/var/vmail\n' >> "$MAILCOW_DIR/docker-compose.override.yml"
     : > "$TMP/calls"
 }
 run() { bash "$ROOT/scripts/apply-relay-file-mode.sh" "$@" > "$TMP/result" 2>&1; }
@@ -154,7 +155,10 @@ for fault in fail-restart fail-configtest fail-app-access fail-rspamd-access; do
     cmp "$CONF/rspamd/local.d/options.inc" "$TMP/original-options" || fail 'options restore'
     [ ! -e "$CONF/postfix/mailstack-relay/conversion.json" ] || fail 'failed conversion marker'
     [ ! -e "$CONF/postfix/mailstack-relay/mynetworks" ] || fail 'new map left behind'
-    pass "$fault restores original files, removes new map/marker and reapplies old services"
+    ! grep -q '/etc/rspamd/mailstack-relay' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'failed conversion volume left behind'
+    grep -q '/srv/operator-vmail:/var/vmail' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'failure lost vmail volume'
+    grep -q 'driver: json-file' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'failure lost logging'
+    pass "$fault restores original files, removes new map/marker/volume and reapplies old services"
 done
 reset_case
 run apply -y || fail 'revert baseline'
@@ -164,7 +168,11 @@ run --revert -y || fail 'revert'
 grep -q '203.0.113.9' "$CONF/postfix/extra.cf" || fail 'current addition lost'
 grep -q '203.0.113.9' "$CONF/rspamd/local.d/options.inc" || fail 'current local addition lost'
 [ ! -e "$CONF/postfix/mailstack-relay/conversion.json" ] || fail 'revert marker left'
-pass 'explicit revert preserves current additions rather than restoring stale initial IPs'
+! grep -q '/etc/rspamd/mailstack-relay' "$MAILCOW_DIR/docker-compose.override.yml" || fail 'revert volume left behind'
+cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/reverted-override"
+run --revert -y || fail 'repeated revert'
+cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/reverted-override" || fail 'repeated revert changed override'
+pass 'explicit revert preserves current additions and removes only managed volume idempotently'
 # The default map is accepted only when there are no mutable relay entries.
 reset_case
 sed -i 's/, 203.0.113.8, \[2001:db8:1::8\]//' "$CONF/postfix/extra.cf"
@@ -220,4 +228,51 @@ cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-inline"
 if bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume' bash "$ROOT" 2>/dev/null; then fail 'unsupported inline service accepted'; fi
 cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/override-inline" || fail 'inline operator service modified'
 pass 'unsupported inline service syntax fails without adding a duplicate service'
+# Preserve existing list indentation and every byte on add/remove round trips.
+volume() { bash -ec 'source "$1/scripts/lib/webmail-env.sh"; webmail_reconcile_relay_volume "$2"' bash "$ROOT" "$1"; }
+for depth in 4 6; do
+    printf 'services:\n  rspamd-mailcow:\n    volumes:\n%*s- ./operator:/operator:ro\n    logging:\n      driver: json-file\n  other:\n    image: synthetic\n' "$depth" '' > "$MAILCOW_DIR/docker-compose.override.yml"
+    cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-original"
+    volume add || fail 'list add'
+    grep -q "^$(printf '%*s' "$depth" '')- ./data/conf/rspamd/mailstack-relay:" "$MAILCOW_DIR/docker-compose.override.yml" || fail 'list indent'
+    cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-added"
+    volume add || fail 'list repeat add'
+    cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-added" || fail 'list repeat mutated'
+    volume remove || fail 'list remove'
+    volume remove || fail 'list repeat remove'
+    cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-original" || fail 'list roundtrip bytes'
+    pass "$depth-space volume list retains indentation and round trips byte-for-byte"
+done
+for layout in missing-key empty-service missing-service; do
+    if [ "$layout" = missing-key ]; then
+        printf 'services:\n  rspamd-mailcow:\n    logging:\n      driver: json-file\n  other:\n    image: synthetic\n' > "$MAILCOW_DIR/docker-compose.override.yml"
+    elif [ "$layout" = empty-service ]; then
+        printf 'services:\n  rspamd-mailcow:\n\n  other:\n    image: synthetic\n' > "$MAILCOW_DIR/docker-compose.override.yml"
+    else
+        printf 'services:\n  other:\n    image: synthetic\n' > "$MAILCOW_DIR/docker-compose.override.yml"
+    fi
+    cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-original"
+    volume add || fail 'missing structure add'
+    volume remove || fail 'missing structure remove'
+    volume remove || fail 'missing structure repeated remove'
+    cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/roundtrip-original" || fail 'missing structure roundtrip'
+    pass "$layout round trip removes only helper-created empty structure"
+done
+for layout in inline long-syntax mixed-indent; do
+    case "$layout" in
+        inline) printf 'services:\n  rspamd-mailcow:\n    volumes: [./operator:/operator:ro]\n' ;;
+        long-syntax) printf 'services:\n  rspamd-mailcow:\n    volumes:\n      - type: bind\n        source: ./operator\n        target: /operator\n' ;;
+        mixed-indent) printf 'services:\n  rspamd-mailcow:\n    volumes:\n    - ./operator:/operator:ro\n      - ./other:/other:ro\n' ;;
+    esac > "$MAILCOW_DIR/docker-compose.override.yml"
+    cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/unsupported-original"
+    before=$(stat -c '%i:%y' "$MAILCOW_DIR/docker-compose.override.yml")
+    backups=$(find "$MAILCOW_DIR" -maxdepth 1 -name '*.relay-volume*' | wc -l)
+    for operation in add remove; do
+        if volume "$operation" 2>/dev/null; then fail 'unsupported volume layout accepted'; fi
+        cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/unsupported-original" || fail 'unsupported bytes changed'
+        [ "$(stat -c '%i:%y' "$MAILCOW_DIR/docker-compose.override.yml")" = "$before" ] || fail 'unsupported inode/mtime changed'
+        [ "$(find "$MAILCOW_DIR" -maxdepth 1 -name '*.relay-volume*' | wc -l)" = "$backups" ] || fail 'unsupported wrote backup/temp'
+    done
+    pass "$layout fails add/remove with zero override/backup/temp writes"
+done
 echo "1..$n"

@@ -48,7 +48,7 @@ async function setup(t, overrides = {}) {
   await writeFile(join(dir, 'postfix', 'conversion.json'), '{"version":2}');
   const audit = createAudit({ dir: join(dir, 'audit') }), lock = createResourceLock(), history = createHistoryService({ audit, lock }), calls = [];
   let failed = false;
-  const dockerapi = { reload: async name => { calls.push(name); if (overrides.reloadFail && (!failed || overrides.alwaysFail)) { failed = true; throw new Error('synthetic'); } } };
+  const dockerapi = { reload: async name => { calls.push(name); await overrides.onReload?.(); if (overrides.reloadFail && (!failed || overrides.alwaysFail)) { failed = true; throw new Error('synthetic'); } } };
   const mailcow = { call: async (_session, _method, path) => {
     if (path.includes('/logs/')) return overrides.logRows ?? [];
     if (overrides.stopped) return { a: { container: 'postfix-mailcow', state: 'exited' } };
@@ -85,7 +85,7 @@ for (const failure of ['reloadFail', 'stopped', 'alwaysFail']) test(`relay ${fai
   const f = await setup(t, { reloadFail: true, ...(failure === 'stopped' ? { reloadFail: false, stopped: true } : {}), ...(failure === 'alwaysFail' ? { alwaysFail: true } : {}) });
   await assert.rejects(f.service.create(await f.args()), { statusCode: 502, code: 'RELAY_APPLY_FAILED' });
   assert.equal(await readFile(f.paths[0], 'utf8'), baseExtra); assert.equal(await readFile(f.paths[1], 'utf8'), baseOptions);
-  const { rows } = await f.audit.read(); assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, failure === 'reloadFail'); assert.ok(f.calls.length >= 2);
+  const { rows } = await f.audit.read(); assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, failure === 'reloadFail'); if (failure !== 'reloadFail') assert.equal(rows.at(-1).detail.restoreReason, failure === 'stopped' ? 'service_not_running' : 'reload_failed'); assert.ok(f.calls.length >= 2);
 });
 test('relay audit intent failure performs no writes or restart', async t => {
   const f = await setup(t), audit = { read: () => f.audit.read(), run: async () => { throw new Error('intent failed'); } };
@@ -141,7 +141,19 @@ for (const index of [0, 1]) test(`relay write failure at file ${index + 1} recor
     await assert.rejects(f.service.create(args), { statusCode: 502, code: 'RELAY_APPLY_FAILED' });
     assert.equal(await readFile(f.paths[0], 'utf8'), baseExtra);
     assert.equal(await readFile(f.paths[1], 'utf8'), baseOptions);
-    const { rows } = await f.audit.read(); assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, false);
+    const { rows } = await f.audit.read(); assert.equal(rows.at(-1).result, 'partial'); assert.equal(rows.at(-1).detail.restored, true); assert.equal(rows.at(-1).detail.restoreReason, undefined); assert.deepEqual(f.calls, ['postfix-mailcow']);
+  } finally { await chmod(directory, 0o755); }
+});
+
+test('relay cannot claim restoration when compensation leaves changed bytes', { skip: process.getuid?.() === 0 }, async t => {
+  let directory;
+  const f = await setup(t, { reloadFail: true, onReload: async () => chmod(directory, 0o555) });
+  directory = join(f.dir, 'postfix');
+  try {
+    await assert.rejects(f.service.create(await f.args()), { statusCode: 502, code: 'RELAY_APPLY_FAILED' });
+    assert.notEqual(await readFile(f.paths[0], 'utf8'), baseExtra);
+    const { rows } = await f.audit.read();
+    assert.equal(rows.at(-1).detail.restored, false); assert.equal(rows.at(-1).detail.restoreReason, 'files_differ');
   } finally { await chmod(directory, 0o755); }
 });
 

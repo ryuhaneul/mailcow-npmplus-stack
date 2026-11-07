@@ -515,6 +515,7 @@ policy_case() (
     scenario="$1";flow="${2:-update}"
     PROJECT_DIR="$ROOT";SCRIPT_DIR="$TMP/policy-scripts";MAILCOW_DIR="$TMP/policy-mailcow";WEBMAIL_DIR="$TMP/app";ENV_FILE="$TMP/stack.env";NPMPLUS_DIR="$TMP/npm";LOGFILE="$TMP/policy.log"
     WEBMAIL_ENABLE=true;WEBMAIL_ADMIN_ENABLE=true;LOG_ARCHIVE_ENABLE=true
+    WEBMAIL_ADMIN_RELAY_ENABLE=false;WEBMAIL_ADMIN_RELAY_READY=false
     rm -f "$TMP/policy-apply-fail" "$TMP/policy-revert-fail"
     printf '# BEGIN mailstack-bounce-policy (synthetic)\n' > "$MAILCOW_DIR/data/conf/postfix/extra.cf"
     : > "$TMP/policy-calls"
@@ -522,7 +523,7 @@ policy_case() (
     webmail_mailcow_value() { echo synthetic; }
     webmail_bounce_addresses() { [ "$scenario" != mismatch ]; }
     webmail_load_config() { :; };edge_check_admin_db_address() { :; }
-    webmail_ensure_db_password() { :; };webmail_ensure_admin_db_password() { :; }
+    webmail_ensure_db_password() { :; };webmail_ensure_admin_db_password() { :; };webmail_ensure_otp_key() { :; }
     webmail_ensure_admin_key() { :; };webmail_reconcile_admin_api() { :; };webmail_reconcile_trusted_sender() { :; }
     edge_prepare_apps() { echo apps-prepared >> "$TMP/policy-calls"; };edge_up_apps() { echo apps-up >> "$TMP/policy-calls"; }
     edge_reconcile_npmplus() { :; };webmail_generate_admin_env() { :; }

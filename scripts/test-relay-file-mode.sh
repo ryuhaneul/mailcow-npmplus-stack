@@ -165,6 +165,7 @@ run apply -y || fail 'revert baseline'
 printf '203.0.113.9\n' >> "$CONF/postfix/mailstack-relay/mynetworks"
 printf '203.0.113.9\n' >> "$CONF/rspamd/mailstack-relay/local_addrs.map"
 run --revert -y || fail 'revert'
+cp "$TMP/result" "$TMP/result-first-revert"
 grep -q '203.0.113.9' "$CONF/postfix/extra.cf" || fail 'current addition lost'
 grep -q '203.0.113.9' "$CONF/rspamd/local.d/options.inc" || fail 'current local addition lost'
 [ ! -e "$CONF/postfix/mailstack-relay/conversion.json" ] || fail 'revert marker left'
@@ -172,7 +173,48 @@ grep -q '203.0.113.9' "$CONF/rspamd/local.d/options.inc" || fail 'current local 
 cp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/reverted-override"
 run --revert -y || fail 'repeated revert'
 cmp "$MAILCOW_DIR/docker-compose.override.yml" "$TMP/reverted-override" || fail 'repeated revert changed override'
-pass 'explicit revert preserves current additions and removes only managed volume idempotently'
+grep -q 'IP가 바뀌어 원본 표기 복원 불가' "$TMP/result-first-revert" || fail 'changed-IP warning missing'
+pass 'explicit revert preserves current additions with warning and removes only managed volume idempotently'
+# Unchanged lists restore the original files verbatim, including IPv6 spelling.
+reset_case
+run apply -y || fail 'byte roundtrip baseline'
+run --revert -y || fail 'byte roundtrip revert'
+cmp "$CONF/postfix/extra.cf" "$TMP/original-extra" || fail 'byte roundtrip extra'
+cmp "$CONF/rspamd/local.d/options.inc" "$TMP/original-options" || fail 'byte roundtrip IPv6 options'
+pass 'unchanged IPv6 lists revert to byte-identical original files'
+reset_case
+run apply -y || fail 'legacy marker baseline'
+python3 - "$CONF/postfix/mailstack-relay/conversion.json" <<'PYOLD'
+from pathlib import Path
+import json,sys
+p=Path(sys.argv[1]);v=json.loads(p.read_text());del v['backupHashes'];p.write_text(json.dumps(v))
+PYOLD
+run --revert -y || fail 'legacy marker revert'
+cmp "$CONF/rspamd/local.d/options.inc" "$TMP/original-options" || fail 'legacy marker bytes'
+grep -q 'checksum 없는 옛 마커' "$TMP/result" || fail 'legacy marker warning'
+pass 'old checksum-free marker passes structural checks with explicit warning'
+for fault in missing corrupt invalid-legacy-fixed; do
+    reset_case
+    run apply -y || fail 'damaged backup baseline'
+    python3 - "$CONF/postfix/mailstack-relay/conversion.json" "$fault" <<'PYDAMAGE'
+from pathlib import Path
+import json,sys
+p=Path(sys.argv[1]);v=json.loads(p.read_text());backup=Path(v['backup']);f=backup/'options.inc'
+if sys.argv[2]=='missing':f.unlink()
+elif sys.argv[2]=='corrupt':f.write_bytes(f.read_bytes()+b'# still valid syntax, wrong bytes\n')
+else:
+ del v['backupHashes'];p.write_text(json.dumps(v));f.write_text(f.read_text().replace('127.0.0.0/8','127.0.0.0/9'))
+PYDAMAGE
+    : > "$TMP/calls"
+    before=$(sha256sum "$CONF/postfix/extra.cf" "$CONF/rspamd/local.d/options.inc" "$CONF/postfix/mailstack-relay/mynetworks" "$CONF/rspamd/mailstack-relay/local_addrs.map" "$CONF/postfix/mailstack-relay/conversion.json" "$MAILCOW_DIR/docker-compose.override.yml" | sort)
+    backups=$(find "$CONF/postfix" -maxdepth 1 -name '.relay-file-mode-backup.*' | wc -l)
+    if run --revert -y; then fail 'invalid backup accepted'; fi
+    after=$(sha256sum "$CONF/postfix/extra.cf" "$CONF/rspamd/local.d/options.inc" "$CONF/postfix/mailstack-relay/mynetworks" "$CONF/rspamd/mailstack-relay/local_addrs.map" "$CONF/postfix/mailstack-relay/conversion.json" "$MAILCOW_DIR/docker-compose.override.yml" | sort)
+    [ "$before" = "$after" ] || fail 'invalid backup changed configuration'
+    [ ! -s "$TMP/calls" ] || fail 'invalid backup Docker side effect'
+    [ "$(find "$CONF/postfix" -maxdepth 1 -name '.relay-file-mode-backup.*' | wc -l)" = "$backups" ] || fail 'invalid backup created snapshot'
+    pass "$fault backup refuses revert before persistent writes or Docker calls"
+done
 # The default map is accepted only when there are no mutable relay entries.
 reset_case
 sed -i 's/, 203.0.113.8, \[2001:db8:1::8\]//' "$CONF/postfix/extra.cf"

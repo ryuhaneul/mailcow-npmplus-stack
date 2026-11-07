@@ -23,7 +23,7 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
       const value = await mailcow.call(session, 'GET', '/api/v1/get/status/containers');
       const rows = value && typeof value === 'object' ? Object.values(value) : [];
       if (['postfix-mailcow', 'rspamd-mailcow'].every(name => rows.some(row => row?.container === name && row.state === 'running'))) return;
-      if (now() >= deadline) throw applyFailed();
+      if (now() >= deadline) throw Object.assign(applyFailed(), { relayFailure: 'service_not_running' });
       await wait(Math.min(1000, deadline - now()));
     }
   }
@@ -33,14 +33,18 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
       await reload(session);
       return { result: 'ok', restored: false };
     } catch {
-      let restored = false;
+      let restored = false, restoreReason = 'restore_failed';
       try {
         const original = await Promise.all(['mynetworks', 'local_addrs.map'].map(name => readFile(join(backup, name))));
-        await writeRelayFiles(config.relayFiles, original);
-        await reload(session);
-        restored = true;
-      } catch { /* Both failures are represented in the result record, without raw upstream errors. */ }
-      return { result: 'partial', restored };
+        try { await writeRelayFiles(config.relayFiles, original); } catch { /* Readback decides whether compensation was needed or succeeded. */ }
+        const actual = await Promise.all(config.relayFiles.map(path => readFile(path)));
+        if (actual.every((bytes, i) => bytes.equals(original[i]))) {
+          restoreReason = 'reload_failed';
+          await reload(session);
+          restored = true;
+        } else restoreReason = 'files_differ';
+      } catch (error) { if (error?.relayFailure === 'service_not_running') restoreReason = 'service_not_running'; }
+      return { result: 'partial', restored, ...(!restored ? { restoreReason } : {}) };
     }
   }
   async function list() {
@@ -69,7 +73,7 @@ export function createRelayService({ config, audit, lock, mailcow, dockerapi, lo
       const after = { version: 2, ips, files: contents.map(digest) };
       const result = await audit.run({ actor, ip, action: 'relay.change', target: 'relay', kind: 'config', revertible: true, before: snapshot(parsed), after }, async intent => {
         const applied = await apply(session, contents, backup);
-        return { result: applied.result, auditId: intent.id, etag: etag(contents), detail: { backup, restored: applied.restored, ...(remove ? {} : { added: { ip: chosen, note: data.note } }) } };
+        return { result: applied.result, auditId: intent.id, etag: etag(contents), detail: { backup, restored: applied.restored, ...(applied.restoreReason ? { restoreReason: applied.restoreReason } : {}), ...(remove ? {} : { added: { ip: chosen, note: data.note } }) } };
       });
       if (result.result === 'partial') throw applyFailed();
       return { result: 'ok', auditId: result.auditId, etag: result.etag };

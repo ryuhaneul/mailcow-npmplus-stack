@@ -167,18 +167,18 @@ grep -qx '# later operator comment' "$CONF/extra.cf" || fail 'revert lost traili
 pass 'migrated revert restores first-apply runtime reference, not pre-migration value'
 old_managed
 sed -i 's/^lmtp_destination_concurrency_limit = 50$/lmtp_destination_concurrency_limit = 1/' "$CONF/extra.cf"
-cp "$CONF/extra.cf" "$TMP/hcmail.extra"
+cp "$CONF/extra.cf" "$TMP/manual.extra"
 : > "$TMP/calls"
 if run --check; then fail 'file 1 live 50 check passed'; fi
 ! grep -Eq 'postfix (check|reload)|postconf (-e|-X)' "$TMP/calls" || fail 'drift check mutated'
-run -y || fail 'hcmail apply'
-cmp -s "$CONF/extra.cf" "$TMP/hcmail.extra" || fail 'hcmail metadata/bytes changed'
+run -y || fail 'manual-block apply'
+cmp -s "$CONF/extra.cf" "$TMP/manual.extra" || fail 'manual-block metadata/bytes changed'
 assert_applied
-run --check || fail 'hcmail repaired check'
+run --check || fail 'manual-block repaired check'
 : > "$TMP/calls"
-run -y || fail 'hcmail repeated apply'
-! grep -Eq 'postfix (check|reload)|postconf (-e|-X)' "$TMP/calls" || fail 'hcmail idempotent mutation'
-pass 'hcmail hand-edited 1 block preserves bytes, repairs live drift and is idempotent'
+run -y || fail 'manual-block repeated apply'
+! grep -Eq 'postfix (check|reload)|postconf (-e|-X)' "$TMP/calls" || fail 'manual-block idempotent mutation'
+pass 'manual-block hand-edited 1 block preserves bytes, repairs live drift and is idempotent'
 reset_case
 printf '\n# BEGIN mailstack lmtp-concurrency (2026-10-26 장애 대응)\nlmtp_destination_concurrency_limit = 50\n# END mailstack lmtp-concurrency\n' >> "$CONF/extra.cf"
 printf '%s' '{"lmtp_destination_concurrency_limit":"50","lmtp_destination_recipient_limit":"1"}' > "$TMP/main.json"

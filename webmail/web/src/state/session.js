@@ -11,3 +11,5 @@ export function invalidateSessionResources() {
 // Separate credential lifetimes even when same-account editors keep their owner object.
 export let authGeneration = 0;
 export function advanceAuthGeneration() { authGeneration++; }
+
+export const authUnavailable = signal(false);

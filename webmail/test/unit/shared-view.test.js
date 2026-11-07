@@ -94,7 +94,7 @@ test('shared view: prefs connection coalesces selection saves with appearance an
   const beforeFetch = globalThis.fetch, beforeStorage = globalThis.localStorage;
   const requests = [], copies = [];
   globalThis.localStorage = { setItem(_key, value) { copies.push(JSON.parse(value)); } };
-  session.value = { user: { email: 'reader@example.com' }, csrf: 'synthetic' }; sessionReady.value = true;
+  session.value = { step: 'done', user: { email: 'reader@example.com' }, csrf: 'synthetic' }; sessionReady.value = true;
   const document = { theme: 'ink', mode: 'light', accent: {}, layout: null, folderColors: {}, sharedView: {}, imageAllow: [], signatures: {}, defaultFrom: null };
   applyServerPrefs(document); copies.length = 0;
   t.mock.timers.enable({ apis: ['setTimeout'] });

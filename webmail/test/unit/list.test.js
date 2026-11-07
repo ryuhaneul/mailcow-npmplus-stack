@@ -11,7 +11,9 @@ import { createListService, listOptions } from '../../server/mail/list.js';
 import { decodeRef, encodeRef, originalRefs } from '../../server/mail/ref.js';
 import { scopeOptions, resolveListScope, sortUids, searchUids, resolveCandidateSources, matchesFolderFilters } from '../../server/mail/list-query.js';
 import { validateDocument } from '../../server/sieve/model.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 
 const cases = [
   ['from:sender@example.com', [{ from: 'sender@example.com' }], [{ field: 'from', op: 'has', value: 'sender@example.com' }]],

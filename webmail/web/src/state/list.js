@@ -1,3 +1,4 @@
+import { handleAuthFailure } from '../api.js';
 import { effect, signal, untracked } from '@preact/signals';
 import { api, checkServerSession, showSessionNotice } from '../api.js';
 import { selection, scopeSelection, selectionScopeKey, updateSelectionPage } from './selection.js';
@@ -108,6 +109,7 @@ export async function runAction(action, refs = [...selection.value], target) {
 export function connectMailboxEvents() {
   let source, stopped=false;
   function connect() {
+    if(stopped || session.value?.step !== 'done')return;
     const connection=new EventSource('/api/events');source=connection;
     let opened=false, checking=false;
     connection.addEventListener('open',()=>{opened=true;});
@@ -122,24 +124,25 @@ export function connectMailboxEvents() {
           if(!session.value){resetMailbox();return;}
           if(current!==undefined)break;
         }
-        if(current&&opened)connect();
+        if(current?.step==='done'&&opened)connect();
       } catch(error) {
         if(error.code==='SESSION_EXPIRED'&&!session.value)showSessionNotice(error.code);
         if(!stopped&&source===connection&&!session.value)resetMailbox();
       } finally { checking=false; }
     }
     connection.addEventListener('mailbox',event=>{
+      if(stopped||session.value?.step!=='done')return;
       const value=JSON.parse(event.data);
       folders.value={...folders.value,folders:folders.value.folders.map(folder=>folder.path===value.path?{...folder,unseen:value.unseen,total:value.total}:folder)};
       const params=list.value.params;
       if(!scopedListFrozen() && !scopeSelection.value?.failureView && isListRoute(route.value) && (params.view==='allmail'||params.q||(params.view==='inbox'&&value.path==='INBOX')||params.folder===value.path))void loadMessages();
     });
-    connection.addEventListener('quota',event=>{const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
-    connection.addEventListener('session',event=>{if(JSON.parse(event.data).state==='expired')void confirm();});
+    connection.addEventListener('quota',event=>{if(stopped||session.value?.step!=='done')return;const quota=JSON.parse(event.data);storage.value={...storage.value,quota};});
+    connection.addEventListener('session',event=>{const value=JSON.parse(event.data);connection.close();if(value.state==='unavailable'){handleAuthFailure({code:'OTP_UNAVAILABLE'});return;}void confirm();});
     connection.addEventListener('error',()=>{if(connection.readyState===EventSource.CLOSED)void confirm();});
   }
   connect();
-  return ()=>{stopped=true;source.close();};
+  return ()=>{stopped=true;source?.close();};
 }
 
 export function resetMailbox() {

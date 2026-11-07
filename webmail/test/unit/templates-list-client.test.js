@@ -69,7 +69,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function setupPrefs(t) {
   const previousFetch = globalThis.fetch, previousStorage = globalThis.localStorage;
   globalThis.localStorage = { setItem() {} };
-  session.value = { user: { email: 'owner@example.invalid' }, csrf: 'synthetic' }; sessionReady.value = true;
+  session.value = { step: 'done', user: { email: 'owner@example.invalid' }, csrf: 'synthetic' }; sessionReady.value = true;
   applyServerPrefs({ theme: 'ink', mode: 'light', templatePins: [pin('a')], pinnedFolders: ['INBOX'] });
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => { globalThis.fetch = previousFetch; globalThis.localStorage = previousStorage; session.value = null; sessionReady.value = false; toast.value = null; });

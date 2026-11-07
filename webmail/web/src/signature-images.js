@@ -1,5 +1,5 @@
+import { handleAuthFailure } from './api.js';
 import { effect } from '@preact/signals';
-import { endSession } from './api.js';
 import { session, authGeneration } from './state/session.js';
 import { signatureError, signatureRequest, signatureSessionChanged } from './signatures.js';
 
@@ -32,7 +32,7 @@ export async function getSignatureImageContent(id) {
     if (!response.ok) {
       const { error } = await response.json();
       if (session.value !== owner) throw signatureSessionChanged();
-      if (generation === authGeneration && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code) && session.value === owner) endSession(error.code);
+      if (session.value === owner) handleAuthFailure(error, { generation });
       throw { ...error, status: response.status };
     }
     const blob = await response.blob();

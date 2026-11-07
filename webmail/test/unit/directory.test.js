@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createDirectoryService, directoryQueries } from '../../server/directory/index.js';
 import { recentRecipients } from '../../server/directory/recent.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 
 const session = () => ({ email: 'user@example.com', name: '사용자' });
 const tables = () => ({

@@ -15,7 +15,7 @@ const params={view:'inbox',folder:'',page:1,pageSize:50,quick:'all',q:'',in:''};
 const rows=[1,2,3].map(index=>({ref:`ref${index}`,folder:'INBOX',folderName:'받은편지함',from:{name:'예시',address:'sender@example.com'},to:[],subject:`제목 ${index}`,date:`2026-10-${16-index}T00:00:00.000Z`,size:1024,seen:false,flagged:false,answered:false,hasAttachment:false}));
 function setup(t,fetcher) {
   const old=globalThis.fetch;globalThis.fetch=fetcher;
-  resetMailbox();route.value=parseRoute('#inbox');list.value={params:{...params},items:structuredClone(rows),total:3,loading:false,error:null};selection.value=new Set();cursor.value=rows[0].ref;acting.value=false;session.value={user:{email:'user@example.com'},csrf:'synthetic-csrf'};sessionReady.value=true;toast.value=null;updateSelectionPage(rows);
+  resetMailbox();route.value=parseRoute('#inbox');list.value={params:{...params},items:structuredClone(rows),total:3,loading:false,error:null};selection.value=new Set();cursor.value=rows[0].ref;acting.value=false;session.value={step:'done',user:{email:'user@example.com'},csrf:'synthetic-csrf'};sessionReady.value=true;toast.value=null;updateSelectionPage(rows);
   t.after(()=>{resetMailbox();route.value=parseRoute('#inbox');globalThis.fetch=old;session.value=null;sessionReady.value=false;toast.value=null;});
 }
 function result(items) {return Response.json({items,total:items.length,page:1,pageSize:50});}

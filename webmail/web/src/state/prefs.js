@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { session, sessionReady } from './session.js';
+import { session, sessionReady, authGeneration } from './session.js';
 import { signal } from '@preact/signals';
 import { toast } from './toast.js';
 import { WM_THEMES } from '../theme/themes.js';
@@ -26,7 +26,10 @@ export function applyServerPrefs(value) {
 }
 
 export async function loadSessionPrefs() {
+  const owner = session.value, generation = authGeneration;
+  if (owner?.step !== 'done') return;
   const value = await api('/api/prefs');
+  if (session.value !== owner || generation !== authGeneration || owner.step !== 'done') return;
   applyServerPrefs(value);
   sessionReady.value = true;
 }
@@ -44,8 +47,8 @@ export function updatePrefs(patch) {
 }
 async function savePrefs() {
   if (saving) return;
-  const owner = session.value;
-  if (!owner || !sessionReady.value) return;
+  const owner = session.value, generation = authGeneration;
+  if (owner?.step !== 'done' || !sessionReady.value) return;
   const patch = pending;
   if (!Object.keys(patch).length) return;
   pending = {}; inFlight = patch;
@@ -53,13 +56,13 @@ async function savePrefs() {
   try {
     await api('/api/prefs', { method: 'PUT', body: patch });
     const saved = await api('/api/prefs');
-    if (session.value !== owner) return;
+    if (session.value !== owner || generation !== authGeneration || owner?.step !== 'done') return;
     confirmed = saved; inFlight = {};
     prefsSaved.value = { patch, saved };
     prefs.value = { ...saved, ...pending };
     try { localStorage.setItem('webmail-prefs', JSON.stringify(saved)); } catch {}
   } catch (error) {
-    if (session.value !== owner) return;
+    if (session.value !== owner || generation !== authGeneration || owner?.step !== 'done') return;
     clearTimeout(saveTimer); pending = {}; inFlight = {};
     prefs.value = structuredClone(confirmed);
     toast.value = { kind: 'error', message: error.message || '설정을 저장하지 못했어요. 이전 설정으로 되돌렸어요.' };

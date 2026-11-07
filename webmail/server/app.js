@@ -1,3 +1,5 @@
+import { createOtpStore } from './security/otp-store.js';
+import otpRoutes from './routes/otp.js';
 import Fastify, { LogController } from 'fastify';
 import { createPublicTemplatesStore } from './templates/public-store.js';
 import { createPublicTemplatesReader } from './templates/public.js';
@@ -40,12 +42,15 @@ import { createSmtpService } from './mail/smtp.js';
 import rulesRoutes from './routes/rules.js';
 import { createRulesService } from './sieve/service.js';
 
-export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {}, directory = {}, publicTemplates = {} } = {}) {
+export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {}, directory = {}, publicTemplates = {}, otp = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
   installClientIp(app);
-  await installAuth(app, { ...auth, config });
+  const otpStore = otp.store ?? createOtpStore({ config, mode: 'webmail' });
+  app.addHook('onClose', async () => { await otpStore.close?.(); });
+  await installAuth(app, { ...auth, config, otpStore });
+  await app.register(otpRoutes, { config });
   await installDirectory(app, { ...directory, config });
   const noticesStore = notices.store ?? createNoticesStore({ ...notices, config });
   app.decorate('notices', noticesStore);

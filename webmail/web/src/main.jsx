@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import App from './app.jsx';
+import { session, authUnavailable } from './state/session.js';
 import { api } from './api.js';
 import { initRouter } from './router.js';
 import { config } from './state/config.js';
@@ -16,8 +17,8 @@ try {
   document.title = config.value.brandName;
   loadPrefs(config.value);
   initTheme(); initRouter();
-  try { await api('/api/auth/session', { silentSessionErrors: true }); await loadSessionPrefs(); } catch (error) {
-    if (!['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) throw error;
+  try { await api('/api/auth/session', { silentSessionErrors: true }); if (session.value?.step === 'done') await loadSessionPrefs(); } catch (error) {
+    if (!['NO_SESSION', 'SESSION_EXPIRED', 'OTP_PENDING_EXPIRED', 'OTP_STATE_CHANGED'].includes(error.code) && !authUnavailable.value) throw error;
   }
   render(<App/>, document.getElementById('app'));
 } catch (error) {

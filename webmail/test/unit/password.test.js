@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { createPasswordService } from '../../server/mailcow/password.js';
 import { createRateLimiter } from '../../server/security/ratelimit.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { logOptions } from '../../server/log.js';
 
 const current = 'synthetic-current-password!';

@@ -1,5 +1,6 @@
+import { handleAuthFailure } from '../api.js';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import { api, endSession } from '../api.js';
+import { api } from '../api.js';
 import { route, navigate } from '../router.js';
 import { registerShortcuts } from '../shortcuts.js';
 import { composeSeed, pendingSend, detachedSendAttempts, detachSendAttempt, sendResultNotice, hasPendingSendAttempt, rememberSendAttempt, restoreSendAttempt, clearSendAttempt } from '../state/compose.js';
@@ -115,7 +116,7 @@ export default function Composer() {
             if(cidUrls.has(file.cid))continue;
             const generation=authGeneration;
             const response=await fetch(`/api/messages/${encodeURIComponent(file.ref)}/parts/${encodeURIComponent(file.partId)}?inline=1`,{credentials:'same-origin'});
-            if(!response.ok){const {error}=await response.json();if(active()&&generation===authGeneration&&['NO_SESSION','SESSION_EXPIRED'].includes(error.code))endSession(error.code);throw error;}
+            if(!response.ok){const {error}=await response.json();if(active())handleAuthFailure(error,{generation});throw error;}
             cidUrls.set(file.cid,URL.createObjectURL(await response.blob()));
           }
           if(cancelled||!active()){for(const url of cidUrls.values())URL.revokeObjectURL(url);return;}
@@ -317,7 +318,7 @@ export default function Composer() {
         if(total>config.value.attachMaxMb*1024**2)throw {code:'ATTACH_TOO_LARGE',message:attachmentLimitMessage(detail.name,config.value.attachMaxMb,total)};
         for(const [cid,source] of templateComposeImages(detail,copied.html)){
           const generation=authGeneration,response=await fetch(source,{credentials:'same-origin'});
-          if(!response.ok){const {error}=await response.json();if(valid()&&generation===authGeneration&&['NO_SESSION','SESSION_EXPIRED'].includes(error.code))endSession(error.code);throw error;}
+          if(!response.ok){const {error}=await response.json();if(valid())handleAuthFailure(error,{generation});throw error;}
           urls.set(cid,URL.createObjectURL(await response.blob()));
         }
         await editor.current?.whenIdle();if(!valid())return;

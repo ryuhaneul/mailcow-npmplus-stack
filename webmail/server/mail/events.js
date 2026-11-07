@@ -3,11 +3,11 @@ import { PassThrough } from 'node:stream';
 export function createEventService({ imap, sessions, logger, listService, now = Date.now }) {
   function open(session) {
     const stream = new PassThrough();
-    let stop, timer, busy = false, pending = false, closed = false;
+    let stop, timer, accessTimer, accessPending, accessBlocked = false, busy = false, pending = false, closed = false;
     const previous = new Map();
     const cleanup = () => {
       if (closed) return;
-      closed = true; clearInterval(timer); stop?.();
+      closed = true; clearInterval(timer); clearInterval(accessTimer); stop?.();
     };
     stream.once('close', cleanup);
     function write(value) {
@@ -16,6 +16,7 @@ export function createEventService({ imap, sessions, logger, listService, now = 
       if (!stream.write(value)) stream.destroy();
     }
     function send(type, data) {
+      if (type !== 'session' && accessBlocked) return;
       const value = JSON.stringify(data);
       if (previous.get(type) !== value) {
         if (type === 'mailbox') listService?.invalidate(session);
@@ -29,6 +30,27 @@ export function createEventService({ imap, sessions, logger, listService, now = 
       await sessions.destroy(session, 'SESSION_EXPIRED');
       return true;
     }
+    async function checkAccess() {
+      if (closed) return false;
+      if (accessPending) return accessPending;
+      accessBlocked = true;
+      const operation = (async () => {
+        try {
+          if (await expired()) return false;
+          await sessions.checkAccess?.(session);
+          if (closed) return false;
+          if (session.state && session.state !== 'ready') {
+            send('session', { state: 'enroll', reason: 'OTP_REQUIRED' }); cleanup(); stream.end(); return false;
+          }
+          accessBlocked = false; return true;
+        } catch (error) {
+          send('session', { state: error.statusCode === 503 ? 'unavailable' : 'expired', reason: error.code });
+          cleanup(); stream.end(); return false;
+        } finally { accessPending = null; }
+      })();
+      accessPending = operation;
+      return operation;
+    }
     async function refresh() {
       if (closed) return;
       if (busy) { pending = true; return; }
@@ -36,7 +58,7 @@ export function createEventService({ imap, sessions, logger, listService, now = 
       try {
         do {
           pending = false;
-          if (await expired()) return;
+          if (!await checkAccess()) return;
           const snapshot = await imap.withMailbox(session, 'INBOX', async client => {
             // The work connection does not IDLE; sync its selected mailbox before STATUS.
             await client.noop();
@@ -53,13 +75,18 @@ export function createEventService({ imap, sessions, logger, listService, now = 
         if (!await expired()) logger?.warn({ code: 'EVENT_REFRESH_FAILED' }, '메일 알림 정보를 갱신하지 못했습니다.');
       } finally { busy = false; }
     }
-    stop = imap.watch(session, () => { void refresh(); });
+    void checkAccess().then(allowed => {
+      if (!allowed || closed) return;
+      stop = imap.watch(session, () => { void refresh(); });
+      void refresh();
+    });
+    accessTimer = setInterval(() => { void checkAccess(); }, 5_000);
+    accessTimer.unref?.();
     timer = setInterval(() => {
       if (closed) return;
       void refresh(); write(': ping\n\n');
     }, 25_000);
     timer.unref?.();
-    void refresh();
     return stream;
   }
   return { open };

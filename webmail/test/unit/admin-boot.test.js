@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createAdminApp } from '../../server/admin/app.js';
 import { loadAdminConfig } from '../../server/admin/config.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { AppError } from '../../server/errors.js';
 
 const env = {

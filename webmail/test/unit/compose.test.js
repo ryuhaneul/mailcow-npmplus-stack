@@ -19,7 +19,9 @@ import addressparser from 'nodemailer/lib/addressparser';
 import { downloadMessage } from 'imapflow/lib/download.js';
 import { bodyParts } from '../../server/mail/read.js';
 import { JSDOM } from 'jsdom';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { createDirectoryService } from '../../server/directory/index.js';
 import { createComposeService } from '../../server/mail/compose.js';
 import { createSmtpService } from '../../server/mail/smtp.js';
@@ -68,10 +70,10 @@ class FakeImap extends EventEmitter {
 }
 async function fixture(t, { smtp, overrides = {}, clientSetup, directoryTables, images, smtpSend } = {}) {
   let time = Date.UTC(2026, 0, 1), logs = ''; const calls = [], clients = [], attempts = [];
-  const actualConfig = { ...config, ...smtp?.options, ...overrides }, tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w09-'));
+  const actualConfig = { ...otpConfig, ...config, ...smtp?.options, ...overrides }, tempRoot = await mkdtemp(join(tmpdir(), 'webmail-w09-'));
   const stream = new Writable({ write(chunk, _encoding, callback) { logs += chunk.toString(); callback(); } });
   const app = Fastify({ logger: { ...logOptions('info'), stream } }); installErrors(app);
-  await installAuth(app, { config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
+  await installAuth(app, { otpStore: createOtpFixture({ now: () => time }).store, config: actualConfig, tempRoot, now: () => time, clientFactory: options => { const client = new FakeImap(options, calls); clients.push(client); clientSetup?.(client); return client; } });
   const directory = createDirectoryService({ config: actualConfig, imap: app.imap, db: { async execute(sql) { return [directoryTables ? directoryTables[Object.keys(directoryTables).find(table => sql.endsWith('FROM ' + table))] || [] : sql.endsWith('FROM mailbox') ? [{ username: 'user@example.com', name: '서버 표시 이름', domain: 'example.com', active: 1 }] : []]; }, async end() {} } });
   const transport = smtp ? createSmtpService({ config: actualConfig }) : { async send(...args) { attempts.push(args); return smtpSend?.(...args); } };
   const service = createComposeService({ config: actualConfig, imap: app.imap, directory, smtp: transport, logger: app.log, tempRoot, now: () => time, ...(images ? { images } : {}) });

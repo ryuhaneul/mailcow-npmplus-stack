@@ -12,7 +12,9 @@ import { createImapPool, mailTlsOptions } from '../../server/mail/imap-pool.js';
 import { fetchOriginals, mailboxStatus, getMetadata, setMetadata, setMetadataEntries } from '../../server/mail/imap-raw.js';
 import { encodeRef, decodeRef, assertUidValidity, originalRefs } from '../../server/mail/ref.js';
 import { createEventService } from '../../server/mail/events.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 
 const config = { imapHost: '127.0.0.1', imapPort: 993, mailTlsMode: 'verify', mailTlsServername: 'mail.example.com', mailTlsPinFile: '' };
 const credentials = () => ({ email: 'user@example.com', password: Buffer.from('synthetic-imap-password'), ip: '198.51.100.9' });

@@ -14,7 +14,7 @@ const library=()=>({revision:'i1',images:[],usedBytes:0,maxBytes:1048576,maxFile
 function setup(t, handler) {
   const before=globalThis.fetch, requests=[];
   globalThis.fetch=async(path,options)=>{requests.push(path);if(path==='/api/auth/session')return handler?.(path,options) ?? Response.json(session.value);return handler?.(path,options) ?? Response.json(path==='/api/compose/identities'?{identities:[{address:session.value.user.email,name:'Example',kind:'self'}],defaultFrom:session.value.user.email,anyAtDomains:[],anyAddress:false}:path==='/api/signatures'?doc():library());};
-  session.value={user:{email:'person@account.example'},csrf:'synthetic'};
+  session.value={step:'done',user:{email:'person@account.example'},csrf:'synthetic'};
   verifiedSession.value=session.value;
   t.after(()=>{session.value=null;globalThis.fetch=before;});
   return requests;
@@ -31,7 +31,7 @@ test('logout/account switch clears resources immediately and ignores late identi
   setup(t,(path)=>path==='/api/compose/identities'&&++requests===1?new Promise(resolve=>{release=()=>resolve(Response.json({identities:[{address:'old@old.example'}]}));}):undefined);
   const pending=loadComposeIdentities();
   session.value=null;assert.equal(composeIdentities.value,null);assert.equal(signatures.value,null);assert.equal(signatureImages.value,null);
-  session.value={user:{email:'new@new.example'},csrf:'new'};
+  session.value={step:'done',user:{email:'new@new.example'},csrf:'new'};
   release();await assert.rejects(pending);assert.equal(composeIdentities.value,null);
   const fresh=await getComposeResources();assert.equal(fresh.identities.identities[0].address,'new@new.example');
 });
@@ -82,7 +82,7 @@ test('opening while a preload fails makes a fresh on-demand request',async t=>{
 test('late authentication failure from a previous identity preload cannot log out the new account',async t=>{
   let release;
   setup(t,path=>path==='/api/compose/identities'?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code:'NO_SESSION',message:'synthetic'}},{status:403}));}):undefined);
-  const old=loadComposeIdentities(),next={user:{email:'next@another.example'},csrf:'next'};
+  const old=loadComposeIdentities(),next={step:'done',user:{email:'next@another.example'},csrf:'next'};
   session.value=next;release();await assert.rejects(old);
   assert.equal(session.value,next);assert.equal(composeIdentities.value,null);
 });
@@ -108,7 +108,7 @@ test('cross-tab invalidation discards identities, signatures and late old-accoun
   assert.equal(verifiedSession.value,null);
 });
 test('same-account relogin updates CSRF without replacing the session object',async t=>{
-  setup(t,path=>path==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'replacement'}):undefined);
+  setup(t,path=>path==='/api/auth/session'?Response.json({step:'done',user:{email:'person@account.example'},csrf:'replacement'}):undefined);
   const owner=session.value;await checkServerSession();
   assert.equal(session.value,owner);assert.equal(owner.csrf,'replacement');assert.equal(verifiedSession.value,owner);
 });
@@ -149,7 +149,7 @@ for (const code of ['SESSION_EXPIRED','NO_SESSION']) for (const [name,request,pa
 ]) {
   test(`${name}: late ${code} after same-account relogin cannot end the new session`,async t=>{
     let release;
-    setup(t,p=>p===path?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code,message:'synthetic old session'}},{status:403}));}):p==='/api/auth/session'?Response.json({user:{email:'person@account.example'},csrf:'new-csrf'}):undefined);
+    setup(t,p=>p===path?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code,message:'synthetic old session'}},{status:403}));}):p==='/api/auth/session'?Response.json({step:'done',user:{email:'person@account.example'},csrf:'new-csrf'}):undefined);
     const owner=session.value,notice={kind:'test-notice',message:'keep'};toast.value=notice;
     const old=request(),failed=assert.rejects(old);
     await checkServerSession();release();await failed;
@@ -163,7 +163,7 @@ for (const code of ['SESSION_EXPIRED','NO_SESSION']) for (const [name,request,pa
 }
 test('late old-account draft auth failure cannot end a newly logged-in account',async t=>{
   let release;
-  setup(t,p=>p==='/api/drafts'?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code:'SESSION_EXPIRED',message:'old draft'}},{status:403}));}):p==='/api/auth/login'?Response.json({user:{email:'next@another.example'},csrf:'next'}):undefined);
+  setup(t,p=>p==='/api/drafts'?new Promise(resolve=>{release=()=>resolve(Response.json({error:{code:'SESSION_EXPIRED',message:'old draft'}},{status:403}));}):p==='/api/auth/login'?Response.json({step:'done',user:{email:'next@another.example'},csrf:'next'}):undefined);
   const old=api('/api/drafts',{method:'PUT',body:{}}),failed=assert.rejects(old);
   await api('/api/auth/login',{method:'POST',body:{}});const next=session.value;
   release();await failed;assert.equal(session.value,next);
@@ -173,7 +173,7 @@ test('late old-account draft auth failure cannot end a newly logged-in account',
 test('SSE expiry verifies the server, reconnects once when valid and logs out when expired',async t=>{
   const previous=globalThis.EventSource,connections=[];let expired=false;
   globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();connections.push(this);}close(){this.readyState=2;}};
-  setup(t,path=>path==='/api/auth/session'?(expired?Response.json({error:{code:'SESSION_EXPIRED',message:'synthetic expiry'}},{status:403}):Response.json({user:{email:'person@account.example'},csrf:'new-sse-csrf'})):undefined);
+  setup(t,path=>path==='/api/auth/session'?(expired?Response.json({error:{code:'SESSION_EXPIRED',message:'synthetic expiry'}},{status:403}):Response.json({step:'done',user:{email:'person@account.example'},csrf:'new-sse-csrf'})):undefined);
   const {route}=await import('../../web/src/router.js'),oldRoute=route.value;route.value={name:'settings',value:''};
   const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stop=connectMailboxEvents();
   t.after(()=>{stop();globalThis.EventSource=previous;route.value=oldRoute;});
@@ -210,8 +210,8 @@ async function overtakenSse(t) {
   globalThis.EventSource=class extends EventTarget{static CLOSED=2;constructor(){super();this.readyState=0;connections.push(this);}close(){this.readyState=2;}};
   globalThis.BroadcastChannel=class{constructor(){channels.push(this);}postMessage(){}close(){}};
   const {route}=await import('../../web/src/router.js'),before=route.value;route.value={name:'settings',value:''};
-  const owner={user:{email:'same@example.com'},csrf:'old'};session.value=owner;verifiedSession.value=owner;
-  globalThis.fetch=async()=>new Promise(resolve=>releases.push(()=>resolve(Response.json({user:owner.user,csrf:'new'}))));
+  const owner={step:'done',user:{email:'same@example.com'},csrf:'old'};session.value=owner;verifiedSession.value=owner;
+  globalThis.fetch=async()=>new Promise(resolve=>releases.push(()=>resolve(Response.json({step:'done',user:owner.user,csrf:'new'}))));
   const {connectMailboxEvents}=await import('../../web/src/state/list.js');const stopWatch=watchServerSession(()=>{}),stopEvents=connectMailboxEvents();
   t.after(()=>{stopEvents();stopWatch();session.value=null;route.value=before;Object.assign(globalThis,previous);});
   connections[0].readyState=1;connections[0].dispatchEvent(new Event('open'));

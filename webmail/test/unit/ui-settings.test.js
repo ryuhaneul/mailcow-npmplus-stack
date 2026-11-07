@@ -11,7 +11,7 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
 function setup(t) {
   const fetch=globalThis.fetch,storage=globalThis.localStorage;
   const copies=[];globalThis.localStorage={setItem(_key,value){copies.push(JSON.parse(value));}};
-  session.value={user:{email:'user@example.com'},csrf:'synthetic'};sessionReady.value=true;applyServerPrefs(document());copies.length=0;
+  session.value={ step: 'done', user:{email:'user@example.com'},csrf:'synthetic'};sessionReady.value=true;applyServerPrefs(document());copies.length=0;
   t.mock.timers.enable({apis:['setTimeout']});
   t.after(()=>{globalThis.fetch=fetch;globalThis.localStorage=storage;session.value=null;sessionReady.value=false;toast.value=null;});
   return copies;

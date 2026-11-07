@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Writable } from 'node:stream';
 import { setImmediate as immediate } from 'node:timers/promises';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { loadConfig } from '../../server/config.js';
 import { logOptions } from '../../server/log.js';
 import { sessionHash } from '../../server/security/session.js';
@@ -13,6 +15,7 @@ import { createRateLimiter } from '../../server/security/ratelimit.js';
 
 const secret = 'synthetic-login-password-123!';
 const env = {
+  ...otpEnv,
   PUBLIC_HOSTNAMES: 'newmail.example.com,newmail.example.org', BRAND_NAME: '메일', ORG_NAME: '', BRAND_MARK: '', DEFAULT_THEME: 'ink', DEFAULT_MODE: 'system',
   INTERNAL_DOMAINS: '', ATTACH_MAX_MB: '25', SESSION_IDLE_MIN: '480', SESSION_MAX_HOURS: '24', AUTOEXPUNGE_DAYS: '30',
   IMAP_HOST: 'dovecot-mailcow', SIEVE_HOST: 'dovecot-mailcow', SMTP_HOST: 'postfix-mailcow', MAIL_TLS_SERVERNAME: 'mail.example.com', MAIL_TLS_MODE: 'verify', MAIL_TLS_PIN_FILE: '',
@@ -101,7 +104,7 @@ test('login: normalized email, password Buffer, random cookie attributes and pub
   assert.equal(f.calls[0].password.toString(), secret);
   assert.deepEqual(response.json().user, { email: 'user@example.com', name: '예제 사용자' });
   assert.equal(response.headers['cache-control'], 'no-store');
-  assert.deepEqual(Object.keys(response.json()).sort(), ['csrf', 'expiresAt', 'user']);
+  assert.deepEqual(Object.keys(response.json()).sort(), ['csrf', 'expiresAt', 'otp', 'step', 'user']);
   const session = await f.app.sessions.get(token);
   assert.equal(session.id, sessionHash(token));
   assert.notEqual(session.id, token);

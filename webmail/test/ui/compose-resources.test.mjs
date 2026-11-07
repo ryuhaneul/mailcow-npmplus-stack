@@ -28,7 +28,7 @@ await test('compose preload, account domains and warm opening latency',async t=>
     fake.state.identities={identities:[{address:email,name:'Synthetic',kind:'self'},{address:'alias@other.example',name:'Alias',kind:'alias'}],defaultFrom:email,anyAtDomains:[],anyAddress:false};
     const page=await browser.newPage({viewport:{width,height:900}}),requests=[],errors=[];let identityCount=0;
     page.setDefaultTimeout(8000);page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/api/'))requests.push({path:new URL(r.url()).pathname,method:r.method()});});
-    const user={user:{email,name:'Synthetic'},csrf:fake.state.csrf,expiresAt:Date.now()+3600000};
+    const user={step:'done',user:{email,name:'Synthetic'},csrf:fake.state.csrf,expiresAt:Date.now()+3600000};
     let document={revision:'r1',items:signed?[{id:sig,name:'합성 서명',html:`<p>합성 서명 본문</p><img src="cid:wm-sig-v1.${asset}@signature.invalid" alt="합성 로고">`}]:[],defaults:signed?{[email]:{newDefault:sig,replyDefault:null}}:{},usedBytes:100,maxBytes:262144,notices:[]};
     await page.route('**/api/auth/session',route=>authenticated?route.fulfill({json:user}):route.fallback());
     await page.route('**/api/auth/login',route=>{fake.state.authenticated=true;return route.fulfill({json:user});});

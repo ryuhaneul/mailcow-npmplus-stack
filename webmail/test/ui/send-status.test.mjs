@@ -157,7 +157,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     const c = await open({ send: 'lost', lookup: count => count === 1 ? 'expired' : {status:'unknown',reason:'NOT_FOUND'} });
     try {
       await expect(c.page.locator('.login-card [role=status]')).toContainText('보낸편지함·임시보관함을 확인해 주세요');
-      await c.page.route('**/api/auth/login', route => route.fulfill({ json: { user: { email: 'other@example.com', name: '합성 사용자' }, csrf: 'other-synthetic-csrf', expiresAt: Date.now() + 3600000 } }));
+      await c.page.route('**/api/auth/login', route => route.fulfill({ json: {step:'done',user: { email: 'other@example.com', name: '합성 사용자' }, csrf: 'other-synthetic-csrf', expiresAt: Date.now() + 3600000 } }));
       await c.page.getByRole('textbox', { name: '메일 주소', exact: true }).fill('other@example.com'); await c.page.getByLabel('암호', { exact: true }).fill('example-password'); await c.page.getByRole('button', { name: '로그인', exact: true }).click();
       await expect(c.page.locator('.mailview')).toBeVisible(); await expect(c.page.locator('.toast')).toHaveCount(0);
     } finally { await c.page.close(); }
@@ -222,7 +222,7 @@ await test('send outcome UI uses synthetic mail and never connects to a real ser
     const c = await open({ send: unknown, lookup: unknown });
     try {
       await expect(c.result).toContainText('발송 여부 확인 필요');
-      await c.page.route('**/api/auth/session', route => route.fulfill({ json: { user: { email: 'other@example.com', name: '합성 사용자' }, csrf: 'other-csrf', expiresAt: Date.now() + 3600000 } }));
+      await c.page.route('**/api/auth/session', route => route.fulfill({ json: {step:'done',user: { email: 'other@example.com', name: '합성 사용자' }, csrf: 'other-csrf', expiresAt: Date.now() + 3600000 } }));
       await c.page.goto(origin + '/#inbox'); await c.page.reload(); await expect(c.page.locator('.mailview')).toBeVisible();
       await expect(c.page.locator('.composer')).toHaveCount(0); await expect(c.page.locator('.pending-send-notice')).toHaveCount(0); await expect(c.page.locator('.toast')).toHaveCount(0);
       assert.equal(await c.page.evaluate(() => sessionStorage.getItem('webmail.pending-sends')), null); assert.equal(c.lookups.length, 0); assert.equal(c.sends.length, 1);

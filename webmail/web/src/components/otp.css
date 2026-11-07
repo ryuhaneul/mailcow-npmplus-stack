@@ -1,0 +1,23 @@
+/* A안 배치만 추가한다. 입력 테두리는 기존 .inp를 유지한다. */
+.otp-login{overflow:auto;height:auto;min-height:100dvh;padding:28px 20px}
+.otp-login .login-card{width:min(410px,100%);max-width:100%;box-sizing:border-box}
+.otp-login.wide .login-card{width:min(750px,100%)}
+.otp-login .account-email{display:block;font-size:13px;color:var(--ink-2);margin:-10px 0 22px;overflow-wrap:anywhere}
+.otp-login h1{margin-bottom:18px}
+.otp-copy{color:var(--ink-2);font-size:13.5px;line-height:1.7;margin:0 0 20px}
+.required-note{padding:11px 13px;background:var(--warn-bg);border-radius:var(--r-ctl);color:var(--warn);font-size:13px;line-height:1.6;margin:0 0 22px}
+.otp-enroll{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px}
+.otp-enroll h3{font-size:15px;margin:0 0 8px}.otp-enroll p{font-size:13px;color:var(--ink-2);line-height:1.65;margin:0 0 16px}
+.otp-enroll .qr-side{border-right:1px solid var(--line);padding-right:30px}
+.otp-enroll .qr{display:block;width:156px;height:156px;background:#fff;border:1px solid var(--line);padding:8px;border-radius:6px;margin:16px 0}
+.qr-caption{font-size:11px;color:var(--ink-3);display:block;margin-top:-10px;margin-bottom:18px}
+.manual-key{display:block;padding:11px 12px;background:var(--sunken);border:1px solid var(--line);border-radius:var(--r-ctl);font-family:var(--mono);font-size:11.5px;line-height:1.7;overflow-wrap:anywhere;margin:6px 0}
+.key-row{display:flex;gap:8px;align-items:center}.key-row code{flex:1;min-width:0}
+.otp-form label{display:block;font-size:13px;font-weight:600;margin-bottom:7px}
+.otp-form .inp{width:100%;min-height:44px;font-size:23px;letter-spacing:.35em;text-align:center;font-variant-numeric:tabular-nums;box-sizing:border-box}
+.otp-form .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:22px}
+.otp-login .otp-form .actions .btn{width:100%;min-height:44px}.otp-logout{width:100%;margin-top:8px}
+.otp-note{font-size:12.5px;color:var(--ink-3);line-height:1.7;margin-top:16px}
+.otp-feedback .otp-error,.otp-error{color:var(--danger);font-size:13px;margin-top:8px}
+.otp-feedback p{font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+@media(max-width:760px){.otp-login{padding:20px 16px}.otp-login .login-card{padding:24px 20px}.otp-enroll{grid-template-columns:minmax(0,1fr);gap:18px}.otp-enroll .qr-side{border-right:0;padding-right:0;border-bottom:1px solid var(--line);padding-bottom:20px}.otp-enroll .qr{margin-left:auto;margin-right:auto}.qr-caption{text-align:center}}

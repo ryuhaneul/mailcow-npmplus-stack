@@ -1,4 +1,4 @@
-import { endSession } from './api.js';
+import { handleAuthFailure } from './api.js';
 import { session, authGeneration } from './state/session.js';
 
 const messages = {
@@ -42,7 +42,7 @@ export async function signatureRequest(path, { method = 'GET', body, ...options 
     if (session.value !== owner) throw signatureSessionChanged();
     if (!response.ok) {
       const error = value.error;
-      if (generation === authGeneration && ['NO_SESSION', 'SESSION_EXPIRED'].includes(error.code)) endSession(error.code);
+      handleAuthFailure(error, { generation });
       throw { ...error, status: response.status };
     }
     return value;

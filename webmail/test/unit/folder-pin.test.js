@@ -34,7 +34,7 @@ test('pin prefs: accepts 50, rejects invalid position, 413 and 503 leave stored 
 });
 let stateSequence=0;
 function state(paths,rows=paths) {
-  session.value={user:{email:`pin${++stateSequence}@example.com`}};
+  session.value={ step: 'done', user:{email:`pin${++stateSequence}@example.com`}};
   prefs.value={pinnedFolders:paths,folderColors:{}};
   folders.value={folders:rows.map(path=>({path,name:path.split('/').at(-1)}))};
 }

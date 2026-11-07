@@ -8,7 +8,9 @@ import { downloadMessage } from 'imapflow/lib/download.js';
 import { createReadService, decodeIso2022Kr, decodeCharset, attachmentHeaders } from '../../server/mail/read.js';
 import { sanitizeHtml, sanitizeComposeHtml } from '../../server/mail/sanitize.js';
 import { encodeRef, decodeRef, assertUidValidity } from '../../server/mail/ref.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 
 const token = encodeRef('INBOX', 123, 9);
 const text = '안녕하세요 합성 메일';

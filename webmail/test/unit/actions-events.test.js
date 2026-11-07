@@ -11,7 +11,9 @@ import { createActionService } from '../../server/mail/actions.js';
 import { createImapPool } from '../../server/mail/imap-pool.js';
 import { createEventService } from '../../server/mail/events.js';
 import { encodeRef, scopedBatchState } from '../../server/mail/ref.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 
 const ref = (path = 'INBOX', uid = 7) => encodeRef(path, 123, uid);
 class ActionImap extends EventEmitter {

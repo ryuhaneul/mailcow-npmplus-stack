@@ -17,8 +17,8 @@ export default function Login() {
     if (busy) return;
     setBusy(true); setError('');
     try {
-      await api('/api/auth/login', { method: 'POST', body: { email, password } });
-      setPassword(''); await restoreSendAttempt(session.value.user.email); await loadSessionPrefs();
+      const value = await api('/api/auth/login', { method: 'POST', body: { email, password } });
+      setPassword(''); if (session.value !== value || value.step !== 'done') return; await restoreSendAttempt(session.value.user.email); await loadSessionPrefs();
       if (toast.value?.kind !== 'send-unknown' || toast.value.ownerEmail !== session.value?.user?.email) toast.value = null;
       navigate('inbox');
     } catch (failure) { setError(failure.message); setPassword(''); }

@@ -1,3 +1,4 @@
+import { otpConfig, createOtpFixture } from './helpers/otp-fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
@@ -14,7 +15,7 @@ import { createSignatureImagesService, SIGNATURE_IMAGES_ENTRY } from '../../serv
 import { PREFS_ENTRY } from '../../server/prefs.js';
 import { withSignatureStoreLock } from '../../server/signature-store-lock.js';
 
-const config = { publicHostnames: ['webmail.example.invalid'], trustProxy: ['127.0.0.0/8'], sessionIdleMin: 480, sessionMaxHours: 24 };
+const config = { ...otpConfig, publicHostnames: ['webmail.example.invalid'], trustProxy: ['127.0.0.0/8'], sessionIdleMin: 480, sessionMaxHours: 24 };
 const owner = 'sender@example.invalid';
 const asset = 'a'.repeat(32), otherAsset = 'b'.repeat(32);
 const canonical = id => `cid:wm-sig-v1.${id}@signature.invalid`;
@@ -29,7 +30,7 @@ async function fixture(t, { injectedService, injectedNormalizer } = {}) {
   installErrors(app);
   app.decorate('directory', { mailboxName: async email => email });
   const tempRoot = await mkdtemp(join(tmpdir(), 'signature-api-'));
-  await installAuth(app, { config, tempRoot, verifyLogin: async () => ({}) });
+  await installAuth(app, { otpStore: createOtpFixture().store, config, tempRoot, verifyLogin: async () => ({}) });
   const values = new Map(), commands = [];
   let active = 0, fail = false;
   const client = { enabled: new Set(), capabilities: new Map(), async exec(command, args, { untagged }) {

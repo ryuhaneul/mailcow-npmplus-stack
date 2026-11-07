@@ -30,6 +30,12 @@ export function installErrors(app) {
     if (known && status === 429 && Number.isInteger(error.retryAfter) && error.retryAfter > 0) reply.header('retry-after', error.retryAfter);
     const code = known ? error.code : status === 403 ? 'AUTH_FAILED' : status < 500 ? 'BAD_REQUEST' : 'INTERNAL_ERROR';
     const message = known ? error.message : status === 403 ? '접근할 수 없어요.' : status < 500 ? '요청을 확인해 주세요.' : '서버 오류가 발생했어요. 잠시 뒤 다시 시도해 주세요.';
-    reply.code(status).send(errorBody(code, message));
+    const body = errorBody(code, message);
+    if (known) {
+      if (['done', 'otp', 'enroll'].includes(error.step)) body.error.step = error.step;
+      if (typeof error.expiresAt === 'string' && Number.isFinite(Date.parse(error.expiresAt))) body.error.expiresAt = error.expiresAt;
+      if (status === 429 && Number.isInteger(error.retryAfter) && error.retryAfter > 0) body.error.retryAfter = error.retryAfter;
+    }
+    reply.code(status).send(body);
   });
 }

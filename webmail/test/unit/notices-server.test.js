@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { sanitizeNotice } from '../../server/notices/sanitize.js';
 import { createNoticesStore } from '../../server/notices/store.js';
 import { createNoticesService } from '../../server/admin/services/notices.js';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { createAdminApp } from '../../server/admin/app.js';
 import { loadAdminConfig } from '../../server/admin/config.js';
 

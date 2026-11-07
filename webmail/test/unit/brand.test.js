@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { securityHeaders } from '../../server/security/headers.js';
 const config = { publicHostnames: ['mail.example.com'], trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, brandName: '합성 메일' };
 async function fixture(t) { const dir = await fs.mkdtemp(join(tmpdir(), 'webmail-a17b-')); t.after(() => fs.rm(dir, { recursive: true, force: true })); const logs = [], app = await createApp({ config: { ...config, logoDir: dir }, logger: { level: 'info', stream: { write: row => logs.push(row) } }, staticDir: dir }); t.after(() => app.close()); return { dir, app, logs }; }

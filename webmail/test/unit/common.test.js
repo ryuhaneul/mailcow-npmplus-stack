@@ -7,13 +7,16 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from '@babel/parser';
 import { Writable } from 'node:stream';
-import { createApp } from '../../server/app.js';
+import { createApp as createBaseApp } from '../../server/app.js';
+import { otpConfig, otpEnv, createOtpFixture } from './helpers/otp-fixture.js';
+const createApp = options => createBaseApp({ ...options, config: { ...otpConfig, ...options.config }, otp: { store: createOtpFixture().store } });
 import { loadConfig } from '../../server/config.js';
 import { AppError } from '../../server/errors.js';
 import { logOptions } from '../../server/log.js';
 import { securityHeaders } from '../../server/security/headers.js';
 
 const env = {
+  ...otpEnv,
   PUBLIC_HOSTNAMES: 'newmail.example.com,newmail.example.org',
   BRAND_NAME: '메일', ORG_NAME: '', BRAND_MARK: '', DEFAULT_THEME: 'ink', DEFAULT_MODE: 'system',
   INTERNAL_DOMAINS: '', ATTACH_MAX_MB: '25', SESSION_IDLE_MIN: '480', SESSION_MAX_HOURS: '24', AUTOEXPUNGE_DAYS: '30',
@@ -310,4 +313,25 @@ test('Docker web-build copies every browser server import and its relative depen
     return source === file && (destination === file || join(destination, source.split('/').at(-1)) === file);
   })).map(file => relative(root, file));
   assert.deepEqual(missing, [], 'Server dependencies missing from Docker web-build COPY');
+});
+
+
+test('errors: AppError emits only approved OTP metadata, preserving existing contracts', async t => {
+  const app = await fixture(t);
+  app.get('/test-otp-error-fields', () => { throw Object.assign(new AppError(429, 'TEST_LIMIT', '예시'), {
+    step: 'otp', expiresAt: '2030-01-01T00:00:00.000Z', retryAfter: 7, seed: 'private', arbitrary: true,
+  }); });
+  const response = await app.inject('/test-otp-error-fields');
+  assert.deepEqual(response.json(), { error: { code: 'TEST_LIMIT', message: '예시', step: 'otp', expiresAt: '2030-01-01T00:00:00.000Z', retryAfter: 7 } });
+  assert.equal(response.headers['retry-after'], '7'); assertHeaders(response);
+});
+
+test('logs: OTP body and dedicated input codes are redacted, diagnostic codes remain', async t => {
+  let logs = '';
+  const stream = new Writable({ write(chunk, _encoding, done) { logs += chunk.toString(); done(); } });
+  const app = await fixture(t, { logger: { ...logOptions('info'), stream } });
+  app.log.info({ code: 'FOLDER_RENAME_MISMATCH', rulesError: { code: 'RULES_WRITE_FAILED' },
+    req: { body: { code: '987654' } }, otp: { code: '987654', seed: 'synthetic-seed' } }, '합성 OTP redaction');
+  const row = logs.split('\n').filter(Boolean).map(JSON.parse).find(value => value.code === 'FOLDER_RENAME_MISMATCH');
+  assert.equal(row.rulesError.code, 'RULES_WRITE_FAILED'); assert.equal(logs.includes('987654'), false); assert.equal(logs.includes('synthetic-seed'), false);
 });

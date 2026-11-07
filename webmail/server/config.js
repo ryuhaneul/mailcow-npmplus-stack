@@ -3,6 +3,8 @@ import { isAbsolute } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 
+import { parseOtpKey } from './security/otp.js';
+
 export const themes = ['ink', 'seland', 'terra', 'amber', 'olive'];
 export const modes = ['system', 'light', 'dark'];
 const levels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
@@ -45,6 +47,7 @@ export function loadConfig(env = process.env) {
     return url.origin;
   }
 
+  const otp = parseOtpKey(value('OTP_KEY'), value('OTP_KEY_VERSION'));
   const publicHostnames = list('PUBLIC_HOSTNAMES');
   const brandName = value('BRAND_NAME');
   const orgName = value('ORG_NAME', true);
@@ -89,7 +92,7 @@ export function loadConfig(env = process.env) {
   if (typeof logoDir !== 'string' || logoDir !== '' && (!isAbsolute(logoDir) || logoDir.includes('\0'))) invalid('LOGO_DIR');
   const logLevel = choice('LOG_LEVEL', levels);
   return Object.freeze({
-    publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
+    otpKey: otp.key, otpKeyVersion: otp.keyVersion, publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
     internalDomains, contactsEnabled, attachMaxMb, bodyMaxMb, sessionIdleMin, sessionMaxHours, autoexpungeDays,
     imapHost, imapPort: 993, sieveHost, sievePort: 4190, smtpHost, smtpPort: 587,
     mailTlsServername, mailTlsMode, mailTlsPinFile, dbHost, dbName, dbUser, dbPassword,

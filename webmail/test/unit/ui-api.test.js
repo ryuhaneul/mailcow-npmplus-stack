@@ -12,7 +12,7 @@ function mock(t, handler) {
   globalThis.fetch = handler;
   t.after(() => {globalThis.fetch=previous;session.value=null;toast.value=null;});
 }
-const user = {user:{email:'user@example.com',name:'예시 사용자'},csrf:'synthetic-csrf',expiresAt:1};
+const user = {step:'done',user:{email:'user@example.com',name:'예시 사용자'},csrf:'synthetic-csrf',expiresAt:1};
 test('API: login/session retain CSRF, credentials are same-origin, mutation sends custom header', async t => {
   const requests=[];
   mock(t, async (path,options) => {requests.push({path,...options});return path.endsWith('logout') ? new Response(null,{status:204}) : Response.json(user);});

@@ -17,23 +17,25 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
   await rm(tempRoot, { recursive: true, force: true });
 
   function expired(session) {
-    return now() - session.lastSeen >= idleMs || now() - session.createdAt >= maxMs;
+    return (session.pendingUntil !== null && session.pendingUntil !== undefined && now() >= session.pendingUntil) || now() - session.lastSeen >= idleMs || now() - session.createdAt >= maxMs;
   }
   function expiresAt(session) {
-    return new Date(Math.min(session.lastSeen + idleMs, session.createdAt + maxMs)).toISOString();
+    return new Date(Math.min(session.lastSeen + idleMs, session.createdAt + maxMs, session.pendingUntil ?? Infinity)).toISOString();
   }
   function create({ email, name, password, connection, ip }) {
     const token = randomBytes(32).toString('base64url');
     const session = {
-      id: sessionHash(token), email, name, password, connection, ip,
+      id: sessionHash(token), cookieHash: sessionHash(token), state: 'ready', pendingUntil: null, enrollmentDraft: null, email, name, password, connection, ip,
       scanAbort: new AbortController(),
       csrf: randomBytes(32).toString('base64url'), createdAt: now(), lastSeen: now(),
     };
-    sessions.set(session.id, session);
+    sessions.set(session.cookieHash, session);
     return { token, session };
   }
   async function destroy(session, code = 'LOGOUT') {
-    if (!sessions.delete(session.id)) return;
+    if (sessions.get(session.cookieHash) !== session) return;
+    sessions.delete(session.cookieHash);
+    clearDraft(session);
     session.scanAbort.abort();
     // 연결 종료나 첨부 정리가 실패해도 암호는 즉시 폐기한다.
     session.password.fill(0);
@@ -51,15 +53,44 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
     const session = sessions.get(sessionHash(token));
     if (!session) throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
     if (expired(session)) {
-      await destroy(session, 'SESSION_EXPIRED');
-      throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
+      const code = session.pendingUntil !== null && now() >= session.pendingUntil ? 'OTP_PENDING_EXPIRED' : 'SESSION_EXPIRED';
+      await destroy(session, code);
+      throw new AppError(403, code, '로그인이 만료됐어요. 다시 로그인해 주세요.');
     }
     session.lastSeen = now();
     return session;
   }
+  function clearDraft(session) {
+    session.enrollmentDraft?.seed.fill(0);
+    session.enrollmentDraft = null;
+  }
+  async function assertAlive(session) {
+    if (sessions.get(session.cookieHash) !== session) throw new AppError(403, 'SESSION_EXPIRED', '다시 로그인해 주세요.');
+    if (expired(session)) {
+      const code = session.pendingUntil !== null && now() >= session.pendingUntil ? 'OTP_PENDING_EXPIRED' : 'SESSION_EXPIRED';
+      await destroy(session, code); throw new AppError(403, code, '다시 로그인해 주세요.');
+    }
+  }
+  async function rotate(session) {
+    await assertAlive(session);
+    // assertAlive may yield; verify the identity again before mutating the Map.
+    if (sessions.get(session.cookieHash) !== session || expired(session)) throw new AppError(403, 'SESSION_EXPIRED', '다시 로그인해 주세요.');
+    const token = randomBytes(32).toString('base64url');
+    sessions.delete(session.cookieHash);
+    session.cookieHash = sessionHash(token);
+    session.csrf = randomBytes(32).toString('base64url');
+    sessions.set(session.cookieHash, session);
+    return token;
+  }
+  let accessChecker;
+  function setAccessChecker(fn) { accessChecker = fn; }
+  async function checkAccess(session) { await assertAlive(session); return accessChecker?.(session); }
+  async function destroyOthersFor(session) {
+    await Promise.all([...sessions.values()].filter(other => other !== session && other.email === session.email).map(other => destroy(other, 'SESSIONS_REVOKED')));
+  }
   async function sweep() {
     await Promise.all([...sessions.values()].map(session => expired(session)
-      ? destroy(session, 'SESSION_EXPIRED') : session.sweepAttachments?.()));
+      ? destroy(session, 'SESSION_EXPIRED') : (session.enrollmentDraft && now() >= session.enrollmentDraft.expiresAt ? clearDraft(session) : session.sweepAttachments?.())));
   }
   async function destroyAllFor(email) {
     await Promise.all([...sessions.values()].filter(session => session.email === email).map(session => destroy(session, 'SESSIONS_REVOKED')));
@@ -67,5 +98,5 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
   async function close() {
     await Promise.all([...sessions.values()].map(session => destroy(session, 'SERVER_SHUTDOWN')));
   }
-  return { create, get, destroy, destroyAllFor, sweep, close, expiresAt };
+  return { assertAlive, rotate, clearDraft, destroyOthersFor, setAccessChecker, checkAccess, create, get, destroy, destroyAllFor, sweep, close, expiresAt };
 }

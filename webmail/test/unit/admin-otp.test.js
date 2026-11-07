@@ -21,7 +21,7 @@ async function fixture(t, { permission = 'full', auditFs } = {}) {
   const options = {}, calls = [];let policy = { forceAll: false, revision: '0', updatedAt: null, updatedBy: '' }, mailboxes = [{ username: email }, { username: 'off@example.com', active: 0 }];
   const missing = addr => ({ email: addr, enabled: false, version: null, registeredAt: null });
   const store = {
-    async getPolicy() { return { ...policy }; },
+    async getPolicy() { if(options.postCommitReadError&&calls.includes('policy'))throw new AppError(503,'OTP_UNAVAILABLE','합성 후속 조회 장애'); return { ...policy }; },
     async listRegistrations() { return [...rows.values()].filter(row => row.enabled); },
     async readAccountStatus(addr) { return rows.get(addr) ?? missing(addr); },
     async setPolicy({ forceAll, revision, actor }) {
@@ -112,4 +112,12 @@ test('concurrent policy confirmations and reset versions each admit one write',a
  assert.deepEqual(resets.map(row=>row.statusCode).sort(),[200,409]);
  const results=(await f.audit.read()).rows.filter(row=>row.phase==='result'&&row.result==='ok'&&row.detail?.after);
  assert.equal(results.length,1);assert.equal(results[0].detail.after.version,f.rows.get(email).version);
+});
+
+test('D1 committed policy stays audited ok when follow-up read fails',async t=>{
+ const f=await fixture(t);f.options.postCommitReadError=true;
+ const response=await f.inject('PUT',policyPath,{forceAll:true,revision:'0',confirm:true});assert.equal(response.statusCode,200,response.body);
+ assert.equal(response.json().forceAll,true);assert.equal(response.json().revision,'1');assert.equal(response.json().result,'partial');assert.equal(response.json().warnings[0].code,'OTP_STATUS_UNAVAILABLE');
+ const records=(await f.audit.read()).rows;assert.deepEqual(records.map(row=>row.phase),['intent','result']);assert.equal(records[1].result,'ok');assert.equal(records[0].actor,'human');assert.equal(records[0].after.forced,true);
+ f.options.postCommitReadError=false;assert.equal((await f.inject('GET',policyPath)).json().forceAll,true);assert.deepEqual(f.calls,['policy']);
 });

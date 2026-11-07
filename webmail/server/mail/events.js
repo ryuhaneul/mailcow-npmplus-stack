@@ -1,7 +1,7 @@
 import { PassThrough } from 'node:stream';
 
 export function createEventService({ imap, sessions, logger, listService, now = Date.now }) {
-  function open(session) {
+  function open(session, binding = { cookieHash: session.cookieHash, state: session.state }) {
     const stream = new PassThrough();
     let stop, timer, accessTimer, accessPending, accessBlocked = false, busy = false, pending = false, closed = false;
     const previous = new Map();
@@ -37,7 +37,7 @@ export function createEventService({ imap, sessions, logger, listService, now = 
       const operation = (async () => {
         try {
           if (await expired()) return false;
-          await sessions.checkAccess?.(session);
+          await sessions.checkAccess?.(session, binding);
           if (closed) return false;
           if (session.state && session.state !== 'ready') {
             send('session', { state: 'enroll', reason: 'OTP_REQUIRED' }); cleanup(); stream.end(); return false;

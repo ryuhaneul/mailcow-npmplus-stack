@@ -29,11 +29,13 @@ export function createOtpAdminService({ store, mailcow, audit, lock }) {
     return lock.run('webmail-otp:policy', async () => {
       const before = await policy({ session });
       if (before.revision !== data.revision) throw new AppError(409, 'CONFLICT', '다른 곳에서 정책이 바뀌었어요. 다시 확인해 주세요.');
-      return audit.run({ actor, ip, action: 'webmail-otp.policy', target: 'policy', kind: 'config', revertible: false,
+      const committed = await audit.run({ actor, ip, action: 'webmail-otp.policy', target: 'policy', kind: 'config', revertible: false,
         before: { forced: before.forceAll }, after: { forced: data.forceAll } }, async intent => {
         const saved = await store.setPolicy({ forceAll: data.forceAll, revision: data.revision, actor });
-        return { ...await policy({ session }), unchanged: saved.unchanged === true, auditId: intent.id };
+        return { ...saved, unchanged: saved.unchanged === true, auditId: intent.id };
       });
+      try { return { ...await policy({ session }), unchanged: committed.unchanged, auditId: committed.auditId }; }
+      catch { return { ...committed, result: 'partial', warnings: [{ code: 'OTP_STATUS_UNAVAILABLE', message: '정책은 적용됐지만 현황을 조회하지 못했어요. 현재 상태를 다시 확인해 주세요.' }] }; }
     });
   }
   async function status({ addr }) { return store.readAccountStatus(address(addr)); }

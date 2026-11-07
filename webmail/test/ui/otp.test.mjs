@@ -76,6 +76,13 @@ await test('A OTP screens, pending preload boundary, dialogs and responsive stat
  await page.getByRole('button',{name:'취소',exact:true}).click();await expect(page.getByRole('button',{name:'2단계 인증 켜기',exact:true})).toBeVisible();assert.equal(fake.state.otp.draft,null);
  await page.getByRole('button',{name:'2단계 인증 켜기',exact:true}).click();await page.getByLabel('6자리 인증 코드').fill('123456');await page.getByRole('button',{name:'확인하고 켜기',exact:true}).click();await expect(page.locator('.otp-badge')).toHaveText('켜짐');
  await page.getByLabel('현재 인증 코드').fill('123456');await page.getByRole('button',{name:'인증하고 끄기',exact:true}).click();await expect(page.locator('.otp-badge')).toHaveText('꺼짐');await view.context.close();
+ // D1 failed forced-enrollment begin retains logout, disabled only while busy.
+ view=await open('forced');page=view.page;let releaseBegin;const beginGate=new Promise(resolve=>{releaseBegin=resolve;});
+ await page.route('**/api/otp/enrollment',async route=>{await beginGate;await route.fulfill({status:500,json:{error:{code:'INTERNAL_ERROR',message:'합성 QR 생성 실패'}}});});
+ await page.reload();await expect(page.getByRole('button',{name:'로그아웃',exact:true})).toBeDisabled();releaseBegin();
+ await expect(page.getByText('합성 QR 생성 실패',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'로그아웃',exact:true})).toBeEnabled();
+ await page.screenshot({path:`${captures}/forced-begin-error-1280-light.png`,fullPage:true});
+ await page.getByRole('button',{name:'로그아웃',exact:true}).click();await expect(page.getByRole('heading',{name:'로그인',exact:true})).toBeVisible();await view.context.close();
  // Required users cannot defer registration; already registered forced users cannot disable.
  view=await open('forced');assert.equal(await view.page.getByRole('button',{name:/나중에|건너뛰기|취소/}).count(),0);await view.context.close();
  fake.state.otp.forced=true;view=await open('on');fake.state.otp.forced=true;await view.page.reload();await expect(view.page.getByText('관리자가 2단계 인증을 필수로 설정했어요. 필수 적용 중에는 끌 수 없습니다.')).toBeVisible();await expect(view.page.getByRole('button',{name:'2단계 인증 끄기',exact:true})).toBeDisabled();await view.context.close();
@@ -84,6 +91,12 @@ await test('A OTP screens, pending preload boundary, dialogs and responsive stat
  await toggle.click();await page.getByRole('button',{name:'필수 적용 켜기',exact:true}).click();await expect(page.getByText('2단계 인증 정책을 저장했습니다.')).toBeVisible();await toggle.click();await expect(page.getByRole('dialog').getByText('이미 등록한 사용자의 2단계 인증은 유지됩니다')).toBeVisible();await page.screenshot({path:`${captures}/policy-off-confirm-1280-light.png`,fullPage:true});await page.getByRole('button',{name:'필수 적용 해제',exact:true}).click();await expect(toggle).not.toBeChecked();await view.context.close();
  view=await open('account');page=view.page;const reset=page.locator('[data-admin-otp="account"]').getByRole('button',{name:'초기화',exact:true});await reset.click();await expect(page.getByRole('dialog').getByText('전체 필수 적용 중이면 다음 로그인 때 다시 등록해야 합니다.')).toBeVisible();await page.keyboard.press('Escape');await expect(reset).toBeFocused();
  await reset.click();await page.getByRole('dialog').getByRole('button',{name:'초기화',exact:true}).click();await expect(page.locator('[data-admin-otp="account"]').getByText('미등록',{exact:true})).toBeVisible();await view.context.close();
+ // D1 applied policy with failed status read is explicit and does not offer stale mutation.
+ view=await open('policy');page=view.page;
+ await page.route('**/api/admin/otp/policy',async route=>{if(route.request().method()==='PUT')await route.fulfill({json:{forceAll:true,revision:'2',result:'partial',warnings:[{code:'OTP_STATUS_UNAVAILABLE',message:'합성 후속 조회 실패'}]}});else await route.continue();});
+ await page.getByRole('checkbox',{name:'전체 강제',exact:true}).click();await page.getByRole('button',{name:'필수 적용 켜기',exact:true}).click();
+ await expect(page.getByText('정책은 적용됐지만 현황을 조회하지 못했어요. 현재 상태를 다시 확인해 주세요.',{exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'현재 상태 다시 읽기',exact:true})).toBeEnabled();assert.equal(await page.getByRole('checkbox').count(),0);await view.context.close();
  // Busy controls prevent duplicate mutation and Escape cannot close a running dialog.
  view=await open('enrollment');page=view.page;let releaseCode,codeRequests=0;const codeGate=new Promise(resolve=>{releaseCode=resolve;});
  await page.route('**/api/otp/enrollment/confirm',async route=>{codeRequests++;await codeGate;await route.continue();});await page.getByLabel('6자리 인증 코드').fill('123456');await page.getByRole('button',{name:'확인하고 켜기',exact:true}).click();await expect(page.getByRole('button',{name:'등록 중…',exact:true})).toBeDisabled();await expect(page.getByRole('button',{name:'취소',exact:true})).toBeDisabled();assert.equal(codeRequests,1);releaseCode();await expect(page.locator('.otp-badge')).toHaveText('켜짐');await view.context.close();

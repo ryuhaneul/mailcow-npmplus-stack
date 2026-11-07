@@ -11,11 +11,12 @@ export default function OtpSettings() {
   async function save() {
     if (busy || confirm === null || error) return;
     setBusy(true);
-    try { await adminApi('/api/admin/otp/policy', { method: 'PUT', body: { forceAll: confirm.forceAll, revision: confirm.revision, confirm: true } }); setConfirm(null); setSaved(true); result.reload(); }
+    try { const response = await adminApi('/api/admin/otp/policy', { method: 'PUT', body: { forceAll: confirm.forceAll, revision: confirm.revision, confirm: true } }); setConfirm(null); setSaved(response); if (response.result !== 'partial') result.reload(); }
     catch (failure) { setError(failure); }
     finally { setBusy(false); }
   }
   const close = () => { if (!busy) { setConfirm(null); setError(null); } };
+  if (saved?.result === 'partial') return <div data-admin-otp="policy"><Notice tone="warn"><p role="status">정책은 적용됐지만 현황을 조회하지 못했어요. 현재 상태를 다시 확인해 주세요.</p><button class="btn" onClick={() => { setSaved(false); result.reload(); }}>현재 상태 다시 읽기</button></Notice></div>;
   if (result.loading) return <Loading/>;
   if (result.error) return <LoadError error={result.error} retry={result.reload}/>;
   const value = result.data;

@@ -5,7 +5,7 @@ export default async function eventRoutes(app, { listService }) {
   const streams = new Set();
   app.addHook('preClose', async () => { for (const stream of streams) stream.destroy(); });
   app.get('/api/events', (request, reply) => {
-    const stream = service.open(request.session);
+    const stream = service.open(request.session, request.sessionAuth);
     streams.add(stream);
     const abort = () => stream.destroy();
     reply.raw.once('close', abort);

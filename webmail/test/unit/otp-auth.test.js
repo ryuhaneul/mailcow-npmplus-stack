@@ -203,3 +203,32 @@ test('rotate rechecks Map identity after assertAlive yields, and leaves a destro
   await assert.rejects(rotating, { code: 'SESSION_EXPIRED' }); await destroying;
   await assert.rejects(f.app.sessions.get(token(logged)), { code: 'SESSION_EXPIRED' });
 });
+
+
+test('D1 delayed old pending cookies cannot enter protected HTTP/SSE after OTP rotation', async t => {
+ for (const enrollment of [false,true]) for (const url of ['/api/otp-test-mail','/api/events']) {
+  const f=await fixture(t); if(enrollment)f.otp.force(true);else f.otp.register(email,seed);
+  const logged=await f.login(),h=headers(logged);let payload,path;
+  if(enrollment){const begun=await post(f,'/api/otp/enrollment',h,{}),owner=await f.app.sessions.get(token(logged));payload={draftId:begun.json().draftId,code:hotp(owner.enrollmentDraft.seed,BigInt(Math.floor(f.time/30000)))};path='/api/otp/enrollment/confirm';}
+  else{payload={code:f.code()};path='/api/auth/otp';}
+  let resume,entered,first=true,watches=0;const reached=new Promise(resolve=>{entered=resolve;}),read=f.otp.store.readAccess;
+  f.app.imap.watch=()=>{watches++;return()=>{};};
+  f.otp.store.readAccess=async(...args)=>{const snapshot=await read(...args);if(first){first=false;entered();await new Promise(resolve=>{resume=resolve;});}return snapshot;};
+  const delayed=f.app.inject({url,headers:h});await reached;
+  const success=await post(f,path,h,payload);assert.equal(success.statusCode,200,success.body);assert.equal(success.json().step,'done');
+  resume();fail(await delayed,403,'SESSION_EXPIRED');assert.equal(f.calls,0);assert.equal(watches,0);
+  assert.equal((await f.app.inject({url:'/api/auth/session',headers:headers(success)})).statusCode,200);
+ }
+});
+test('D1 logout bypasses storage/envelope failures while enforcing Origin/CSRF',async t=>{
+ for(const mode of ['ready-db','pending-db','pending-envelope']){
+  const f=await fixture(t);if(mode.startsWith('pending'))f.otp.register(email,seed);
+  const logged=await f.login(),h=headers(logged),before=f.otp.reads;
+  if(mode.endsWith('db'))f.otp.unavailable=true;else f.otp.rows.get(email).envelope.tag[0]^=1;
+  fail(await post(f,'/api/auth/logout',{...h,origin:'https://evil.example.com'},{}),403,'BAD_ORIGIN');
+  fail(await post(f,'/api/auth/logout',{...h,'x-webmail-csrf':'wrong'},{}),403,'CSRF');
+  const response=await post(f,'/api/auth/logout',h,{});assert.equal(response.statusCode,204,response.body);assert.match(response.headers['set-cookie'],/Max-Age=0/);assert.equal(f.otp.reads,before);
+  f.otp.unavailable=false;if(mode.endsWith('envelope'))f.otp.rows.get(email).envelope.tag[0]^=1;
+  fail(await f.app.inject({url:'/api/auth/session',headers:h}),403,'SESSION_EXPIRED');
+ }
+});

@@ -42,11 +42,11 @@ export function createOtpService({ store, sessions, limiter, config, now = Date.
     session.pendingUntil = session.state === 'ready' ? null : now() + pendingMs;
     return snapshot;
   }
-  async function checkAccess(session) {
-    await sessions.assertAlive(session);
+  async function checkAccess(session, binding) {
+    await sessions.assertAlive(session, binding);
     const snapshot = await store.readAccess(session);
-    // A queued state check may finish after logout/reset has destroyed this session.
-    await sessions.assertAlive(session);
+    // Reject requests presented with a cookie that rotated while SQL was pending.
+    await sessions.assertAlive(session, binding);
     if (!snapshot || snapshot.version !== session.otpVersion) return expire(session);
     validateEnvelope(snapshot);
     if ((session.state === 'enroll' || session.enrollmentDraft) && session.policyRevision !== snapshot.policyRevision) return expire(session);
@@ -56,7 +56,9 @@ export function createOtpService({ store, sessions, limiter, config, now = Date.
     session.policyRevision = snapshot.policyRevision;
     return snapshot;
   }
-  function authorize(session, method, path) {
+  function authorize(session, method, path, binding) {
+    if (binding && binding.cookieHash !== session.cookieHash) throw new AppError(403, 'SESSION_EXPIRED', '다시 로그인해 주세요.');
+    if (binding && binding.state !== 'ready' && !pendingPaths[binding.state]?.has(`${method} ${path}`)) throw requireStep(session);
     if (session.state !== 'ready' && !pendingPaths[session.state]?.has(`${method} ${path}`)) throw requireStep(session);
   }
   function validateBody(body, fields) {

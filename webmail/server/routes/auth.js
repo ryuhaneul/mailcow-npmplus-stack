@@ -26,6 +26,7 @@ export async function installAuth(app, { config, verifyLogin, clientFactory, now
   app.decorate('rateLimiter', rateLimiter);
   app.decorateRequest('session', null);
   app.decorateRequest('otpSnapshot', null);
+  app.decorateRequest('sessionAuth', null);
   const timer = setInterval(() => {
     rateLimiter.sweep(); otpLimiter.sweep();
     sessions.sweep().catch(() => app.log.error({ code: 'SESSION_SWEEP_FAILED' }, '만료 세션 정리에 실패했습니다.'));
@@ -47,8 +48,10 @@ export async function installAuth(app, { config, verifyLogin, clientFactory, now
     }
     reply.header('cache-control', 'no-store');
     try {
-      request.session = await sessions.get(request.cookies[cookieName]);
-      request.otpSnapshot = await otp.checkAccess(request.session);
+      request.sessionAuth = {};
+      request.session = await sessions.get(request.cookies[cookieName], request.sessionAuth);
+      await sessions.assertAlive(request.session, request.sessionAuth);
+      if (!(request.method === 'POST' && path === '/api/auth/logout')) request.otpSnapshot = await otp.checkAccess(request.session, request.sessionAuth);
     } catch (error) {
       if (error.code === 'OTP_PENDING_EXPIRED') reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
       throw error;
@@ -57,7 +60,7 @@ export async function installAuth(app, { config, verifyLogin, clientFactory, now
       checkOrigin(request, config.publicHostnames);
       checkCsrf(request);
     }
-    otp.authorize(request.session, request.method, path);
+    otp.authorize(request.session, request.method, path, request.sessionAuth);
   });
   await app.register(authRoutes, { config, verifyLogin, sessions, rateLimiter });
 }

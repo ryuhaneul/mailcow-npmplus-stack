@@ -72,7 +72,7 @@ export default function OtpEnrollment({ onComplete, onCancel, onLogout, onBusy =
     try { await navigator.clipboard.writeText(draft.manualKey); setCopyNotice('키를 복사했어요.'); }
     catch { setCopyNotice('복사하지 못했어요. 수동 입력 키를 선택해 복사해 주세요.'); }
   }
-  if (!draft) return <div aria-busy={busy}><p class="otp-error" role="alert">{error}</p>{busy ? <p role="status">QR 코드를 준비하고 있어요…</p> : <button class="btn" onClick={begin}>새 QR 코드로 다시 시작</button>}{onCancel && <button class="btn ghost" onClick={onCancel} disabled={busy}>취소</button>}</div>;
+  if (!draft) return <div aria-busy={busy}><p class="otp-error" role="alert">{error}</p>{busy ? <p role="status">QR 코드를 준비하고 있어요…</p> : <button class="btn" onClick={begin}>새 QR 코드로 다시 시작</button>}{onCancel && <button class="btn ghost" onClick={onCancel} disabled={busy}>취소</button>}{onLogout && <button class="btn ghost" onClick={onLogout} disabled={busy}>로그아웃</button>}</div>;
   return <div class="otp-enroll">
     <section class="qr-side"><h3>1. 인증 앱에 추가하세요</h3><p>인증 앱에서 QR 코드를 스캔하거나<br/>아래 키를 직접 입력해 주세요.</p>
       <img class="qr" src={draft.qrDataUrl} alt="인증 앱 등록용 QR 코드" width="156" height="156" referrerPolicy="no-referrer"/>

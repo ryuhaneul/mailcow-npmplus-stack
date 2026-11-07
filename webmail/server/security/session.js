@@ -48,7 +48,7 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
     if (results.some(result => result.status === 'rejected')) logger.error({ code: 'SESSION_CLEANUP_FAILED', email: session.email, ip: session.ip }, '세션 자원 정리에 실패했습니다.');
     logger.info({ code, email: session.email, ip: session.ip }, '로그인 세션을 종료했습니다.');
   }
-  async function get(token) {
+  async function get(token, binding) {
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new AppError(403, 'NO_SESSION', '로그인이 필요해요.');
     const session = sessions.get(sessionHash(token));
     if (!session) throw new AppError(403, 'SESSION_EXPIRED', '로그인이 만료됐어요. 다시 로그인해 주세요.');
@@ -57,6 +57,7 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
       await destroy(session, code);
       throw new AppError(403, code, '로그인이 만료됐어요. 다시 로그인해 주세요.');
     }
+    if (binding) Object.assign(binding, { cookieHash: sessionHash(token), state: session.state });
     session.lastSeen = now();
     return session;
   }
@@ -64,7 +65,8 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
     session.enrollmentDraft?.seed.fill(0);
     session.enrollmentDraft = null;
   }
-  async function assertAlive(session) {
+  async function assertAlive(session, binding) {
+    if (binding && binding.cookieHash !== session.cookieHash) throw new AppError(403, 'SESSION_EXPIRED', '다시 로그인해 주세요.');
     if (sessions.get(session.cookieHash) !== session) throw new AppError(403, 'SESSION_EXPIRED', '다시 로그인해 주세요.');
     if (expired(session)) {
       const code = session.pendingUntil !== null && now() >= session.pendingUntil ? 'OTP_PENDING_EXPIRED' : 'SESSION_EXPIRED';
@@ -84,7 +86,7 @@ export async function createSessionStore({ config, logger, now = Date.now, tempR
   }
   let accessChecker;
   function setAccessChecker(fn) { accessChecker = fn; }
-  async function checkAccess(session) { await assertAlive(session); return accessChecker?.(session); }
+  async function checkAccess(session, binding) { await assertAlive(session, binding); return accessChecker?.(session, binding); }
   async function destroyOthersFor(session) {
     await Promise.all([...sessions.values()].filter(other => other !== session && other.email === session.email).map(other => destroy(other, 'SESSIONS_REVOKED')));
   }

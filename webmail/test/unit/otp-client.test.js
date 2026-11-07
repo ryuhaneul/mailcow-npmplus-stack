@@ -149,4 +149,11 @@ test('OTP settings bootstrap follows the actual fixture session/prefs/status res
   assert.equal(root.querySelector('button[type=submit]').className, 'btn');
   assert.equal(root.querySelector('input').disabled, false);
   assert.equal(document.activeElement, root.querySelector('input'));
+  let releaseBegin,loggedOut=0;const beginGate=new Promise(resolve=>{releaseBegin=resolve;});
+  globalThis.fetch=async()=>{await beginGate;return Response.json({error:{code:'INTERNAL_ERROR',message:'합성 QR 생성 실패'}},{status:500});};
+  const {default:OtpEnrollment}=await import('../../web/src/components/OtpEnrollment.jsx');
+  await act(async()=>render(h(OtpEnrollment,{onLogout:()=>{loggedOut++;}}),root));
+  let logoutButton=[...root.querySelectorAll('button')].find(node=>node.textContent==='로그아웃');assert.equal(logoutButton.disabled,true);
+  await act(async()=>{releaseBegin();await new Promise(resolve=>setTimeout(resolve,30));});logoutButton=[...root.querySelectorAll('button')].find(node=>node.textContent==='로그아웃');
+  assert.equal(logoutButton.disabled,false);assert.match(root.textContent,/합성 QR 생성 실패/);await act(async()=>logoutButton.click());assert.equal(loggedOut,1);
 });

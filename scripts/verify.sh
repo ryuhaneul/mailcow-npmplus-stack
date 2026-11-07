@@ -217,6 +217,7 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     check "Template domain groups (block + doveconf)" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-template-groups.sh" --check
     check "Dovecot Webmail blocks" env MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-webmail.sh" --check
     check "Webmail notices schema and counter" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" --check
+    check "Webmail OTP key prepared privately" webmail_ensure_otp_key --check
     check "Webmail directory/notices and enabled admin DB grants" env MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" --check
     check "Unauthenticated logout: 403, no WWW-Authenticate" webmail_logout_unauthenticated
     if [ "${WEBMAIL_MAIL_TLS_MODE:-verify}" = pin ]; then

@@ -24,22 +24,24 @@ statefile = root/'schema.json'
 state = json.loads(statefile.read_text()) if statefile.exists() else {}
 if 'CREATE DATABASE' in sql:
     assert 'CREATE DATABASE IF NOT EXISTS mailstack_webmail CHARACTER SET utf8mb4' in sql
-    assert sql.count('CREATE TABLE IF NOT EXISTS') == 8
-    assert sql.count('ENGINE=InnoDB DEFAULT CHARSET=utf8mb4') == 8
+    assert sql.count('CREATE TABLE IF NOT EXISTS') == 10
+    assert sql.count('ENGINE=InnoDB DEFAULT CHARSET=utf8mb4') == 10
     for field in ('title VARCHAR(200)', 'body_html MEDIUMTEXT', "ENUM('update','maintenance','info')", "ENUM('draft','published','hidden')", 'publish_seq BIGINT NULL UNIQUE', 'published_at DATETIME NULL', 'updated_by VARCHAR(255)', 'created_at DATETIME(6)', 'updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)', 'PRIMARY KEY (notice_id, domain)', 'ON DELETE CASCADE', 'email VARCHAR(255)', 'last_seen_seq BIGINT', 'CHECK (id = 1)', 'INSERT IGNORE INTO mailstack_webmail.notice_counter (id, next_seq) VALUES (1, 0)'):
         assert field in sql, field
     for field in ('name VARCHAR(100)', 'subject TEXT', 'data MEDIUMBLOB', 'PRIMARY KEY (template_id, domain)', 'REFERENCES mailstack_webmail.public_templates(id) ON DELETE CASCADE'):
         assert field in sql, field
     for field in ('login_ip_allowlist', 'ip VARCHAR(64)', 'note VARCHAR(200)', 'created_by VARCHAR(255)'):
         assert field in sql, field
+    for field in ('otp_accounts', 'version BINARY(16)', 'secret_ciphertext VARBINARY(20)', 'nonce BINARY(12)', 'tag BINARY(16)', 'key_version SMALLINT UNSIGNED', 'last_step BIGINT', 'otp_policy', 'force_all TINYINT(1)', 'revision BIGINT UNSIGNED', 'INSERT IGNORE INTO mailstack_webmail.otp_policy'):
+        assert field in sql, field
     assert 'cid' not in sql.lower()
     assert not re.search(r'^(DROP|TRUNCATE|DELETE|REPLACE|UPDATE)\s', sql, re.M)
     if (root/'ddl-fail').exists(): sys.exit(1)
-    state.setdefault('counter', 0); state.setdefault('notices', []); state.setdefault('reads', {}); state.setdefault('login_ips', [])
+    state.setdefault('otp_accounts', []); state.setdefault('otp_policy', {'force_all': 0, 'revision': 0}); state.setdefault('counter', 0); state.setdefault('notices', []); state.setdefault('reads', {}); state.setdefault('login_ips', [])
     statefile.write_text(json.dumps(state))
 elif not statefile.exists(): sys.exit(1)
 elif 'LIMIT 0' in sql:
-    assert sql.count('LIMIT 0') == 8
+    assert sql.count('LIMIT 0') == 10
 elif 'SELECT COUNT(*) FROM mailstack_webmail.notice_counter' in sql:
     print(int(state.get('counter', -1) >= 0))
 else: sys.exit(91)
@@ -55,11 +57,11 @@ if run --check; then fail 'missing schema passed'; fi
 pass 'missing schema check fails without writes'
 run apply || { cat "$TMP/result"; fail apply; }
 run --check || fail check
-pass 'fresh schema has all eight tables, required fields, constraints and counter seed'
+pass 'fresh schema has all ten tables, required fields, constraints and counter seed'
 python3 - "$TMP/schema.json" <<'PY'
 import json, sys
 from pathlib import Path
-p=Path(sys.argv[1]); p.write_text(json.dumps({'counter': 42, 'notices': [{'id': 3, 'title': 'Synthetic notice'}], 'reads': {'reader@example.test': 41}, 'login_ips': [{'ip': '192.0.2.10', 'note': 'Synthetic exception'}]}))
+p=Path(sys.argv[1]); p.write_text(json.dumps({'otp_accounts': [{'email': 'otp@example.test', 'version': 'synthetic-generation', 'ciphertext': 'synthetic-ciphertext'}], 'otp_policy': {'force_all': 1, 'revision': 7}, 'counter': 42, 'notices': [{'id': 3, 'title': 'Synthetic notice'}], 'reads': {'reader@example.test': 41}, 'login_ips': [{'ip': '192.0.2.10', 'note': 'Synthetic exception'}]}))
 PY
 cp "$TMP/schema.json" "$TMP/schema.before"
 run apply && run --check || fail rerun
@@ -174,7 +176,7 @@ if (
 printf '[{"Containers":{}}]\n' > "$TMP/network.json"
 pass 'update rejects occupied address before upstream or archive container changes'
 for stage in setup update; do
-    for error in none schema grants address; do
+    for error in none schema otp-key grants address; do
         (
             events="$TMP/$stage-$error.events"
             : > "$events"
@@ -185,6 +187,7 @@ for stage in setup update; do
             setup_archive_sync() { :; }
             webmail_ensure_db_password() { echo password >> "$events"; }
             webmail_ensure_admin_db_password() { echo admin-password >> "$events"; }
+            webmail_ensure_otp_key() { echo otp-key >> "$events"; [ "$error" != otp-key ]; }
             webmail_ensure_admin_key() { :; }
             webmail_reconcile_admin_api() { :; }
             webmail_reconcile_trusted_sender() { :; }
@@ -201,7 +204,7 @@ for stage in setup update; do
         ) > "$TMP/result" 2>&1 && result=0 || result=$?
         if [ "$error" = none ]; then
             [ "$result" = 0 ] || fail "$stage success"
-            [ "$(paste -sd, "$TMP/$stage-$error.events")" = load,address,password,admin-password,schema,grants,env,up ] || fail "$stage order"
+            [ "$(paste -sd, "$TMP/$stage-$error.events")" = load,address,password,admin-password,schema,otp-key,grants,env,up ] || fail "$stage order"
         else
             [ "$result" != 0 ] || fail "$stage ignored $error failure"
             ! grep -q '^up$' "$TMP/$stage-$error.events" || fail "$stage started after $error failure"

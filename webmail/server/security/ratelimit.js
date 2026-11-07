@@ -83,3 +83,43 @@ export function createRateLimiter({ now = Date.now, logger, readLoginIps = async
   }
   return { refreshLoginIps, checkLogin, recordFailure, checkPassword, sweep };
 }
+
+// Separate from password login limits: login-IP exceptions never exempt OTP.
+export function createOtpRateLimiter({ now = Date.now } = {}) {
+  const emails = new Map(), ips = new Map();
+  const windowMs = 600_000, blockMs = 300_000;
+  function prune(map, key) {
+    const record = map.get(key);
+    if (!record) return null;
+    record.times = record.times.filter(attempt => attempt.at > now() - windowMs);
+    if (!record.times.length && record.blockedUntil <= now()) { map.delete(key); return null; }
+    return record;
+  }
+  function reserve(ip, email) {
+    const buckets = [[emails, email, 5], [ips, ip, 30]];
+    const until = Math.max(...buckets.map(([map, key]) => prune(map, key)?.blockedUntil ?? 0));
+    if (until > now()) {
+      const error = new AppError(429, 'OTP_RATE_LIMITED', '인증 시도가 너무 많아요. 잠시 뒤 다시 시도해 주세요.');
+      error.retryAfter = Math.max(1, Math.ceil((until - now()) / 1000)); throw error;
+    }
+    const attempt = { at: now() };
+    for (const [map, key, limit] of buckets) {
+      const record = prune(map, key) ?? { times: [], blockedUntil: 0 };
+      record.times.push(attempt);
+      if (record.times.length >= limit) record.blockedUntil = now() + blockMs;
+      map.set(key, record);
+    }
+    let released = false;
+    return () => {
+      if (released) return; released = true;
+      for (const [map, key, limit] of buckets) {
+        const record = prune(map, key); if (!record) continue;
+        record.times = record.times.filter(value => value !== attempt);
+        record.blockedUntil = record.times.length >= limit ? record.times.at(-1).at + blockMs : 0;
+        prune(map, key);
+      }
+    };
+  }
+  function sweep() { for (const map of [emails, ips]) for (const key of map.keys()) prune(map, key); }
+  return { reserve, sweep };
+}

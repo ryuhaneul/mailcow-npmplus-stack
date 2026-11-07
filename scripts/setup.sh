@@ -851,6 +851,7 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     webmail_ensure_db_password && webmail_ensure_admin_db_password || die "Webmail DB password preparation failed"
     MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" apply \
         || die "Webmail notices schema preparation failed"
+    webmail_ensure_otp_key || die "Webmail OTP key preparation failed"
     MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply \
         || die "Webmail DB grants preparation failed"
 fi

@@ -40,44 +40,40 @@ mysql_root() {
 # SHOW GRANTS can contain authentication hashes. Normalize only privilege metadata;
 # never print the original output, root password, or generated user password.
 normalize_grants() {
-    local line rest columns table account_tail usage_tail privileges
-    while IFS= read -r line; do
-        line=${line//\`/}
-        line=${line//\'/}
-        case "$line" in
-            "GRANT USAGE ON *.* TO $TARGET"*)
-                usage_tail=${line#"GRANT USAGE ON *.* TO $TARGET"}
-                case "$usage_tail" in ''|" IDENTIFIED "*|" REQUIRE "*) ;; *) return 1 ;; esac
-                [[ "$usage_tail" != *'WITH GRANT OPTION'* ]] || return 1
-                ;;
-            'GRANT SELECT ('*)
-                rest=${line#'GRANT SELECT ('}
-                [[ "$rest" == *') ON '* ]] || return 1
-                columns=${rest%%') ON '*}
-                rest=${rest#*') ON '}
-                [[ "$rest" == *' TO '* ]] || return 1
-                table=${rest%%' TO '*}
-                account_tail=${rest#*' TO '}
-                [ "$account_tail" = "$TARGET" ] || return 1
-                [[ "$table" == "$WEBMAIL_DB_NAME."* ]] || return 1
-                table=${table#"$WEBMAIL_DB_NAME."}
-                columns=$(printf '%s' "$columns" | tr -d ' ' | tr ',' '\n' | LC_ALL=C sort | paste -sd, -)
-                printf '%s:%s\n' "$table" "$columns"
-                ;;
-            'GRANT '*' ON '*' TO '*)
-                rest=${line#'GRANT '}
-                privileges=${rest%%' ON '*}
-                rest=${rest#*' ON '}
-                table=${rest%%' TO '*}
-                account_tail=${rest#*' TO '}
-                [ "$account_tail" = "$TARGET" ] || return 1
-                [[ "$table" == mailstack_webmail.* ]] || return 1
-                privileges=$(printf '%s' "$privileges" | tr -d ' ' | tr ',' '\n' | LC_ALL=C sort | paste -sd, -)
-                printf '%s:%s\n' "$table" "$privileges"
-                ;;
-            *) return 1 ;;
-        esac
-    done
+    python3 -c '
+import re,sys
+schema,target=sys.argv[1:]
+try:
+    for raw in sys.stdin:
+        line=raw.strip().replace("`", "").replace(chr(39), "")
+        if "WITH GRANT OPTION" in line: raise ValueError()
+        usage="GRANT USAGE ON *.* TO "+target
+        if line.startswith(usage):
+            tail=line[len(usage):]
+            if tail and not tail.startswith((" IDENTIFIED ", " REQUIRE ")): raise ValueError()
+            continue
+        match=re.fullmatch(r"GRANT (.+) ON ([a-zA-Z0-9_.*]+) TO (.+)",line)
+        if not match or match[3]!=target: raise ValueError()
+        spec,table=match[1],match[2]
+        entries=re.split(r",\s*(?![^()]*\))",spec)
+        parsed=[]
+        for entry in entries:
+            item=re.fullmatch(r"(SELECT|INSERT|UPDATE|DELETE)(?: \(([^()]+)\))?",entry.strip())
+            if not item: raise ValueError()
+            cols=None if item[2] is None else sorted(c.strip() for c in item[2].split(","))
+            if cols is not None and (len(set(cols))!=len(cols) or not all(re.fullmatch(r"[a-z_]+",c) for c in cols)): raise ValueError()
+            parsed.append((item[1],cols))
+        if table in ("mailstack_webmail.otp_accounts","mailstack_webmail.otp_policy"):
+            for verb,cols in parsed:
+                print(table+":"+verb+(":"+",".join(cols) if cols is not None else ""))
+        elif table.startswith(schema+".") and len(parsed)==1 and parsed[0][0]=="SELECT" and parsed[0][1] is not None:
+            print(table[len(schema)+1:]+":"+",".join(parsed[0][1]))
+        elif table.startswith("mailstack_webmail.") and all(cols is None for _,cols in parsed):
+            print(table+":"+",".join(sorted(verb for verb,_ in parsed)))
+        else: raise ValueError()
+except Exception:
+    sys.exit(1)
+' "$WEBMAIL_DB_NAME" "$TARGET"
 }
 verify_grants() {
     local grants actual expected
@@ -85,6 +81,11 @@ verify_grants() {
     actual=$(printf '%s\n' "$grants" | normalize_grants | LC_ALL=C sort) || return 1
     if [ "${1:-relay}" = admin ]; then
         expected=$(printf '%s\n' \
+            'mailstack_webmail.otp_accounts:SELECT:email,registered_at,version' \
+            'mailstack_webmail.otp_accounts:UPDATE:key_version,last_step,nonce,registered_at,secret_ciphertext,tag,version' \
+            'mailstack_webmail.otp_accounts:DELETE' \
+            'mailstack_webmail.otp_policy:SELECT:force_all,id,revision,updated_at,updated_by' \
+            'mailstack_webmail.otp_policy:UPDATE:force_all,revision,updated_at,updated_by' \
             'mailstack_webmail.notices:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.notice_domains:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.notice_counter:SELECT,UPDATE' \
@@ -94,6 +95,10 @@ verify_grants() {
             'mailstack_webmail.public_template_files:DELETE,INSERT,SELECT,UPDATE' | LC_ALL=C sort)
     else
     expected=$(printf '%s\n' \
+        'mailstack_webmail.otp_accounts:SELECT:email,key_version,last_step,nonce,registered_at,secret_ciphertext,tag,version' \
+        'mailstack_webmail.otp_accounts:INSERT:email,version' \
+        'mailstack_webmail.otp_accounts:UPDATE:key_version,last_step,nonce,registered_at,secret_ciphertext,tag,version' \
+        'mailstack_webmail.otp_policy:SELECT:force_all,id,revision' \
         'alias:active,address,domain,goto,sender_allowed' \
         'alias_domain:active,alias_domain,target_domain' \
         'domain:active,domain' \
@@ -145,6 +150,8 @@ admin_account() (
             printf "CREATE USER IF NOT EXISTS %s IDENTIFIED BY '%s';\n" "$ACCOUNT" "$PASSWORD_SQL"
             printf "ALTER USER %s IDENTIFIED BY '%s';\n" "$ACCOUNT" "$PASSWORD_SQL"
             printf 'REVOKE ALL PRIVILEGES, GRANT OPTION FROM %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT (`email`,`version`,`registered_at`), UPDATE (`version`,`secret_ciphertext`,`nonce`,`tag`,`key_version`,`registered_at`,`last_step`), DELETE ON mailstack_webmail.otp_accounts TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT (`id`,`force_all`,`revision`,`updated_at`,`updated_by`), UPDATE (`force_all`,`revision`,`updated_at`,`updated_by`) ON mailstack_webmail.otp_policy TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, DELETE ON mailstack_webmail.login_ip_allowlist TO %s;\n' "$ACCOUNT"
@@ -189,6 +196,8 @@ case "$MODE" in
             printf 'GRANT SELECT (`alias_domain`, `target_domain`, `active`) ON `%s`.`alias_domain` TO %s;\n' "$WEBMAIL_DB_NAME" "$ACCOUNT"
             printf 'GRANT SELECT (`domain`, `active`) ON `%s`.`domain` TO %s;\n' "$WEBMAIL_DB_NAME" "$ACCOUNT"
             printf 'GRANT SELECT (`logged_in_as`, `send_as`) ON `%s`.`sender_acl` TO %s;\n' "$WEBMAIL_DB_NAME" "$ACCOUNT"
+            printf 'GRANT SELECT (`email`,`version`,`secret_ciphertext`,`nonce`,`tag`,`key_version`,`registered_at`,`last_step`), INSERT (`email`,`version`), UPDATE (`version`,`secret_ciphertext`,`nonce`,`tag`,`key_version`,`registered_at`,`last_step`) ON mailstack_webmail.otp_accounts TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT (`id`,`force_all`,`revision`) ON mailstack_webmail.otp_policy TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.login_ip_allowlist TO %s;\n' "$ACCOUNT"

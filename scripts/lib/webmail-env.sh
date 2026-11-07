@@ -21,6 +21,8 @@ webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 webmail_options() {
     WEBMAIL_ADMIN_DOVEADM_ENABLE="${WEBMAIL_ADMIN_DOVEADM_ENABLE:-false}"
     WEBMAIL_ADMIN_RELAY_ENABLE="${WEBMAIL_ADMIN_RELAY_ENABLE:-false}"
+    WEBMAIL_OTP_KEY="${WEBMAIL_OTP_KEY:-}"
+    WEBMAIL_OTP_KEY_VERSION="${WEBMAIL_OTP_KEY_VERSION:-}"
     WEBMAIL_ADMIN_DOVEADM_KEY="${WEBMAIL_ADMIN_DOVEADM_KEY:-}"
     MAIL_FTS_NIGHTLY_ENABLE="${MAIL_FTS_NIGHTLY_ENABLE:-false}"
     MAIL_FTS_NIGHTLY_START="${MAIL_FTS_NIGHTLY_START:-03:00}"
@@ -125,6 +127,8 @@ webmail_load_config() {
     WEBMAIL_ADMIN_DOVEADM_ENABLE=false
     WEBMAIL_ADMIN_RELAY_ENABLE=false
     WEBMAIL_ADMIN_DOVEADM_KEY=
+    WEBMAIL_OTP_KEY=
+    WEBMAIL_OTP_KEY_VERSION=
     WEBMAIL_ADMIN_HOSTNAME=
     WEBMAIL_ADMIN_SESSION_IDLE_MIN=
     WEBMAIL_ADMIN_SESSION_MAX_HOURS=
@@ -242,6 +246,58 @@ webmail_ensure_admin_db_password() {
         rm -f "$tmp"
         return 1
     fi
+}
+
+# The key is independent of connection credentials. Never regenerate over OTP data.
+webmail_ensure_otp_key() {
+    set +x
+    [ "$WEBMAIL_ENABLE" = true ] || return 0
+    local mode="${1:-apply}" root_password present registered tmp line found_key=0 found_version=0
+    case "$mode" in apply|--check) ;; *) webmail_error 'invalid OTP key mode'; return 1 ;; esac
+    if [ -n "${WEBMAIL_OTP_KEY:-}" ] || [ -n "${WEBMAIL_OTP_KEY_VERSION:-}" ]; then
+        [[ "${WEBMAIL_OTP_KEY:-}" =~ ^[a-fA-F0-9]{64}$ ]] && [ "${WEBMAIL_OTP_KEY_VERSION:-}" = 1 ] \
+            || { webmail_error 'invalid OTP key configuration'; return 1; }
+        if [ "$mode" = --check ]; then
+            [ "$(stat -c %a "$WEBMAIL_STACK_ENV")" = 600 ] || { webmail_error 'OTP key storage mode must be 600'; return 1; }
+        else chmod 600 "$WEBMAIL_STACK_ENV" || return 1; fi
+        return 0
+    fi
+    [ "$mode" != --check ] || { webmail_error 'OTP key has not been prepared'; return 1; }
+    root_password=$(webmail_mailcow_value DBROOT)
+    [ -n "$root_password" ] || { webmail_error 'DBROOT is missing'; return 1; }
+    present=$(
+        cd "$MAILCOW_DIR" && MYSQL_PWD="$root_password" docker compose exec -T -e MYSQL_PWD mysql-mailcow \
+            mysql --user=root --batch --raw --skip-column-names 2>/dev/null <<'SQL'
+SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='mailstack_webmail' AND table_name='otp_accounts';
+SQL
+    ) || { webmail_error 'could not check OTP schema before key generation'; return 1; }
+    case "$present" in
+        0) registered=0 ;;
+        1)
+            registered=$(
+                cd "$MAILCOW_DIR" && MYSQL_PWD="$root_password" docker compose exec -T -e MYSQL_PWD mysql-mailcow \
+                    mysql --user=root --batch --raw --skip-column-names 2>/dev/null <<'SQL'
+SELECT COUNT(*) FROM mailstack_webmail.otp_accounts WHERE registered_at IS NOT NULL;
+SQL
+            ) || { webmail_error 'could not check OTP registrations before key generation'; return 1; }
+            ;;
+        *) webmail_error 'unexpected OTP schema state'; return 1 ;;
+    esac
+    [[ "$registered" =~ ^[0-9]+$ ]] && [ "$registered" = 0 ] \
+        || { webmail_error 'OTP registrations exist or are unavailable; restore the original OTP key'; return 1; }
+    WEBMAIL_OTP_KEY=$(openssl rand -hex 32) || return 1
+    WEBMAIL_OTP_KEY_VERSION=1
+    tmp=$(mktemp "$WEBMAIL_STACK_ENV.otp.XXXXXX") || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ ^(export[[:space:]]+)?WEBMAIL_OTP_KEY= ]]; then
+            if [ "$found_key" -eq 0 ]; then printf 'WEBMAIL_OTP_KEY=%s\n' "$WEBMAIL_OTP_KEY"; found_key=1; fi
+        elif [[ "$line" =~ ^(export[[:space:]]+)?WEBMAIL_OTP_KEY_VERSION= ]]; then
+            if [ "$found_version" -eq 0 ]; then printf 'WEBMAIL_OTP_KEY_VERSION=1\n'; found_version=1; fi
+        else printf '%s\n' "$line"; fi
+    done < "$WEBMAIL_STACK_ENV" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if [ "$found_key" -eq 0 ]; then printf 'WEBMAIL_OTP_KEY=%s\n' "$WEBMAIL_OTP_KEY" >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+    if [ "$found_version" -eq 0 ]; then printf 'WEBMAIL_OTP_KEY_VERSION=1\n' >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+    if ! chmod 600 "$tmp" || ! mv "$tmp" "$WEBMAIL_STACK_ENV"; then rm -f "$tmp"; return 1; fi
 }
 
 webmail_ensure_admin_key() {
@@ -398,6 +454,8 @@ webmail_generate_env() (
         webmail_env_line MAIL_TLS_SERVERNAME "$WEBMAIL_TLS_NAME" &&
         webmail_env_line MAIL_TLS_MODE "$WEBMAIL_MAIL_TLS_MODE" &&
         webmail_env_line MAIL_TLS_PIN_FILE "$pin_file" &&
+        webmail_env_line OTP_KEY "${WEBMAIL_OTP_KEY:-}" &&
+        webmail_env_line OTP_KEY_VERSION "${WEBMAIL_OTP_KEY_VERSION:-}" &&
         webmail_env_line DB_HOST mysql-mailcow &&
         webmail_env_line DB_NAME "$WEBMAIL_DB_NAME" &&
         webmail_env_line DB_USER webmail_ro &&
@@ -534,6 +592,8 @@ webmail_generate_admin_env() (
             webmail_env_line LOG_ARCHIVE_URL http://log-archiver:8080 &&
             webmail_env_line LOG_ARCHIVE_KEY "$LOG_ARCHIVE_KEY";
         }; } &&
+        webmail_env_line OTP_KEY "${WEBMAIL_OTP_KEY:-}" &&
+        webmail_env_line OTP_KEY_VERSION "${WEBMAIL_OTP_KEY_VERSION:-}" &&
         webmail_env_line DB_HOST mysql-mailcow &&
         webmail_env_line DB_NAME mailstack_webmail &&
         webmail_env_line DB_USER webmail_notices_admin &&
@@ -652,7 +712,7 @@ webmail_extract_tls_pin() (
 )
 
 webmail_prepare() {
-    webmail_load_config "$1" "$2" && webmail_ensure_db_password && webmail_ensure_admin_db_password && webmail_ensure_admin_key && log_archive_ensure_key &&
+    webmail_load_config "$1" "$2" && webmail_ensure_db_password && webmail_ensure_admin_db_password && webmail_ensure_otp_key && webmail_ensure_admin_key && log_archive_ensure_key &&
         webmail_reconcile_admin_api "$(dirname "${BASH_SOURCE[0]}")/.." &&
         webmail_reconcile_trusted_sender "$(dirname "${BASH_SOURCE[0]}")/.." &&
         webmail_extract_tls_pin "$3" && webmail_generate_env "$3" && webmail_generate_admin_env "$3"

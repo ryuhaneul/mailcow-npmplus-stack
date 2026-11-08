@@ -70,10 +70,11 @@ async function pop3(source, password = env('PASSWORD'), email = env('EMAIL')) {
     lines.write(`PASS ${password}`); const reply = await lines.line(); ensure(/^(\+OK|-ERR)/.test(reply), 'POP3_REPLY'); return reply.startsWith('+OK');
   } finally { lines.socket.destroy(); }
 }
-async function smtp(source, port, password = env('PASSWORD'), email = env('EMAIL')) {
-  let lines = await open(port, source, port === 465);
+async function smtp(source, port, password = env('PASSWORD'), email = env('EMAIL'), expectNoAuth = false) {
+  let lines = await open(port, source, port === 465); let authAdvertised = false;
   async function response() { let reply = await lines.line(); ensure(/^\d{3}[- ]/.test(reply), 'SMTP_REPLY'); const code = reply.slice(0, 3); let count = 0;
-    while (reply[3] === '-') { ensure(++count < 100, 'SMTP_REPLY_LIMIT'); reply = await lines.line(); ensure(reply.startsWith(code), 'SMTP_MULTILINE'); } return Number(code); }
+    if (/^250[- ]AUTH(?:[ =]|$)/i.test(reply)) authAdvertised = true;
+    while (reply[3] === '-') { ensure(++count < 100, 'SMTP_REPLY_LIMIT'); reply = await lines.line(); ensure(reply.startsWith(code), 'SMTP_MULTILINE'); if (/^250[- ]AUTH(?:[ =]|$)/i.test(reply)) authAdvertised = true; } return Number(code); }
   try {
     ensure(await response() === 220, 'SMTP_GREETING'); lines.write('EHLO netlimit-int.example.test'); ensure(await response() === 250, 'SMTP_EHLO');
     if (port !== 465 && !(port === 588 && env('SMTP588_MODE') === 'plain')) {
@@ -81,8 +82,9 @@ async function smtp(source, port, password = env('PASSWORD'), email = env('EMAIL
       const secure = tlsConnect({ socket, servername: env('TLS_SERVERNAME'), rejectUnauthorized: true, ...(env('CA_FILE') ? { ca: readFileSync(env('CA_FILE')) } : {}) });
       secure.setTimeout(12000, () => secure.destroy());
       await new Promise((resolve, reject) => { secure.once('secureConnect', resolve); secure.once('error', () => reject(Error('TLS_FAILED'))); });
-      lines = new Lines(secure); lines.write('EHLO netlimit-int.example.test'); ensure(await response() === 250, 'SMTP_TLS_EHLO');
+      lines = new Lines(secure); authAdvertised = false; lines.write('EHLO netlimit-int.example.test'); ensure(await response() === 250, 'SMTP_TLS_EHLO');
     }
+    if (expectNoAuth) { ensure(!authAdvertised, 'SMTP_AUTH_UNEXPECTED'); return false; }
     lines.write(`AUTH PLAIN ${Buffer.from(`\0${email}\0${password}`).toString('base64')}`);
     const code = await response(); ensure(code === 235 || code === 535, 'SMTP_AUTH_NOT_EXERCISED'); return code === 235;
   } finally { lines.socket.destroy(); }
@@ -97,7 +99,7 @@ async function auth(protocol, source, password = env('PASSWORD'), email = env('E
   }
   return protocol === 'imap' ? imap(source, password) : protocol === 'pop3' ? pop3(source, password, email) : smtp(source, Number(protocol.slice(4)), password, email);
 }
-const authPaths = ['imap', 'pop3', 'smtp465', 'smtp587', 'smtp588', 'smtp25'];
+const authPaths = ['imap', 'pop3', 'smtp465', 'smtp587', 'smtp588'];
 async function request(method, path, body, { mailcow = false, status = 200 } = {}) {
   const response = await fetch(new URL(path, env(mailcow ? 'MAILCOW_URL' : 'ADMIN_URL')), { method, redirect: 'error', signal: AbortSignal.timeout(60000),
     headers: { origin: env('ADMIN_ORIGIN'), [mailcow ? 'x-api-key' : 'x-mailadmin-api-key']: env(mailcow ? 'MAILCOW_KEY' : 'ADMIN_KEY'), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -111,7 +113,7 @@ const detail = (email = env('EMAIL')) => request('GET', mailboxPath(email));
 async function patch(data, email = env('EMAIL')) { const before = await detail(email); const result = await request('PATCH', mailboxPath(email), { etag: before.etag, ...data }); ensure(result.result === 'ok', 'PATCH_PARTIAL'); return result; }
 async function replaceIps(values) {
   const before = await request('GET', '/api/admin/login-ips');
-  for (const item of before.items) await request('DELETE', `/api/admin/login-ips/${encodeURIComponent(item.ip)}`);
+  for (const item of before.items) await request('DELETE', `/api/admin/login-ips/${encodeURIComponent(item.ip)}`, {});
   for (const item of values) await request('POST', '/api/admin/login-ips', { ip: item.ip, note: item.note || '' });
 }
 async function aliases(email) { const list = await request('GET', `/api/admin/aliases?q=${encodeURIComponent(email)}`); return list.items.find(item => item.address === email); }
@@ -173,7 +175,8 @@ if (skip) {
         });
         appName = `netlimit-int-${randomUUID()}`; appPassword = `Int-${randomUUID()}!aA9`;
         await request('POST', '/api/v1/add/app-passwd', { username: env('EMAIL'), app_name: appName, app_passwd: appPassword, app_passwd2: appPassword, active: '1', protocols: ['imap_access', 'pop3_access', 'smtp_access'] }, { mailcow: true });
-        await run('V05 SMTP AUTH on 465/587/588/25 with password and app password', async () => {
+        await run('V05 SMTP AUTH on 465/587/588 and no AUTH advertised on 25 after STARTTLS', async () => {
+          await smtp(env('SOURCE_A'), 25, undefined, undefined, true);
           for (const password of [env('PASSWORD'), appPassword]) { await patch({ protocolInternalOnly: true }); for (const path of authPaths.filter(value => value.startsWith('smtp'))) { await checkAuth(path, env('SOURCE_A'), true, password); await checkAuth(path, env('SOURCE_B'), false, password); }
             await patch({ protocolInternalOnly: false }); for (const path of authPaths.filter(value => value.startsWith('smtp'))) await checkAuth(path, env('SOURCE_B'), true, password); }
         });
@@ -231,8 +234,8 @@ if (skip) {
       const cleanup = async fn => { try { await fn(); } catch { restored = false; } };
       if (appName) await cleanup(async () => {
         const items = await request('GET', `/api/v1/get/app-passwd/all/${encodeURIComponent(env('EMAIL'))}`, undefined, { mailcow: true });
-        const owned = items.filter(item => item.name === appName); if (owned.length) await request('POST', '/api/v1/delete/app-passwd', owned.map(item => String(item.id)), { mailcow: true });
-        const after = await request('GET', `/api/v1/get/app-passwd/all/${encodeURIComponent(env('EMAIL'))}`, undefined, { mailcow: true }); ensure(!after.some(item => item.name === appName), 'APP_PASSWORD_CLEANUP');
+        const owned = (Array.isArray(items) ? items : []).filter(item => item.name === appName); if (owned.length) await request('POST', '/api/v1/delete/app-passwd', owned.map(item => String(item.id)), { mailcow: true });
+        const after = await request('GET', `/api/v1/get/app-passwd/all/${encodeURIComponent(env('EMAIL'))}`, undefined, { mailcow: true }); ensure(!(Array.isArray(after) ? after : []).some(item => item.name === appName), 'APP_PASSWORD_CLEANUP');
       });
       for (const email of [...temporary].reverse()) { await cleanup(() => removeMailbox(email)); await cleanup(() => removeAlias(email)); }
       if (changed) {

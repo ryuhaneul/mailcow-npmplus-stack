@@ -188,8 +188,8 @@ finally에서 mailbox와 alias를 모두 정리한다. 기존 암호·기존 앱
 가능하도록 main이 healthy 상태에서 세 계정/목록을 먼저 준비하고 snapshot을 만든다.
 runner는 조건 이름만 보고 장애를 증명하지 않는다. 실제 주입 및 첫503·로그는 아래 수동 증거가 필요하다.
 포트가 연결 불가하거나 STARTTLS/AUTH가 없으면 거부 성공으로 세지 않고 실패한다.
-SMTP는 AUTH235/535만 판정하고 MAIL/RCPT를 보내지 않는다.25가 SASL-disabled이면 V05를
-통과 처리하지 말고 실제 `smtpd_sasl_auth_enable`/EHLO 증거와 함께 적용 범위를 보고한다.
+SMTP465/587/588은 AUTH235/535만 판정하고 MAIL/RCPT를 보내지 않는다.25는 V05에서
+STARTTLS 뒤 EHLO에 AUTH가 광고되지 않음을 확인하며, 광고되면 실패한다.
 
 ### source A/B 만들기 — VM 호스트에서만
 

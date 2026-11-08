@@ -32,6 +32,9 @@ export function createAdminSessionStore({ config, client, logger, now = Date.now
     cleanup.set(session.id, job);
     try { await job; } finally { cleanup.delete(session.id); }
   }
+  async function destroyOthers(current) {
+    await Promise.all([...sessions.values()].filter(session => session.username === current.username && session.id !== current.id).map(destroy));
+  }
   async function get(token) {
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new AppError(403, 'NO_SESSION', '로그인이 필요해요.');
     const session = sessions.get(sessionHash(token));
@@ -52,5 +55,5 @@ export function createAdminSessionStore({ config, client, logger, now = Date.now
     await Promise.all([...sessions.values()].map(destroy));
     await Promise.all(cleanup.values());
   }
-  return { create, get, destroy, sweep, close, expiresAt };
+  return { create, get, destroy, destroyOthers, sweep, close, expiresAt };
 }

@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { loadAdminConfig } from './config.js';
 import { installAdminAuth } from './routes/auth.js';
+import passwordRoutes from './routes/password.js';
 import { createApiKeyStore } from './api-keys.js';
 import { createApiKeysService } from './services/api-keys.js';
 import apiKeysRoutes from './routes/api-keys.js';
@@ -132,6 +133,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('audit', audit);
   app.decorate('adminLock', adminLock);
   app.decorate('adminHistory', history);
+  await app.register(passwordRoutes);
   const apiKeysService = createApiKeysService({ store: apiKeys, config, audit, lock: adminLock });
   await app.register(apiKeysRoutes, { service: apiKeysService });
   await app.register(historyRoutes, { service: history });

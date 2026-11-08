@@ -23,6 +23,7 @@ else: sys.exit(2)
 MOCK
 chmod +x "$TMP/bin/docker"
 source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
 n=0
 pass() { n=$((n+1)); echo "ok $n - $1"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }

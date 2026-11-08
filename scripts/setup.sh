@@ -860,6 +860,9 @@ webmail_ensure_admin_key || die "Webmail admin key preparation failed"
 webmail_reconcile_admin_api "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Webmail admin API reconciliation failed"
 webmail_reconcile_trusted_sender "$SCRIPT_DIR" 2>&1 | tee -a "$LOGFILE" || die "Trusted sender rule reconciliation failed"
 # Remove callbacks before changing apps when policy prerequisites were disabled.
+if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$WEBMAIL_ENABLE" != true ]; then
+    webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Authentication policy disable reconciliation failed"
+fi
 if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$LOG_ARCHIVE_ENABLE" != true ] || [ -z "$(webmail_mailcow_value API_KEY)" ]; then
     webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy disable reconciliation failed"
 fi
@@ -922,6 +925,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
 fi
 if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && { [ "$WEBMAIL_ADMIN_RELAY_READY" = true ] || [ -f "$MAILCOW_DIR/data/conf/postfix/mailstack-relay/conversion.json" ]; }; then MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-relay-file-mode.sh" apply -y || die "Relay file conversion failed"; fi
 webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"
+webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Authentication policy application failed"
 
 # ============================================================
 # Phase 6c: Junk/Trash retention (independent of Webmail)

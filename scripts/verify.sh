@@ -294,6 +294,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     fi
     check "Monitor storage permissions and unauthenticated APIs: 403" admin_monitor_storage_and_auth
     check "Bounce policy hook/runtime peers or verified disabled state" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
+    check "Authentication policy settings/runtime peers/DB probe" webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
     if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
         check "Archive per-source successful collection field" admin_monitor_archive_contract
     fi
@@ -313,6 +314,7 @@ fi
 
 if [ "$WEBMAIL_ADMIN_ENABLE" != true ]; then
     check "Disabled bounce policy hook absent" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
+    check "Disabled authentication policy hook absent" webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
 fi
 
 # --- Security ---

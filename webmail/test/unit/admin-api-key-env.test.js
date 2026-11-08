@@ -21,6 +21,7 @@ async function fixture(t) {
       return spawnSync('bash', [trace ? '-exc' : '-ec', `
         source "$1"
         webmail_load_config "$2" "$3"
+        webmail_auth_policy_addresses() { printf '%s\\n' "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
         webmail_generate_env "$3"
         webmail_generate_admin_env "$3"
         webmail_generate_override "$3"

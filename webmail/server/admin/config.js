@@ -1,3 +1,4 @@
+import { authPolicyConfig } from './auth-policy.js';
 import { parseOtpKey } from '../security/otp.js';
 import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
@@ -134,7 +135,7 @@ export function loadAdminConfig(env = process.env) {
   }
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    otpKey, otpKeyVersion, bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    otpKey, otpKeyVersion, authPolicy: authPolicyConfig(env), bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly, dbHost, dbName, dbUser, dbPassword,

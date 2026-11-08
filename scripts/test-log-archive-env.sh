@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 n=0

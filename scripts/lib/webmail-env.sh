@@ -619,11 +619,90 @@ webmail_reconcile_bounce_policy() {
     return 0
 }
 
+# Resolve all authentication policy peers from declared networks, then optionally
+# compare live containers and the generated admin environment. No IP suffix guesses.
+webmail_auth_policy_addresses() (
+    set +x
+    umask 077
+    local dest="$1" mode="${2:-compose}" work label service id
+    work=$(mktemp -d) || return 1
+    trap 'rm -rf "$work"' EXIT
+    (cd "$MAILCOW_DIR" && docker compose config --format json --no-env-resolution) > "$work/mailcow" 2>"$work/errors" || return 1
+    (cd "$dest" && docker compose --profile admin config --format json --no-env-resolution) > "$work/app" 2>"$work/errors" || return 1
+    if [ "$mode" = runtime ]; then
+        for label in peer sogo bind relay; do
+            case "$label" in
+                peer) service=dovecot-mailcow ;;
+                sogo) service=sogo-mailcow ;;
+                bind) service=webmail-admin ;;
+                relay) service=mailrelay-webmail ;;
+            esac
+            if [[ "$label" = peer || "$label" = sogo ]]; then
+                id=$(cd "$MAILCOW_DIR" && docker compose ps -q "$service") || return 1
+            else
+                id=$(cd "$dest" && docker compose --profile admin ps -q "$service") || return 1
+            fi
+            [[ "$id" =~ ^[a-f0-9]{12,64}$ ]] || return 1
+            docker inspect --format '{{json .NetworkSettings.Networks}}' "$id" > "$work/$label.live" 2>"$work/errors" || return 1
+            if [ "$label" = bind ]; then
+                docker inspect --format '{{json .NetworkSettings.Ports}}' "$id" > "$work/ports.live" 2>"$work/errors" || return 1
+            fi
+        done
+        (cd "$dest" && docker compose --profile admin exec -T webmail-admin node -e 'console.log(JSON.stringify([process.env.AUTH_POLICY_BIND,process.env.AUTH_POLICY_PEER,process.env.AUTH_POLICY_TRUSTED_RELAY,process.env.AUTH_POLICY_TRUSTED_SOGO]))') > "$work/env.live" 2>"$work/errors" || return 1
+    fi
+    python3 - "$work" "$WEBMAIL_NETWORK" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_RELAY_IPV4" "$mode" <<'PYPOLICY'
+from pathlib import Path
+import ipaddress,json,sys
+w=Path(sys.argv[1]); network=ipaddress.ip_network(sys.argv[2]+'.0/24'); expected,relay_expected,mode=sys.argv[3:]
+try:
+    def read(label, service):
+        cfg=json.loads((w/label).read_text()); row=cfg['services'][service]
+        if row.get('network_mode'): raise ValueError()
+        if service=='webmail-admin' and any(str(p.get('target'))=='10041' and p.get('published') is not None for p in row.get('ports',[])): raise ValueError()
+        result={}
+        for logical, options in row['networks'].items():
+            if not isinstance(options,dict) or not options.get('ipv4_address'): continue
+            name=cfg['networks'][logical]['name']; address=str(ipaddress.IPv4Address(options['ipv4_address']))
+            if ipaddress.ip_address(address) in network and address not in (str(network.network_address),str(network.broadcast_address)):
+                if name in result: raise ValueError()
+                result[name]=address
+        return result
+    maps=[read('app','webmail-admin'),read('mailcow','dovecot-mailcow'),read('app','mailrelay-webmail'),read('mailcow','sogo-mailcow')]
+    names=set(maps[0]).intersection(*maps[1:])
+    if len(names)!=1: raise ValueError()
+    name=names.pop(); values=[row[name] for row in maps]
+    if len(set(values))!=4 or values[0]!=expected or values[2]!=relay_expected: raise ValueError()
+    if mode=='runtime':
+        if json.loads((w/'env.live').read_text())!=values or any(key.split('/')[0]=='10041' and val for key,val in json.loads((w/'ports.live').read_text()).items()): raise ValueError()
+        for label,address in zip(('bind','peer','relay','sogo'),values):
+            if json.loads((w/(label+'.live')).read_text())[name]['IPAddress']!=address: raise ValueError()
+    print('\n'.join(values))
+except (ValueError,KeyError,TypeError,AttributeError): sys.exit(1)
+PYPOLICY
+)
+
+webmail_reconcile_auth_policy() {
+    set +x
+    local scripts="$1" dest="$2" mode="${3:-apply}" url
+    if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] && [ "${WEBMAIL_ENABLE:-true}" = true ]; then
+        MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" WEBMAIL_NETWORK="$WEBMAIL_NETWORK" \
+          WEBMAIL_ADMIN_DB_IPV4="$WEBMAIL_ADMIN_DB_IPV4" WEBMAIL_RELAY_IPV4="$WEBMAIL_RELAY_IPV4" \
+          bash "$scripts/apply-dovecot-auth-policy.sh" "$mode" -y
+    elif [ "$mode" = --check ]; then
+        ! grep -q '^# BEGIN mailstack-auth-policy ' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null || return 1
+        url=$(cd "$MAILCOW_DIR" && docker compose exec -T dovecot-mailcow doveconf -h auth_policy_server_url 2>/dev/null) || return 1
+        [[ "$url" != *:10041/auth-policy ]]
+    elif grep -q '^# BEGIN mailstack-auth-policy ' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+        MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" bash "$scripts/apply-dovecot-auth-policy.sh" --revert -y
+    fi
+}
+
 webmail_generate_admin_env() (
     set +x
     [ "$WEBMAIL_ADMIN_ENABLE" = true ] || return 0
     local dest="$1" tmp auto_days="" pin_file="" doveadm_url="" doveadm_key="" relay_files="" trusted_file=""
-    local mailcow_api_key bounce_bind="" bounce_peer="" bounce_addresses
+    local mailcow_api_key bounce_bind="" bounce_peer="" bounce_addresses auth_addresses
+    local -a auth_values
     # Allow only printable non-space ASCII before the reader strips CR or Bash drops NUL.
     if sed -n 's/^API_KEY=//p' "$MAILCOW_DIR/mailcow.conf" | tail -n1 | LC_ALL=C grep -a '[^!-~]' > /dev/null; then
         webmail_error "invalid mailcow API key"
@@ -650,6 +729,9 @@ webmail_generate_admin_env() (
     fi
     if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && [ "$WEBMAIL_ADMIN_RELAY_READY" = true ]; then relay_files=/run/relay/postfix/mynetworks,/run/relay/rspamd/local_addrs.map; fi
     if [ "${MAIL_TRUSTED_SENDER_ENABLE:-false}" = true ]; then trusted_file=/run/trusted/trusted_senders.map; fi
+    auth_addresses=$(webmail_auth_policy_addresses "$dest") || { webmail_error "authentication policy Compose addresses unavailable"; return 1; }
+    mapfile -t auth_values <<< "$auth_addresses"
+    [ "${#auth_values[@]}" -eq 4 ] || return 1
     mkdir -p "$dest" || return 1
     tmp=$(mktemp "$dest/.webmail-admin.env.XXXXXX") || return 1
     trap 'rm -f "$tmp"' EXIT
@@ -667,6 +749,10 @@ webmail_generate_admin_env() (
         webmail_env_line DB_NAME mailstack_webmail &&
         webmail_env_line DB_USER webmail_notices_admin &&
         webmail_env_line DB_PASSWORD "${WEBMAIL_ADMIN_DB_PASSWORD:-}" &&
+        webmail_env_line AUTH_POLICY_BIND "${auth_values[0]}" &&
+        webmail_env_line AUTH_POLICY_PEER "${auth_values[1]}" &&
+        webmail_env_line AUTH_POLICY_TRUSTED_RELAY "${auth_values[2]}" &&
+        webmail_env_line AUTH_POLICY_TRUSTED_SOGO "${auth_values[3]}" &&
         webmail_env_line BOUNCE_POLICY_BIND "$bounce_bind" &&
         webmail_env_line BOUNCE_POLICY_PEER "$bounce_peer" &&
         webmail_env_line BOUNCE_POLICY_PORT 10040 &&

@@ -1,3 +1,4 @@
+import { createAuthPolicyListener } from './auth-policy.js';
 import { createProtocolNetlimitStore } from '../security/protocol-netlimit-store.js';
 import { createOtpStore } from '../security/otp-store.js';
 import { createOtpAdminService } from './services/otp.js';
@@ -160,6 +161,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   await app.register(otpRoutes, { service: otpService });
   const protocolNetlimitStore = protocolNetlimit.store ?? createProtocolNetlimitStore({ config });
   app.addHook('onClose', async () => { await protocolNetlimitStore.close?.(); });
+  const authPolicy = createAuthPolicyListener({ config: config.authPolicy, store: protocolNetlimitStore, logger: app.log });
+  app.addHook('onReady', async () => { await authPolicy.start(); });
+  app.addHook('preClose', async () => { await authPolicy.stop(); });
   const accounts = createAccountsService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });

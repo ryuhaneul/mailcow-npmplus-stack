@@ -4,6 +4,8 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
+webmail_reconcile_auth_policy() { :; }
 # This suite isolates archive transactions; ACME's real guards/API and failure
 # paths are exercised in test-npmplus-acme.sh without a Docker daemon.
 npmplus_acme_prepare() { NPMPLUS_ACME_CHANGED=false; }
@@ -512,6 +514,8 @@ POLICY_STUB
 printf '#!/bin/bash\nexit 0\n' > "$TMP/policy-scripts/admin-app-link.sh"
 policy_case() (
     source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
+webmail_reconcile_auth_policy() { :; }
     scenario="$1";flow="${2:-update}"
     PROJECT_DIR="$ROOT";SCRIPT_DIR="$TMP/policy-scripts";MAILCOW_DIR="$TMP/policy-mailcow";WEBMAIL_DIR="$TMP/app";ENV_FILE="$TMP/stack.env";NPMPLUS_DIR="$TMP/npm";LOGFILE="$TMP/policy.log"
     WEBMAIL_ENABLE=true;WEBMAIL_ADMIN_ENABLE=true;LOG_ARCHIVE_ENABLE=true
@@ -567,6 +571,8 @@ if policy_case revert-failure; then fail disabled-revert-failure-ignored; fi
 grep -q mailstack-bounce-policy "$TMP/policy-mailcow/data/conf/postfix/extra.cf" || fail failed-revert-lost-config
 (
     source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
+webmail_reconcile_auth_policy() { :; }
     WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"
     webmail_mailcow_value() { echo synthetic; }
     if webmail_reconcile_bounce_policy "$TMP/policy-scripts" "$TMP/app" --check; then exit 1; fi
@@ -574,6 +580,8 @@ grep -q mailstack-bounce-policy "$TMP/policy-mailcow/data/conf/postfix/extra.cf"
 pass 'disabled revert failure stops update, preserves configuration and remains visible to verify'
 (
     source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
+webmail_reconcile_auth_policy() { :; }
     WEBMAIL_ADMIN_ENABLE=false;MAILCOW_DIR="$TMP/policy-mailcow"
     rm -f "$MAILCOW_DIR/data/conf/postfix/extra.cf"
     webmail_mailcow_value() { echo synthetic; }
@@ -588,7 +596,9 @@ reset_case
 rsync() { printf '%s\n' "$@" > "$TMP/rsync-args"; }
 edge_check_docker_version() { :; }
 edge_check_overlap() { :; }
+edge_check_admin_db_address() { :; }
 webmail_ensure_db_password() { :; }
+webmail_ensure_admin_db_password() { :; }
 webmail_extract_tls_pin() { :; }
 webmail_generate_env() { :; }
 webmail_generate_admin_env() { :; }

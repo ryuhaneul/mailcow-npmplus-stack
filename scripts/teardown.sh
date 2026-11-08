@@ -68,6 +68,11 @@ if grep -qFx '# BEGIN mailstack-admin doveadm (apply-dovecot-admin-api.sh)' "$MA
     MAILCOW_DIR="$MAILCOW_DIR" bash "$SCRIPT_DIR/apply-dovecot-admin-api.sh" --revert -y || { warn 'Admin doveadm revert failed; teardown stopped'; exit 1; }
 fi
 
+# Remove authentication callback before stopping the admin listener or Dovecot.
+if grep -qFx '# BEGIN mailstack-auth-policy (apply-dovecot-auth-policy.sh)' "$MAILCOW_DIR/data/conf/dovecot/extra.conf" 2>/dev/null; then
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" bash "$SCRIPT_DIR/apply-dovecot-auth-policy.sh" --revert -y || { warn 'Authentication policy revert failed; teardown stopped'; exit 1; }
+fi
+
 # Remove the app link while mailcow Redis is still available.
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ] || [ -f "$WEBMAIL_DIR/webmail-admin.env" ] || docker inspect webmail-admin >/dev/null 2>&1; then
     WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" remove "$MAILCOW_DIR" || { warn 'Admin app link removal failed; teardown stopped'; exit 1; }

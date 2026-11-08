@@ -83,6 +83,7 @@ if run --revert; then fail destructive-mode; fi
 if run apply extra; then fail extra-argument; fi
 pass 'no destructive mode and extra arguments rejected'
 source "$ROOT/scripts/lib/webmail-env.sh"
+webmail_auth_policy_addresses() { printf "%s\n" "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
 printf 'DOMAIN=example.test\nWEBMAIL_ADMIN_ENABLE=true\nWEBMAIL_ADMIN_DB_PASSWORD=\nWEBMAIL_ADMIN_DB_PASSWORD=\n' > "$WEBMAIL_ENV_FILE"
 webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
 [ "$WEBMAIL_ADMIN_DB_IPV4" = 172.22.1.241 ] || fail default-admin-address

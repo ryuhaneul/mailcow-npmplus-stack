@@ -1617,3 +1617,93 @@ restored 결과를 남깁니다. 자동 restart 대체 경로는 없습니다.
 를 사용합니다. 이 절차는 최초 백업의 과거 IP가 아니라 **현재 map의 IP**를 인라인 설정으로
 옮기고 두 서비스를 재시작합니다. 그 뒤 이전 앱의 이미지/env/mount로 되돌리세요. 감사 기록과
 백업은 삭제하지 않습니다. `--check`는 전환 완료와 참조·파일 일관성을 읽기만 검사합니다.
+
+### 계정별 사내 IP에서만 IMAP·POP3·SMTP 허용
+
+계정 수정의 **사내 IP에서만 IMAP·POP3·SMTP 허용**은 기본 꺼짐입니다.
+켜면 기존 **웹메일 로그인 예외 IP** 목록을 사내 허용 목록으로 재사용합니다. 별도 IP 목록을
+만들지 않으며 IPv4·IPv6 주소와 CIDR을 지원합니다. 이 공통 목록을 바꾸면 켜진 모든 계정에
+다음 인증부터 적용됩니다. 체크를 켠 채 목록이 비어 있으면 외부 프로토콜 인증은 모두 거부되고
+관리 화면에 빈 목록 경고가 표시됩니다. 경고 상태로 저장할 수 있습니다.
+
+기존 IMAP·POP3·SMTP 켜기/끄기와 별개인 추가 조건입니다. 이 옵션을 켜거나 업데이트해도
+꺼진 프로토콜을 자동으로 켜지 않습니다. 프로토콜 자체가 꺼져 있으면 사내 IP에서도 사용할 수
+없습니다. 계정 상세에서 현재 제한 여부를 확인할 수 있고, 변경은 기존 계정 수정과 동일한
+관리 사람 로그인·full API 키 권한을 요구합니다. read 키는 수정할 수 없습니다. 변경·되돌리기는
+기존 변경 기록에 남습니다. API 필드는 `protocolInternalOnly`이며 생략한 PATCH는 이 값을
+바꾸지 않습니다. 다른 관리자가 변경한 etag로 저장하면 409이므로 새 상태를 읽어 확인하세요.
+
+IMAP·POP3·SMTP **인증 시도**에 적용하며 SMTP AUTH 단계에서 판정합니다. 인증 뒤 RCPT에서만
+거부하는 방식이 아닙니다. 기본 암호와 앱 암호 모두 대상이며, 외부 master 로그인도 대상 계정의
+설정을 따릅니다. 이미 인증한 연결을 강제로 끊거나 공유 ACL을 바꾸지는 않습니다.
+웹메일·SOGo의 내부 IMAP 경로는 검증된 두 컨테이너의 정확한 실제 접속 IP로 예외 처리합니다.
+웹메일 client name·IMAP ID·같은 Docker subnet이라는 이유로 예외를 주지 않습니다.
+웹메일 HTTPS 접근 제한은 기존 방화벽/접근 제어가 맡으며 이 체크가 HTTPS 정책을 대체하지 않습니다.
+LMTP 배달·Sieve·doveadm·공유 읽기의 기존 동작은 별도 VM 회귀로 확인합니다.
+
+정책 서비스나 정책 DB가 장애이면 **기존 비밀번호 인증으로 계속**하도록 구성됩니다.
+이는 사내 IP 제한이 일시 적용되지 않는다는 뜻입니다. 잘못된 암호나 꺼진 프로토콜을
+허용으로 바꾸지는 않습니다. 계정 설정 화면에서 DB를 읽지 못하는 경우에는 저장을 시작하지 않고
+503으로 실패합니다. 인증 시 정책 연결이 응답하지 않으면 OFF 계정을 포함해 요청마다 최대 약 2초의
+추가 지연이 생길 수 있습니다. 즉시 연결 거절과 무응답은 다르므로 VM에서 실제 시간을 확인합니다.
+정책 로그의 `AUTH_POLICY_FAIL_OPEN`/`AUTH_POLICY_DENY`와 고정 reason 코드를 확인하고,
+계정·IP·요청·SQL 오류 원문을 새 정책 로그에 남기지 않습니다.
+
+관리 앱에는 mailcow network의 전용 10041 listener를 사용합니다. 공개 port나 새 compose service는
+추가하지 않습니다. setup/update는 schema/grants와 generated env, admin 준비를 확인한 뒤
+Dovecot hook을 적용합니다. 네 주소는 compose/runtime에서 읽어 대조하며 추측하지 않습니다.
+구버전 env에 네 주소가 전부 없으면 listener가 꺼져 있고, 일부만 있으면 구성 오류입니다.
+새 hook은 주소·비공개 port·DB probe가 확인되지 않으면 설치하지 않습니다.
+다른 소유자의 auth policy 설정이 있으면 자동 병합하지 않고 중단합니다.
+
+```sh
+# 승인한 적용 대상에서만 실행. 경로는 해당 스택의 실제 값으로 지정합니다.
+MAILCOW_DIR=<mailcow-path> WEBMAIL_DIR=<webmail-path> \
+  bash scripts/apply-dovecot-auth-policy.sh --check
+```
+
+적용/revert의 Dovecot reload는 기존 연결에 영향을 줄 수 있으므로 유지보수 절차를 따릅니다.
+원복할 때에는 **관리 앱을 중단하거나 이전 이미지로 바꾸기 전에** owned hook부터 제거합니다.
+
+```sh
+MAILCOW_DIR=<mailcow-path> WEBMAIL_DIR=<webmail-path> \
+  bash scripts/apply-dovecot-auth-policy.sh --revert -y
+```
+
+그 뒤 policy URL 부재와 기존 인증을 확인하고 이전 admin 이미지·env로 복구합니다.
+이 스크립트는 자기 block만 제거하고 다른 extra.conf bytes를 보존합니다. 설정/backup은0600이며
+nonce·전체 설정을 출력하지 않습니다. 문법/reload/effective 검증 실패 시 원본을 복원하지만,
+복구가 불완전하다는 오류가 남으면 추가 적용을 멈추고 backup으로 확인하세요.
+DB 표/계정 flag는 일반 rollback에서 삭제하지 않습니다. **다시 적용하면 보존된 ON값이
+다시 제한**하므로 재적용 전 계정 상태를 확인하세요. schema 삭제는 별도 백업·승인이 필요합니다.
+실환경 인계와 VM V01–V16 절차는 [통합시험 README](../webmail/test/int/README.md#계정별-사내-ip-제한--격리-vm-d-live)를 따릅니다.
+
+계정 rename은 원래 flag를 새 주소로 옮기고 이전 행을 정리합니다. delete·별칭 전환은
+제한 행을 정리하며 같은 주소를 다시 만들면 기본 OFF입니다. 여러 저장소의 변경은 단일 DB
+트랜잭션이 아니므로 이미 계정 변경이 반영된 뒤 제한 행 정리만 실패하면 `partial`일 수 있습니다.
+전체 요청을 반복하거나 전체 표를 지우지 말고 응답 steps와 변경 기록, 실제 mailbox·alias·flag를
+먼저 확인하세요. PATCH의 etag가 null이면 반드시 재조회하고 자동 재시도하지 않습니다.
+
+주소 변경 실패 후 남은 제한 행을 정리해야 하면 원래/새 mailbox 존재와 감사의 성공 단계를 먼저
+확인합니다. mailbox가 남아 있는 행을 orphan이라고 판단하지 않습니다. 정리가 필요한 **정확한 주소**와
+현재 version을 기록하고, 다른 관리 변경이 없는지 CAS로 확인합니다. 다음은 승인된 VM/복구 환경에서
+실행하는 예시입니다. 관리 앱과 같은 DB 접근 환경·env가 필요하며 DB credential은 인자로 전달하지 않습니다.
+
+```sh
+# ORPHAN_EMAIL과 ORPHAN_VERSION은 사전에 확인한 주소와 32자리 hex version을 private env로 지정합니다.
+node --env-file=/dev/shm/netlimit-recovery.env --input-type=module <<'JS'
+import {createProtocolNetlimitStore} from './webmail/server/security/protocol-netlimit-store.js';
+const e=process.env,addr=e.ORPHAN_EMAIL,version=e.ORPHAN_VERSION;
+if(!/^[^\s@]+@[^\s@]+$/.test(addr||'')||!/^[a-f0-9]{32}$/.test(version||''))throw Error('RECOVERY_INPUT');
+async function absent(){const r=await fetch(new URL('/api/admin/mailboxes/'+encodeURIComponent(addr),e.NETLIMIT_INT_ADMIN_URL),{headers:{'x-mailadmin-api-key':e.NETLIMIT_INT_ADMIN_KEY},signal:AbortSignal.timeout(60000)});if(r.status!==404)throw Error('MAILBOX_PRESENT_OR_UNKNOWN');}
+const store=createProtocolNetlimitStore({config:{dbHost:e.DB_HOST,dbName:e.DB_NAME,dbUser:e.DB_USER,dbPassword:e.DB_PASSWORD}});
+try{await absent();const row=await store.read(addr);if(row.version!==version)throw Error('VERSION_CHANGED');await absent();await store.remove({email:addr,expected:{enabled:row.enabled,version}});console.log('ORPHAN_ROW_REMOVED');}
+catch{throw Error('RECOVERY_STOPPED (details omitted)');}finally{await store.close();}
+JS
+```
+
+삭제 직전까지 다른 계정 생성/rename이 없도록 기존 관리 절차로 대상 주소의 변경을 막고 수행합니다.
+이 복구 명령과 관리 API는 서로 같은 lock을 공유하지 않으므로 운영 중 자동 정리 작업으로 예약하지
+않습니다. version이 달라졌거나 mailbox 조회가403/503이면 정리하지 않습니다. 계정이 존재하면
+현재 etag를 사용한 관리 API 수정으로 의도한 ON/OFF를 복원합니다. 공개 저장소/보고서에 실제 주소·
+version·credential을 넣지 말고, 정리 결과와 감사 참조만 남기세요.

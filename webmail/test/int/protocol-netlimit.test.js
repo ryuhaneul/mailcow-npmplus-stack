@@ -14,7 +14,7 @@ const skip = process.env.NETLIMIT_INT !== '1' ? '미실행 — NETLIMIT_INT=1 �
 function ensure(value, code) { if (!value) throw Error(code); }
 const env = key => process.env[`NETLIMIT_INT_${key}`];
 const mailboxPath = email => `/api/admin/mailboxes/${encodeURIComponent(email)}`;
-const safe = operation => async () => { try { await operation(); } catch { throw Error('NETLIMIT_CHECK_FAILED (sensitive details omitted)'); } };
+const safe = (operation, stage) => async () => { try { await operation(); } catch { throw Error(`NETLIMIT_CHECK_FAILED ${stage()}`); } };
 const protocols = ['imap', 'pop3', 'smtp'];
 const stats = values => { const sorted = [...values].sort((a, b) => a - b); return { min: sorted[0], median: sorted[2], max: sorted.at(-1) }; };
 
@@ -145,7 +145,8 @@ if (skip) {
     try { validate(); } catch { throw Error('NETLIMIT_INPUT_INVALID (values omitted)'); }
     let original, originalIps, appName, appPassword; const temporary = new Set(); let changed = false;
     let failed = false;
-    const run = async (id, fn) => { await t.test(id, safe(async () => { ensure(!failed, 'PREREQUISITE_FAILED'); try { await fn(); } catch { failed = true; throw Error('CHECK_FAILED'); } })); };
+    const run = async (id, fn) => { let stage = id.slice(0, 3); const step = (name, operation) => { stage = name; return operation(); };
+      await t.test(id, safe(async () => { if (failed) stage += '-prerequisite'; ensure(!failed, 'PREREQUISITE_FAILED'); try { await fn(step); } catch { failed = true; throw Error('CHECK_FAILED'); } }, () => stage)); };
     const checkAuth = async (path, source, expected, password, email) => ensure(await auth(path, source, password, email) === expected, 'AUTH_EXPECTATION');
     try {
       if (condition !== 'baseline') {
@@ -212,13 +213,18 @@ if (skip) {
           ensure((await detail(next)).protocolInternalOnly === false, 'CONVERT_FLAG'); await patch({ protocolInternalOnly: true }, next); await removeMailbox(next);
           ensure((await create(next)).result === 'ok' && (await detail(next)).protocolInternalOnly === false, 'RECREATE_FLAG');
         });
-        await run('V15 protocol OFF, empty list and default flag', async () => {
-          await patch({ protocolInternalOnly: true, protocols: Object.fromEntries(protocols.map(key => [key, false])) });
-          for (const path of authPaths) await checkAuth(path, env('SOURCE_A'), false);
-          await patch({ protocols: Object.fromEntries(protocols.map(key => [key, true])) }); await replaceIps([]);
-          const empty = await detail(); ensure(empty.protocolInternalOnly === true && empty.protocolInternalAllowlistEmpty === true, 'EMPTY_LIST_WARNING');
-          for (const path of ['imap', 'pop3']) for (const source of [env('SOURCE_A'), env('SOURCE_B')]) await checkAuth(path, source, false);
-          await replaceIps([{ ip: env('SOURCE_A') }]); await patch({ protocolInternalOnly: false });
+        await run('V15 cold protocol OFF and warm empty list', async step => {
+          const local = `netlimit-int-${randomUUID()}`, cold = `${local}@${env('EMAIL').split('@')[1]}`;
+          await step('V15-cold-absent', async () => { await request('GET', mailboxPath(cold), undefined, { status: 404 }); ensure(!await aliases(cold), 'TEMP_ADDRESS_EXISTS'); });
+          temporary.add(cold);
+          await step('V15-cold-create', async () => { ensure((await request('POST', '/api/admin/mailboxes', { local, domain: env('EMAIL').split('@')[1], kind: 'personal', quotaGb: 1, name: 'Network policy integration', password: env('PASSWORD') })).result === 'ok', 'CREATE'); });
+          await step('V15-cold-protocol-OFF', () => patch({ protocolInternalOnly: true, protocols: Object.fromEntries(protocols.map(key => [key, false])) }, cold));
+          for (const path of authPaths) await step(`V15-cold-${path}`, () => checkAuth(path, env('SOURCE_A'), false, env('PASSWORD'), cold));
+          await step('V15-empty-warm', async () => { await patch({ protocolInternalOnly: true }); await checkAuth('imap', env('SOURCE_A'), true); });
+          await step('V15-empty-clear', () => replaceIps([]));
+          await step('V15-empty-warning', async () => { const empty = await detail(); ensure(empty.protocolInternalOnly === true && empty.protocolInternalAllowlistEmpty === true, 'EMPTY_LIST_WARNING'); });
+          for (const path of ['imap', 'pop3']) for (const source of ['A', 'B']) await step(`V15-empty-${path}-${source}`, () => checkAuth(path, env(`SOURCE_${source}`), false));
+          await step('V15-empty-restore', async () => { await replaceIps([{ ip: env('SOURCE_A') }]); await patch({ protocolInternalOnly: false }); });
         });
       }
       await run('V12 five monotonic AUTH latency samples', async () => {

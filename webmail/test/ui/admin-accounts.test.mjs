@@ -2,7 +2,7 @@ import {test} from 'node:test';import assert from 'node:assert/strict';import {m
 const captures=process.env.AF05_CAPTURE_DIR||'/tmp/webmail-af05-captures';
 await test('AF05 accounts, guarded edits and lifecycle flows',async t=>{
  const fake=createFakeAdminApi(),initial=structuredClone(fake.state);const server=await createServer({root:fileURLToPath(new URL('../../web',import.meta.url)),configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),logLevel:'error',plugins:[{name:'af05-test-api',configureServer(server){server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});await server.listen();t.after(()=>server.close());const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});t.after(()=>browser.close());await mkdir(captures,{recursive:true});const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
- async function open(hash='accounts',width=1280,prepare=()=>{}){Object.assign(fake.state,structuredClone(initial));prepare(fake.state);const context=await browser.newContext({viewport:{width,height:1000}}),page=await context.newPage(),errors=[],logs=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>logs.push(m.text()));await page.goto(`${origin}/admin.html#${hash}`);await expect(page.locator('[data-admin-page]')).toBeAttached();return{page,context,errors,logs};}
+ async function open(hash='accounts',width=1280,prepare=()=>{},options={}){Object.assign(fake.state,structuredClone(initial));prepare(fake.state);const context=await browser.newContext({viewport:{width,height:options.height??1000},colorScheme:options.mode??'light'}),page=await context.newPage(),errors=[],logs=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>logs.push(m.text()));if(options.mode)await context.addInitScript(mode=>localStorage.setItem('webmail-admin-prefs',JSON.stringify({theme:'ink',mode,accent:{}})),options.mode);await page.goto(`${origin}/admin.html#${hash}`);await expect(page.locator('[data-admin-page]')).toBeAttached();return{page,context,errors,logs};}
  async function preview(page){await page.getByRole('button',{name:'변경 미리보기',exact:true}).click();await expect(page.locator('[aria-current=step]')).toContainText('미리보기');}
  async function confirm(page){await page.getByRole('button',{name:'실행 확인으로'}).click();await expect(page.locator('[aria-current=step]')).toContainText('실행 확인');}
  await t.test('four filters, literal search, empty state and server pagination',async()=>{const{page,context,errors}=await open();try{await expect(page.locator('.filters button')).toHaveText(['전체','개인','팀','비활성']);for(const[label,count]of[['전체',4],['개인',2],['팀',1],['비활성',2]]){await page.getByRole('button',{name:label,exact:true}).click();await expect(page.locator('.account-item')).toHaveCount(count);}await page.getByRole('button',{name:'전체',exact:true}).click();await page.getByLabel('메일함 이름 또는 주소 검색').fill('PERSON@');await expect(page.locator('.account-item')).toHaveCount(1);await page.getByLabel('메일함 이름 또는 주소 검색').fill('[missing]');await expect(page.locator('.list-pane')).toContainText('일치하는 메일함이 없습니다');fake.state.accounts.items=Array.from({length:60},(_,i)=>({...initial.accounts.items[0],address:`person${String(i).padStart(2,'0')}@example.com`}));await page.getByLabel('메일함 이름 또는 주소 검색').fill('person');await expect(page.locator('.account-item')).toHaveCount(50);await page.getByRole('button',{name:'다음 쪽'}).click();await expect(page.locator('.account-item')).toHaveCount(10);await expect(page.getByRole('button',{name:'다음 쪽'})).toBeDisabled();assert.deepEqual(errors,[]);}finally{await context.close();}});
@@ -20,6 +20,30 @@ await test('AF05 accounts, guarded edits and lifecycle flows',async t=>{
   const message='꺼진 계정(off@example.com)이 남에게 준 공유는 확인하지 못했어요. 처리 후 공유 화면에서 확인해 주세요.';
   const{page,context,errors}=await open('flow/leave/person%40example.com',1280,s=>{s.accounts.warnings=[{code:'SHARES_INACTIVE_SKIPPED',addresses:['off@example.com'],message}];});
   try{await preview(page);await expect(page.locator('.ac-workflow')).toContainText(message);await confirm(page);await page.getByRole('checkbox').check();await page.getByRole('button',{name:'실행하기',exact:true}).click();await expect(page.locator('.ac-result')).toContainText(message);assert.deepEqual(errors,[]);}finally{await context.close();}
+ });
+
+ for(const mode of ['light','dark'])for(const width of [1280,375])await t.test(`netlimit ${mode} ${width}: empty-list warning, persisted flag and short-dialog access`,async()=>{
+  const {page,context,errors}=await open('accounts/person%40example.com',width,state=>{state.accounts.allowlistEmpty=true;},{mode});
+  try{
+   await page.getByRole('button',{name:'수정',exact:true}).click();
+   const flag=page.getByLabel('IMAP·POP3·SMTP를 사내 IP에서만 허용',{exact:true});await expect(flag).not.toBeChecked();
+   await flag.check();await expect(page.getByText('사내 IP 목록이 비어 있어 이 계정의 외부 로그인이 모두 거부됩니다.',{exact:true})).toBeVisible();
+   await page.evaluate(()=>document.fonts.ready);
+   await page.screenshot({path:`${captures}/netlimit-edit-${width}-${mode}.png`,fullPage:true});
+   const overflow=await page.evaluate(()=>({document:document.documentElement.scrollWidth,viewport:innerWidth,dialogs:[...document.querySelectorAll('dialog[open]')].map(d=>({client:d.clientWidth,scroll:d.scrollWidth}))}));
+   assert.ok(overflow.document<=overflow.viewport);assert.ok(overflow.dialogs.every(d=>d.scroll<=d.client));
+   await page.getByRole('button',{name:'변경 저장',exact:true}).click();
+   await expect(page.locator('.detail-section .kv').first()).toContainText('켜짐 · IMAP·POP3·SMTP');
+   await page.screenshot({path:`${captures}/netlimit-detail-${width}-${mode}.png`,fullPage:true});
+   await page.setViewportSize({width,height:480});await page.getByRole('button',{name:'수정',exact:true}).click();await expect(flag).toBeChecked();
+   const save=page.getByRole('button',{name:'변경 저장',exact:true});await save.scrollIntoViewIfNeeded();
+   const box=await save.boundingBox();assert.ok(box&&box.y>=0&&box.y+box.height<=480);
+   await save.click();await expect(page.locator('dialog[open]')).toHaveCount(0);assert.deepEqual(errors,[]);
+  }finally{await context.close();}
+ });
+ await t.test('netlimit partial response is reloaded before another edit',async()=>{
+  const {page,context,errors}=await open('accounts/person%40example.com',375,state=>{state.accounts.patchPartial=true;});
+  try{await page.getByRole('button',{name:'수정',exact:true}).click();await page.getByLabel('IMAP·POP3·SMTP를 사내 IP에서만 허용',{exact:true}).check();await page.getByRole('button',{name:'변경 저장',exact:true}).click();await expect(page.getByText('일부 변경만 적용됐어요. 단계별 결과를 확인해 주세요.',{exact:true})).toBeVisible();await page.getByRole('button',{name:'수정',exact:true}).click();await expect(page.getByLabel('IMAP·POP3·SMTP를 사내 IP에서만 허용',{exact:true})).toBeChecked();assert.deepEqual(errors,[]);}finally{await context.close();}
  });
 
 });

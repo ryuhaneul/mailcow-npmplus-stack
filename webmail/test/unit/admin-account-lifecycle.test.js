@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,8 +88,9 @@ async function fixture(t, populated = true) {
     }, async close() {},
   };
   const otp = createOtpAdminService({ store: otpStore, mailcow, audit, lock });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
-  return { otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
+  const netlimit = createFakeProtocolNetlimitStore();
+  const service = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
+  return { netlimit, otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
 }
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
@@ -277,7 +279,7 @@ test('lifecycle: intent failure prevents every write', async t => {
 
 test('lifecycle HTTP: preview/delete and leave use auth, JSON, Origin, CSRF guard and no challenge header', async t => {
   const f = await fixture(t, false);
-  const app = await createAdminApp({ otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${user}`;
   assert.equal((await app.inject({ method: 'POST', url: `${url}/delete-preview`, headers: { origin: 'https://mailadmin.example.com' }, payload: {} })).statusCode, 403);
@@ -594,4 +596,19 @@ test('OTP delete cleanup failure returns partial stage otp, preserving the compl
   const result = await remove(f, confirmed((await preview(f)).etag));
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'otp'); assert.equal(result.steps.at(-1).code, 'OTP_UNAVAILABLE');
   assert.equal(f.boxes.some(row => row.username === user), false); assert.equal(f.otpRows.has(user), true); assert.ok(result.recovery[0].message.includes('초기화'));
+});
+
+test('netlimit lifecycle: delete cleans flag; disable keeps it; changed preview rejects before writes', async t => {
+  const f = await fixture(t, false), flag = { enabled: true, version: 'a'.repeat(32) }; f.netlimit.rows.set(user, flag);
+  const initial = await preview(f); f.netlimit.rows.set(user, { ...flag, version: 'b'.repeat(32) });
+  await assert.rejects(remove(f, confirmed(initial.etag)), { statusCode: 409 }); assert.equal(writes(f).length, 0);
+  const disabled = await leave(f, { action: 'preview' }); await leave(f, { action: 'run', etag: disabled.etag });
+  assert.equal(f.netlimit.rows.get(user).enabled, true);
+  const fresh = await preview(f); const deleted = await remove(f, confirmed(fresh.etag)); assert.equal(deleted.result, 'ok'); assert.equal(f.netlimit.rows.has(user), false);
+});
+test('netlimit lifecycle: cleanup failure reports partial after confirmed mailbox deletion', async t => {
+  const f = await fixture(t, false); f.netlimit.rows.set(user, { enabled: true, version: 'a'.repeat(32) });
+  const initial = await preview(f); f.netlimit.removeFailure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애');
+  const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'protocol-netlimit');
+  assert.equal(f.boxes.some(row => row.username === user), false); assert.equal(f.netlimit.rows.has(user), true);
 });

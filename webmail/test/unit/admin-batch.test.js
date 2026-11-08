@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -49,10 +50,11 @@ async function fixture(t) {
   } };
   const audit = createAudit({ dir, logger: { info(data) { logs.push(data); } } }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const dockerapi = { async getAcl() { return []; } };
-  const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir }), accounts = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams }), domains = createDomainsService({ mailcow, audit, lock, history });
+  const netlimit = createFakeProtocolNetlimitStore();
+  const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir }), accounts = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams }), domains = createDomainsService({ mailcow, audit, lock, history });
   const aliasService = createAliasesService({ mailcow, audit, lock, history });
   const service = createBatchService({ mailcow, audit, accounts, domains, teams, aliases: aliasService, lock });
-  return { dir, boxes, filters, primary, aliasDomains, aliases, jobs, calls, logs, options, mailcow, audit, lock, history, dockerapi, service };
+  return { netlimit, dir, boxes, filters, primary, aliasDomains, aliases, jobs, calls, logs, options, mailcow, audit, lock, history, dockerapi, service };
 }
 const mailCsv = 'email,name,type,team\nfirst@example.com,첫째,개인,\nsecond@example.com,둘째,팀,기획팀\nthird@example.com,,관리,';
 const run = (f, data = {}, kind = 'mailboxes') => f.service.run({ ...ctx, kind, data: { action: 'parse', csv: mailCsv, ...data } });
@@ -138,7 +140,7 @@ test('batch: 1000 physical lines and1MB boundaries, quoted multiline contributes
   assert.throws(() => parseCsv('email,name\na@example.com,"' + '\n'.repeat(999) + '"'), { statusCode: 422 });
 });
 test('batch HTTP: guarded single action endpoint, syntax line422, >64KB valid CSV accepted, no CSV/password logs', async t => {
-  const f = await fixture(t), logs = []; const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const f = await fixture(t), logs = []; const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   assert.equal((await app.inject({ method: 'POST', url: '/api/admin/batch/mailboxes', headers: { origin: 'https://mailadmin.example.com' }, payload: { action: 'parse', csv: mailCsv } })).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
   const post = payload => app.inject({ method: 'POST', url: '/api/admin/batch/mailboxes', headers, payload });
@@ -226,7 +228,7 @@ test('batch sync: no new job readback causes502; current duplicate rechecked und
   const outcomes = await Promise.all([sync(f, { action: 'retry', lines: [2] }), sync(f, { action: 'retry', lines: [2] })]); assert.equal(outcomes.flatMap(row => row.results).filter(row => row.result === 'ok').length, 1); assert.equal(f.jobs.length, 1);
 });
 test('batch sync HTTP: parse/run/error/audit/logger redact raw secrets and key even when add response echoes plaintext', async t => {
-  const f = await fixture(t), logs = []; const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const f = await fixture(t), logs = []; const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   const send = payload => app.inject({ method: 'POST', url: '/api/admin/batch/syncjobs', headers, payload });
   for (const payload of [{ action: 'parse', csv: syncCsv() }, { action: 'run', csv: syncCsv(), lines: [2] }]) { const response = await send(payload); assert.equal(response.statusCode, 200, response.body); assert.ok(!response.body.includes(sourceSecret)); assert.ok(!response.body.includes('password1')); }
@@ -263,7 +265,7 @@ test('batch sync: source case preserved in API, duplicate matching case-insensit
 test('batch sync: upstream parse error is redacted in HTTP error and logger; missing domain never auto-created', async t => {
   const f = await fixture(t), logs = [];
   await assert.rejects(sync(f, { csv: syncCsv('old@example.net', 'new@missing.example.com'), action: 'run', lines: [2] }), { statusCode: 422 }); assert.equal(writes(f).length, 0);
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   f.options.onCall = ({ path }) => { if (path.endsWith('/syncjobs/all/no_log')) throw new AppError(503, 'MAILCOW_UNAVAILABLE', `remote detail ${sourceSecret}`); };
   const result = await app.inject({ method: 'POST', url: '/api/admin/batch/syncjobs', headers, payload: { action: 'parse', csv: syncCsv() } }); assert.equal(result.statusCode, 503); assert.ok(!result.body.includes(sourceSecret)); assert.match(result.json().error.message, /\*\*\*/); assert.ok(!logs.join('').includes(sourceSecret));
@@ -271,7 +273,7 @@ test('batch sync: upstream parse error is redacted in HTTP error and logger; mis
 
 test('batch sync HTTP: comma password in flag error fully masked, disk/logger values0', async t => {
   const f = await fixture(t), logs = [], secret = 'Synthetic,Quoted-Password!';
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   f.options.onCall = ({ path }) => { if (path === '/api/v1/add/syncjob') throw new AppError(422, 'MAILCOW_REJECTED', `remote --password1 ${secret}`); };
   const csv = `source,password,target,host\nold@example.net,"${secret}",new@example.com,imap.example.net`;

@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -91,7 +92,7 @@ for (const failure of [new AppError(502, 'DOVEADM_REJECTED', '거부'), new AppE
     await assert.rejects(reader.getAcl(owner), error => error === failure);
     assert.deepEqual(calls.map(row => row.args.mailbox).filter(Boolean), ['INBOX', 'Archive']);
     const mailcow = mailcowFixture(), history = { register() {} };
-    const accounts = createAccountsService({ mailcow, dockerapi: reader, history });
+    const accounts = createAccountsService({ protocolNetlimit: createFakeProtocolNetlimitStore(), mailcow, dockerapi: reader, history });
     const detail = await accounts.detail({}, owner);
     assert.deepEqual(detail.refs.shares, []); assert.equal(detail.warnings[0].code, 'SHARES_PARTIAL');
     await assert.rejects(accounts.deletePreview({}, owner), { statusCode: 502, code: 'SHARES_UNAVAILABLE' });
@@ -171,7 +172,7 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
     if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
     return grants.has(args.user) ? [{ id: `user=${grantee}`, global: '', rights: 'lookup read' }] : [];
   } };
-  const app = await createAdminApp({ config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: dir }, logger: false, auth: { client: { ...mailcowFixture(), async login({ username }) { return { username, state: 'ready' }; } } }, dockerapi, doveadm });
+  const app = await createAdminApp({ protocolNetlimit: { store: createFakeProtocolNetlimitStore() }, config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: dir }, logger: false, auth: { client: { ...mailcowFixture(), async login({ username }) { return { username, state: 'ready' }; } } }, dockerapi, doveadm });
   t.after(() => app.close());
   assert.equal((await app.inject('/healthz')).statusCode, 200);
   const denied = await app.inject('/api/admin/shares'); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
@@ -210,7 +211,7 @@ for (const on of [false, true]) test(`global INBOX ACL: ${on ? 'doveadm' : 'dock
     if (method !== 'GET') writes++;
     return original.call(session, method, path, body);
   } };
-  const accounts = createAccountsService({ mailcow, dockerapi: { ...dockerapi, getAcl: reader.getAcl }, history: { register() {} }, teams: {} });
+  const accounts = createAccountsService({ protocolNetlimit: createFakeProtocolNetlimitStore(), mailcow, dockerapi: { ...dockerapi, getAcl: reader.getAcl }, history: { register() {} }, teams: {} });
   await assert.rejects(accounts.rename({ session: {}, actor: 'admin', ip: '192.0.2.1', addr: grantee, data: { action: 'preview', newLocal: 'new', keepOldAsAlias: true } }), { statusCode: 409, code: 'ACL_UNSUPPORTED' });
   assert.equal(writes, 0);
   assert.deepEqual(await reader.getAcl(owner), [globalAcl]);

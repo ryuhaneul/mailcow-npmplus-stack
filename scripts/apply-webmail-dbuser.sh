@@ -90,6 +90,7 @@ verify_grants() {
             'mailstack_webmail.notice_domains:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.notice_counter:SELECT,UPDATE' \
             'mailstack_webmail.login_ip_allowlist:DELETE,INSERT,SELECT' \
+            'mailstack_webmail.account_protocol_netlimit:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_templates:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_template_domains:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_template_files:DELETE,INSERT,SELECT,UPDATE' | LC_ALL=C sort)
@@ -155,6 +156,7 @@ admin_account() (
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, DELETE ON mailstack_webmail.login_ip_allowlist TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.account_protocol_netlimit TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_templates TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_files TO %s;\n' "$ACCOUNT"

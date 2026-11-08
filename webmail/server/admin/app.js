@@ -1,3 +1,4 @@
+import { createProtocolNetlimitStore } from '../security/protocol-netlimit-store.js';
 import { createOtpStore } from '../security/otp-store.js';
 import { createOtpAdminService } from './services/otp.js';
 import otpRoutes from './routes/otp.js';
@@ -99,7 +100,7 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {}, loginIps = {}, otp = {} } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {}, loginIps = {}, otp = {}, protocolNetlimit = {} } = {}) {
   if (logger !== false) {
     const base = logOptions(config.logLevel);
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
@@ -157,7 +158,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('otp', otpService);
   app.addHook('onClose', async () => { await otpStore.close?.(); });
   await app.register(otpRoutes, { service: otpService });
-  const accounts = createAccountsService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService });
+  const protocolNetlimitStore = protocolNetlimit.store ?? createProtocolNetlimitStore({ config });
+  app.addHook('onClose', async () => { await protocolNetlimitStore.close?.(); });
+  const accounts = createAccountsService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });
   const quotaNotifications = createQuotaNotificationsService({

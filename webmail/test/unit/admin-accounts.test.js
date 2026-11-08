@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -61,8 +62,9 @@ async function fixture(t) {
   const dockerapi = { async getAcl(owner) { aclCalls.push(owner); if (options.aclFailure === owner) throw new Error(secret); return structuredClone(acl.get(owner) ?? []); } };
   const audit = createAudit({ dir, logger: { info(data) { logs.push(data); } } }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams });
-  return { dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, teams, service };
+  const netlimit = createFakeProtocolNetlimitStore();
+  const service = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams });
+  return { netlimit, dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, teams, service };
 }
 const context = { session: {}, actor: 'admin', ip: '198.51.100.17' };
 const writes = f => f.calls.filter(call => call.method === 'POST');
@@ -231,8 +233,8 @@ test('accounts: missing audit directory permissions prevent mailcow mutation', a
 
 async function http(t, f) {
   const lines = []; const stream = new Writable({ write(chunk, _encoding, done) { lines.push(chunk.toString()); done(); } });
-  const client = { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir, logLevel: 'info' },
+  const client = { ...f.mailcow, createApiContext() { return {}; }, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
+  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { apiKeyDir: join(f.dir, 'keys'), mailcowApiKey: 'synthetic-server-key', adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir, logLevel: 'info' },
     logger: { ...logOptions('info'), stream }, auth: { client }, dockerapi: f.dockerapi }); t.after(() => app.close());
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: secret } });
   assert.equal(logged.statusCode, 200, logged.body);
@@ -335,7 +337,7 @@ test('quota accounts: entire 500-account projection is compact and etag matches 
   assert.equal(result.items.length, 500);
   assert.deepEqual(Object.keys(result.items[0]).sort(), ['address','etag','kind','name','quotaGb','usedBytes']);
   assert.equal(result.items[0].quotaGb, 0); assert.equal(result.items[1].kind, 'team'); assert.equal(result.items[2].kind, 'admin');
-  assert.equal(result.items[0].etag, (await read(f)).etag);
+  assert.notEqual(result.items[0].etag, (await read(f)).etag);
   const size = Buffer.byteLength(JSON.stringify(result)); t.diagnostic(`quota projection: 500 accounts ${size} bytes; 95 accounts ${Buffer.byteLength(JSON.stringify({ items: result.items.slice(0, 95) }))} bytes`); assert.ok(size < 150_000, `500 rows: ${size} bytes`);
   const saved = await patch(f, result.items[0].etag, { quotaGb: 25 });
   assert.equal(saved.mailbox.quotaGb, 25);
@@ -348,4 +350,71 @@ test('quota HTTP: list is protected and exposes the mailcow usage with no-store'
   assert.equal(response.statusCode, 200, response.body); assert.equal(response.headers['cache-control'], 'no-store');
   assert.equal(response.json().items[0].usedBytes, f.boxes[0].quota_used);
   assert.ok(!response.body.includes(secret));
+});
+
+test('netlimit account: default OFF, empty list and boolean validation leave protocols untouched', async t => {
+  const f = await fixture(t); f.netlimit.allowlistEmpty = true;
+  const before = await read(f); assert.equal(before.protocolInternalOnly, false); assert.equal(before.protocolInternalAllowlistEmpty, true);
+  for (const value of [null, 'true', 1, {}]) await assert.rejects(patch(f, before.etag, { protocolInternalOnly: value }), { statusCode: 422 });
+  const protocolBefore = structuredClone(f.boxes[0].attributes);
+  const on = await patch(f, before.etag, { protocolInternalOnly: true });
+  assert.equal(on.mailbox.protocolInternalOnly, true); assert.equal(on.mailbox.protocolInternalAllowlistEmpty, true);
+  assert.deepEqual(f.boxes[0].attributes, protocolBefore); assert.equal(writes(f).length, 0);
+  await assert.rejects(patch(f, before.etag, { protocolInternalOnly: false }), { statusCode: 409 });
+  const records = (await f.history.list()).items; assert.equal(records.length, 1); assert.equal(records[0].action, 'mailbox.protocol-netlimit');
+  await patch(f, on.etag, { protocolInternalOnly: true }); assert.equal((await f.history.list()).items.length, 1);
+});
+test('netlimit account: legacy quota etag works without modifying flag; flag requires combined etag', async t => {
+  const f = await fixture(t); await patch(f, (await read(f)).etag, { protocolInternalOnly: true });
+  const quota = (await f.service.quotaList({})).items.find(row => row.address === user), flag = structuredClone(f.netlimit.rows.get(user));
+  await assert.rejects(patch(f, quota.etag, { protocolInternalOnly: false }), { statusCode: 409 });
+  const saved = await patch(f, quota.etag, { quotaGb: 25 }); assert.equal(saved.mailbox.quotaGb, 25); assert.deepEqual(f.netlimit.rows.get(user), flag);
+  const result = await patch(f, (await read(f)).etag, { protocolInternalOnly: false }); assert.equal(result.mailbox.protocolInternalOnly, false);
+});
+test('netlimit account: DB preflight prevents settings; flag failure is partial and skips password', async t => {
+  const f = await fixture(t), before = await read(f);
+  f.netlimit.failure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애');
+  await assert.rejects(patch(f, before.etag, { name: '새 이름', protocolInternalOnly: true }), { statusCode: 503 }); assert.equal(writes(f).length, 0);
+  f.netlimit.failure = null; f.netlimit.writeFailure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애');
+  const result = await patch(f, before.etag, { name: '새 이름', protocolInternalOnly: true, password: secret });
+  assert.equal(result.result, 'partial'); assert.deepEqual(result.steps.map(row => row.stage), ['settings', 'protocol-netlimit']);
+  assert.equal(result.mailbox.name, '새 이름'); assert.equal(result.mailbox.protocolInternalOnly, false); assert.ok(result.etag);
+  assert.equal(writes(f).filter(row => row.body?.attr?.password).length, 0);
+});
+test('netlimit account: uncertain flag write returns null etag; password failure preserves saved flag', async t => {
+  const f = await fixture(t), before = await read(f), originalWrite = f.netlimit.write;
+  f.netlimit.write = async input => { await originalWrite(input); f.netlimit.failure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애'); throw f.netlimit.failure; };
+  const uncertain = await patch(f, before.etag, { protocolInternalOnly: true });
+  assert.equal(uncertain.result, 'partial'); assert.equal(uncertain.etag, null); assert.equal(uncertain.reloadRequired, true); assert.equal(uncertain.mailbox.protocolInternalOnly, null);
+  f.netlimit.failure = null; f.netlimit.write = originalWrite; f.options.passwordFailure = new AppError(422, 'MAILCOW_REJECTED', '합성 암호 실패');
+  const result = await patch(f, (await read(f)).etag, { protocolInternalOnly: false, password: secret });
+  assert.equal(result.result, 'partial'); assert.equal(result.mailbox.protocolInternalOnly, false); assert.equal(result.steps[0].stage, 'protocol-netlimit');
+});
+test('netlimit account: undo restores enabled with a new generation and rejects later edits', async t => {
+  const f = await fixture(t); const on = await patch(f, (await read(f)).etag, { protocolInternalOnly: true });
+  const record = (await f.history.list()).items[0];
+  await f.history.revert(record.id, { ...context, confirm: true });
+  const off = await read(f); assert.equal(off.protocolInternalOnly, false); assert.notEqual(off.protocolInternalVersion, on.mailbox.protocolInternalVersion);
+  await assert.rejects(f.history.revert(record.id, { ...context, confirm: true }), { statusCode: 409 });
+  f.boxes.splice(f.boxes.findIndex(row => row.username === user), 1);
+  await assert.rejects(f.history.revert(record.id, { ...context, confirm: true }), { statusCode: 404 });
+});
+test('netlimit account: create clears orphan flag and preserves server protocol OFF', async t => {
+  const f = await fixture(t); f.netlimit.rows.set(next, { enabled: true, version: 'a'.repeat(32) }); f.options.created = { attributes: { imap_access: '0' } };
+  await create(f); assert.equal(f.netlimit.rows.has(next), false); assert.equal((await f.service.detail({}, next)).protocolInternalOnly, false);
+  assert.equal(f.boxes.find(row => row.username === next).attributes.imap_access, '0');
+});
+test('netlimit HTTP: anonymous/read key denied; human/full key can toggle and CSRF stays enforced', async t => {
+  const f = await fixture(t), { app, headers } = await http(t, f), url = `/api/admin/mailboxes/${user}`;
+  const current = await app.inject({ url, headers });
+  const payload = { etag: current.json().etag, protocolInternalOnly: true };
+  for (const h of [{ origin: headers.origin }, { ...headers, 'x-mailadmin-csrf': '' }]) {
+    const result = await app.inject({ method: 'PATCH', url, headers: h, payload }); assert.equal(result.statusCode, 403); assert.equal(result.headers['www-authenticate'], undefined);
+  }
+  const human = await app.inject({ method: 'PATCH', url, headers, payload }); assert.equal(human.statusCode, 200, human.body);
+  for (const permission of ['read', 'full']) {
+    const issued = await app.apiKeys.create({ name: `Synthetic ${permission}`, permission }, 'admin', { id: app.apiKeys.allocateId() });
+    const result = await app.inject({ method: 'PATCH', url, headers: { 'x-mailadmin-api-key': issued.token }, payload: { etag: human.json().etag, protocolInternalOnly: false } });
+    assert.equal(result.statusCode, permission === 'read' ? 403 : 200, result.body); assert.equal(result.headers['www-authenticate'], undefined);
+  }
 });

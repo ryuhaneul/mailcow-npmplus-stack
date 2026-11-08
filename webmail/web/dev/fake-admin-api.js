@@ -317,13 +317,13 @@ export function createFakeAdminApi() {
       const address = leaving ? body.address : decodeURIComponent(accountMatch[1]), row = state.accounts.items.find(row => row.address === address), etag = `synthetic-account-${state.accounts.version}`;
       if (!row) return fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});
       const send = value => response.end(JSON.stringify(value));
-      if (request.method === 'GET') return send({ ...row, etag, refs: state.accountRefs, sharesScope: 'teams+own', appPasswordCount: 2, warnings: state.accounts.warnings || [] });
+      if (request.method === 'GET') return send({ protocolInternalOnly: false, protocolInternalVersion: null, protocolInternalAllowlistEmpty: Boolean(state.accounts.allowlistEmpty), ...row, etag, refs: state.accountRefs, sharesScope: 'teams+own', appPasswordCount: 2, warnings: state.accounts.warnings || [] });
       if (request.method === 'PATCH') {
         if (state.accounts.patchError) return fail(state.accounts.patchError);
         if (body.etag !== etag) return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요.'});
-        for (const key of ['name','quotaGb','protocols']) if (body[key] !== undefined) row[key] = body[key];
+        for (const key of ['name','quotaGb','protocols','protocolInternalOnly']) if (body[key] !== undefined) row[key] = body[key];
         if (body.active !== undefined) row.active=Number(body.active); state.accounts.version++;
-        return send({ result: 'ok', mailbox: row, etag: `synthetic-account-${state.accounts.version}`, warnings: body.protocols?.sieve===false ? [{...sieveDisabledWarning}] : [], steps:[{stage:'settings',status:'ok',auditId:'11111111111111111111111111111111'}] });
+        return send({ result: state.accounts.patchPartial ? 'partial' : 'ok', ...(state.accounts.patchPartial ? {reloadRequired:true} : {}), mailbox: row, etag: state.accounts.patchPartial ? null : `synthetic-account-${state.accounts.version}`, warnings: body.protocols?.sieve===false ? [{...sieveDisabledWarning}] : [], steps:[{stage:'settings',status:'ok',auditId:'11111111111111111111111111111111'}] });
       }
       const mode = leaving ? body.mode : 'delete', previewing = leaving ? body.action === 'preview' : Boolean(accountMatch[2]);
       if (previewing) return send({ address, mode, cleanRefs: leaving ? body.cleanRefs : true, forwardTo: body.forwardTo || null, etag, messages: row.messages, usedBytes: row.usedBytes, refs: body.cleanRefs === false ? {} : { ...state.accountRefs, aliases: state.accountRefs.aliases.map(alias => ({ ...alias, effect: mode==='delete' ? 'deleted' : 'kept' })) }, sharesScope: body.cleanRefs===false ? 'none' : 'all', irreversible: mode==='delete', confirmAddress: mode==='delete' ? address : null, confirmation: mode==='delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.', warnings: [...(leaving ? leaveWarnings : []), ...(state.accounts.warnings || [])] });

@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -88,8 +89,9 @@ async function fixture(t, populated = true) {
     }, async close() {},
   };
   const otp = createOtpAdminService({ store: otpStore, mailcow, audit, lock });
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
-  return { otpRows, otpStore, dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, aclFolders, service, audit, history };
+  const netlimit = createFakeProtocolNetlimitStore();
+  const service = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
+  return { netlimit, otpRows, otpStore, dir, boxes, filters, aliases, jobs, passwords, calls, acl, options, mailcow, dockerapi, aclFolders, service, audit, history };
 }
 const rename = (f, data) => f.service.rename({ ...context, addr: old, data: { newLocal: 'new', keepOldAsAlias: true, ...data } });
 const preview = f => rename(f, { action: 'preview' });
@@ -217,7 +219,7 @@ test('rename: stale etag, missing etag and concurrent duplicate flows produce no
 });
 
 test('rename HTTP: guard protects preview/run and permits successful rename without challenge headers', async t => {
-  const f = await fixture(t, false); const app = await createAdminApp({ otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t, false); const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${old}/rename`, payload = { action: 'preview', newLocal: 'new', keepOldAsAlias: true };
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
@@ -345,4 +347,21 @@ test('OTP rename cleanup failure stops later cascades, reports partial and prese
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'otp'); assert.equal(result.steps.at(-1).code, 'OTP_UNAVAILABLE');
   assert.equal(f.boxes[0].username, next); assert.equal(f.otpRows.has(old), true);
   assert.ok(result.recovery.find(row => row.stage === 'otp').message.includes('초기화'));
+});
+
+test('netlimit rename: copies ON before rename and removes old address only after confirmation', async t => {
+  const f = await fixture(t, false); f.netlimit.rows.set(old, { enabled: true, version: 'a'.repeat(32) });
+  const initial = await preview(f); let checked = false;
+  f.options.onCall = ({ path }) => { if (path === '/api/v1/edit/rename-mbox') { assert.equal(f.netlimit.rows.get(next).enabled, true); checked = true; } };
+  const result = await run(f, initial.etag); assert.equal(result.result, 'ok'); assert.equal(checked, true);
+  assert.equal(f.netlimit.rows.has(old), false); assert.equal(f.netlimit.rows.get(next).enabled, true);
+});
+test('netlimit rename: failed rename removes the pre-copy and preserves original flag', async t => {
+  const f = await fixture(t, false), flag = { enabled: true, version: 'a'.repeat(32) }; f.netlimit.rows.set(old, flag);
+  const initial = await preview(f); f.options.failPath = '/api/v1/edit/rename-mbox';
+  await assert.rejects(run(f, initial.etag)); assert.deepEqual(f.netlimit.rows.get(old), flag); assert.equal(f.netlimit.rows.has(next), false);
+});
+test('netlimit rename: stale flag preview refuses the rename', async t => {
+  const f = await fixture(t, false), initial = await preview(f); f.netlimit.rows.set(old, { enabled: true, version: 'a'.repeat(32) });
+  await assert.rejects(run(f, initial.etag), { statusCode: 409 }); assert.equal(writes(f).length, 0);
 });

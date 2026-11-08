@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS mailstack_webmail.login_ip_allowlist (
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   created_by VARCHAR(255) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS mailstack_webmail.account_protocol_netlimit (
+  email VARCHAR(255) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
+  enabled TINYINT(1) NOT NULL DEFAULT 0,
+  version BINARY(16) NOT NULL,
+  CONSTRAINT account_protocol_netlimit_enabled CHECK (enabled IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS mailstack_webmail.otp_accounts (
   email VARCHAR(255) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
   version BINARY(16) NOT NULL,
@@ -112,6 +118,7 @@ SQL
 fi
 # Resolve every required column without reading notice bodies or email addresses.
 mysql_root <<'SQL' >/dev/null || die 'notices schema is missing or incompatible'
+SELECT email,enabled,version FROM mailstack_webmail.account_protocol_netlimit LIMIT 0;
 SELECT email,version,secret_ciphertext,nonce,tag,key_version,registered_at,last_step FROM mailstack_webmail.otp_accounts LIMIT 0;
 SELECT id,force_all,revision,updated_at,updated_by FROM mailstack_webmail.otp_policy LIMIT 0;
 SELECT id,title,body_html,category,audience_all,pinned,state,publish_seq,published_at,created_at,updated_at,updated_by FROM mailstack_webmail.notices LIMIT 0;
@@ -126,7 +133,13 @@ SQL
 READY=$(mysql_root <<'SQL'
 SELECT (SELECT COUNT(*) FROM mailstack_webmail.otp_policy WHERE id = 1 AND force_all IN (0,1)) = 1
    AND (SELECT COUNT(*) FROM mailstack_webmail.notice_counter) = 1
-   AND (SELECT COUNT(*) FROM mailstack_webmail.notice_counter WHERE id = 1 AND next_seq >= 0) = 1;
+   AND (SELECT COUNT(*) FROM mailstack_webmail.notice_counter WHERE id = 1 AND next_seq >= 0) = 1
+   AND (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='mailstack_webmail' AND TABLE_NAME='account_protocol_netlimit') = 3
+   AND (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='mailstack_webmail' AND TABLE_NAME='account_protocol_netlimit' AND CONSTRAINT_NAME='account_protocol_netlimit_enabled' AND CONSTRAINT_TYPE='CHECK') = 1
+   AND (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='mailstack_webmail' AND TABLE_NAME='account_protocol_netlimit'
+     AND IS_NULLABLE='NO' AND ((COLUMN_NAME='email' AND DATA_TYPE='varchar' AND CHARACTER_MAXIMUM_LENGTH=255 AND COLLATION_NAME='utf8mb4_bin' AND COLUMN_KEY='PRI')
+       OR (COLUMN_NAME='enabled' AND COLUMN_TYPE='tinyint(1)' AND COLUMN_DEFAULT='0')
+       OR (COLUMN_NAME='version' AND COLUMN_TYPE='binary(16)'))) = 3;
 SQL
 ) || die 'could not check publication counter'
 [ "$READY" = 1 ] || die 'publication counter is missing or incompatible'

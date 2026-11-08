@@ -1,3 +1,4 @@
+import { createProtocolNetlimitStore, protocolNetlimitState, protocolNetlimitVersion } from '../../security/protocol-netlimit-store.js';
 import { collectMailboxQuota } from './quota.js';
 import { sieveDisabledWarning } from '../messages.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -45,12 +46,42 @@ function snapshot(row) {
 }
 const kindOf = (row, groups) => groups.has(normalize(row.username)) ? 'team' : Number(row.quota) === 3 * GB ? 'admin' : 'personal';
 const summary = (row, groups) => ({ ...snapshot(row), kind: kindOf(row, groups), usedBytes: Number(row.quota_used ?? 0), messages: Number(row.messages ?? 0) });
-export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, aclFolders = {
+export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, protocolNetlimit = createProtocolNetlimitStore(), aclFolders = {
   enabled: false,
   readOwned: async owner => (await dockerapi.getAcl(owner)).filter(row => normalize(row.user) === owner && row.mailbox === 'INBOX'),
   assertExist: async () => {},
 } }) {
   const aliasApi = createAliasApi(mailcow);
+  const netState = async addr => protocolNetlimitState(await protocolNetlimit.read(addr));
+  const editState = (mailbox, netlimit) => ({ mailbox, netlimit });
+  const netFields = row => ({ protocolInternalOnly: row.enabled, protocolInternalVersion: row.version,
+    ...(row.allowlistEmpty !== undefined ? { protocolInternalAllowlistEmpty: row.allowlistEmpty } : {}) });
+  async function changeNetlimit({ session, actor, ip, addr, before, enabled }) {
+    await box(session, addr);
+    const after = { enabled, version: protocolNetlimitVersion() };
+    return audit.run({ actor, ip, action: 'mailbox.protocol-netlimit', target: addr, kind: 'config', revertible: true, before, after }, async intent => {
+      await protocolNetlimit.write({ email: addr, enabled, expected: before, version: after.version });
+      if (!isDeepStrictEqual(await netState(addr), after)) throw verifyFailed();
+      return { value: after, auditId: intent.id };
+    });
+  }
+  async function cleanupNetlimit({ actor, ip, addr, expected }) {
+    const before = expected ?? await netState(addr);
+    if (before.version === null) return;
+    return audit.run({ actor, ip, action: 'mailbox.protocol-netlimit.cleanup', target: addr, kind: 'irreversible', revertible: false,
+      before, after: { enabled: false, version: null } }, async () => protocolNetlimit.remove({ email: addr, expected: before }));
+  }
+  history.register('mailbox.protocol-netlimit', {
+    label: '사내 IP 제한을 바꿨어요',
+    read: async ({ session, target }) => { await box(session, target); return netState(target); },
+    prepareRevert: async ({ record }) => ({ expected: record.after, target: { enabled: record.before.enabled, version: protocolNetlimitVersion() } }),
+    write: async ({ session, target, value, expected }) => {
+      await box(session, target);
+      const written = await protocolNetlimit.write({ email: target, enabled: value.enabled, version: value.version, expected });
+      return { target: written };
+    },
+  });
+
   const folderWarnings = () => aclFolders.enabled === false ? [{ code: 'SUBFOLDER_ACL_UNCHECKED', message: '하위 폴더 공유 권한은 2단계(doveadm)가 켜진 서버에서만 확인·정리돼요' }] : [];
   const get = (session, path) => mailcow.call(session, 'GET', `/api/v1/get/${path}`);
   async function rows(session, path) {
@@ -119,7 +150,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return { address: item.address, name: item.name, kind: item.kind, usedBytes: item.usedBytes, quotaGb: item.quotaGb, etag: etag(snapshot(row)) };
     }) };
   }
-  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false } = {}) {
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true } = {}) {
     const addr = address(rawAddress), row = await box(session, addr);
     const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
       rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
@@ -153,8 +184,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     warnings.push(...folderWarnings());
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
-    const state = snapshot(row);
-    return { ...summary(row, groups), appPasswordCount: appPasswords.length, etag: etag(state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
+    const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
+    return { ...summary(row, groups), ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
       refs: {
         aliases: aliases.filter(alias => !isMemberAlias(alias) && targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
@@ -190,39 +221,58 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const hasPassword = Object.hasOwn(data ?? {}, 'password');
     if (data && typeof data === 'object') delete data.password;
     try {
-      const addr = address(rawAddress);
-      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !['etag', 'name', 'quotaGb', 'active', 'protocols'].includes(key)) ||
+      const addr = address(rawAddress), hasNetlimit = Object.hasOwn(data ?? {}, 'protocolInternalOnly');
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !['etag', 'name', 'quotaGb', 'active', 'protocols', 'protocolInternalOnly'].includes(key)) ||
         (hasPassword && (!password || !password.length)) || !Object.keys(data).some(key => key !== 'etag') && !hasPassword) throw invalid();
       if (data.name !== undefined && (typeof data.name !== 'string' || data.name.length > 255)) throw invalid();
       if (data.quotaGb !== undefined) quota(data.quotaGb);
       if (data.active !== undefined && ![true, false, 0, 1].includes(data.active)) throw invalid();
+      if (hasNetlimit && typeof data.protocolInternalOnly !== 'boolean') throw invalid();
       if (data.protocols !== undefined && (!data.protocols || typeof data.protocols !== 'object' || Array.isArray(data.protocols) || Object.entries(data.protocols).some(([key, value]) => !protocols.includes(key) || typeof value !== 'boolean'))) throw invalid();
       return await lock.run(addr, async () => {
-        const before = snapshot(await box(session, addr)); assertUnchanged(data.etag, before);
+        const before = snapshot(await box(session, addr));
+        // Existing quota clients use mailbox-only revisions and never write the flag.
+        const legacy = !hasNetlimit && data.etag === etag(before);
+        const netBefore = legacy ? null : await netState(addr);
+        assertUnchanged(data.etag, legacy ? before : editState(before, netBefore));
         const after = { ...before, protocols: { ...before.protocols, ...data.protocols } };
         for (const key of ['name', 'quotaGb']) if (data[key] !== undefined) after[key] = data[key];
         if (data.active !== undefined) after.active = Number(data.active);
         const warnings = data.protocols?.sieve === false ? [sieveWarning()] : [], steps = [];
-        let applied = before;
-        if (!isDeepStrictEqual(before, after)) applied = await audit.run({ actor, ip, action: 'mailbox.edit', target: addr, kind: 'config', revertible: true, before, after }, async intent => {
-          const value = await save(session, addr, before, after); steps.push({ stage: 'settings', status: 'ok', auditId: intent.id }); return value;
-        });
-        if (hasPassword) {
+        let applied = before, stage = 'settings', flagAttempted = false;
+        async function response(result) {
+          if (legacy) return { result, steps, mailbox: applied, etag: etag(applied), warnings };
           try {
-            await audit.run({ actor, ip, action: 'mailbox.password', target: addr, kind: 'config', revertible: false, before: {}, after: { password: 'changed' } }, async intent => {
-              const attr = { password: password.toString(), password2: password.toString() };
-              try { await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [addr], attr }); }
-              finally { delete attr.password; delete attr.password2; }
-              steps.push({ stage: 'password', status: 'ok', auditId: intent.id });
-            });
-          } catch (error) {
-            if (error instanceof MailcowAuthLost) throw error;
-            if (!steps.length) throw error;
-            steps.push({ stage: 'password', status: 'failed', code: safeCode(error), auditId: null });
-            return { result: 'partial', steps, mailbox: applied, etag: etag(applied), warnings };
+            const current = snapshot(await box(session, addr)), net = await protocolNetlimit.read(addr);
+            return { result, steps, mailbox: { ...current, ...netFields(net) }, etag: etag(editState(current, protocolNetlimitState(net))), warnings };
+          } catch {
+            return { result: 'partial', steps, mailbox: { ...applied, protocolInternalOnly: null, protocolInternalVersion: null }, etag: null, reloadRequired: true, warnings };
           }
         }
-        return { result: 'ok', steps, mailbox: applied, etag: etag(applied), warnings };
+        try {
+          if (!isDeepStrictEqual(before, after)) applied = await audit.run({ actor, ip, action: 'mailbox.edit', target: addr, kind: 'config', revertible: true, before, after }, async intent => {
+            const value = await save(session, addr, before, after); steps.push({ stage, status: 'ok', auditId: intent.id }); return value;
+          });
+          stage = 'protocol-netlimit';
+          if (hasNetlimit && data.protocolInternalOnly !== netBefore.enabled) {
+            flagAttempted = true;
+            const changed = await changeNetlimit({ session, actor, ip, addr, before: netBefore, enabled: data.protocolInternalOnly });
+            steps.push({ stage, status: 'ok', auditId: changed.auditId });
+          }
+          stage = 'password';
+          if (hasPassword) await audit.run({ actor, ip, action: 'mailbox.password', target: addr, kind: 'config', revertible: false, before: {}, after: { password: 'changed' } }, async intent => {
+            const attr = { password: password.toString(), password2: password.toString() };
+            try { await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [addr], attr }); }
+            finally { delete attr.password; delete attr.password2; }
+            steps.push({ stage, status: 'ok', auditId: intent.id });
+          });
+        } catch (error) {
+          if (error instanceof MailcowAuthLost) throw error;
+          if (!steps.length && (!flagAttempted || error.statusCode === 409)) throw error;
+          steps.push({ stage, status: 'failed', code: safeCode(error), auditId: null });
+          return response('partial');
+        }
+        return response('ok');
       });
     } finally { password?.fill(0); }
   }
@@ -244,6 +294,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         const warnings = [];
         await lock.run(addr, async () => {
           if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'MAILBOX_EXISTS', '이미 있는 메일함이에요.');
+          await cleanupNetlimit({ actor, ip, addr });
           await audit.run({ actor, ip, action: 'mailbox/create', target: addr, kind: 'config', revertible: false, before: {}, after: { ...desired, password: 'set' } }, async intent => {
             const body = { local_part: addr.split('@')[0], domain, name: data.name, quota: String(quotaGb * 1024), active: '1', force_pw_update: '0', tls_enforce_in: '1', tls_enforce_out: '1', password: password.toString(), password2: password.toString() };
             try { await mailcow.call(session, 'POST', '/api/v1/add/mailbox', body); }
@@ -331,18 +382,18 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
   }
   async function lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo }) {
-    const account = snapshot(await box(session, addr));
+    const account = snapshot(await box(session, addr)), netlimit = await netState(addr);
     const filters = await rows(session, 'filters/all');
     const ownFilters = prefilters(filters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
     let forward;
     if (forwardTo) forward = await teams.previewForward(session, addr, forwardTo);
     const operation = { mode, cleanRefs, forwardTo };
-    if (mode === 'disable' && !cleanRefs) return { state: { account, ownFilters, operation }, account, filters, forward,
+    if (mode === 'disable' && !cleanRefs) return { state: { account, netlimit, ownFilters, operation }, account, filters, forward,
       refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
     if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map(), ownerSnapshot = new Map();
-    const info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
+    const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
     const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
@@ -357,7 +408,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
     };
-    return { state: { account, ownFilters, operation, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
+    return { state: { account, netlimit, ownFilters, operation, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
       teamsToClean, aliasRows, senderRows, syncRows, aclByOwner, info };
   }
   async function deletePreview(session, rawAddress, options = {}) {
@@ -465,7 +516,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             stage = 'mailbox';
             await lock.run(addr, async () => {
               const checkedOwners = new Map();
-              const current = await detail(session, addr, { allShares: true, ownerSnapshot: checkedOwners });
+              const current = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, ownerSnapshot: checkedOwners });
               verifyShareOwners(checkedOwners);
               if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못해 삭제를 멈췄어요.');
               if (Object.values(current.refs).some(refs => refs.length)) throw new AppError(409, 'REFERENCES_REMAIN', '연결이 남아 있어 메일함을 지우지 않았어요. 다시 미리보기를 확인해 주세요.');
@@ -474,10 +525,14 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               protectTeams(checkedFilters, await rows(session, 'alias/all'), addr);
               const ownFilters = prefilters(checkedFilters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
               assertUnchanged(etag(plan.state.ownFilters), ownFilters);
+              assertUnchanged(etag(plan.state.netlimit), await netState(addr));
               await mailcow.call(session, 'POST', '/api/v1/delete/mailbox', [addr]);
               if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
             });
             success(stage, addr);
+            stage = 'protocol-netlimit';
+            await lock.run(addr, () => cleanupNetlimit({ actor, ip, addr, expected: plan.state.netlimit }));
+            if (plan.state.netlimit.version !== null) success(stage, addr);
             stage = 'otp';
             const clearedOtp = await otp.cleanup({ email: addr, actor, ip });
             success(stage, addr, clearedOtp.auditId);
@@ -485,7 +540,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           if (mode === 'disable' && cleanRefs) {
             stage = 'shares';
             const checkedOwners = new Map();
-            const current = await detail(session, addr, { allShares: true, ownerSnapshot: checkedOwners, skipOwnShares });
+            const current = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, ownerSnapshot: checkedOwners, skipOwnShares });
             verifyShareOwners(checkedOwners);
             if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || current.refs.shares.length) throw verifyFailed();
           }
@@ -493,7 +548,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         } catch (error) {
           if (!touched) throw error;
           if (error instanceof MailcowAuthLost) lostSession = error;
-          const recovery = stage === 'otp' ? [{ stage, message: '메일함 삭제는 적용됐어요. 관리 2단계 인증 초기화 API로 이전 주소의 남은 등록을 정리해 주세요.' }] : stage === 'aliases' ? [{ stage, message: '별칭 대상과 대상 메일함의 보내기 권한을 mailcow에서 확인하고 원래 권한을 복원해 주세요.' }] : [];
+          const recovery = stage === 'protocol-netlimit' ? [{ stage, message: '계정 변경은 적용됐지만 제한 설정 정리를 완료하지 못했어요. 현재 상태를 다시 확인해 주세요.' }] : stage === 'otp' ? [{ stage, message: '메일함 삭제는 적용됐어요. 관리 2단계 인증 초기화 API로 이전 주소의 남은 등록을 정리해 주세요.' }] : stage === 'aliases' ? [{ stage, message: '별칭 대상과 대상 메일함의 보내기 권한을 mailcow에서 확인하고 원래 권한을 복원해 주세요.' }] : [];
           steps.push({ stage: stage ?? 'verify', status: 'failed', code: safeCode(error), auditId: null, ...(recovery.length ? { recovery: recovery[0].message } : {}) });
           return { result: 'partial', steps, ...(recovery.length ? { recovery } : {}), detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps, ...(recovery.length ? { recovery } : {}) }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
         }
@@ -534,7 +589,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const aliasRows = aliases.filter(item => targets(item.goto).includes(old)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(item => normalize(item.username) === old || targets(item.sender_acl).includes(old)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(item => normalize(item.user2) === old).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, old, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
+    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, old, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
     const shares = relatedShares(aclByOwner, old).map(row => ({ owner: row.owner, grantee: row.id, mailbox: row.mailbox, rights: [...row.rights] }));
     for (const share of shares) {
@@ -551,7 +606,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       syncjobs: syncRows.map(job => ({ id: job.id, before: old, after: next })),
       oldAlias: [{ address: old, targets: [next] }],
     };
-    const state = { old, next, keepOldAsAlias: true, account, shareOwners: ownerVersions(ownerSnapshot),
+    const state = { old, next, keepOldAsAlias: true, account, netlimit: await netState(old), netlimitTarget: await netState(next), shareOwners: ownerVersions(ownerSnapshot),
       filters: affectedFilters.map(filter => ({ id: filter.id, owner: normalize(filter.username), sha256: scriptHash(filter.script_data), active: filter.active, type: filter.filter_type })),
       aliases: aliasRows.map(alias => ({ id: alias.id, sha256: etag(alias) })),
       senders: senderRows.map(item => ({ mailbox: normalize(item.username), sha256: etag(item.sender_acl) })),
@@ -572,6 +627,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       const plan = await renamePlan(session, old, next); assertUnchanged(data.etag, plan.state);
       const steps = [], recovery = [
         { stage: 'mailbox', message: `현재 ${next} 함을 확인해 주세요. 주소를 다시 바꾸려면 mailcow에서 모든 연결도 함께 확인해 주세요.` },
+        { stage: 'protocol-netlimit', message: '주소 변경은 적용됐지만 제한 설정 정리를 완료하지 못했어요. 현재 상태를 다시 확인해 주세요.' },
         { stage: 'otp', message: '주소 변경은 적용됐어요. 관리 2단계 인증 초기화 API로 이전 주소의 남은 등록을 정리하고 새 주소로 다시 등록해 주세요.' },
         { stage: 'teamFilters', message: `필터 화면에서 ${old} 대신 ${next}로 팀 전달 주소를 확인해 주세요.` },
         { stage: 'aliases', message: `별칭 대상에서 ${old}를 ${next}로 바꾸고 대상 메일함의 원래 보내기 권한을 확인해 주세요.` },
@@ -580,7 +636,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         { stage: 'syncjobs', message: '대상이 바뀌지 않은 동기화 작업은 지우고 새 주소로 다시 만들어 주세요.' },
         { stage: 'oldAlias', message: `${old}를 ${next}로 보내는 별칭을 만들어 주세요.` },
       ];
-      let renamed = false, fatal, stage = 'mailbox';
+      let renamed = false, fatal, netCopy, stage = 'mailbox';
       const warnings = plan.info.warnings.filter(warning => warning.code !== 'SUBFOLDER_ACL_UNCHECKED');
       const expectedAccount = { ...plan.account, address: next, senderAcl: replaceAddress(plan.account.senderAcl, old, next) };
       const record = { actor, ip, action: 'mailbox.rename', target: old, kind: 'config', revertible: false, before: { address: old, changes: plan.changes }, after: { address: next, keepOldAsAlias: true } };
@@ -609,11 +665,21 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             assertUnchanged(data.etag, (await renamePlan(session, old, next)).state);
             await runStage('mailbox', old, { address: old }, { address: next }, async () => {
               assertUnchanged(data.etag, (await renamePlan(session, old, next)).state);
+              if (plan.state.netlimit.version !== null || plan.state.netlimitTarget.version !== null) {
+                netCopy = { enabled: plan.state.netlimit.enabled, version: protocolNetlimitVersion() };
+                await runStage('protocol-netlimit', next, plan.state.netlimitTarget, netCopy, () =>
+                  protocolNetlimit.write({ email: next, enabled: netCopy.enabled, version: netCopy.version, expected: plan.state.netlimitTarget }));
+                stage = 'mailbox';
+              }
+              assertUnchanged(etag(plan.state.netlimit), await netState(old));
               await mailcow.call(session, 'POST', '/api/v1/edit/rename-mbox', { items: [old], attr: { domain: old.split('@')[1], old_local_part: old.split('@')[0], new_local_part: next.split('@')[0], create_alias: '0' } });
               renamed = true;
               await verifyMailbox();
             });
           }));
+          stage = 'protocol-netlimit';
+          await lock.run(old, () => cleanupNetlimit({ actor, ip, addr: old, expected: plan.state.netlimit }));
+          if (plan.state.netlimit.version !== null) steps.push({ stage, target: old, status: 'ok' });
           stage = 'otp';
           const clearedOtp = await otp.cleanup({ email: old, actor, ip });
           steps.push({ stage, target: old, status: 'ok', auditId: clearedOtp.auditId });
@@ -683,12 +749,36 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             try { if (renameMember(filter.script_data, old, next).changed) throw verifyFailed(); }
             catch (error) { if (error instanceof Refused) throw verifyFailed(); throw error; }
           }
-          const checkedAcl = new Map(), checkedOwners = new Map(), info = await detail(session, next, { allShares: true, aclSnapshot: checkedAcl, ownerSnapshot: checkedOwners });
+          const checkedAcl = new Map(), checkedOwners = new Map(), info = await detail(session, next, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: checkedAcl, ownerSnapshot: checkedOwners });
           assertUnchanged(etag(ownerVersions(new Map(plan.state.shareOwners.map(([owner, active]) => [owner === old ? next : owner, active]).filter(([owner]) => checkedOwners.has(owner))))), ownerVersions(checkedOwners));
           if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || [...checkedAcl.values()].some(acl => acl.some(item => normalize(item.id) === old))) throw verifyFailed();
           for (const share of plan.changes.shares) if (!checkedAcl.get(share.newOwner)?.some(item => item.mailbox === share.mailbox && normalize(item.id) === share.newGrantee && aclReadOnly(item))) throw verifyFailed();
           return { result: 'ok', address: next, steps, recovery: [], warnings: [...warnings, ...folderWarnings()], detail: { steps }, notices: renameNotices };
         } catch (error) {
+          if (!renamed && netCopy) {
+            try {
+              const currentBoxes = await rows(session, 'mailbox/all');
+              if (currentBoxes.some(row => normalize(row.username) === old) && !currentBoxes.some(row => normalize(row.username) === next)) {
+                await lock.run(next, async () => {
+                  const current = await netState(next);
+                  if (isDeepStrictEqual(current, netCopy)) {
+                    await audit.run({ actor, ip, action: 'mailbox.rename.protocol-netlimit.restore', target: next, kind: 'irreversible', revertible: false,
+                      before: current, after: plan.state.netlimitTarget }, async () => {
+                      if (plan.state.netlimitTarget.version === null) await protocolNetlimit.remove({ email: next, expected: current });
+                      else await protocolNetlimit.write({ email: next, enabled: plan.state.netlimitTarget.enabled, version: plan.state.netlimitTarget.version, expected: current });
+                    });
+                  } else if (!isDeepStrictEqual(current, plan.state.netlimitTarget)) assertUnchanged('conflict', {});
+                });
+                throw error;
+              }
+              renamed = true; // Keep the target restriction if the rename applied or cannot be disproved.
+            } catch (recoveryError) {
+              if (recoveryError === error) throw error;
+              stage = 'protocol-netlimit';
+              steps.push({ stage, status: 'failed', code: safeCode(recoveryError), recovery: recovery.find(item => item.stage === stage).message });
+              return { result: 'partial', address: next, steps, recovery, warnings, detail: { steps, recovery }, notices: renameNotices };
+            }
+          }
           if (!renamed) throw error;
           if (error instanceof MailcowAuthLost) fatal = error;
           const instruction = recovery.find(item => item.stage === stage)?.message ?? '새 주소의 연결을 미리보기 목록과 대조하고 남은 설정을 mailcow에서 직접 고쳐 주세요.';
@@ -704,6 +794,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   const gapWarning = { code: 'CONVERSION_GAP', message: '같은 주소의 메일함과 별칭은 함께 있을 수 없어 전환 중 잠깐 메일을 받지 못할 수 있어요.' };
   async function conversionPlan(session, addr, direction, options) {
     const [boxes, aliases, filters] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all')]);
+    const netlimit = await netState(addr);
     await domainActive(session, addr.split('@')[1]);
     const internal = new Set(boxes.filter(row => String(row.active) === '1').map(row => normalize(row.username)));
     const destinations = direction === 'mailbox-to-alias' ? options.targets : [options.copyTo, options.sendGrantTo].filter(Boolean);
@@ -717,7 +808,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       if (!alias) throw new AppError(404, 'NOT_FOUND', '전환할 별칭을 찾을 수 없어요.');
       if (isMemberAlias(alias)) throw new AppError(409, 'TEAM_MEMBER_ALIAS', '팀 분배 화면에서 바꿔 주세요.');
       const ownFilters = filters.filter(row => normalize(row.username) === addr);
-      return { state: { direction, addr, options, alias: etag(alias), senders: senderVersions,
+      return { state: { direction, addr, options, netlimit, alias: etag(alias), senders: senderVersions,
         destinations: boxes.filter(row => destinations.includes(normalize(row.username))).map(snapshot).sort((a, b) => a.address.localeCompare(b.address)),
         filters: ownFilters.map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })) },
         alias, ownFilters, senders, senderRestore, warnings: [gapWarning, ...folderWarnings()], changes: { alias: aliasBackup(alias),
@@ -739,7 +830,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         throw new AppError(409, error.code.toUpperCase(), `${normalize(filter.username)}의 필터를 해석할 수 없어요. 필터 화면에서 먼저 확인해 주세요.`);
       }
     }
-    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, addr, { allShares: true, aclSnapshot: aclByOwner, ownerSnapshot });
+    const aclByOwner = new Map(), ownerSnapshot = new Map(), info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot });
     if (info.warnings.some(row => row.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 다시 시도해 주세요.');
     const shares = relatedShares(aclByOwner, addr);
     if (shares.some(row => !aclReadOnly(row))) throw new AppError(409, 'ACL_UNSUPPORTED', '관련 공유에 읽기 외 권한이 있어요. 공유를 먼저 확인해 주세요.');
@@ -753,7 +844,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       { code: 'INCOMING_SHARES_UNUSED', message: `다른 함에서 이 주소에 준 공유 ${shares.filter(row => row.owner !== addr).length}건은 남지만 로그인할 수 없어 쓰이지 않아요` },
       ...info.warnings,
     ];
-    const state = { direction, addr, options, shareOwners: ownerVersions(ownerSnapshot), account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
+    const state = { direction, addr, options, netlimit, shareOwners: ownerVersions(ownerSnapshot), account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
       filters: relatedFilters.map(row => ({ id: row.id, owner: normalize(row.username), sha256: scriptHash(row.script_data), active: row.active, type: row.filter_type })),
       senders: senderVersions, acl: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: jobs.map(row => ({ id: row.id, sha256: etag(row) })),
@@ -789,14 +880,15 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         const kind = direction === 'mailbox-to-alias' ? 'irreversible' : 'config';
         const steps = [], warnings = [...plan.warnings];
         let touched = false, mailboxCreated = false, fatal, stage = 'verify';
-        const recovery = direction === 'mailbox-to-alias' ? [
+        const netlimitRecovery = { stage: 'protocol-netlimit', message: '계정 변경은 적용됐지만 제한 설정 정리를 완료하지 못했어요. 현재 상태를 다시 확인해 주세요.' };
+        const recovery = direction === 'mailbox-to-alias' ? [netlimitRecovery,
           { stage: 'syncjobs', message: '이미 지운 동기화는 변경 기록의 작업 번호를 확인하고 필요하면 새로 만들어 주세요. 원본 암호는 다시 입력해야 해요.' },
           { stage: 'filters', message: '이미 지운 필터는 변경 기록의 원문 백업을 확인하고 필요하면 mailcow에서 다시 만들어 주세요.' },
           { stage: 'mailbox', message: '메일함이 남아 있는지 확인해 주세요. 새 메일은 옮기거나 지운 뒤 전환해야 해요.' },
           { stage: 'alias', message: `${addr} 별칭을 ${options.targets.join(', ')} 대상으로 만들어 메일 수신을 복구해 주세요.` },
           { stage: 'references', message: '대상 메일함의 원래 보내기 권한과 변경 기록의 원래 goto·활성 상태·공개 여부·보내기 권한·설명을 보고 참조 별칭을 다시 붙여 주세요.' },
           { stage: 'senders', message: '변경 기록의 원래 목록을 보고 다른 사람의 보내기 권한을 복원해 주세요.' },
-        ] : [
+        ] : [netlimitRecovery,
           { stage: 'alias', message: '변경 기록의 원래 별칭 대상과 설정을 확인해 주세요. 메일함을 만들지 못했다면 같은 주소의 별칭을 다시 만들 수 있어요.' },
           { stage: 'mailbox', message: '별칭과 메일함은 같은 주소에 함께 있을 수 없어요. 변경 기록을 보고 별칭을 복원하거나 초기 암호를 정해 메일함을 만들어 주세요.' },
           { stage: 'copy', message: 'mailcow에서 내부 대상으로 redirect :copy 사전 필터를 만들어 주세요.' },
@@ -850,6 +942,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 await mutate('/api/v1/delete/mailbox', [addr]);
                 if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
               }));
+              stage = 'protocol-netlimit';
+              await lock.run(addr, () => cleanupNetlimit({ actor, ip, addr, expected: plan.state.netlimit }));
+              if (plan.state.netlimit.version !== null) steps.push({ stage, target: addr, status: 'ok' });
               await lock.run(addr, () => step('alias', addr, {}, { address: addr, targets: options.targets }, async () => {
                 if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '주소가 이미 사용 중이에요.');
                 await mutate('/api/v1/add/alias', { address: addr, goto: options.targets.join(','), active: '1', sogo_visible: '0', sender_allowed: '0', public_comment: '', private_comment: '' });
@@ -876,6 +971,9 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 await mutate('/api/v1/delete/alias', [String(plan.alias.id)]);
                 if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr)) throw verifyFailed();
               }));
+              stage = 'protocol-netlimit';
+              await lock.run(addr, () => cleanupNetlimit({ actor, ip, addr, expected: plan.state.netlimit }));
+              if (plan.state.netlimit.version !== null) steps.push({ stage, target: addr, status: 'ok' });
               await lock.run(addr, () => step('mailbox', addr, {}, { address: addr, quotaGb: options.quotaGb, password: 'set' }, async () => {
                 if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === addr) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '주소가 이미 사용 중이에요.');
                 const body = { local_part: addr.split('@')[0], domain: addr.split('@')[1], name: addr.split('@')[0], quota: String(options.quotaGb * 1024), active: '1',

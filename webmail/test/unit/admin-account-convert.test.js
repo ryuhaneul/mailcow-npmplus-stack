@@ -1,3 +1,4 @@
+import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -86,8 +87,9 @@ async function fixture(t, direction = 'mailbox-to-alias') {
       if (mailboxes.includes(options.missingFolder)) throw new AppError(409, 'CONFLICT', '폴더가 없어졌어요.');
     },
   };
-  const service = createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, aclFolders });
-  return { dir, boxes, aliases, filters, jobs, acl, calls, options, mailcow, dockerapi, aclFolders, audit, history, service, direction };
+  const netlimit = createFakeProtocolNetlimitStore();
+  const service = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams, aclFolders });
+  return { netlimit, dir, boxes, aliases, filters, jobs, acl, calls, options, mailcow, dockerapi, aclFolders, audit, history, service, direction };
 }
 const convert = (f, data) => f.service.convert({ ...context, direction: f.direction, data: { address: addr, ...(f.direction === 'mailbox-to-alias' ? { targets: [team] } : {}), ...data } });
 const preview = (f, data = {}) => convert(f, { action: 'preview', ...data });
@@ -250,7 +252,7 @@ test('convert: missing etag and concurrent duplicate flows cannot issue two dest
 });
 
 test('convert HTTP: both routes use existing authentication/CSRF guard and JSON partial contract', async t => {
-  const f = await fixture(t, 'alias-to-mailbox'); const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t, 'alias-to-mailbox'); const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = '/api/admin/convert/alias-to-mailbox';
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
@@ -356,4 +358,17 @@ for (const [before, after] of [[0, 1], [1, 0], [1, 2]]) test(`convert: unrelated
   const f = await fixture(t); f.boxes.find(row => row.username === other).active = before;
   const initial = await convert(f, { action: 'preview' }); f.boxes.find(row => row.username === other).active = after;
   await assert.rejects(convert(f, { action: 'run', etag: initial.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' }); assert.equal(writes(f).length, 0);
+});
+
+test('netlimit conversion: mailbox-to-alias removes flag; recreation starts OFF', async t => {
+  const f = await fixture(t); f.netlimit.rows.set(addr, { enabled: true, version: 'a'.repeat(32) });
+  const initial = await preview(f); const result = await run(f, initial.etag); assert.equal(result.result, 'ok'); assert.equal(f.netlimit.rows.has(addr), false);
+  const g = await fixture(t, 'alias-to-mailbox'); g.netlimit.rows.set(addr, { enabled: true, version: 'b'.repeat(32) });
+  const p = await preview(g); const created = await run(g, p.etag); assert.equal(created.result, 'ok'); assert.equal(g.netlimit.rows.has(addr), false);
+});
+test('netlimit conversion: cleanup failure is partial and never creates a new mailbox', async t => {
+  const f = await fixture(t, 'alias-to-mailbox'); f.netlimit.rows.set(addr, { enabled: true, version: 'a'.repeat(32) });
+  const initial = await preview(f); f.netlimit.removeFailure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애');
+  const result = await run(f, initial.etag); assert.equal(result.result, 'partial');
+  assert.equal(f.calls.some(call => call.path === '/api/v1/add/mailbox'), false);
 });

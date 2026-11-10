@@ -123,8 +123,8 @@ try:
         assert data==content(old,password)
         for obj,mode in [(directory,0o750),(path,0o640)]:
             st=obj.stat();assert st.st_uid==0 and stat.S_IMODE(st.st_mode)==mode
-            if action=='check':assert st.st_gid==gid
-        if action=='check':assert old==ip
+            if action=='check' and st.st_gid!=gid:sys.exit('retirement resource GID mismatch')
+        if action=='check' and old!=ip:sys.exit('retirement resource IP mismatch')
     else:
         assert action=='apply';password=secrets.token_hex(32)
     (w/'map.next').write_text(content(ip,password));(w/'postfix.ip').write_text(ip);(w/'old.host').write_text(old);(w/'gid').write_text(str(gid))

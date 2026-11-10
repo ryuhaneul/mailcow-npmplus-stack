@@ -5,14 +5,14 @@ import { MailcowAuthLost } from '../mailcow-client.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { createFilterBackups } from './teams.js';
 import { addressPattern } from '../sieve-team.js';
-import { tokens } from '../../sieve/import-syntax.js';
+import { inspectRedirects } from '../../sieve/redirect-targets.js';
+export { inspectRedirects } from '../../sieve/redirect-targets.js';
 import { externalRedirectPreview, externalSpamGuardMessage, internalDomainSet } from '../filter-script.js';
 import { SCRIPT_NAME } from '../../sieve/model.js';
 
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const invalid = () => new AppError(422, 'INVALID_INPUT', '메일함과 필터 입력값을 확인해 주세요.');
-const uninspectable = () => new AppError(422, 'FILTER_UNINSPECTABLE', '전달 대상을 안전하게 해석할 수 없는 필터예요.');
 const rejected = () => new AppError(502, 'MAILCOW_REJECTED', '필터 정보를 읽을 수 없어요.');
 const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 필터가 예상과 달라요. 다시 확인해 주세요.');
 const missing = () => new AppError(404, 'NOT_FOUND', '필터나 메일함을 찾을 수 없어요.');
@@ -21,33 +21,6 @@ function input(data, fields) { if (!data || typeof data !== 'object' || Array.is
 const state = row => row ? { id: String(row.id), type: row.filter_type, active: String(row.active), label: row.script_desc, sha256: sha256(row.script_data), bytes: Buffer.byteLength(row.script_data) } : null;
 const hashes = (before, after) => ({ scriptSha256Before: sha256(before), scriptSha256After: sha256(after), bytesBefore: Buffer.byteLength(before), bytesAfter: Buffer.byteLength(after) });
 
-export function inspectRedirects(source) {
-  if (typeof source !== 'string') throw uninspectable();
-  let values; try { values = tokens(source); } catch { throw uninspectable(); }
-  const redirects = [];
-  for (let i = 0; i < values.length; i++) {
-    if (values[i] !== 'redirect') continue;
-    let index = i + 1, copy = false;
-    while (typeof values[index] === 'string' && values[index].startsWith(':')) {
-      if (values[index] !== ':copy' || copy) throw uninspectable(); copy = true; index++;
-    }
-    const targets = [];
-    if (values[index] === '[') {
-      index++;
-      for (;;) {
-        if (!values[index] || typeof values[index] !== 'object') throw uninspectable(); targets.push(values[index++].string);
-        if (values[index] === ']') { index++; break; }
-        if (values[index++] !== ',') throw uninspectable();
-      }
-    } else {
-      if (!values[index] || typeof values[index] !== 'object') throw uninspectable(); targets.push(values[index++].string);
-    }
-    if (values[index] !== ';' || targets.some(target => typeof target !== 'string' || target.includes('${') || !addressPattern.test(target))) throw uninspectable();
-    for (const target of targets) redirects.push({ target: normalize(target), copy });
-    i = index;
-  }
-  return redirects;
-}
 
 export function createFiltersService({ mailcow, dockerapi, audit, lock, history, auditDir }) {
   const backups = createFilterBackups({ dir: auditDir });

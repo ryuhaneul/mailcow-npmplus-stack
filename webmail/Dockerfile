@@ -17,6 +17,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node server ./server
 COPY --chown=node:node bin/fts-unlock.js ./bin/fts-unlock.js
+COPY --chown=node:node bin/migrate-webmail-retirement.js ./bin/migrate-webmail-retirement.js
 COPY --from=web-build --chown=node:node /app/web/dist ./web/dist
 COPY --from=web-build --chown=node:node /app/web/dist-admin ./web/dist-admin
 RUN mkdir -p /data/audit /brand && chown -R node:node /data /brand

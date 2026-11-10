@@ -504,3 +504,40 @@ This project is a collection of scripts for automating mail server deployment.
   responsibility for those licenses.
 - **The authors and contributors shall not be liable for any damages arising from the
   use of this software.**
+
+### Retirement metadata migration (admin)
+
+Retirement metadata and SMTP recipient keys use separate application tables. Prepare
+`bash scripts/apply-webmail-retirement-db.sh apply` before applying the updated DB grants;
+`--check` verifies the existing schema and `--dry-run` prints DDL without contacting services.
+The admin DB account gets CRUD on both tables. Public webmail gets SELECT only on
+`retirement_recipient_keys` when the server's
+`WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=true`; missing/empty/false leaves this
+additional public grant disabled. The SMTP account and receive-block hook are prepared
+separately. Importing metadata never activates receive blocking.
+
+Run the migration inside the admin container using its existing API key, audit directory,
+and DB account. An installation without the mailcow API key cannot migrate. Prepare an
+admin-only directory such as `/data/private` (0700); reports are created exclusively with
+mode 0600 and existing files are never overwritten. Approvals contain one canonical
+address per line. Review a new report and explicitly approve addresses before applying:
+
+```sh
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --dry-run --output /data/private/retirement-candidates.json
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --apply --manifest /data/private/retirement-candidates.json --approved /data/private/retirement-approved.txt --output /data/private/retirement-receipt.json
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --rollback --manifest /data/private/retirement-receipt.json --approved /data/private/retirement-approved.txt --output /data/private/retirement-rollback.json
+```
+
+Dry-run is the default and changes no service state; only the specified report is created.
+Apply rechecks live mailbox state and successful paired audit records before CAS inserts.
+Imported accounts are explicitly retired with receive blocking **OFF** and zero recipient
+keys. Missing or ambiguous creation times are held: timezone-free timestamps use a
+conservative ±24-hour band, and only creation more than 24 hours before the leave record
+qualifies. Later lifecycle evidence also holds the address for manual review. This cannot
+prove that changes outside the application's API/audit history never happened.
+
+Rollback removes only the exact imported versions in its receipt; modified records,
+changed mailbox generations, pending operations or recipient keys stop the operation.
+A partial receipt records completed writes; review it before recovery. Schema tables and
+existing mail are never dropped by this tool. Application routing/UI integration and SMTP
+activation are separate deployment steps.

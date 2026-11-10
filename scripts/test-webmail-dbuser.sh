@@ -75,7 +75,7 @@ from pathlib import Path
 u=json.loads(Path(sys.argv[1]).read_text())
 assert set(u)=={'webmail_ro@172.22.1.240','webmail_notices_admin@172.22.1.241'}
 web=u['webmail_ro@172.22.1.240']; admin=u['webmail_notices_admin@172.22.1.241']
-assert len(web['grants'])==14 and len(admin['grants'])==10
+assert len(web['grants'])==14 and len(admin['grants'])==12
 for table in ('public_templates','public_template_domains','public_template_files'):
     assert sum(('GRANT SELECT ON mailstack_webmail.'+table+' TO ') in g for g in web['grants'])==1
     assert sum(('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.'+table+' TO ') in g for g in admin['grants'])==1
@@ -83,6 +83,9 @@ assert any('GRANT SELECT ON mailstack_webmail.login_ip_allowlist TO ' in g for g
 assert any('GRANT SELECT, INSERT, DELETE ON mailstack_webmail.login_ip_allowlist TO ' in g for g in admin['grants'])
 assert any('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.account_protocol_netlimit TO ' in g for g in admin['grants'])
 assert not any('account_protocol_netlimit' in g for g in web['grants'])
+for table in ('account_retirement','retirement_recipient_keys'):
+    assert any('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.'+table+' TO ' in g for g in admin['grants'])
+    assert not any('mailstack_webmail.'+table+' ' in g for g in web['grants'])
 assert not any('notice_counter' in g for g in web['grants'])
 assert not any('notice_reads' in g or '`mailcow`.' in g for g in admin['grants'])
 assert sum('GRANT SELECT (' in g and 'ON `mailcow`.' in g for g in web['grants'])==5
@@ -98,8 +101,30 @@ cmp -s "$TMP/users.json" "$TMP/users.before" || fail changed-grants
 cmp -s "$WEBMAIL_ENV_FILE" "$TMP/env.before" || fail changed-passwords
 ! grep -qE 'synthetic-root|synthetic-hash|WEBMAIL_.*PASSWORD=' "$TMP/result" || fail leaked-secret
 pass 'reapply is idempotent and preserves both persisted passwords without logging secrets'
+# Public retirement access follows only the server flag; metadata is never granted.
+printf '\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=true\n' >> "$WEBMAIL_ENV_FILE"
+run apply && run --check || fail retirement-enabled
+python3 - "$TMP/users.json" <<'PYTEST'
+import json,sys
+u=json.load(open(sys.argv[1])); grants=u['webmail_ro@172.22.1.240']['grants']
+assert len(grants)==15
+assert sum('GRANT SELECT ON mailstack_webmail.retirement_recipient_keys TO ' in g for g in grants)==1
+assert not any('account_retirement' in g for g in grants)
+PYTEST
+pass 'retirement ON grants public SELECT only on recipient keys'
+cp "$WEBMAIL_ENV_FILE" "$TMP/enabled.env"
+cp "$TMP/env.before" "$WEBMAIL_ENV_FILE"
+run apply && run --check || fail retirement-disabled
+cmp -s "$TMP/users.json" "$TMP/users.before" || fail retirement-disabled-grants
+pass 'retirement OFF removes only added public access and preserves admin CRUD'
+printf '\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=invalid\n' >> "$WEBMAIL_ENV_FILE"
+cp "$TMP/users.json" "$TMP/grants.before-invalid"
+if run apply; then fail retirement-invalid-flag; fi
+cmp -s "$TMP/users.json" "$TMP/grants.before-invalid" || fail retirement-invalid-mutated
+cp "$TMP/env.before" "$WEBMAIL_ENV_FILE"
+pass 'invalid retirement flag fails before grant writes'
 # Every mutation starts from the exact accepted state; --check may never fix it.
-for error in schema-wide global grant-option reads-delete admin-reads admin-mailcow admin-schema admin-counter-insert missing-column template-write missing-template otp-admin-seed otp-public-delete otp-public-policy otp-broad-update otp-extra-column; do
+for error in schema-wide global grant-option reads-delete admin-reads admin-mailcow admin-schema admin-counter-insert missing-column template-write missing-template otp-admin-seed otp-public-delete otp-public-policy otp-broad-update otp-extra-column retirement-metadata retirement-public-write; do
     cp "$TMP/users.before" "$TMP/users.json"
     python3 - "$TMP/users.json" "$error" <<'PY'
 from pathlib import Path
@@ -108,6 +133,8 @@ p=Path(sys.argv[1]); u=json.loads(p.read_text()); error=sys.argv[2]
 r='webmail_ro@172.22.1.240'; a='webmail_notices_admin@172.22.1.241'
 extra={
 
+'retirement-metadata':(r,"GRANT SELECT ON mailstack_webmail.account_retirement TO 'webmail_ro'@'172.22.1.240'"),
+'retirement-public-write':(r,"GRANT INSERT ON mailstack_webmail.retirement_recipient_keys TO 'webmail_ro'@'172.22.1.240'"),
 'otp-admin-seed':(a,"GRANT SELECT (secret_ciphertext) ON mailstack_webmail.otp_accounts TO 'webmail_notices_admin'@'172.22.1.241'"),
 'otp-public-delete':(r,"GRANT DELETE ON mailstack_webmail.otp_accounts TO 'webmail_ro'@'172.22.1.240'"),
 'otp-public-policy':(r,"GRANT UPDATE (force_all) ON mailstack_webmail.otp_policy TO 'webmail_ro'@'172.22.1.240'"),

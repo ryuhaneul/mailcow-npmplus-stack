@@ -25,8 +25,11 @@ die() { echo "[apply-webmail-dbuser] ERROR: $*" >&2; exit 1; }
 MODE="${1:-apply}"
 [ "$#" -le 1 ] || die "usage: $0 [apply|--check|--revert]"
 case "$MODE" in apply|--check|--revert) ;; *) die "usage: $0 [apply|--check|--revert]" ;; esac
+WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=false
 webmail_load_config "${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}" "${MAILCOW_DIR:-/home/mailcow-dockerized}" \
     || die "could not load configuration"
+RETIREMENT_ENABLE=${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}
+case "$RETIREMENT_ENABLE" in true|false) ;; *) die "retirement enable flag must be true or false" ;; esac
 command -v docker >/dev/null 2>&1 || die "docker not found"
 DBROOT=$(webmail_mailcow_value DBROOT)
 [ -n "$DBROOT" ] || die "DBROOT is missing from mailcow.conf"
@@ -91,6 +94,8 @@ verify_grants() {
             'mailstack_webmail.notice_counter:SELECT,UPDATE' \
             'mailstack_webmail.login_ip_allowlist:DELETE,INSERT,SELECT' \
             'mailstack_webmail.account_protocol_netlimit:DELETE,INSERT,SELECT,UPDATE' \
+            'mailstack_webmail.account_retirement:DELETE,INSERT,SELECT,UPDATE' \
+            'mailstack_webmail.retirement_recipient_keys:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_templates:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_template_domains:DELETE,INSERT,SELECT,UPDATE' \
             'mailstack_webmail.public_template_files:DELETE,INSERT,SELECT,UPDATE' | LC_ALL=C sort)
@@ -112,6 +117,9 @@ verify_grants() {
         'mailstack_webmail.public_templates:SELECT' \
         'mailstack_webmail.public_template_domains:SELECT' \
         'mailstack_webmail.public_template_files:SELECT' | LC_ALL=C sort)
+    fi
+    if [ "${1:-relay}" = relay ] && [ "$RETIREMENT_ENABLE" = true ]; then
+        expected=$(printf '%s\n' "$expected" 'mailstack_webmail.retirement_recipient_keys:SELECT' | LC_ALL=C sort)
     fi
     [ "$actual" = "$expected" ]
 }
@@ -157,6 +165,8 @@ admin_account() (
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, DELETE ON mailstack_webmail.login_ip_allowlist TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.account_protocol_netlimit TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.account_retirement TO %s;\n' "$ACCOUNT"
+            printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.retirement_recipient_keys TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_templates TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.public_template_files TO %s;\n' "$ACCOUNT"
@@ -200,6 +210,7 @@ case "$MODE" in
             printf 'GRANT SELECT (`logged_in_as`, `send_as`) ON `%s`.`sender_acl` TO %s;\n' "$WEBMAIL_DB_NAME" "$ACCOUNT"
             printf 'GRANT SELECT (`email`,`version`,`secret_ciphertext`,`nonce`,`tag`,`key_version`,`registered_at`,`last_step`), INSERT (`email`,`version`), UPDATE (`version`,`secret_ciphertext`,`nonce`,`tag`,`key_version`,`registered_at`,`last_step`) ON mailstack_webmail.otp_accounts TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT (`id`,`force_all`,`revision`) ON mailstack_webmail.otp_policy TO %s;\n' "$ACCOUNT"
+            if [ "$RETIREMENT_ENABLE" = true ]; then printf 'GRANT SELECT ON mailstack_webmail.retirement_recipient_keys TO %s;\n' "$ACCOUNT"; fi
             printf 'GRANT SELECT ON mailstack_webmail.notices TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.notice_domains TO %s;\n' "$ACCOUNT"
             printf 'GRANT SELECT ON mailstack_webmail.login_ip_allowlist TO %s;\n' "$ACCOUNT"

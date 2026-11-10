@@ -120,10 +120,5 @@ export function createLogsService({ mailcow, config, logArchive }) {
     }
     return bounded({ n, range: { dovecot: range(dovecot, 'dovecot'), postfix: range(postfix, 'postfix') }, plainPop3: { status: uncertain ? 'unknown' : 'known', count: uncertain ? null : plain.size, accounts: [...plain.values()], basis: 'pop3-login: Login 중 secured/TLS 표시 없는 계정 (조회한 로그 범위 안)', ...(uncertain ? { reason: '계정 이름을 읽을 수 없는 POP3 로그인 줄이 있어요.' } : {}) }, smtp25: { status: 'known', count: smtp.size, accounts: [...smtp.values()], basis: 'postfix/smtpd 줄의 sasl_username (mailcow 기본 syslog 이름 기준)' } });
   }
-  async function admins(session) {
-    const data = rows(await mailcow.call(session, 'GET', '/api/v1/get/admin/all'));
-    const yes = value => value === true || String(value) === '1';
-    return { items: data.map(row => ({ username: String(row.username), active: yes(row.active_int ?? row.active), tfaActive: yes(row.tfa_active_int ?? row.tfa_active), created: String(row.created ?? ''), forceTfa: yes(row.attributes?.force_tfa), forcePwUpdate: yes(row.attributes?.force_pw_update) })) };
-  }
-  return { logs, archive, archiveStatus, compatUsage, admins, autoexpunge: () => ({ days: config.autoexpungeDays }) };
+  return { logs, archive, archiveStatus, compatUsage, autoexpunge: () => ({ days: config.autoexpungeDays }) };
 }

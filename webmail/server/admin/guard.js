@@ -12,7 +12,8 @@ const keyMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const authenticationFailures = new Set(['INVALID_TOKEN', 'UNKNOWN_KEY', 'REVOKED', 'EXPIRED', 'IP_DENIED']);
 const keyReasons = new Set([...authenticationFailures, 'HUMAN_ONLY', 'PERMISSION_DENIED']);
 const forbidden = reason => Object.assign(new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.'), { reason });
-const humanOnly = path => path === '/api/admin/auth' || path.startsWith(authRoot) || path === '/api/admin/api-keys' || path.startsWith('/api/admin/api-keys/');
+const humanOnly = (path, method) =>
+  (changing.has(method) && (path === '/api/admin/admins' || path.startsWith('/api/admin/admins/'))) || path === '/api/admin/auth' || path.startsWith(authRoot) || path === '/api/admin/api-keys' || path.startsWith('/api/admin/api-keys/');
 export function installAdminGuard(app, { config, sessions, client, apiKeys, apiKeyRateLimiter = createApiKeyRateLimiter() }) {
   app.decorateRequest('session', null);
   app.decorateRequest('adminError', null);
@@ -23,7 +24,7 @@ export function installAdminGuard(app, { config, sessions, client, apiKeys, apiK
   app.addHook('onRequest', async request => {
     if (!managed(request)) return;
     request.adminKeyMode = Object.hasOwn(request.headers, keyHeader);
-    if (request.adminKeyMode && humanOnly(request.routeOptions.url)) throw forbidden('HUMAN_ONLY');
+    if (request.adminKeyMode && humanOnly(request.routeOptions.url, request.method)) throw forbidden('HUMAN_ONLY');
     if (!changing.has(request.method)) return;
     if (!request.adminKeyMode && request.headers.origin !== `https://${config.adminHostname}`) throw new AppError(403, 'BAD_ORIGIN', '허용된 관리 주소에서 다시 시도해 주세요.');
     if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') throw new AppError(415, 'JSON_REQUIRED', 'JSON 형식으로 요청해 주세요.');

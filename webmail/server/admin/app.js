@@ -35,6 +35,8 @@ import { resolve } from 'node:path';
 import { loadAdminConfig } from './config.js';
 import { installAdminAuth } from './routes/auth.js';
 import passwordRoutes from './routes/password.js';
+import { createAdminsService } from './services/admins.js';
+import adminsRoutes from './routes/admins.js';
 import { createApiKeyStore } from './api-keys.js';
 import { createApiKeysService } from './services/api-keys.js';
 import apiKeysRoutes from './routes/api-keys.js';
@@ -134,6 +136,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.decorate('adminLock', adminLock);
   app.decorate('adminHistory', history);
   await app.register(passwordRoutes);
+  await app.register(adminsRoutes, { service: createAdminsService({ mailcow: app.mailcow, audit, lock: adminLock, sessions: app.adminSessions }) });
   const apiKeysService = createApiKeysService({ store: apiKeys, config, audit, lock: adminLock });
   await app.register(apiKeysRoutes, { service: apiKeysService });
   await app.register(historyRoutes, { service: history });

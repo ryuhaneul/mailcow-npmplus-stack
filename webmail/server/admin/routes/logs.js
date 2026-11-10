@@ -20,6 +20,5 @@ export default async function logsRoutes(app, { service }) {
   app.get('/api/admin/logs/archive', (request, reply) => archiveRequest(request, reply, options => service.archive(request.query, options)));
   app.get('/api/admin/logs/archive/status', (request, reply) => archiveRequest(request, reply, options => service.archiveStatus(options)));
   app.get('/api/admin/compat-usage', { config: { adminMailcowApi: true } }, request => service.compatUsage(request.session.mailcow));
-  app.get('/api/admin/admins', { config: { adminMailcowApi: true } }, request => service.admins(request.session.mailcow));
   app.get('/api/admin/autoexpunge', request => service.autoexpunge(request.session.mailcow));
 }

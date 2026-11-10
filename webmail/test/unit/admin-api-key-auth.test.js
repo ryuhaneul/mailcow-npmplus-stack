@@ -44,6 +44,8 @@ async function fixture(t, { permission = 'full', configured = true, store, state
     app.post(path, handled); app.get(path, handled); app.delete(path, handled);
   }
   app.get('/api/admin/auth/session', handled);
+  app.get('/api/admin/admins', { config: { adminMailcowApi: true } }, handled);
+  for (const [method, url] of [['POST', '/api/admin/admins'], ['PATCH', '/api/admin/admins/:username/active'], ['POST', '/api/admin/admins/:username/password'], ['DELETE', '/api/admin/admins/:username']]) app.route({ method, url, handler: handled });
   app.get('/healthz', async () => ({ ok: true }));
   t.after(() => app.close());
   const inject = ({ headers = header, url = '/api/admin/resource/item', method = 'GET', ...rest } = {}) => app.inject({ method, url, headers, remoteAddress: ip, ...rest });
@@ -257,4 +259,16 @@ test('API guard: human-only denials leave the key budget available', async t => 
   for (let i = 0; i < 120; i++) failure(await f.inject({ url: '/api/admin/auth/session' }));
   assert.equal(count(f, 'authenticate'), 0);
   assert.equal((await f.inject()).statusCode, 200);
+});
+
+for (const permission of ['read', 'full']) test(`API guard: ${permission} keeps administrator list GET but rejects every account write before authentication`, async t => {
+  const f = await fixture(t, { permission });
+  assert.equal((await f.inject({ url: '/api/admin/admins' })).statusCode, 200);
+  const before = f.calls.length;
+  for (const [method, url] of [['POST', '/api/admin/admins'], ['PATCH', '/api/admin/admins/other/active'], ['POST', '/api/admin/admins/other/password'], ['DELETE', '/api/admin/admins/other']]) {
+    for (const cookie of [undefined, 'mailadmin_sid=synthetic-cookie']) {
+      failure(await f.inject({ method, url, headers: { ...header, ...(cookie ? { cookie } : {}) }, payload: {} }));
+    }
+  }
+  assert.equal(f.calls.length, before);
 });

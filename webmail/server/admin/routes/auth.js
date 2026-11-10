@@ -5,8 +5,9 @@ import { createAdminSessionStore, cookieName, cookieOptions } from '../session.j
 import { createAdminRateLimiter } from '../ratelimit.js';
 import { installAdminGuard } from '../guard.js';
 import { createApiKeyRateLimiter } from '../api-key-ratelimit.js';
+import { ADMIN_ACCOUNTS_LOCK, createResourceLock } from '../lock.js';
 
-export async function installAdminAuth(app, { config, client = createMailcowClient({ config, logger: app.log }), now = Date.now, apiKeys } = {}) {
+export async function installAdminAuth(app, { config, client = createMailcowClient({ config, logger: app.log }), now = Date.now, apiKeys, lock = createResourceLock() } = {}) {
   await app.register(cookie);
   const sessions = createAdminSessionStore({ config, client, logger: app.log, now });
   const rateLimiter = createAdminRateLimiter({ now });
@@ -23,10 +24,10 @@ export async function installAdminAuth(app, { config, client = createMailcowClie
   }, 60_000);
   timer.unref();
   app.addHook('onClose', async () => { clearInterval(timer); await sessions.close(); });
-  await app.register(authRoutes, { config, client, sessions, rateLimiter });
+  await app.register(authRoutes, { config, client, sessions, rateLimiter, lock });
 }
 
-async function authRoutes(app, { config, client, sessions, rateLimiter }) {
+async function authRoutes(app, { config, client, sessions, rateLimiter, lock }) {
   const publicSession = session => ({ step: session.state === 'totp' ? 'totp' : 'done', user: { username: session.username }, csrf: session.csrf, features: { apiKeys: Boolean(config.mailcowApiKey), trusted: Boolean(config.trustedSenderFile), cleanup: Boolean(config.doveadmUrl && config.doveadmKey), relay: Boolean(config.relayFiles?.length) }, expiresAt: sessions.expiresAt(session) });
   const clear = reply => reply.clearCookie(cookieName, { ...cookieOptions(config), maxAge: 0 });
   app.post('/api/admin/auth/login', async (request, reply) => {
@@ -36,6 +37,7 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
     if (body && typeof body === 'object') delete body.password;
     try {
       if (!username || !password.length) throw new AppError(422, 'INVALID_INPUT', '아이디와 암호를 입력해 주세요.');
+      const generation = sessions.generation(username);
       const release = rateLimiter.reserve(request.ip, username);
       let mailcow;
       try { mailcow = await client.login({ username, password, ip: request.ip }); }
@@ -49,15 +51,24 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
         await client.logout(mailcow);
         throw new AppError(403, 'ADMIN_PENDING_ACTION', 'mailcow 관리 화면에서 필요한 작업을 먼저 끝내 주세요.');
       }
-      const previous = request.cookies[cookieName];
-      if (previous) {
-        try { await sessions.destroy(await sessions.get(previous)); }
-        catch (error) { if (!(error instanceof AppError)) throw error; }
+      try {
+        return await lock.run(ADMIN_ACCOUNTS_LOCK, async () => {
+          const previous = request.cookies[cookieName];
+          if (previous) {
+            try { await sessions.destroy(await sessions.get(previous)); }
+            catch (error) { if (!(error instanceof AppError)) throw error; }
+          }
+          if (sessions.generation(username) !== generation) throw new AppError(403, 'SESSION_EXPIRED', '계정 정보가 바뀌었어요. 다시 로그인해 주세요.');
+          const { token, session } = sessions.create(mailcow);
+          reply.setCookie(cookieName, token, cookieOptions(config));
+          request.log.info({ code: session.state === 'ready' ? 'LOGIN_SUCCESS' : 'TOTP_REQUIRED', username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
+          return publicSession(session);
+        });
+      } catch (error) {
+        try { await client.logout(mailcow); }
+        catch { request.log.warn({ code: 'MAILCOW_LOGOUT_FAILED' }, 'mailcow 대행 세션을 로그아웃하지 못했습니다.'); }
+        throw error;
       }
-      const { token, session } = sessions.create(mailcow);
-      reply.setCookie(cookieName, token, cookieOptions(config));
-      request.log.info({ code: session.state === 'ready' ? 'LOGIN_SUCCESS' : 'TOTP_REQUIRED', username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
-      return publicSession(session);
     } finally { password.fill(0); }
   });
   app.get('/api/admin/auth/session', async request => publicSession(request.session));
@@ -85,9 +96,21 @@ async function authRoutes(app, { config, client, sessions, rateLimiter }) {
       throw error;
     }
     release();
-    session.state = 'ready';
-    request.log.info({ code: 'LOGIN_SUCCESS', username: session.username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
-    return publicSession(session);
+    try {
+      return await lock.run(ADMIN_ACCOUNTS_LOCK, async () => {
+        const current = await sessions.get(request.cookies[cookieName]);
+        if (current !== session || current.state !== 'totp' || current.generation !== sessions.generation(current.username)) {
+          throw new AppError(403, 'SESSION_EXPIRED', '계정 정보가 바뀌었어요. 다시 로그인해 주세요.');
+        }
+        current.state = 'ready';
+        request.log.info({ code: 'LOGIN_SUCCESS', username: current.username, ip: request.ip }, '관리 로그인 인증을 완료했습니다.');
+        return publicSession(current);
+      });
+    } catch (error) {
+      clear(reply);
+      await sessions.destroy(session);
+      throw error;
+    }
   });
   app.post('/api/admin/auth/logout', async (request, reply) => {
     clear(reply);

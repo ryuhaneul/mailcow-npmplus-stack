@@ -8,6 +8,13 @@ export const cookieOptions = config => ({ httpOnly: true, secure: true, sameSite
 export function createAdminSessionStore({ config, client, logger, now = Date.now }) {
   const sessions = new Map();
   const cleanup = new Map();
+  const generations = new Map();
+  const generation = username => generations.get(username) ?? 0;
+  function bumpGeneration(username) {
+    const next = generation(username) + 1;
+    generations.set(username, next);
+    return next;
+  }
   const idleMs = config.sessionIdleMin * 60_000;
   const maxMs = config.sessionMaxHours * 3_600_000;
   function expiresAt(session) {
@@ -18,19 +25,26 @@ export function createAdminSessionStore({ config, client, logger, now = Date.now
   function create(mailcow) {
     const token = randomBytes(32).toString('base64url');
     const session = { id: sessionHash(token), username: mailcow.username, state: mailcow.state, mailcow,
-      csrf: randomBytes(32).toString('base64url'), createdAt: now(), lastSeen: now(), totpFailures: 0 };
+      generation: generation(mailcow.username), csrf: randomBytes(32).toString('base64url'), createdAt: now(), lastSeen: now(), totpFailures: 0 };
     sessions.set(session.id, session);
     return { token, session };
   }
-  async function destroy(session) {
-    if (!sessions.delete(session.id)) return cleanup.get(session.id);
-    const job = (async () => {
+  function destroy(session) {
+    if (!sessions.delete(session.id)) return cleanup.get(session.id) ?? Promise.resolve();
+    // Revoke local access before starting any remote cleanup, including other sessions in a batch.
+    session.state = 'closed';
+    session.csrf = '';
+    const job = Promise.resolve().then(async () => {
       try { await client.logout(session.mailcow); }
       catch { logger?.warn({ code: 'MAILCOW_LOGOUT_FAILED' }, 'mailcow 대행 세션을 로그아웃하지 못했습니다.'); }
-      finally { session.state = 'closed'; session.csrf = ''; }
-    })();
+    }).finally(() => cleanup.delete(session.id));
     cleanup.set(session.id, job);
-    try { await job; } finally { cleanup.delete(session.id); }
+    return job;
+  }
+  function invalidateUser(username, { exceptId } = {}) {
+    bumpGeneration(username);
+    return Promise.all([...sessions.values()]
+      .filter(session => session.username === username && session.id !== exceptId).map(destroy));
   }
   async function destroyOthers(current) {
     await Promise.all([...sessions.values()].filter(session => session.username === current.username && session.id !== current.id).map(destroy));
@@ -55,5 +69,5 @@ export function createAdminSessionStore({ config, client, logger, now = Date.now
     await Promise.all([...sessions.values()].map(destroy));
     await Promise.all(cleanup.values());
   }
-  return { create, get, destroy, destroyOthers, sweep, close, expiresAt };
+  return { create, get, destroy, destroyOthers, generation, bumpGeneration, invalidateUser, sweep, close, expiresAt };
 }

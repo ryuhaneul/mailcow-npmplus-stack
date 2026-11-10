@@ -111,6 +111,7 @@ async function fakeMailcow(t, mode = 'plain') {
     }
     if (req.url.startsWith('/api/v1/')) {
       assert.equal(states.get(sid)?.state, 'ready');
+      if (options.apiHandler) return options.apiHandler({ req, res, json, sid });
       if (options.apiHang) return;
       if (options.apiLarge) return res.end('x'.repeat(2 * 1024 * 1024 + 1));
       if (options.apiStatus) res.statusCode = options.apiStatus;
@@ -478,4 +479,52 @@ test('admin API client: API deadline aborts a hanging response within fifteen se
   const start = Date.now();
   await assert.rejects(fake.client.call(fake.client.createApiContext({ permission: 'full' }), 'GET', '/api/v1/get/mailbox/all'), { statusCode: 503, code: 'MAILCOW_API_UNAVAILABLE' });
   assert.ok(Date.now() - start >= 14_500 && Date.now() - start < 17_000); assert.equal(fake.calls.length, 1);
+});
+
+const gate = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+test('admin client: strict writes ignore old warnings but reject new warnings and missing successes', async t => {
+  const fake = await fakeMailcow(t), session = await fake.login();
+  const warning = { type: 'warning', msg: 'no_active_admin' }, success = { type: 'success', msg: 'admin_modified' };
+  const call = (strict = true) => fake.client.call(session, 'POST', '/api/v1/edit/admin', {}, undefined, { rejectWarnings: strict });
+  fake.options.apiData = [warning]; await call(false);
+  fake.options.apiData = [warning, success]; assert.deepEqual(await call(), [warning, success]);
+  fake.options.apiData = [warning, success, warning];
+  await assert.rejects(call(), { statusCode: 422, mailcowMessageKey: 'no_active_admin' });
+  // A response reset makes both rows new, including a warning after a success.
+  fake.options.apiData = [success, warning]; await assert.rejects(call(), { statusCode: 422 });
+  fake.options.apiData = { type: 'warning', msg: 'cannot_delete_self' };
+  await assert.rejects(call(), { statusCode: 422, mailcowMessageKey: 'cannot_delete_self' });
+  fake.options.apiData = []; await assert.rejects(call(), { statusCode: 502 });
+  fake.options.apiData = [{ type: 'info', msg: 'synthetic_info' }]; await assert.rejects(call(), { statusCode: 502 });
+  fake.options.apiData = [warning]; assert.deepEqual(await call(false), [warning]);
+  await fake.client.logout(session);
+});
+
+test('admin client: POST queue serializes same-session writes, recovers after rejection, and keeps GET and other sessions parallel', async t => {
+  const fake = await fakeMailcow(t), first = await fake.login(), other = await fake.login('other');
+  const entered = gate(), release = gate(); let firstPosts = 0, otherPosts = 0;
+  const sid = /MCSESSID=([^;]+)/.exec(first.jar.getCookieStringSync(fake.config.mailcowUiUrl))[1];
+  fake.options.apiHandler = async ({ req, json, sid: current }) => {
+    if (req.method === 'GET') return json({ items: [] });
+    if (current !== sid) { otherPosts++; return json({ type: 'success' }); }
+    firstPosts++;
+    if (firstPosts === 1) { entered.resolve(); await release.promise; return json({ type: 'danger', msg: 'synthetic_rejected' }); }
+    return json({ type: 'success', msg: 'admin_modified' });
+  };
+  const firstWrite = assert.rejects(fake.client.call(first, 'POST', '/api/v1/edit/admin', {}), { statusCode: 422 });
+  await entered.promise;
+  const secondWrite = fake.client.call(first, 'POST', '/api/v1/edit/admin', {});
+  await Promise.all([fake.client.call(first, 'GET', '/api/v1/get/admin/all'), fake.client.call(other, 'POST', '/api/v1/edit/admin', {})]);
+  assert.equal(firstPosts, 1); assert.equal(otherPosts, 1);
+  release.resolve(); await firstWrite; await secondWrite; assert.equal(firstPosts, 2);
+  await Promise.all([fake.client.logout(first), fake.client.logout(other)]);
+});
+
+test('admin client: a queued POST does not start after logout closes its resource', async t => {
+  const fake = await fakeMailcow(t), session = await fake.login(), entered = gate(), release = gate(); let posts = 0;
+  fake.options.apiHandler = async ({ json }) => { posts++; entered.resolve(); await release.promise; return json({ type: 'success' }); };
+  const first = assert.rejects(fake.client.call(session, 'POST', '/api/v1/edit/admin', {}), { statusCode: 503, code: 'MAILCOW_UNAVAILABLE' }); await entered.promise;
+  const queued = assert.rejects(fake.client.call(session, 'POST', '/api/v1/edit/admin', {}), { statusCode: 403, code: 'MAILCOW_SESSION_LOST' });
+  await fake.client.logout(session); release.resolve(); await first; await queued; assert.equal(posts, 1);
 });

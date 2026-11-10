@@ -110,7 +110,15 @@ export function createMailcowClient({ config, logger }) {
     return resource.logout;
   }
 
-  async function call(session, method, path, body, signal) {
+  function call(session, method, path, body, signal, options = {}) {
+    const resource = resources.get(session);
+    if (method !== 'POST' || !resource || resource.apiKey) return callNow(session, method, path, body, signal, options);
+    const job = (resource.postQueue ?? Promise.resolve()).then(() => callNow(session, method, path, body, signal, options));
+    resource.postQueue = job.catch(() => {});
+    return job;
+  }
+
+  async function callNow(session, method, path, body, signal, { rejectWarnings = false } = {}) {
     if (!((method === 'GET' && /^\/api\/v1\/get\/[^?#]+$/.test(path)) ||
       (method === 'POST' && /^\/api\/v1\/(?:add|edit|delete)\/[^?#]+$/.test(path)))) throw new AppError(422, 'INVALID_INPUT', 'API 요청을 확인해 주세요.');
     const url = new URL(path, base);
@@ -119,6 +127,7 @@ export function createMailcowClient({ config, logger }) {
     const apiKey = resource?.apiKey === true;
     if (apiKey && resource.permission === 'read' && method !== 'GET') throw new AppError(403, 'API_KEY_FORBIDDEN', 'API 키로 접근할 수 없어요.');
     const lost = apiKey ? apiUnavailable : () => new MailcowAuthLost();
+    if (!resource || resource.closed || resource.logout) throw lost();
     const response = await request(session, method, path, { body, signal });
     if ([constants.HTTP_STATUS_UNAUTHORIZED, constants.HTTP_STATUS_FORBIDDEN].includes(response.status)) throw lost();
     let data;
@@ -135,12 +144,12 @@ export function createMailcowClient({ config, logger }) {
         const startsWithPrevious = data.length >= previous.length && previous.every((row, index) => isDeepStrictEqual(row, data[index]));
         current = startsWithPrevious ? data.slice(previous.length) : data;
         session.lastReturn = structuredClone(data);
-      } else if (data && ['success', 'error', 'danger'].includes(data.type)) {
+      } else if (data && (['success', 'error', 'danger'].includes(data.type) || (rejectWarnings && data.type === 'warning'))) {
         current = [data];
       } else {
         throw new AppError(502, 'MAILCOW_REJECTED', 'mailcow가 요청을 거절했어요.');
       }
-      const rejected = current.find(row => row?.type === 'error' || row?.type === 'danger');
+      const rejected = current.find(row => row?.type === 'error' || row?.type === 'danger' || (rejectWarnings && row?.type === 'warning'));
       if (rejected) {
         const raw = Array.isArray(rejected.msg) ? rejected.msg[0] : rejected.msg;
         const key = typeof raw === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(raw) && !(apiKey && raw.includes(config.mailcowApiKey)) ? raw : null;
@@ -148,6 +157,7 @@ export function createMailcowClient({ config, logger }) {
         error.mailcowMessageKey = key;
         throw error;
       }
+      if (rejectWarnings && !current.some(row => row?.type === 'success')) throw new AppError(502, 'MAILCOW_REJECTED', 'mailcow의 변경 결과를 확인할 수 없어요.');
     }
     return data;
   }

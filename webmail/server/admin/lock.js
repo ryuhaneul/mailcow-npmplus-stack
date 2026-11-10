@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { AppError } from '../errors.js';
 
+export const ADMIN_ACCOUNTS_LOCK = 'admin-accounts';
+
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));

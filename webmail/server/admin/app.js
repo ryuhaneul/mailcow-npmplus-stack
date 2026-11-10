@@ -126,9 +126,9 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   });
   const apiKeys = createApiKeyStore({ directory: config.apiKeyDir, now: auth.now });
   app.decorate('apiKeys', apiKeys);
-  await installAdminAuth(app, { ...auth, config, apiKeys });
-  const audit = createAudit({ ...auditOptions, dir: config.auditDir, logger: app.log });
   const adminLock = createResourceLock();
+  await installAdminAuth(app, { ...auth, config, apiKeys, lock: adminLock });
+  const audit = createAudit({ ...auditOptions, dir: config.auditDir, logger: app.log });
   const history = createHistoryService({ audit, lock: adminLock });
   app.decorate('audit', audit);
   app.decorate('adminLock', adminLock);

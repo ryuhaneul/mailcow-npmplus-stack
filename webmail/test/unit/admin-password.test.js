@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAdminApp } from '../../server/admin/app.js';
 import { AppError } from '../../server/errors.js';
+import { ADMIN_ACCOUNTS_LOCK } from '../../server/admin/lock.js';
 import { logOptions } from '../../server/log.js';
 
 const origin = 'https://mailadmin.example.test', ip = '198.51.100.9';
@@ -21,8 +22,8 @@ async function fixture(t, { auditFs } = {}) {
       if (options.loginError) throw options.loginError();
       return { username: args.username, state: options.state, temporary: true };
     },
-    async call(session, method, path, body) {
-      calls.push({ kind: 'call', session, method, path, body });
+    async call(session, method, path, body, signal, callOptions) {
+      calls.push({ kind: 'call', session, method, path, body, callOptions });
       if (path === '/api/v1/get/status/version') return { version: 'synthetic' };
       if (path.startsWith('/api/v1/get/admin/')) return options.detail;
       if (path === '/api/v1/edit/admin') {
@@ -58,6 +59,7 @@ test('password: isolated recheck, original editing context, preserved flags and 
   assert.equal(logins(f).length, 1); assert.equal(logins(f)[0].ip, ip); assert.equal(logins(f)[0].username, 'admin');
   assert.ok(logins(f)[0].password.every(byte => byte === 0));
   assert.equal(f.calls.filter(row => row.path === '/api/v1/get/admin/admin').length, 1);
+  assert.deepEqual(edits(f)[0].callOptions, { rejectWarnings: true });
   assert.equal(edits(f).length, 1); assert.equal(edits(f)[0].session, f.current.session.mailcow);
   assert.deepEqual(edits(f)[0].body, { items: ['admin'], attr: { password: input.password, password2: input.password2, active: f.options.detail.active, ...f.options.detail.attributes } });
   assert.equal(Object.hasOwn(f.options.detail, 'force_tfa'), false); assert.equal(Object.hasOwn(f.options.detail, 'force_pw_update'), false);
@@ -86,7 +88,7 @@ test('password: TOTP challenge proves current password without verifying another
 });
 
 for (const a of [0, 1]) for (const b of [0, 1]) for (const strings of [false, true]) test(`password: preserves force flags ${a}/${b}, strings=${strings}`, async t => {
-  const f = await fixture(t); f.options.detail = { active: strings ? '0' : 0, attributes: { force_tfa: strings ? String(a) : a, force_pw_update: strings ? String(b) : b } };
+  const f = await fixture(t); f.options.detail = { active: strings ? '1' : 1, attributes: { force_tfa: strings ? String(a) : a, force_pw_update: strings ? String(b) : b } };
   assert.equal((await f.write()).statusCode, 200); assert.deepEqual(edits(f)[0].body.attr, { password: input.password, password2: input.password2, active: f.options.detail.active, ...f.options.detail.attributes });
 });
 for (const key of ['active', 'force_tfa', 'force_pw_update']) test(`password: missing ${key} prevents edit`, async t => {
@@ -105,12 +107,12 @@ test('password: missing or malformed attributes never falls back to top-level fl
   }
 });
 
-test('password: policy rejection writes failed audit and preserves other sessions', async t => {
+test('password: policy rejection writes failed audit and keeps other sessions revoked after dispatch', async t => {
   const f = await fixture(t); const other = f.add();
   f.options.editError = () => Object.assign(new AppError(422, 'MAILCOW_REJECTED', 'mailcow가 요청을 거절했어요(password_complexity).'), { mailcowMessageKey: 'password_complexity' });
   const response = await f.write(); failure(response, 422, 'MAILCOW_REJECTED');
   const { rows } = await f.app.audit.read(); assert.equal(rows.length, 2); assert.equal(rows[1].result, 'failed'); assert.equal(rows[1].code, 'MAILCOW_REJECTED');
-  assert.equal((await f.alive(other)).statusCode, 200); for (const value of Object.values(input)) assert.ok(!(f.logs + JSON.stringify(rows) + response.body).includes(value));
+  failure(await f.alive(other), 403, 'SESSION_EXPIRED'); for (const value of Object.values(input)) assert.ok(!(f.logs + JSON.stringify(rows) + response.body).includes(value));
 });
 
 test('password: removes all other own sessions including TOTP, keeps current and another user', async t => {
@@ -176,5 +178,63 @@ for (const change of [{ currentPassword: '' }, { currentPassword: 7 }, { passwor
 for (const failAt of [1, 2]) test(`password: audit write ${failAt} failure respects mutation boundary`, async t => {
   let writes = 0;
   const auditFs = { ...fs, async open(...args) { const handle = await fs.open(...args); return { chmod: (...values) => handle.chmod(...values), stat: () => handle.stat(), read: (...values) => handle.read(...values), close: () => handle.close(), async writeFile(...values) { if (++writes === failAt) throw new Error('synthetic-audit-failure'); return handle.writeFile(...values); }, sync: () => handle.sync() }; } };
-  const f = await fixture(t, { auditFs }); failure(await f.write(), 500, failAt === 1 ? 'AUDIT_UNAVAILABLE' : 'AUDIT_RESULT_UNAVAILABLE'); assert.equal(edits(f).length, failAt === 1 ? 0 : 1);
+  const f = await fixture(t, { auditFs }), other = f.add('admin', 'totp');
+  failure(await f.write(), 500, failAt === 1 ? 'AUDIT_UNAVAILABLE' : 'AUDIT_RESULT_UNAVAILABLE');
+  assert.equal(edits(f).length, failAt === 1 ? 0 : 1);
+  assert.equal(f.app.adminSessions.generation('admin'), failAt === 1 ? 0 : 2);
+  assert.equal((await f.alive(other)).statusCode, failAt === 1 ? 200 : 403);
+});
+
+for (const active of [0, '0']) test(`password: a freshly disabled account (${typeof active}) cannot reactivate itself`, async t => {
+  const f = await fixture(t); f.options.detail.active = active;
+  failure(await f.write(), 403, 'NO_SESSION'); assert.equal(edits(f).length, 0);
+  assert.equal((await f.app.audit.read()).rows.length, 0);
+});
+
+test('password: a preceding account mutation revokes a queued password request under the same lock', async t => {
+  const f = await fixture(t); let entered, release, queued;
+  const started = new Promise(resolve => { entered = resolve; }), resume = new Promise(resolve => { release = resolve; });
+  const waiting = new Promise(resolve => { queued = resolve; });
+  const mutation = f.app.adminLock.run(ADMIN_ACCOUNTS_LOCK, async () => {
+    entered(); await resume; f.options.detail.active = 0;
+    const cleanup = f.app.adminSessions.invalidateUser('admin'); f.app.adminSessions.bumpGeneration('admin'); await cleanup;
+  });
+  await started; const run = f.app.adminLock.run;
+  f.app.adminLock.run = (key, operation) => { assert.equal(key, ADMIN_ACCOUNTS_LOCK); queued(); return run(key, operation); };
+  const response = f.write(); await waiting; release(); await mutation;
+  failure(await response, 403, 'SESSION_EXPIRED'); assert.equal(edits(f).length, 0); assert.equal(logins(f).length, 0);
+});
+
+test('password: account mutation following a password change leaves account disabled', async t => {
+  const f = await fixture(t); let entered, release, queued;
+  const started = new Promise(resolve => { entered = resolve; }), resume = new Promise(resolve => { release = resolve; });
+  const waiting = new Promise(resolve => { queued = resolve; });
+  const original = f.app.mailcow.login;
+  f.app.mailcow.login = async args => { entered(); await resume; return original(args); };
+  const response = f.write(); await started;
+  const run = f.app.adminLock.run;
+  f.app.adminLock.run = (key, operation) => { assert.equal(key, ADMIN_ACCOUNTS_LOCK); queued(); return run(key, operation); };
+  const mutation = f.app.adminLock.run(ADMIN_ACCOUNTS_LOCK, async () => {
+    f.options.detail.active = 0; const cleanup = f.app.adminSessions.invalidateUser('admin'); f.app.adminSessions.bumpGeneration('admin'); await cleanup;
+  });
+  await waiting; release(); assert.equal((await response).statusCode, 200); await mutation;
+  assert.equal(f.options.detail.active, 0); failure(await f.alive(f.current), 403, 'SESSION_EXPIRED'); assert.equal(edits(f).length, 1);
+});
+
+test('password: failed dispatch fences in-flight logins and revokes every other session, keeping current', async t => {
+  const f = await fixture(t), other = f.add('admin', 'totp');
+  const before = f.app.adminSessions.generation('admin');
+  f.options.editError = () => new AppError(503, 'MAILCOW_UNAVAILABLE', '연결 실패');
+  failure(await f.write(), 503, 'MAILCOW_UNAVAILABLE');
+  assert.equal(f.app.adminSessions.generation('admin'), before + 2);
+  failure(await f.alive(other), 403, 'SESSION_EXPIRED'); assert.equal((await f.alive(f.current)).statusCode, 200);
+});
+
+test('password: logout during current-password recheck prevents dispatch', async t => {
+  const f = await fixture(t); let entered, release;
+  const started = new Promise(resolve => { entered = resolve; }), resume = new Promise(resolve => { release = resolve; });
+  const original = f.app.mailcow.login;
+  f.app.mailcow.login = async args => { entered(); await resume; return original(args); };
+  const response = f.write(); await started; await f.app.adminSessions.destroy(f.current.session); release();
+  failure(await response, 403, 'SESSION_EXPIRED'); assert.equal(edits(f).length, 0);
 });

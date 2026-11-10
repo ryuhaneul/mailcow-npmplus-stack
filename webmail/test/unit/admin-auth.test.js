@@ -4,7 +4,8 @@ import { Writable } from 'node:stream';
 import { createAdminApp } from '../../server/admin/app.js';
 import { AppError } from '../../server/errors.js';
 import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
-import { sessionHash } from '../../server/admin/session.js';
+import { createAdminSessionStore, sessionHash } from '../../server/admin/session.js';
+import { ADMIN_ACCOUNTS_LOCK } from '../../server/admin/lock.js';
 import { logOptions } from '../../server/log.js';
 
 const origin = 'https://mailadmin.example.com';
@@ -438,4 +439,72 @@ test('admin auth: API header cannot access human login, session, TOTP or logout'
     failure(response, 403, 'API_KEY_FORBIDDEN'); assert.equal(response.headers['set-cookie'], undefined);
   }
   assert.equal(count(f, 'login'), 1); assert.equal(count(f, 'totp'), 0); assert.equal(count(f, 'logout'), 0);
+});
+
+const barrier = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+test('admin sessions: invalidation detaches every ready/TOTP session before remote logout and preserves exceptId', async () => {
+  const remote = barrier(), started = barrier(); let logoutCalls = 0;
+  const store = createAdminSessionStore({ config, client: { async logout() { logoutCalls++; started.resolve(); await remote.promise; } } });
+  const keep = store.create({ username: 'admin', state: 'ready' });
+  const otherUser = store.create({ username: 'other', state: 'ready' });
+  const removed = ['ready', 'ready', 'totp', 'totp'].map(state => store.create({ username: 'admin', state }));
+  const old = store.generation('admin');
+  const cleanup = store.invalidateUser('admin', { exceptId: keep.session.id });
+  assert.equal(store.generation('admin'), old + 1);
+  assert.equal(logoutCalls, 0);
+  for (const item of removed) { assert.equal(item.session.state, 'closed'); assert.equal(item.session.csrf, ''); await assert.rejects(store.get(item.token), { statusCode: 403 }); }
+  await started.promise;
+  assert.equal(logoutCalls, 4);
+  assert.equal(await store.get(keep.token), keep.session);
+  assert.equal(await store.get(otherUser.token), otherUser.session);
+  assert.equal(store.bumpGeneration('admin'), old + 2);
+  remote.resolve(); await cleanup; await store.close();
+});
+
+for (const state of ['ready', 'totp']) test(`admin auth: invalidation blocks an already-started ${state} login from creating a session`, async t => {
+  const f = await fixture(t, { state }), entered = barrier(), resume = barrier();
+  const original = f.client.login;
+  f.client.login = async args => { entered.resolve(); await resume.promise; return original(args); };
+  const response = login(f); await entered.promise;
+  await f.app.adminSessions.invalidateUser('admin');
+  f.app.adminSessions.bumpGeneration('admin');
+  resume.resolve(); failure(await response, 403, 'SESSION_EXPIRED');
+  assert.equal(count(f, 'logout'), 1);
+  assert.equal((await response).headers['set-cookie'], undefined);
+});
+
+test('admin auth: login started during a mutation cannot publish after its final generation bump', async t => {
+  const f = await fixture(t), entered = barrier(), release = barrier(), queued = barrier();
+  const mutation = f.app.adminLock.run(ADMIN_ACCOUNTS_LOCK, async () => {
+    await f.app.adminSessions.invalidateUser('admin'); entered.resolve(); await release.promise; f.app.adminSessions.bumpGeneration('admin');
+  });
+  await entered.promise;
+  const run = f.app.adminLock.run;
+  f.app.adminLock.run = (key, operation) => { queued.resolve(); return run(key, operation); };
+  const response = login(f); await queued.promise; release.resolve(); await mutation;
+  failure(await response, 403, 'SESSION_EXPIRED'); assert.equal(count(f, 'logout'), 1);
+});
+
+test('admin auth: an already-started TOTP cannot resurrect a revoked local session', async t => {
+  const f = await fixture(t, { state: 'totp' }), headers = credentials(await login(f));
+  const entered = barrier(), release = barrier(), original = f.client.totp;
+  f.client.totp = async (...args) => { entered.resolve(); await release.promise; return original(...args); };
+  const response = write(f, '/api/admin/auth/totp', headers, { code: '123456' }); await entered.promise;
+  await f.app.adminSessions.invalidateUser('admin'); release.resolve();
+  failure(await response, 403, 'SESSION_EXPIRED');
+  failure(await f.app.inject({ url: '/api/admin/auth/session', headers }), 403, 'SESSION_EXPIRED');
+  assert.equal(count(f, 'logout'), 1);
+});
+
+test('admin auth: TOTP generation is checked under the shared account lock before promotion', async t => {
+  const f = await fixture(t, { state: 'totp' }), headers = credentials(await login(f));
+  const entered = barrier(), release = barrier(), queued = barrier();
+  const mutation = f.app.adminLock.run(ADMIN_ACCOUNTS_LOCK, async () => { entered.resolve(); await release.promise; f.app.adminSessions.bumpGeneration('admin'); });
+  await entered.promise;
+  const run = f.app.adminLock.run;
+  f.app.adminLock.run = (key, operation) => { queued.resolve(); return run(key, operation); };
+  const response = write(f, '/api/admin/auth/totp', headers, { code: '123456' }); await queued.promise;
+  release.resolve(); await mutation;
+  failure(await response, 403, 'SESSION_EXPIRED'); assert.equal(count(f, 'logout'), 1);
 });

@@ -120,7 +120,7 @@ export function loadAdminConfig(env = process.env) {
   const auditDir = choice('AUDIT_DIR', ['/data/audit']);
   const rspamdMapDir = env.ADMIN_RSPAMD_MAP_DIR ?? '/rspamd_custom_maps';
   if (typeof rspamdMapDir !== 'string' || !isAbsolute(rspamdMapDir) || rspamdMapDir.includes('\0')) invalid('ADMIN_RSPAMD_MAP_DIR');
-  // Older admin env files keep running; missing DB settings disable notices only.
+  // Missing DB settings disable notices; retirement account operations report unavailability.
   const dbHost = env.DB_HOST ? host('DB_HOST') : '';
   const dbName = env.DB_NAME ?? 'mailstack_webmail';
   const dbUser = env.DB_USER ?? 'webmail_notices_admin';
@@ -133,9 +133,11 @@ export function loadAdminConfig(env = process.env) {
     const otp = parseOtpKey(env.OTP_KEY, env.OTP_KEY_VERSION);
     otpKey = otp.key; otpKeyVersion = otp.keyVersion;
   }
+  const retirementFlag = env.WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE === '' ? 'false' : env.WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE ?? 'false';
+  if (!['true', 'false'].includes(retirementFlag)) invalid('WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE');
   const logLevel = choice('LOG_LEVEL', ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
   return Object.freeze({
-    otpKey, otpKeyVersion, authPolicy: authPolicyConfig(env), bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
+    retirementReceiveBlockEnabled: retirementFlag === 'true', otpKey, otpKeyVersion, authPolicy: authPolicyConfig(env), bouncePolicy, adminHostname, sessionIdleMin, sessionMaxHours, mailcowApiKey, logArchiveUrl, logArchiveKey, apiKeyDir: '/data/api-keys', quotaNotificationDir: '/data/quota-notifications', monitorDir: '/data/mail-monitor', mailcowUiUrl: mailcowUiUrl.origin, mailcowUiServername,
     imapHost, smtpHost, mailTlsServername, mailTlsMode, mailTlsPinFile, domain, mailcowPublicUrl: mailcowPublicUrl.href, trustProxy, dockerapiUrl, doveadmUrl, doveadmKey,
     trustedSenderFile, relayFiles: relayRaw === '' ? [] : relayRaw.split(','), mailcowIpv4Network, mailcowIpv6Network,
     wholeMailbox: shareWholeMailbox === 'true', autoexpungeDays, logoDir, auditDir, rspamdMapDir, logLevel, ftsNightly, dbHost, dbName, dbUser, dbPassword,

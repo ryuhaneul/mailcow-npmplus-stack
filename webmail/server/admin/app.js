@@ -1,3 +1,5 @@
+import { createRetirementStore } from '../security/retirement-store.js';
+import { createRetirementRouting } from './retirement-routing.js';
 import { createAuthPolicyListener } from './auth-policy.js';
 import { createProtocolNetlimitStore } from '../security/protocol-netlimit-store.js';
 import { createOtpStore } from '../security/otp-store.js';
@@ -104,7 +106,7 @@ import { installHeaders, installClientIp } from '../security/headers.js';
 
 export const adminCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
 
-export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {}, loginIps = {}, otp = {}, protocolNetlimit = {} } = {}) {
+export async function createAdminApp({ config = loadAdminConfig(), staticDir = fileURLToPath(new URL('../../web/dist-admin/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, audit: auditOptions = {}, dockerapi, tlsExpiry, doveadm, notices = {}, publicTemplates = {}, loginIps = {}, otp = {}, protocolNetlimit = {}, retirement = {} } = {}) {
   if (logger !== false) {
     const base = logOptions(config.logLevel);
     logger = { ...base, ...logger, redact: { ...base.redact, ...logger?.redact,
@@ -169,7 +171,13 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const authPolicy = createAuthPolicyListener({ config: config.authPolicy, store: protocolNetlimitStore, logger: app.log });
   app.addHook('onReady', async () => { await authPolicy.start(); });
   app.addHook('preClose', async () => { await authPolicy.stop(); });
-  const accounts = createAccountsService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
+  const retirementStore = retirement.store ?? createRetirementStore({ config, mode: 'admin' });
+  const retirementRouting = retirement.routing ?? createRetirementRouting({ mailcow: app.mailcow, dockerapi: sharesDockerapi, store: retirementStore });
+  const retirementOptions = { store: retirementStore, routing: retirementRouting,
+    featureEnabled: retirement.featureEnabled ?? config.retirementReceiveBlockEnabled ?? false,
+    ready: retirement.ready ?? false }; // P6: replace the false fallback only with verified deployment readiness.
+  app.addHook('onClose', async () => { await retirementStore.close?.(); });
+  const accounts = createAccountsService({ retirement: retirementOptions, mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });
   const quotaNotifications = createQuotaNotificationsService({

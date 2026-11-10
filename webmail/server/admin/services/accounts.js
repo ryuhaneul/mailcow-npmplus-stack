@@ -1,3 +1,6 @@
+import { tokens as retirementTokens } from '../../sieve/import-syntax.js';
+import { emptyRetirementState, retirementVersion } from '../../security/retirement-store.js';
+import { retirementRedirects } from '../../sieve/redirect-targets.js';
 import { createProtocolNetlimitStore, protocolNetlimitState, protocolNetlimitVersion } from '../../security/protocol-netlimit-store.js';
 import { collectMailboxQuota } from './quota.js';
 import { sieveDisabledWarning } from '../messages.js';
@@ -46,12 +49,47 @@ function snapshot(row) {
 }
 const kindOf = (row, groups) => groups.has(normalize(row.username)) ? 'team' : Number(row.quota) === 3 * GB ? 'admin' : 'personal';
 const summary = (row, groups) => ({ ...snapshot(row), kind: kindOf(row, groups), usedBytes: Number(row.quota_used ?? 0), messages: Number(row.messages ?? 0) });
-export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, protocolNetlimit = createProtocolNetlimitStore(), aclFolders = {
+export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, retirement = null, protocolNetlimit = createProtocolNetlimitStore(), aclFolders = {
   enabled: false,
   readOwned: async owner => (await dockerapi.getAcl(owner)).filter(row => normalize(row.user) === owner && row.mailbox === 'INBOX'),
   assertExist: async () => {},
 } }) {
   const aliasApi = createAliasApi(mailcow);
+  const retirementState = addr => retirement ? retirement.store.read(addr) : Promise.resolve(emptyRetirementState());
+  const routingLock = operation => retirement ? retirement.routing.withRoutingLock(operation) : operation();
+  const blockUnavailable = pendingLeave => new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', pendingLeave ? '서버 기능을 켜서 준비한 뒤 퇴사 처리의 남은 정리를 처리하세요.' : '서버의 수신 차단 준비 상태를 확인해 주세요.');
+  const retirementConflict = code => new AppError(409, code, '퇴사 설정을 다시 확인해 주세요.');
+  const retirementDto = (state, active) => ({ ...state, featureEnabled: retirement?.featureEnabled === true,
+    effectiveReceiveBlock: !state.receiveBlocked ? 'off' : retirement?.featureEnabled && retirement?.ready ? 'on' : 'unverified',
+    warnings: [...(state.receiveBlocked && (!retirement?.featureEnabled || !retirement?.ready) ? [{ code: 'RECEIVE_BLOCK_UNVERIFIED', message: '저장된 차단 선택의 실제 적용을 확인해야 해요.' }] : []),
+      ...(state.retired && active !== undefined && active !== 2 ? [{ code: 'RETIREMENT_STATE_MISMATCH', message: '퇴사 기록과 현재 로그인 상태가 달라요.' }] : [])] });
+  async function writeRetirement(addr, state, patch, actor, keys) {
+    const version = retirementVersion();
+    const selectedKeys = keys ?? (state.receiveBlocked ? await retirement.store.keysForOwner(addr) : []);
+    await retirement.store.write({ email: addr, ...state, ...patch, updatedBy: actor,
+      version, keys: selectedKeys, expected: state });
+    const checked = await retirementState(addr);
+    if (checked.version !== version || !isDeepStrictEqual((await retirement.store.keysForOwner(addr)).sort(), [...selectedKeys].sort())) throw verifyFailed();
+    for (const [key, value] of Object.entries(patch)) if (!['version', 'updatedAt', 'updatedBy'].includes(key) && !isDeepStrictEqual(checked[key], value)) throw verifyFailed();
+    return checked;
+  }
+  async function assertReusable(addr) {
+    if (!retirement) return;
+    const state = await retirementState(addr), keys = await retirement.store.keysForOwner(addr);
+    if (state.version !== null || keys.length || (await retirement.store.blockedRecipients([addr])).length) throw retirementConflict('RETIREMENT_ADDRESS_STALE');
+  }
+  async function cleanupRetirement(addr, expected) {
+    if (!retirement) return;
+    await retirement.store.remove({ email: addr, expected });
+    if ((await retirementState(addr)).version !== null || (await retirement.store.keysForOwner(addr)).length) throw verifyFailed();
+  }
+  async function assertMovable(addr) {
+    const state = await retirementState(addr);
+    if (state.receiveBlocked) throw new AppError(409, 'RETIREMENT_BLOCK_ACTIVE', '수신 차단을 먼저 끈 뒤 주소나 계정 종류를 바꿔 주세요.');
+    if (state.pendingOperation) throw retirementConflict('RETIREMENT_OPERATION_PENDING');
+    if (retirement && (await retirement.store.keysForOwner(addr)).length) throw retirementConflict('RETIREMENT_KEYS_STALE');
+    return state;
+  }
   const netState = async addr => protocolNetlimitState(await protocolNetlimit.read(addr));
   const editState = (mailbox, netlimit) => ({ mailbox, netlimit });
   const netFields = row => ({ protocolInternalOnly: row.enabled, protocolInternalVersion: row.version,
@@ -141,7 +179,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const search = q.trim().toLowerCase();
     const found = boxes.filter(row => typeof row.username === 'string' && `${row.username} ${row.name ?? ''}`.toLowerCase().includes(search) &&
       (kind === 'all' || (kind === 'off' ? String(row.active) !== '1' : kindOf(row, groups) === kind))).sort((a, b) => a.username.localeCompare(b.username));
-    return { items: found.slice((Number(page) - 1) * 50, Number(page) * 50).map(row => summary(row, groups)), total: found.length, page: Number(page), pageSize: 50 };
+    const items = [];
+    // The retirement pool deliberately has two connections and no wait queue.
+    for (const row of found.slice((Number(page) - 1) * 50, Number(page) * 50)) items.push({ ...summary(row, groups), retirement: retirementDto(await retirementState(normalize(row.username)), Number(row.active)) });
+    return { items, total: found.length, page: Number(page), pageSize: 50 };
   }
   async function quotaList(session) {
     const boxes = await collectMailboxQuota(mailcow, session), groups = groupMailboxAddresses(await rows(session, 'filters/all'));
@@ -185,7 +226,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
     const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
-    return { ...summary(row, groups), ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
+    return { ...summary(row, groups), retirement: retirementDto(await retirementState(addr), Number(row.active)), ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
       refs: {
         aliases: aliases.filter(alias => !isMemberAlias(alias) && targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
@@ -205,10 +246,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     for (const key of protocols) if (before.protocols[key] !== after.protocols[key]) result[`${key}_access`] = after.protocols[key] ? '1' : '0';
     return result;
   }
-  async function save(session, addr, before, after) {
+  async function save(session, addr, before, after, attempted = () => {}) {
     assertUnchanged(etag(before), snapshot(await box(session, addr)));
     const attr = attrs(before, after);
-    if (Object.keys(attr).length) await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [addr], attr });
+    if (Object.keys(attr).length) { attempted(); await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [addr], attr }); }
     const applied = snapshot(await box(session, addr));
     if (!isDeepStrictEqual(applied, after)) throw verifyFailed();
     return applied;
@@ -294,6 +335,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         const warnings = [];
         await lock.run(addr, async () => {
           if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'MAILBOX_EXISTS', '이미 있는 메일함이에요.');
+          await assertReusable(addr);
           await cleanupNetlimit({ actor, ip, addr });
           await audit.run({ actor, ip, action: 'mailbox/create', target: addr, kind: 'config', revertible: false, before: {}, after: { ...desired, password: 'set' } }, async intent => {
             const body = { local_part: addr.split('@')[0], domain, name: data.name, quota: String(quotaGb * 1024), active: '1', force_pw_update: '0', tls_enforce_in: '1', tls_enforce_out: '1', password: password.toString(), password2: password.toString() };
@@ -321,6 +363,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
             stage = 'alias';
             await lock.run(alias, async () => {
               await domainActive(session, alias.split('@')[1]);
+              await assertReusable(alias);
               if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === alias) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === alias)) throw new AppError(409, 'ALIAS_EXISTS', '이미 있는 주소라 별칭을 만들지 않았어요.');
               await audit.run({ actor, ip, action: 'alias/create', target: alias, kind: 'config', revertible: false, before: {}, after: { address: alias, targets: [addr], active: 1 } }, async intent => {
                 await aliasApi.add(session, { address: alias, goto: addr, active: '1', sogo_visible: '0', comment: '' });
@@ -381,25 +424,26 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     }
     return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
   }
-  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo }) {
+  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares = mode === 'delete', forwardTo }) {
     const account = snapshot(await box(session, addr)), netlimit = await netState(addr);
     const filters = await rows(session, 'filters/all');
     const ownFilters = prefilters(filters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
     let forward;
     if (forwardTo) forward = await teams.previewForward(session, addr, forwardTo);
-    const operation = { mode, cleanRefs, forwardTo };
-    if (mode === 'disable' && !cleanRefs) return { state: { account, netlimit, ownFilters, operation }, account, filters, forward,
+    const operation = { mode, cleanRefs, cleanShares, forwardTo };
+    const retiredState = await retirementState(addr);
+    if (mode === 'disable' && !cleanRefs && !cleanShares) return { state: { account, netlimit, ownFilters, operation, retiredState }, account, filters, forward,
       refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
     if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
-    const teamsToClean = protectTeams(filters, aliases, addr), aclByOwner = new Map(), ownerSnapshot = new Map();
+    const teamsToClean = cleanRefs ? protectTeams(filters, aliases, addr) : [], aclByOwner = new Map(), ownerSnapshot = new Map();
     const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot });
-    if (info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
+    if (cleanShares && info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
     const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(row => normalize(row.username) === addr && targets(row.sender_acl).length || targets(row.sender_acl).includes(addr)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    const refs = { ...info.refs, aliases: info.refs.aliases.map(alias => ({ ...alias, effect: mode === 'disable' ? 'kept' : alias.targets.every(target => target === addr) ? 'deleted' : 'target_removed' })) };
+    const refs = Object.fromEntries(Object.entries(info.refs).map(([kind, values]) => [kind, values.map(ref => ({ ...ref, effect: kind === 'shares' ? cleanShares ? 'deleted' : 'kept' : !cleanRefs || kind === 'aliases' && mode === 'disable' ? 'kept' : kind === 'aliases' ? ref.targets.every(target => target === addr) ? 'deleted' : 'target_removed' : 'removed' }))]));
     const versions = {
       shareOwners: ownerVersions(ownerSnapshot),
       aliases: aliasRows.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
@@ -408,50 +452,53 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
     };
-    return { state: { account, netlimit, ownFilters, operation, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
+    return { state: { account, netlimit, ownFilters, operation, retiredState, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
       teamsToClean, aliasRows, senderRows, syncRows, aclByOwner, info };
   }
   async function deletePreview(session, rawAddress, options = {}) {
     const addr = address(rawAddress), mode = options.mode ?? 'delete', cleanRefs = options.cleanRefs ?? true;
-    const forwardTo = options.forwardTo ? address(options.forwardTo) : null;
-    if (!['disable', 'delete'].includes(mode) || typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo)) throw invalid();
-    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo });
+    const forwardTo = options.forwardTo ? address(options.forwardTo) : null, cleanShares = options.cleanShares ?? (mode === 'delete');
+    if (!['disable', 'delete'].includes(mode) || typeof cleanRefs !== 'boolean' || typeof cleanShares !== 'boolean' || mode === 'delete' && (!cleanRefs || !cleanShares || forwardTo)) throw invalid();
+    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo });
     const row = plan.info ?? await box(session, addr);
-    return { address: addr, mode, cleanRefs, forwardTo, etag: etag(plan.state), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
+    return { address: addr, mode, cleanRefs, cleanShares, forwardTo, etag: etag(plan.state), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
       refs: plan.refs, sharesScope: plan.sharesScope, irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
       confirmation: mode === 'delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.',
       warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
   }
-  async function lifecycleRun({ session, actor, ip, addr: rawAddress, data, mode = 'delete' }) {
-    const addr = address(rawAddress), cleanRefs = data?.cleanRefs, forwardTo = data?.forwardTo ? address(data.forwardTo) : null;
-    if (typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo) || mode === 'delete' && data.confirmAddress !== addr) throw invalid();
+  async function lifecycleRun({ session, actor, ip, addr: rawAddress, data, mode = 'delete', onRetired, onFinished, onStep, beforeWrite, skipForward = false }) {
+    const addr = address(rawAddress), cleanRefs = data?.cleanRefs, cleanShares = mode === 'delete' ? true : data?.cleanShares ?? false, forwardTo = data?.forwardTo ? address(data.forwardTo) : null;
+    if (typeof cleanShares !== 'boolean' || typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo) || mode === 'delete' && data.confirmAddress !== addr) throw invalid();
     return lock.run(`flow:${addr}`, async () => {
-      const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo });
+      const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo });
       assertUnchanged(data.etag, plan.state);
       const steps = [], cleaned = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
       const expectedAccount = structuredClone(plan.account);
-      const skipOwnShares = cleanRefs && plan.account.active === 0;
+      const skipOwnShares = cleanShares && plan.account.active === 0;
       const verifyShareOwners = owners => assertUnchanged(etag(plan.state.versions.shareOwners.filter(([owner]) => owners.has(owner)).map(([owner, active]) =>
         [owner, owner === addr ? expectedAccount.active : active])), ownerVersions(owners));
       let lostSession, stage, touched = false;
       const entry = { actor, ip, action: mode === 'delete' ? 'mailbox.delete' : 'mailbox.leave', target: addr,
-        kind: mode === 'delete' ? 'irreversible' : 'config', revertible: false, before: { account: plan.account, refs: plan.refs }, after: { ...(mode === 'delete' ? {} : { active: 2, forwardTo }), ...(skipOwnShares ? { ownSharesUnchecked: true } : {}) } };
-      const result = await audit.run(entry, async () => {
-        const success = (name, target, auditId = null) => { touched = true; steps.push({ stage: name, target, status: 'ok', auditId }); };
+        kind: mode === 'delete' ? 'irreversible' : 'config', revertible: false, before: { account: plan.account, refs: plan.refs }, after: { ...(mode === 'delete' ? {} : { active: 2, ...(Object.hasOwn(data, 'forwardTo') ? { forwardTo } : {}), cleanRefs, cleanShares, receiveBlocked: data.receiveBlocked ?? false }), ...(skipOwnShares ? { ownSharesUnchecked: true } : {}) } };
+      const result = await audit.run(entry, async intent => {
+        const success = async (name, target, auditId = null) => { touched = true; steps.push({ stage: name, target, status: 'ok', auditId }); await onStep?.({ stage: name, target }); };
         try {
           // Recheck the full preview once more after the durable intent and before the first write.
-          assertUnchanged(data.etag, (await lifecycleSnapshot(session, addr, { mode, cleanRefs, forwardTo })).state);
+          assertUnchanged(data.etag, (await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo })).state);
+          await beforeWrite?.();
           if (mode === 'disable') {
             stage = 'active';
             await lock.run(addr, async () => {
               const after = { ...plan.account, active: 2 };
-              await save(session, addr, plan.account, after); expectedAccount.active = 2;
+              await save(session, addr, plan.account, after, () => { touched = true; }); expectedAccount.active = 2;
             });
-            success(stage, addr);
-            if (forwardTo) {
+            await success(stage, addr);
+            stage = 'retirement';
+            await onRetired?.(intent);
+            if (forwardTo && !skipForward) {
               stage = 'forward';
               const applied = await teams.forward({ session, actor, ip, team: addr, member: forwardTo, etag: plan.forward.etag });
-              success(stage, addr, applied.auditId);
+              await success(stage, addr, applied.auditId);
             }
           }
           if (cleanRefs) {
@@ -466,12 +513,12 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 const checked = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
                 if (remaining.length ? !checked || !isDeepStrictEqual(targets(checked.goto), remaining) : Boolean(checked)) throw verifyFailed();
               });
-              cleaned.aliases.push(aliasAddress); success(stage, aliasAddress);
+              cleaned.aliases.push(aliasAddress); await success(stage, aliasAddress);
             }
             for (const filter of plan.teamsToClean) {
               stage = 'teams'; const owner = normalize(filter.username);
               const applied = await teams.change({ session, actor, ip, team: owner, member: addr, add: false, irreversible: mode === 'delete', etag: filter.teamEtag });
-              cleaned.teams.push(owner); success(stage, owner, applied.auditId);
+              cleaned.teams.push(owner); await success(stage, owner, applied.auditId);
             }
             for (const sender of plan.senderRows) {
               stage = 'senders'; const owner = normalize(sender.username);
@@ -482,8 +529,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 await save(session, owner, before, after);
                 if (owner === addr) expectedAccount.senderAcl = [];
               });
-              cleaned.senders.push(owner); success(stage, owner);
+              cleaned.senders.push(owner); await success(stage, owner);
             }
+          }
+          if (cleanShares) {
             const owners = [...new Set(plan.refs.shares.map(share => share.owner))].sort();
             for (const owner of owners) {
               stage = 'shares';
@@ -498,9 +547,11 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 }
                 const checked = await aclFolders.readOwned(owner);
                 if (checked.some(row => normalize(row.user) === owner && (owner === addr || normalize(row.id) === addr))) throw verifyFailed();
-                for (const { grantee, mailbox } of grants) success(stage, `${owner} → ${grantee} (${mailbox})`);
+                for (const { grantee, mailbox } of grants) await success(stage, `${owner} → ${grantee} (${mailbox})`);
               });
             }
+          }
+          if (cleanRefs) {
             for (const job of plan.syncRows) {
               stage = 'syncjobs';
               await lock.run(`syncjob:${job.id}`, async () => {
@@ -509,7 +560,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 await mailcow.call(session, 'POST', '/api/v1/delete/syncjob', [String(job.id)]);
                 if ((await rows(session, 'syncjobs/all/no_log')).some(row => String(row.id) === String(job.id))) throw verifyFailed();
               });
-              cleaned.syncjobs.push(job.id); success(stage, String(job.id));
+              cleaned.syncjobs.push(job.id); await success(stage, String(job.id));
             }
           }
           if (mode === 'delete') {
@@ -529,22 +580,27 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               await mailcow.call(session, 'POST', '/api/v1/delete/mailbox', [addr]);
               if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
             });
-            success(stage, addr);
+            await success(stage, addr);
+            stage = 'retirement';
+            await cleanupRetirement(addr, plan.state.retiredState);
             stage = 'protocol-netlimit';
             await lock.run(addr, () => cleanupNetlimit({ actor, ip, addr, expected: plan.state.netlimit }));
-            if (plan.state.netlimit.version !== null) success(stage, addr);
+            if (plan.state.netlimit.version !== null) await success(stage, addr);
             stage = 'otp';
             const clearedOtp = await otp.cleanup({ email: addr, actor, ip });
-            success(stage, addr, clearedOtp.auditId);
+            await success(stage, addr, clearedOtp.auditId);
           }
-          if (mode === 'disable' && cleanRefs) {
+          if (mode === 'disable' && cleanShares) {
             stage = 'shares';
             const checkedOwners = new Map();
             const current = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, ownerSnapshot: checkedOwners, skipOwnShares });
             verifyShareOwners(checkedOwners);
             if (current.warnings.some(warning => warning.code === 'SHARES_PARTIAL') || current.refs.shares.length) throw verifyFailed();
           }
-          return { result: 'ok', steps, detail: { messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
+          stage = 'retirement';
+          const final = await onFinished?.();
+          if (final?.steps) steps.push(...final.steps);
+          return { result: final?.result === 'partial' ? 'partial' : 'ok', steps, ...(final?.recovery ? { recovery: final.recovery } : {}), detail: { ...(final?.recovery ? { recovery: final.recovery } : {}), messages: plan.info?.messages ?? 0, usedBytes: plan.info?.usedBytes ?? 0, cleaned, steps }, warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
         } catch (error) {
           if (!touched) throw error;
           if (error instanceof MailcowAuthLost) lostSession = error;
@@ -557,11 +613,226 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return result;
     });
   }
+  function retirementInput(data, { leave = false } = {}) {
+    if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.receiveBlocked !== 'boolean' ||
+      data.cleanupConfirmed !== undefined && typeof data.cleanupConfirmed !== 'boolean' ||
+      Object.hasOwn(data, 'forwardTo') && data.forwardTo !== null && (typeof data.forwardTo !== 'string' || !data.forwardTo)) throw invalid();
+    if (!leave && Object.keys(data).some(key => !['receiveBlocked', 'forwardTo', 'etag', 'cleanupConfirmed'].includes(key))) throw invalid();
+    const value = { receiveBlocked: data.receiveBlocked, cleanupConfirmed: data.cleanupConfirmed ?? false };
+    if (Object.hasOwn(data, 'forwardTo')) value.forwardTo = data.forwardTo === null ? null : address(data.forwardTo);
+    if (value.receiveBlocked && value.forwardTo) throw retirementConflict('RETIREMENT_FORWARD_CONFLICT');
+    return value;
+  }
+  async function retirementPlan(session, addr, request, { initialLeave = false, allowPendingLeave = initialLeave } = {}) {
+    if (!retirement) throw blockUnavailable();
+    const state = await retirementState(addr), account = snapshot(await box(session, addr));
+    const ownerKeys = await retirement.store.keysForOwner(addr);
+    if (state.pendingOperation?.kind === 'leave' && !allowPendingLeave) throw new AppError(409, 'RETIREMENT_OPERATION_PENDING', '퇴사 처리의 남은 정리를 기존 퇴사 미리보기에서 먼저 처리해 주세요.');
+    if (!initialLeave && (!state.retired || account.active !== 2)) throw retirementConflict('RETIREMENT_STATE_CONFLICT');
+    if (request.receiveBlocked && (!retirement.featureEnabled || !retirement.ready)) throw blockUnavailable(state.pendingOperation?.kind === 'leave');
+    const own = prefilters(await rows(session, 'filters/all'), addr), removeForward = [], blockers = [];
+    const forwarding = own.map(filter => {
+      const location = { source: 'admin', type: 'prefilter', address: addr, id: String(filter.id) };
+      try { return { ...location, targets: [...new Set(retirementRedirects(filter.script_data).map(row => row.target))], inspected: true }; }
+      catch { return { ...location, targets: [], inspected: false }; }
+    });
+    const existingTargets = [...new Set(forwarding.flatMap(row => row.targets))].sort();
+    const forwardingChange = request.forwardTo ? { effect: existingTargets.includes(request.forwardTo) ? 'unchanged' : 'add', target: request.forwardTo,
+      existingTargets, message: existingTargets.includes(request.forwardTo) ? '이미 있는 관리 전달을 유지해요.' : `기존 관리 전달 ${existingTargets.length}개에 ${request.forwardTo} 추가` } :
+      request.forwardTo === null ? { effect: 'remove-managed', existingTargets, message: '미리보기에 표시된 관리 전달만 지워요.' } :
+        { effect: 'kept', existingTargets, message: '기존 전달을 유지해요.' };
+    let forward;
+    if (request.forwardTo) { await retirement.routing.assertRecipients([request.forwardTo]); forward = await teams.previewForward(session, addr, request.forwardTo); }
+    if (request.forwardTo === null) for (const filter of own) {
+      let redirects;
+      try { redirects = retirementRedirects(filter.script_data); } catch { blockers.push({ code: 'OWNER_FORWARD_UNEDITABLE', ...forwarding.find(row => row.id === String(filter.id)) }); continue; }
+      if (!redirects.length) continue;
+      const parsed = analyze(filter.script_data);
+      // Whole-filter removal is restricted to a pure literal copy-forward filter.
+      const pure = parsed.parsed && redirects.every(row => row.copy) && parsed.members.length === redirects.length &&
+        retirementTokens(filter.script_data).every(token => typeof token === 'object' || ['require', 'redirect', ':copy', 'stop', '[', ']', ',', ';'].includes(token));
+      if (!pure || own.length !== 1) blockers.push({ code: 'OWNER_FORWARD_UNEDITABLE', ...forwarding.find(row => row.id === String(filter.id)) });
+      else removeForward.push({ id: String(filter.id), hash: scriptHash(filter.script_data), effect: 'filter_deleted_with_backup' });
+    }
+    const routing = request.receiveBlocked ? await retirement.routing.inspect(session, addr) : null;
+    if (routing) blockers.push(...routing.blockers.filter(issue => !(issue.code === 'OWNER_FORWARD_ACTIVE' && issue.source === 'admin' && issue.type === 'prefilter' && removeForward.some(row => row.id === issue.id))));
+    const changes = [...removeForward.map(row => ({ kind: 'owner-forward', address: addr, ...row })), ...(routing?.changes ?? [])];
+    const version = { account, state, ownerKeys, request: { receiveBlocked: request.receiveBlocked, ...(Object.hasOwn(request, 'forwardTo') ? { forwardTo: request.forwardTo } : {}) },
+      own: own.map(row => ({ id: row.id, hash: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id))), routing: routing?.etag ?? null, forward: forward?.etag ?? null };
+    return { address: addr, request, state, ownerKeys, account, routing, forward, changes, blockers, version, etag: etag(version),
+      retirement: retirementDto(state, account.active), forwarding, forwardingChange, after: { receiveBlocked: request.receiveBlocked, ...(Object.hasOwn(request, 'forwardTo') ? { forwardTo: request.forwardTo } : {}) } };
+  }
+  const retirementPreviewDto = plan => ({ address: plan.address, etag: plan.etag, retirement: plan.retirement, after: plan.after,
+    changes: plan.changes, blockers: plan.blockers, forwarding: plan.forwarding, forwardingChange: plan.forwardingChange, canPrepare: !plan.blockers.length, cleanupRequired: plan.changes.length > 0,
+    warnings: plan.retirement.warnings });
+  async function retirementPreview(session, rawAddress, data) {
+    const addr = address(rawAddress), request = retirementInput(data);
+    return retirementPreviewDto(await retirementPlan(session, addr, request));
+  }
+  function assertRetirementPlan(plan, consent) {
+    if (plan.blockers.length) { const error = retirementConflict('RETIREMENT_ROUTES_REMAIN'); error.details = { blockers: plan.blockers }; throw error; }
+    if (plan.changes.length && !consent) throw retirementConflict('RETIREMENT_CLEANUP_CONFIRM_REQUIRED');
+  }
+  async function applyRetirement({ session, actor, ip, addr, request, plan, completed = [], pendingBase = null, auditId }) {
+    const steps = [], done = stage => completed.includes(stage), complete = stage => { if (!done(stage)) completed.push(stage); steps.push({ stage, status: 'ok' }); };
+    let state = await retirementState(addr), stage = 'pending';
+    const teamRevisions = new Map();
+    const pending = () => ({ ...(pendingBase ?? { kind: 'settings', request, auditId }), completed: [...completed] });
+    try {
+      state = await writeRetirement(addr, state, { pendingOperation: pending() }, actor);
+      // OFF is committed before any requested forwarding write.
+      if (!request.receiveBlocked && state.receiveBlocked) {
+        stage = 'receive-off'; state = await writeRetirement(addr, state, { receiveBlocked: false, pendingOperation: pending() }, actor, []); complete(stage);
+      }
+      stage = 'remove-forward';
+      if (!done(stage) || plan.changes.some(row => row.kind === 'owner-forward')) {
+        for (const change of plan.changes.filter(row => row.kind === 'owner-forward')) {
+          const filter = (await rows(session, 'filters/all')).find(row => String(row.id) === change.id);
+          if (!filter || normalize(filter.username) !== addr || scriptHash(filter.script_data) !== change.hash) throw retirementConflict('CHANGED_ELSEWHERE');
+          await teams.deleteFilter({ session, actor, ip, filter });
+        }
+        complete(stage); state = await writeRetirement(addr, state, { pendingOperation: pending() }, actor);
+      }
+      stage = 'routing-cleanup';
+      if (request.receiveBlocked) {
+        // The initial etag was checked before writing; each remaining edge is now read and checked again.
+        for (const change of plan.changes.filter(row => ['alias', 'team-member-alias', 'team'].includes(row.kind))) {
+          if (change.kind === 'alias') await lock.run(change.address, async () => {
+            const alias = (await rows(session, 'alias/all')).find(row => normalize(row.address) === change.address);
+            if (!alias || etag(alias) !== change.version) throw retirementConflict('CHANGED_ELSEWHERE');
+            await audit.run({ actor, ip, action: 'mailbox.retirement.alias', target: change.address, kind: 'config', revertible: false,
+              before: aliasBackup(alias), after: { targets: change.keep } }, async () => {
+              await editAliasPreservingSenders(session, alias, { items: [String(alias.id)], attr: { goto: change.keep.join(',') } });
+              const checked = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
+              if (!checked || !isDeepStrictEqual(targets(checked.goto), change.keep)) throw verifyFailed();
+            });
+          });
+          else for (const member of change.remove) {
+            const team = change.kind === 'team' ? change.address : change.team;
+            const filter = prefilters(await rows(session, 'filters/all'), team).find(row => String(row.id) === change.filterId);
+            if (!filter) throw retirementConflict('CHANGED_ELSEWHERE');
+            const aliases = await rows(session, 'alias/all'), bundle = memberAliases(filter, aliases)[0];
+            const currentEtag = etag({ id: filter.id, source: filter.script_data, ...(bundle ? { goto: bundle.goto } : {}) });
+            if (currentEtag !== (teamRevisions.get(team) ?? change.etag)) throw retirementConflict('CHANGED_ELSEWHERE');
+            const applied = await teams.change({ session, actor, ip, team, member, add: false, etag: currentEtag });
+            teamRevisions.set(team, applied.etag);
+          }
+        }
+        complete(stage);
+        stage = 'receive-on';
+        const fresh = await retirement.routing.inspect(session, addr), keys = retirement.routing.assertReady(fresh);
+        if (!state.receiveBlocked || !isDeepStrictEqual(await retirement.store.keysForOwner(addr), keys)) state = await writeRetirement(addr, state, { receiveBlocked: true, pendingOperation: pending() }, actor, keys);
+        complete(stage);
+      }
+      stage = 'forward';
+      if (request.forwardTo && (!done(stage) || !plan.forwarding.some(row => row.targets.includes(request.forwardTo)))) {
+        const preview = await teams.previewForward(session, addr, request.forwardTo);
+        await retirement.routing.assertRecipients([request.forwardTo]);
+        await teams.forward({ session, actor, ip, team: addr, member: request.forwardTo, etag: preview.etag }); complete(stage);
+      }
+      stage = 'complete'; state = await writeRetirement(addr, state, { pendingOperation: null }, actor);
+      return { result: 'ok', address: addr, auditId, steps, detail: { steps }, retirement: retirementDto(state), warnings: retirementDto(state).warnings };
+    } catch (error) {
+      if (error instanceof MailcowAuthLost) throw error;
+      steps.push({ stage, status: 'failed', code: safeCode(error) });
+      let actual;
+      try {
+        actual = await retirementState(addr);
+        // Readback resolves uncertain CAS commits; preserve the last committed selection.
+        actual = await writeRetirement(addr, actual, { pendingOperation: pending() }, actor);
+      } catch { actual = null; }
+      const recovery = [{ stage, message: '현재 퇴사·수신 상태와 남은 연결을 다시 미리보기로 확인해 주세요.' }];
+      return { result: 'partial', address: addr, auditId, steps, detail: { steps, recovery }, retirement: actual ? retirementDto(actual) : null, reloadRequired: !actual, recovery, warnings: [] };
+    }
+  }
+  async function retirementUpdate({ session, actor, ip, addr: rawAddress, data }) {
+    const addr = address(rawAddress), request = retirementInput(data);
+    return routingLock(async () => {
+      const plan = await retirementPlan(session, addr, request); assertUnchanged(data.etag, plan.version); assertRetirementPlan(plan, request.cleanupConfirmed);
+      if (!plan.state.pendingOperation && plan.state.receiveBlocked === request.receiveBlocked && !Object.hasOwn(request, 'forwardTo') && !plan.changes.length &&
+        isDeepStrictEqual(plan.ownerKeys, request.receiveBlocked ? plan.routing.keys : [])) return { result: 'unchanged', unchanged: true, retirement: plan.retirement, warnings: plan.retirement.warnings };
+      return audit.run({ actor, ip, action: 'mailbox.retirement', target: addr, kind: 'config', revertible: false, before: plan.retirement, after: { ...plan.after, cleanupConfirmed: request.cleanupConfirmed, changes: plan.changes } }, async intent => {
+        const fresh = await retirementPlan(session, addr, request); assertUnchanged(data.etag, fresh.version); assertRetirementPlan(fresh, request.cleanupConfirmed);
+        const previous = fresh.state.pendingOperation;
+        const sameRequest = previous?.kind === 'settings' && previous.request?.receiveBlocked === request.receiveBlocked &&
+          Object.hasOwn(previous.request ?? {}, 'forwardTo') === Object.hasOwn(request, 'forwardTo') && previous.request?.forwardTo === request.forwardTo;
+        return applyRetirement({ session, actor, ip, addr, request, plan: fresh, auditId: intent.id, completed: sameRequest ? [...(previous.completed ?? [])] : [] });
+      });
+    });
+  }
+
   async function leave({ session, actor, ip, data }) {
-    if (!data || !['preview', 'run'].includes(data.action) || !['disable', 'delete'].includes(data.mode) || typeof data.cleanRefs !== 'boolean') throw invalid();
-    const result = data.action === 'preview' ? await deletePreview(session, data.address, data) :
-      await lifecycleRun({ session, actor, ip, addr: data.address, data, mode: data.mode });
-    return { ...result, warnings: [...leaveWarnings(), ...result.warnings.filter(warning => !leaveWarnings().some(row => row.code === warning.code))] };
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !['preview', 'run'].includes(data.action) || !['disable', 'delete'].includes(data.mode) || typeof data.cleanRefs !== 'boolean' ||
+      Object.keys(data).some(key => !['action', 'address', 'mode', 'cleanRefs', 'cleanShares', 'forwardTo', 'receiveBlocked', 'cleanupConfirmed', 'etag', 'confirmAddress'].includes(key))) throw invalid();
+    if (data.cleanShares !== undefined && typeof data.cleanShares !== 'boolean' || data.receiveBlocked !== undefined && typeof data.receiveBlocked !== 'boolean' ||
+      data.cleanupConfirmed !== undefined && typeof data.cleanupConfirmed !== 'boolean') throw invalid();
+    if (Object.hasOwn(data, 'forwardTo') && data.forwardTo !== null && (typeof data.forwardTo !== 'string' || !data.forwardTo)) throw invalid();
+    if (data.receiveBlocked && data.forwardTo) throw retirementConflict('RETIREMENT_FORWARD_CONFLICT');
+    const addr = address(data.address);
+    if (!retirement || data.mode === 'delete') {
+      if (data.mode === 'delete' && (data.receiveBlocked || data.forwardTo)) throw invalid();
+      const result = data.action === 'preview' ? await deletePreview(session, addr, data) : await lifecycleRun({ session, actor, ip, addr, data, mode: data.mode });
+      return { ...result, warnings: [...leaveWarnings(), ...result.warnings.filter(warning => !leaveWarnings().some(row => row.code === warning.code))] };
+    }
+    const current = await retirementState(addr);
+    const currentActive = Number((await box(session, addr)).active);
+    if (current.retired && !current.pendingOperation) return { result: 'unchanged', alreadyRetired: true, unchanged: true,
+      address: addr, accountActive: currentActive, message: '이미 퇴사 처리한 계정이에요. 계정 상세에서 수신 설정을 바꿔 주세요.', settingsPath: `/admin/accounts/${encodeURIComponent(addr)}`, retirement: retirementDto(current, currentActive), warnings: [] };
+    if (current.pendingOperation && current.pendingOperation.kind !== 'leave') return { result: 'unchanged', alreadyRetired: true, address: addr,
+      accountActive: currentActive, settingsPath: `/admin/accounts/${encodeURIComponent(addr)}`, retirement: retirementDto(current, currentActive), warnings: [] };
+    // Older retries may omit the new selection; the persisted request remains authoritative.
+    const saved = current.pendingOperation?.request;
+    if (saved && ['receiveBlocked', 'cleanRefs', 'cleanShares', 'forwardTo'].some(key => Object.hasOwn(data, key) && !isDeepStrictEqual(data[key], saved[key]))) throw retirementConflict('RETIREMENT_RETRY_SETTINGS_CHANGED');
+    const options = saved ?? { cleanRefs: data.cleanRefs, cleanShares: data.cleanShares ?? false, receiveBlocked: data.receiveBlocked ?? false,
+      ...(data.receiveBlocked ? { forwardTo: null } : Object.hasOwn(data, 'forwardTo') ? { forwardTo: data.forwardTo === null ? null : address(data.forwardTo) } : {}) };
+    const request = retirementInput({ ...options, cleanupConfirmed: data.cleanupConfirmed ?? false }, { leave: true });
+    const prepare = async () => {
+      const lifecycle = await deletePreview(session, addr, { ...options, mode: 'disable' });
+      const settings = await retirementPlan(session, addr, request, { initialLeave: true });
+      const version = { lifecycle: lifecycle.etag, settings: settings.etag };
+      return { lifecycle, settings, version };
+    };
+    const plan = await prepare();
+    if (data.action === 'preview') return { ...plan.lifecycle, confirmation: !current.retired && plan.settings.account.active === 2 ? '받기 전용 계정이에요. 실행하면 퇴사 처리 기록을 명시적으로 남겨요.' : plan.lifecycle.confirmation, etag: etag(plan.version), receiveBlocked: options.receiveBlocked,
+      retirement: plan.settings.retirement, forwarding: plan.settings.forwarding, forwardingChange: plan.settings.forwardingChange, receiveChanges: plan.settings.changes, blockers: plan.settings.blockers,
+      cleanupRequired: plan.settings.changes.length > 0, canPrepare: !plan.settings.blockers.length, alreadyRetired: current.retired,
+      pendingOperation: current.pendingOperation, unclassifiedReceiveOnly: !current.retired && plan.settings.account.active === 2 };
+    assertUnchanged(data.etag, plan.version); assertRetirementPlan(plan.settings, request.cleanupConfirmed);
+    let state = current, settingsResult;
+    const pending = { kind: 'leave', request: options, lifecycleCompleted: current.pendingOperation?.lifecycleCompleted ?? [], completed: current.pendingOperation?.completed ?? [] };
+    if (current.retired && plan.settings.account.active !== 2) throw retirementConflict('RETIREMENT_STATE_CONFLICT');
+    const skipForward = options.forwardTo && pending.lifecycleCompleted.some(row => row.stage === 'forward') &&
+      prefilters(await rows(session, 'filters/all'), addr).some(row => { try { return retirementRedirects(row.script_data).some(item => item.copy && item.target === options.forwardTo); } catch { return false; } });
+    const result = await lifecycleRun({ session, actor, ip, addr, mode: 'disable', data: { ...data, ...options, etag: plan.lifecycle.etag }, skipForward,
+      beforeWrite: async () => {
+        const fresh = await retirementPlan(session, addr, request, { initialLeave: true });
+        assertUnchanged(plan.settings.etag, fresh.version); assertRetirementPlan(fresh, request.cleanupConfirmed);
+      },
+      onStep: async completed => {
+        if (!pending.lifecycleCompleted.some(row => isDeepStrictEqual(row, completed))) pending.lifecycleCompleted.push(completed);
+        if (state.retired) state = await writeRetirement(addr, state, { pendingOperation: pending }, actor);
+      },
+      onRetired: async intent => {
+        pending.auditId ??= intent.id;
+        // active=2 has already been read back, so later failures cannot hide the retirement fact.
+        state = await writeRetirement(addr, state, { retired: true, recordedAt: state.recordedAt ?? new Date().toISOString(), source: state.source ?? 'leave',
+          sourceAuditId: state.sourceAuditId ?? intent.id, pendingOperation: pending }, actor);
+      },
+      onFinished: async () => {
+        // Known cleanup changes alter the original graph. Re-inspect before committing keys.
+        const fresh = await retirementPlan(session, addr, request, { allowPendingLeave: true });
+        assertRetirementPlan(fresh, request.cleanupConfirmed);
+        const consented = change => JSON.stringify({ kind: change.kind, address: change.address, remove: change.remove, keep: change.keep, id: change.id, hash: change.hash, filterId: change.filterId });
+        if (fresh.changes.some(change => !plan.settings.changes.some(old => consented(old) === consented(change)))) throw retirementConflict('CHANGED_ELSEWHERE');
+        settingsResult = await applyRetirement({ session, actor, ip, addr, request, plan: fresh, pendingBase: pending, auditId: pending.auditId, completed: [...pending.completed, ...(options.forwardTo ? ['forward'] : [])] });
+        return settingsResult;
+      } });
+    let actual, accountActive;
+    try { actual = retirementDto(await retirementState(addr)); } catch { actual = null; }
+    try { accountActive = Number((await box(session, addr)).active); } catch { accountActive = null; }
+    return { ...result, address: addr, accountActive, requested: options, ...(settingsResult?.result === 'partial' ? { result: 'partial' } : {}),
+      steps: result.steps, detail: result.detail, retirement: actual, reloadRequired: !actual || accountActive === null,
+      ...(settingsResult?.recovery ? { recovery: settingsResult.recovery } : {}) };
   }
   const renameNotices = [
     '앱 암호·본인 필터 소유자는 mailcow가 함께 바꿔요.',
@@ -570,6 +841,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   const replaceAddress = (values, old, next) => [...new Set(values.map(value => value === old ? next : value))].sort();
   const aclReadOnly = row => addressPattern.test(row.id) && isDeepStrictEqual([...new Set(row.rights)].sort(), ['lookup', 'read']);
   async function renamePlan(session, old, next) {
+    const retiredState = await assertMovable(old); await assertReusable(next);
     const row = await box(session, old), account = snapshot(row);
     if (row.active === 0 || row.active === '0') throw inactiveMailbox();
     if (![1, 2, '1', '2'].includes(row.active)) throw new AppError(502, 'SHARES_UNAVAILABLE', '메일함의 사용 상태를 확인하지 못했어요. 다시 시도해 주세요.');
@@ -606,7 +878,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       syncjobs: syncRows.map(job => ({ id: job.id, before: old, after: next })),
       oldAlias: [{ address: old, targets: [next] }],
     };
-    const state = { old, next, keepOldAsAlias: true, account, netlimit: await netState(old), netlimitTarget: await netState(next), shareOwners: ownerVersions(ownerSnapshot),
+    const state = { old, next, keepOldAsAlias: true, retiredState, account, netlimit: await netState(old), netlimitTarget: await netState(next), shareOwners: ownerVersions(ownerSnapshot),
       filters: affectedFilters.map(filter => ({ id: filter.id, owner: normalize(filter.username), sha256: scriptHash(filter.script_data), active: filter.active, type: filter.filter_type })),
       aliases: aliasRows.map(alias => ({ id: alias.id, sha256: etag(alias) })),
       senders: senderRows.map(item => ({ mailbox: normalize(item.username), sha256: etag(item.sender_acl) })),
@@ -677,6 +949,12 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               await verifyMailbox();
             });
           }));
+          stage = 'retirement';
+          if (retirement && plan.state.retiredState.version !== null) {
+            await writeRetirement(next, await retirementState(next), { ...plan.state.retiredState, pendingOperation: null }, actor, []);
+            await cleanupRetirement(old, plan.state.retiredState);
+            steps.push({ stage, target: next, status: 'ok' });
+          }
           stage = 'protocol-netlimit';
           await lock.run(old, () => cleanupNetlimit({ actor, ip, addr: old, expected: plan.state.netlimit }));
           if (plan.state.netlimit.version !== null) steps.push({ stage, target: old, status: 'ok' });
@@ -794,6 +1072,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   const gapWarning = { code: 'CONVERSION_GAP', message: '같은 주소의 메일함과 별칭은 함께 있을 수 없어 전환 중 잠깐 메일을 받지 못할 수 있어요.' };
   async function conversionPlan(session, addr, direction, options) {
     const [boxes, aliases, filters] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all')]);
+    const retiredState = direction === 'mailbox-to-alias' ? await assertMovable(addr) : (await assertReusable(addr), await retirementState(addr));
     const netlimit = await netState(addr);
     await domainActive(session, addr.split('@')[1]);
     const internal = new Set(boxes.filter(row => String(row.active) === '1').map(row => normalize(row.username)));
@@ -808,7 +1087,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       if (!alias) throw new AppError(404, 'NOT_FOUND', '전환할 별칭을 찾을 수 없어요.');
       if (isMemberAlias(alias)) throw new AppError(409, 'TEAM_MEMBER_ALIAS', '팀 분배 화면에서 바꿔 주세요.');
       const ownFilters = filters.filter(row => normalize(row.username) === addr);
-      return { state: { direction, addr, options, netlimit, alias: etag(alias), senders: senderVersions,
+      return { state: { direction, addr, options, retiredState, netlimit, alias: etag(alias), senders: senderVersions,
         destinations: boxes.filter(row => destinations.includes(normalize(row.username))).map(snapshot).sort((a, b) => a.address.localeCompare(b.address)),
         filters: ownFilters.map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })) },
         alias, ownFilters, senders, senderRestore, warnings: [gapWarning, ...folderWarnings()], changes: { alias: aliasBackup(alias),
@@ -844,7 +1123,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       { code: 'INCOMING_SHARES_UNUSED', message: `다른 함에서 이 주소에 준 공유 ${shares.filter(row => row.owner !== addr).length}건은 남지만 로그인할 수 없어 쓰이지 않아요` },
       ...info.warnings,
     ];
-    const state = { direction, addr, options, netlimit, shareOwners: ownerVersions(ownerSnapshot), account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
+    const state = { direction, addr, options, retiredState, netlimit, shareOwners: ownerVersions(ownerSnapshot), account: snapshot(mailbox), aliases: references.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
       filters: relatedFilters.map(row => ({ id: row.id, owner: normalize(row.username), sha256: scriptHash(row.script_data), active: row.active, type: row.filter_type })),
       senders: senderVersions, acl: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: jobs.map(row => ({ id: row.id, sha256: etag(row) })),
@@ -942,6 +1221,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 await mutate('/api/v1/delete/mailbox', [addr]);
                 if ((await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw verifyFailed();
               }));
+              stage = 'retirement';
+              await cleanupRetirement(addr, plan.state.retiredState);
               stage = 'protocol-netlimit';
               await lock.run(addr, () => cleanupNetlimit({ actor, ip, addr, expected: plan.state.netlimit }));
               if (plan.state.netlimit.version !== null) steps.push({ stage, target: addr, status: 'ok' });
@@ -1013,5 +1294,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       });
     } finally { password?.fill(0); }
   }
-  return { list, quotaList, detail, create, edit, deletePreview, remove: lifecycleRun, leave, rename, convert };
+  return { list, quotaList, detail, create: args => routingLock(() => create(args)), edit, deletePreview,
+    remove: args => routingLock(() => lifecycleRun(args)), leave: args => args.data?.action === 'preview' ? leave(args) : routingLock(() => leave(args)),
+    rename: args => args.data?.action === 'preview' ? rename(args) : routingLock(() => rename(args)),
+    convert: args => args.data?.action === 'preview' ? convert(args) : routingLock(() => convert(args)), retirementPreview, retirementUpdate };
 }

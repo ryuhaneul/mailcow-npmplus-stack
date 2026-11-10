@@ -95,7 +95,7 @@ async function fixture(t, populated = true) {
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
 const remove = (f, data) => f.service.remove({ ...context, addr: user, data });
-const confirmed = etag => ({ etag, confirmAddress: user, cleanRefs: true });
+const confirmed = etag => ({ etag, confirmAddress: user, cleanRefs: true, cleanShares: true });
 const leave = (f, data) => f.service.leave({ ...context, data: { address: user, mode: 'disable', cleanRefs: false, ...data } });
 
 test('lifecycle: delete preview includes all five references, unique alias impact, counts and all ACL scope', async t => {
@@ -221,9 +221,9 @@ test('lifecycle: disable without cleanup blocks login, creates copy-only prefilt
 });
 
 test('lifecycle: disable cleanRefs preserves aliases but cleans team, sender, individual shares and syncjobs', async t => {
-  const f = await fixture(t), initial = await leave(f, { action: 'preview', cleanRefs: true });
+  const f = await fixture(t), initial = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true });
   assert.ok(initial.refs.aliases.every(row => row.effect === 'kept'));
-  const result = await leave(f, { action: 'run', cleanRefs: true, etag: initial.etag });
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: initial.etag });
   assert.equal(result.result, 'ok'); assert.equal(f.boxes[0].active, 2); assert.equal(f.aliases.length, 2);
   assert.equal(writes(f)[0].path, '/api/v1/edit/mailbox'); assert.ok(!writes(f).some(row => row.path.endsWith('/alias')));
   assert.ok(!f.filters[0].script_data.includes(user)); assert.deepEqual(f.boxes[0].sender_acl, []); assert.deepEqual(f.boxes[2].sender_acl, [team]);
@@ -267,8 +267,8 @@ test('lifecycle: forwarding failure after active update leaves mailbox receiving
 });
 
 test('lifecycle: leave delete delegates to the same deletion workflow and includes both notices', async t => {
-  const f = await fixture(t, false), initial = await leave(f, { action: 'preview', mode: 'delete', cleanRefs: true });
-  const result = await leave(f, { action: 'run', mode: 'delete', cleanRefs: true, etag: initial.etag, confirmAddress: user });
+  const f = await fixture(t, false), initial = await leave(f, { action: 'preview', mode: 'delete', cleanRefs: true, cleanShares: true });
+  const result = await leave(f, { action: 'run', mode: 'delete', cleanRefs: true, cleanShares: true, etag: initial.etag, confirmAddress: user });
   assert.equal(result.result, 'ok'); assert.equal(result.warnings.length, 2); assert.equal(writes(f).at(-1).path, '/api/v1/delete/mailbox');
 });
 
@@ -279,7 +279,7 @@ test('lifecycle: intent failure prevents every write', async t => {
 
 test('lifecycle HTTP: preview/delete and leave use auth, JSON, Origin, CSRF guard and no challenge header', async t => {
   const f = await fixture(t, false);
-  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const app = await createAdminApp({ retirement: { store: { read: async () => ({ version: null, retired: false, receiveBlocked: false, pendingOperation: null }), keysForOwner: async () => [], remove: async () => {}, withRoutingLock: operation => operation() }, routing: { withRoutingLock: operation => operation() } }, protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${user}`;
   assert.equal((await app.inject({ method: 'POST', url: `${url}/delete-preview`, headers: { origin: 'https://mailadmin.example.com' }, payload: {} })).statusCode, 403);
@@ -319,7 +319,7 @@ for (const active of [1, 2]) test(`lifecycle regression: incoming shares from ow
   const f = await fixture(t, false); f.boxes[2].active = active;
   f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
   const initial = await preview(f);
-  assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  assert.deepEqual(initial.refs.shares, [{ owner: other, grantee: user, mailbox: 'INBOX', rights: ['lookup', 'read'], effect: 'deleted' }]);
   const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'ok');
   assert.deepEqual(f.acl.get(other), []); assert.ok(!f.boxes.some(row => row.username === user));
 });
@@ -385,7 +385,7 @@ test('lifecycle regression: concurrent deletes never lock a goto alias as a mail
       } finally { active.delete(key); }
     });
   };
-  const removeAddress = (addr, plan) => f.service.remove({ ...context, addr, data: { etag: plan.etag, confirmAddress: addr, cleanRefs: true } });
+  const removeAddress = (addr, plan) => f.service.remove({ ...context, addr, data: { etag: plan.etag, confirmAddress: addr, cleanRefs: true, cleanShares: true } });
   let timer;
   const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('concurrent deletes did not finish within 5 seconds')), 5000); });
   try {
@@ -407,7 +407,7 @@ test('lifecycle regression: concurrent deletes never lock a goto alias as a mail
 for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} previews and removes owned and received rows in every folder`, async t => {
   const f = await fixture(t, false), folders = ['INBOX', 'Sent', '거래처 "봄"/2026'];
   for (const [owner, grantee] of [[user, other], [team, user]]) f.acl.set(owner, folders.map(mailbox => ({ user: owner, id: grantee, mailbox, rights: ['lookup', 'read'] })));
-  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true, cleanShares: true });
   assert.equal(initial.refs.shares.length, 6);
   assert.deepEqual(new Set(initial.refs.shares.map(row => row.mailbox)), new Set(folders));
   const result = await f.service.remove({ ...context, addr: user, mode, data: confirmed(initial.etag) });
@@ -427,7 +427,7 @@ for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} prev
 for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} refuses success when a new folder grant appears during cleanup`, async t => {
   const f = await fixture(t, false);
   f.acl.set(team, [{ user: team, id: user, mailbox: 'Sent', rights: ['lookup', 'read'] }]);
-  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true, cleanShares: true });
   const removeAcl = f.dockerapi.deleteAcl;
   f.dockerapi.deleteAcl = async (...args) => {
     await removeAcl(...args);
@@ -443,11 +443,11 @@ for (const mode of ['delete', 'disable']) test(`account folder ACL: ${mode} refu
 test('account folder ACL: leave detects new owner reference after the shares stage', async t => {
   const f = await fixture(t, false);
   f.jobs.push({ id: 8, user2: user, active: 1 });
-  const initial = await leave(f, { action: 'preview', cleanRefs: true });
+  const initial = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true });
   f.options.onCall = ({ path }) => {
     if (path === '/api/v1/delete/syncjob') f.acl.set(other, [{ user: other, id: user, mailbox: 'Late', rights: ['lookup', 'read'] }]);
   };
-  const result = await leave(f, { action: 'run', cleanRefs: true, etag: initial.etag });
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: initial.etag });
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
 });
 
@@ -463,7 +463,7 @@ test('account folder ACL: disabled doveadm retains INBOX behavior and warns on d
   const f = await fixture(t, false); f.aclFolders.enabled = false;
   f.acl.set(team, ['INBOX', 'Sent'].map(mailbox => ({ user: team, id: user, mailbox, rights: ['lookup', 'read'] })));
   const info = await f.service.detail({}, user, { allShares: true }), initial = await preview(f);
-  for (const result of [info, initial, await leave(f, { action: 'preview', cleanRefs: true })]) {
+  for (const result of [info, initial, await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true })]) {
     assert.ok(result.warnings.some(row => row.code === 'SUBFOLDER_ACL_UNCHECKED'));
     assert.deepEqual(result.refs.shares.map(row => row.mailbox), ['INBOX']);
   }
@@ -480,7 +480,7 @@ for (const mode of ['disable', 'delete']) test(`lifecycle: ${mode} removes only 
   const info = await f.service.detail({}, user);
   assert.deepEqual(info.refs.aliases, []);
   assert.deepEqual(info.refs.teams, [{ mailbox: team, filterId: 10, members: [user, other] }]);
-  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true });
+  const initial = await f.service.deletePreview({}, user, { mode, cleanRefs: true, cleanShares: true });
   const result = await f.service.remove({ ...context, addr: user, mode, data: confirmed(initial.etag) });
   assert.equal(result.result, 'ok');
   assert.equal(f.aliases.length, 1); assert.equal(f.aliases[0].goto, other);
@@ -500,7 +500,7 @@ test('lifecycle: last bundled member blocks leave and deletion before writes eve
     script_data: `redirect :copy "${bundle}";\nredirect :copy "${other}";\n` });
   f.aliases.push({ id: 1, address: bundle, goto: user, active: 1, private_comment: 'mailadmin:team-members' });
   await assert.rejects(preview(f), { statusCode: 409, code: 'LAST_MEMBER' });
-  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true }), { statusCode: 409, code: 'LAST_MEMBER' });
+  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true, cleanShares: true }), { statusCode: 409, code: 'LAST_MEMBER' });
   assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, user);
 });
 
@@ -513,26 +513,26 @@ test('lifecycle: alias-mode team deletion preview and execution refuse before an
   await assert.rejects(f.service.deletePreview({}, team), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
   assert.equal(writes(f).length, 0);
   await assert.rejects(f.service.remove({ ...context, addr: team,
-    data: { etag: initial.etag, confirmAddress: team, cleanRefs: true } }), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
+    data: { etag: initial.etag, confirmAddress: team, cleanRefs: true, cleanShares: true } }), { statusCode: 409, code: 'TEAM_ALIAS_MODE' });
   assert.equal(writes(f).length, 0);
 });
 
 for (const active of [0, '0']) test(`lifecycle: inactive unrelated owner ${JSON.stringify(active)} is skipped with visible warning`, async t => {
   const f = await fixture(t, false); f.boxes.find(row => row.username === other).active = active;
   f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
-  const initial = await leave(f, { action: 'preview', cleanRefs: true });
+  const initial = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true });
   const warning = initial.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED');
   assert.deepEqual(warning.addresses, [other]); assert.match(warning.message, /남에게 준 공유는 확인하지 못했어요/);
   assert.ok(!f.aclCalls.includes(other)); assert.deepEqual(initial.refs.shares, []);
   assert.ok(!initial.warnings.some(row => row.code === 'SHARES_PARTIAL'));
-  const result = await leave(f, { action: 'run', cleanRefs: true, etag: initial.etag });
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: initial.etag });
   assert.equal(result.result, 'ok'); assert.deepEqual(result.warnings.find(row => row.code === warning.code), warning);
   assert.equal(f.acl.get(other).length, 1); assert.ok(!f.aclCalls.includes(other));
 });
 
 for (const active of [1, 2, '1', '2']) test(`lifecycle: unreadable enabled owner ${JSON.stringify(active)} stays fail-closed`, async t => {
   const f = await fixture(t, false); f.boxes[2].active = active; f.options.aclFailure = other;
-  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true }), { statusCode: 502, code: 'SHARES_UNAVAILABLE' });
+  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true, cleanShares: true }), { statusCode: 502, code: 'SHARES_UNAVAILABLE' });
   assert.equal(writes(f).length, 0);
 });
 
@@ -546,10 +546,10 @@ for (const mode of ['disable', 'delete']) test(`lifecycle: inactive target ${mod
   const f = await fixture(t, false); f.boxes[0].active = 0;
   f.acl.set(user, [{ user, id: other, mailbox: 'Sent', rights: ['lookup', 'read'] }]);
   f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
-  const initial = await leave(f, { action: 'preview', mode, cleanRefs: true });
+  const initial = await leave(f, { action: 'preview', mode, cleanRefs: true, cleanShares: true });
   assert.deepEqual(initial.refs.shares.map(row => row.owner), [other]);
   assert.deepEqual(initial.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [user]);
-  const result = await leave(f, { action: 'run', mode, cleanRefs: true, etag: initial.etag, ...(mode === 'delete' ? { confirmAddress: user } : {}) });
+  const result = await leave(f, { action: 'run', mode, cleanRefs: true, cleanShares: true, etag: initial.etag, ...(mode === 'delete' ? { confirmAddress: user } : {}) });
   assert.equal(result.result, 'ok'); assert.equal(f.acl.get(other).length, 0); assert.equal(f.acl.get(user).length, 1);
   assert.ok(!f.aclCalls.includes(user)); assert.deepEqual(result.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, [user]);
   if (mode === 'disable') assert.equal(f.boxes[0].active, 2);
@@ -560,24 +560,24 @@ for (const mode of ['disable', 'delete']) test(`lifecycle: inactive target ${mod
 
 for (const active of [1, 2]) test(`lifecycle: initially enabled target ${active} still refuses remaining own grants`, async t => {
   const f = await fixture(t, false); f.boxes[0].active = active; f.jobs.push({ id: 8, user2: user, active: 1 });
-  const initial = await leave(f, { action: 'preview', cleanRefs: true });
+  const initial = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true });
   f.options.onCall = ({ path }) => { if (path === '/api/v1/delete/syncjob') f.acl.set(user, [{ user, id: other, mailbox: 'Late', rights: ['lookup', 'read'] }]); };
-  const result = await leave(f, { action: 'run', cleanRefs: true, etag: initial.etag });
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: initial.etag });
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'WRITE_VERIFY_FAILED');
 });
 
 for (const [before, after] of [[0, 1], [1, 0], [1, 2], [2, 1]]) test(`lifecycle: owner active ${before}→${after} invalidates preview even with empty ACL`, async t => {
   const f = await fixture(t, false); f.boxes[2].active = before;
-  const initial = await leave(f, { action: 'preview', cleanRefs: true }); f.boxes[2].active = after;
-  await assert.rejects(leave(f, { action: 'run', cleanRefs: true, etag: initial.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  const initial = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true }); f.boxes[2].active = after;
+  await assert.rejects(leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: initial.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
   assert.equal(writes(f).length, 0);
 });
 
 for (const mode of ['disable', 'delete']) test(`lifecycle: ${mode} detects another owner turning off during cleanup`, async t => {
   const f = await fixture(t, false); f.jobs.push({ id: 8, user2: user, active: 1 });
-  const initial = await leave(f, { action: 'preview', mode, cleanRefs: true });
+  const initial = await leave(f, { action: 'preview', mode, cleanRefs: true, cleanShares: true });
   f.options.onCall = ({ path }) => { if (path === '/api/v1/delete/syncjob') f.boxes[2].active = 0; };
-  const result = await leave(f, { action: 'run', mode, cleanRefs: true, etag: initial.etag, ...(mode === 'delete' ? { confirmAddress: user } : {}) });
+  const result = await leave(f, { action: 'run', mode, cleanRefs: true, cleanShares: true, etag: initial.etag, ...(mode === 'delete' ? { confirmAddress: user } : {}) });
   assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).code, 'CHANGED_ELSEWHERE');
   assert.ok(!writes(f).some(call => call.path === '/api/v1/delete/mailbox'));
 });

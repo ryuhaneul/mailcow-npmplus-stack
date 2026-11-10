@@ -541,3 +541,23 @@ changed mailbox generations, pending operations or recipient keys stop the opera
 A partial receipt records completed writes; review it before recovery. Schema tables and
 existing mail are never dropped by this tool. Application routing/UI integration and SMTP
 activation are separate deployment steps.
+
+Retirement settings remove an existing owner forward automatically only with preview
+consent, and only when the whole managed prefilter contains literal `:copy` redirects
+plus `require`/`stop`; deletion keeps its audit backup. Mixed prefilters are
+`OWNER_FORWARD_UNEDITABLE` blockers showing the location and known targets; edit them
+in the team distribution screen first. Personal, postfilter and global scripts are
+never edited automatically. Ordinary retirement defaults `cleanShares=false` even
+with legacy `cleanRefs=true`; permanent deletion still cleans every reference.
+
+In retirement settings, `forwardTo: X` adds X to the existing managed forwards,
+`forwardTo: null` explicitly removes the eligible pure managed prefilter, and an
+omitted `forwardTo` preserves existing forwards. Preview reports the existing targets
+and the actual addition/removal; it does not silently replace other destinations.
+
+A partial leave must finish through the leave preview/run flow before the separate
+retirement settings endpoints can be used (`409 RETIREMENT_OPERATION_PENDING`). If
+its pending request selected receive blocking and the server feature is OFF, enable
+and prepare the server feature before retrying; this flow has no additional cancel
+or bypass transition. Partial settings operations may use a new explicit settings
+preview instead.

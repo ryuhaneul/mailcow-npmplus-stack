@@ -134,4 +134,15 @@ test('disabled Sieve shows existing filter notices and leaves composing and the 
     assert.equal(root.querySelector('.toast'), null);
     assert.equal(requests.filter(path => path === '/api/rules').length, 3);
   });
+  await t.test('retirement recovery-blocked notice reaches the real undo dialog unchanged', async () => {
+    const { default: ImportResult } = await import('../../web/src/components/ImportResult.jsx');
+    const recoveryMessage = '이전 필터 복원을 차단했어요. 관리자에게 현재 활성 필터와 수신 차단 설정 확인을 요청하세요';
+    dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+    globalThis.fetch = async path => { assert.equal(path, '/api/rules/import/undo'); return Response.json({ error: { code: 'IMPORT_WRITE_FAILED', message: recoveryMessage, detail: { restored: false, recoveryBlocked: true, recoveryCode: 'RETIREMENT_RECIPIENT_BLOCKED' } } }, { status: 502 }); };
+    await act(async () => { render(null, root); render(h(ImportResult, { info: { at: '2026-11-10T00:00:00.000Z', undo: { available: true, edited: false }, source: { kind: 'active-script' } }, onBusyChange() {}, onUndone() { assert.fail('blocked recovery is not success'); } }), root); });
+    await act(async () => root.querySelector('.gi-result button').click());
+    await act(async () => { root.querySelector('.gi-undo .btn.pri').click(); await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(root.querySelector('.gi-undo [role=alert]').textContent, recoveryMessage);
+  });
+
 });

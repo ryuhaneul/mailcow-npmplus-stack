@@ -561,3 +561,16 @@ its pending request selected receive blocking and the server feature is OFF, ena
 and prepare the server feature before retrying; this flow has no additional cancel
 or bypass transition. Partial settings operations may use a new explicit settings
 preview instead.
+
+Public webmail receives the derived `RETIREMENT_RECEIVE_BLOCK_ENABLE` boolean from
+`WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE` (missing/empty defaults OFF). When ON,
+Sieve writes, activation, restore, imports, undo and failed-import recovery check
+literal redirect targets with one batched SELECT on `retirement_recipient_keys` per
+write phase. Public webmail has no retirement metadata access or named routing lock.
+The SELECT and Sieve write are not atomic: a concurrent admin block can race with
+that write, and mailcow UI/API or direct ManageSieve changes remain outside this
+application guard. With no redirect targets, no SELECT is needed and saving remains
+possible during a DB outage; a DB failure at the initial forwarding check returns
+503 before the first change. XML checks before folder creation, then rejects a changed final target set.
+A blocked recovery retains its archives, reports `502 IMPORT_WRITE_FAILED` with
+`recoveryBlocked`, and asks for administrator review.

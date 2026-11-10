@@ -1,3 +1,4 @@
+import { retirementRedirects } from './redirect-targets.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { AppError } from '../errors.js';
 import { connectManageSieve } from './managesieve.js';
@@ -27,7 +28,16 @@ function object(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))) invalid('$', 'request');
 }
 
-export function createRulesService({ config, imap, directory, logger, connect = connectManageSieve, now = Date.now, readGmailXml = readXml, convertGmailEntries = convertEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }) }) {
+export function createRulesService({ config, imap, directory, logger, connect = connectManageSieve, now = Date.now, readGmailXml = readXml, convertGmailEntries = convertEntries, folderService = createFolderService({ imap }), mailActions = createActionService({ imap }), retirement = null }) {
+  function recipientTargets(sources) {
+    return [...new Set(sources.filter(source => source !== null && source !== undefined).flatMap(source => retirementRedirects(source).map(row => row.target)))].sort();
+  }
+  async function guardSources(sources) {
+    if (!retirement) return null;
+    const targets = recipientTargets(sources);
+    if ((await retirement.blockedRecipients(targets)).length) throw new AppError(409, 'RETIREMENT_RECIPIENT_BLOCKED', '수신 차단된 계정으로 전달할 수 없어요.');
+    return targets;
+  }
   const locks = new Map();
   function serial(session, operation) {
     const key = session.email.toLowerCase();
@@ -89,6 +99,7 @@ export function createRulesService({ config, imap, directory, logger, connect = 
   function allowed(value, states) { if (!states.includes(value.state)) throw stateError(); }
   async function write(client, current, doc, policy, { activate = false, preservePrevious = false } = {}) {
     const script = generateScript(doc, policy);
+    await guardSources([script]);
     await client.checkScript(script);
     if (current.script !== null && !preservePrevious) await client.putScript(previousName, current.script);
     await client.putScript(SCRIPT_NAME, script);
@@ -130,6 +141,7 @@ export function createRulesService({ config, imap, directory, logger, connect = 
   async function reactivate(session) {
     return perform(session, null, async (client, current) => {
       allowed(current, ['inactive_other']);
+      await guardSources([current.script]);
       await client.setActive(SCRIPT_NAME);
       return { previousActive: current.activeName };
     });
@@ -270,12 +282,15 @@ export function createRulesService({ config, imap, directory, logger, connect = 
   async function removeScript(client, name) {
     if ((await client.listScripts()).some(script => script.name === name)) await client.deleteScript(name);
   }
-  async function applyImport(session, client, current, policy, { rules, items, mode, source, createdFolders = [], startFresh = false }) {
+  async function applyImport(session, client, current, policy, { rules, items, mode, source, createdFolders = [], startFresh = false, checkedTargets }) {
     if (!rules.length && !startFresh) throw nothing();
     const previousImport = await readImportRecord(client, current.scripts);
     const at = new Date(Math.max(now(), previousImport ? Date.parse(previousImport.at) + 1 : 0)).toISOString();
     const doc = importDocument(current, rules, mode, source, at);
     const script = generateScript(doc, policy);
+    if (retirement && checkedTargets !== undefined) {
+      if (canonicalJSON(recipientTargets([script])) !== canonicalJSON(checkedTargets)) throw previewChanged();
+    } else await guardSources([script]);
     const activeScript = current.activeName === SCRIPT_NAME ? current.script : current.activeName ? await client.getScript(current.activeName) : null;
     const record = importRecord({ at, source, mode, items, webmailScript: current.script, activeName: current.activeName, activeScript, afterScript: script });
     let archived = false;
@@ -291,7 +306,7 @@ export function createRulesService({ config, imap, directory, logger, connect = 
       await client.putScript(SCRIPT_NAME, script);
       await client.setActive(SCRIPT_NAME);
     } catch (cause) {
-      let restored = false;
+      let restored = false, recoveryCode;
       // A timed-out connection may already have stored bytes. Verify on a fresh
       // connection, and never infer success just from a command rejection.
       if (archived) {
@@ -299,6 +314,9 @@ export function createRulesService({ config, imap, directory, logger, connect = 
           restored = await withClient(session, async recovery => {
             const rows = await recovery.listScripts();
             const stored = rows.some(row => row.name === SCRIPT_NAME) ? await recovery.getScript(SCRIPT_NAME) : null;
+            const selectedSource = current.activeName === SCRIPT_NAME ? current.script : current.activeName ? await recovery.getScript(current.activeName) : null;
+            if (current.activeName && current.activeName !== SCRIPT_NAME && selectedSource !== activeScript) return false;
+            await guardSources([...(current.script !== null && stored !== current.script ? [current.script] : []), selectedSource]);
             if (current.script !== null && stored !== current.script) await recovery.putScript(SCRIPT_NAME, current.script);
             if ((rows.find(row => row.active)?.name ?? null) !== current.activeName) await recovery.setActive(current.activeName ?? '');
             if (current.script === null) await removeScript(recovery, SCRIPT_NAME);
@@ -312,10 +330,13 @@ export function createRulesService({ config, imap, directory, logger, connect = 
             if (current.activeName && current.activeName !== SCRIPT_NAME && await recovery.getScript(undoActiveName) !== activeScript) return false;
             return true;
           });
-        } catch { /* Report uncertainty; the archive remains available for recovery. */ }
+        } catch (error) {
+          if (error instanceof AppError && ['RETIREMENT_RECIPIENT_BLOCKED', 'RETIREMENT_BLOCK_UNAVAILABLE', 'FILTER_UNINSPECTABLE'].includes(error.code)) recoveryCode = error.code;
+          // Report uncertainty; the archive remains available for recovery.
+        }
       }
-      const error = new AppError(502, 'IMPORT_WRITE_FAILED', restored ? '적용하지 못했어요. 필터는 그대로예요.' : '적용을 마치지 못했어요. 현재 필터 상태를 다시 확인해 주세요.');
-      error.detail = { restored };
+      const error = new AppError(502, 'IMPORT_WRITE_FAILED', recoveryCode ? '이전 필터 복원을 차단했어요. 관리자에게 현재 활성 필터와 수신 차단 설정 확인을 요청하세요' : restored ? '적용하지 못했어요. 필터는 그대로예요.' : '적용을 마치지 못했어요. 현재 필터 상태를 다시 확인해 주세요.');
+      error.detail = { restored, ...(recoveryCode ? { recoveryBlocked: true, recoveryCode } : {}) };
       // Keep only protocol metadata; server text can contain imported mail data.
       if (cause instanceof AppError && cause.code === 'SIEVE_REJECTED' && ['CHECKSCRIPT', 'PUTSCRIPT'].includes(cause.command)) {
         error.detail.command = cause.command;
@@ -333,14 +354,16 @@ export function createRulesService({ config, imap, directory, logger, connect = 
       const plan = await xmlPlan(client, current, policy, body, entries);
       if (canonicalJSON(plan.expect) !== canonicalJSON(body.expect)) throw previewChanged();
       if (!plan.rules.length) throw nothing();
-      return plan;
+      const source = { name: body.fileName, sha256: sha256(body.xml) };
+      const script = generateScript(importDocument(current, plan.rules, plan.mode, source), { ...policy, folders: [...policy.folders, ...plan.newFolders.map(path => ({ path }))] });
+      return { ...plan, checkedTargets: await guardSources([script]) };
     });
     // This IMAP operation is deliberately outside the Sieve lock.
     const createdFolders = await createImportFolders(session, initial.newFolders);
     return perform(session, null, async (client, current, policy) => {
       const plan = await xmlPlan(client, current, policy, body, entries, initial.newFolders);
       if (canonicalJSON(plan.expect) !== canonicalJSON(body.expect) || initial.newFolders.some(path => !policy.folders.some(folder => folder.path === path && allowedMoveFolder(folder)))) throw previewChanged();
-      return applyImport(session, client, current, policy, { ...plan, source: { kind: 'gmail-xml', name: body.fileName, sha256: sha256(body.xml) }, createdFolders });
+      return applyImport(session, client, current, policy, { ...plan, source: { kind: 'gmail-xml', name: body.fileName, sha256: sha256(body.xml) }, createdFolders, checkedTargets: initial.checkedTargets });
     });
   }
   async function importRules(session, body) {
@@ -391,6 +414,8 @@ export function createRulesService({ config, imap, directory, logger, connect = 
           activeCopy = parseScript(activeArchive).state === 'ok' ? regenerateScript(activeArchive, policy) : activeArchive;
         }
       }
+      const selectedSource = active.name === SCRIPT_NAME ? webmailCopy ?? current.script : active.name ? activeCopy ?? await client.getScript(active.name) : null;
+      await guardSources([webmailCopy, activeCopy, selectedSource]);
       try {
         if (activeCopy !== undefined) await client.putScript(active.name, activeCopy);
         if (webmailCopy !== undefined) await client.putScript(SCRIPT_NAME, webmailCopy);

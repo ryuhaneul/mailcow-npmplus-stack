@@ -117,6 +117,12 @@ cp "$TMP/env.before" "$WEBMAIL_ENV_FILE"
 run apply && run --check || fail retirement-disabled
 cmp -s "$TMP/users.json" "$TMP/users.before" || fail retirement-disabled-grants
 pass 'retirement OFF removes only added public access and preserves admin CRUD'
+printf '\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=\n' >> "$WEBMAIL_ENV_FILE"
+run apply && run --check || fail retirement-empty
+cmp -s "$TMP/users.json" "$TMP/users.before" || fail retirement-empty-grants
+cp "$TMP/env.before" "$WEBMAIL_ENV_FILE"
+pass 'empty retirement flag keeps public recipient-key SELECT disabled'
+
 printf '\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=invalid\n' >> "$WEBMAIL_ENV_FILE"
 cp "$TMP/users.json" "$TMP/grants.before-invalid"
 if run apply; then fail retirement-invalid-flag; fi

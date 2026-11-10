@@ -90,9 +90,11 @@ export function loadConfig(env = process.env) {
   });
   const logoDir = env.LOGO_DIR ?? '';
   if (typeof logoDir !== 'string' || logoDir !== '' && (!isAbsolute(logoDir) || logoDir.includes('\0'))) invalid('LOGO_DIR');
+  const retirementFlag = env.RETIREMENT_RECEIVE_BLOCK_ENABLE === '' ? 'false' : env.RETIREMENT_RECEIVE_BLOCK_ENABLE ?? 'false';
+  if (!['true', 'false'].includes(retirementFlag)) invalid('RETIREMENT_RECEIVE_BLOCK_ENABLE');
   const logLevel = choice('LOG_LEVEL', levels);
   return Object.freeze({
-    otpKey: otp.key, otpKeyVersion: otp.keyVersion, publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
+    retirementReceiveBlockEnabled: retirementFlag === 'true', otpKey: otp.key, otpKeyVersion: otp.keyVersion, publicHostnames, brandName, orgName, brandMark, defaultTheme, defaultMode,
     internalDomains, contactsEnabled, attachMaxMb, bodyMaxMb, sessionIdleMin, sessionMaxHours, autoexpungeDays,
     imapHost, imapPort: 993, sieveHost, sievePort: 4190, smtpHost, smtpPort: 587,
     mailTlsServername, mailTlsMode, mailTlsPinFile, dbHost, dbName, dbUser, dbPassword,

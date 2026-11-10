@@ -35,7 +35,7 @@ const unknown = '# synthetic example.com\nif true { keep; }\n';
 const mutating = commands => commands.filter(row => ['CHECKSCRIPT', 'PUTSCRIPT', 'SETACTIVE'].includes(row.command));
 const useful = commands => commands.filter(row => !['STARTTLS', 'AUTHENTICATE', 'LOGOUT'].includes(row.command)).map(row => row.command + (row.name ? ` ${row.name}` : ''));
 
-async function fixture(t, state = 'ok') {
+async function fixture(t, state = 'ok', retirement = null) {
   const good = generateScript(document(), policy), previous = generateScript(document(2), policy);
   const states = {
     ok: { scripts: [[web, good]], activeName: web }, none: {},
@@ -48,7 +48,7 @@ async function fixture(t, state = 'ok') {
   };
   const server = await rulesServer(t, { certificate, privateKey, ...states[state] });
   const tempRoot = await mkdtemp(join(temp, 'session-'));
-  const app = await createApp({ config: { publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
+  const app = await createApp({ retirement: { store: retirement }, config: { retirementReceiveBlockEnabled: Boolean(retirement), publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
     sieveHost: '127.0.0.1', sievePort: server.port, mailTlsMode: 'pin', mailTlsPinFile: join(temp, 'server.pem'), mailTlsServername: 'mail.example.com',
     dbHost: '127.0.0.1', dbName: 'mailcow', dbUser: 'webmail_ro', dbPassword: 'synthetic-db-password', internalDomains: [] }, logger: false,
     staticDir: '/nonexistent-webmail-rules-fixture', auth: { tempRoot }, rules: { now: () => Date.UTC(2026, 9, 15) } });
@@ -926,3 +926,11 @@ for (const stage of [{ command: 'PUTSCRIPT', name: undoActiveName }, { command: 
     });
   }
 }
+
+test('public retirement HTTP: forwarding DB failure is 503 before ManageSieve writes and has no auth challenge', async t => {
+  let queries = 0;
+  const f = await fixture(t, 'ok', { async blockedRecipients(values) { assert.ok(values.length); queries++; throw new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', '수신 설정을 확인할 수 없어요.'); } });
+  const doc = document(); doc.rules[0].actions = { forward: ['user@example.com'] };
+  const response = await f.request('PUT', '/api/rules', { baseRev: 3, doc });
+  status(response, 503, 'RETIREMENT_BLOCK_UNAVAILABLE'); assert.equal(queries, 1); assert.deepEqual(mutating(f.server.commands), []);
+});

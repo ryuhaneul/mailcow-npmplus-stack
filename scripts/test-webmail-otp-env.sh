@@ -55,6 +55,22 @@ for f in webmail.env webmail-admin.env; do
     grep -qFx 'OTP_KEY_VERSION="1"' "$TMP/app/$f" || fail render-version
 done
 pass 'both private runtime envs receive the same preserved key and version'
+cp "$TMP/stack.env" "$TMP/retirement-source.before"
+for retirement_flag in false true; do
+    WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE="$retirement_flag"
+    webmail_generate_env "$TMP/app" && webmail_generate_admin_env "$TMP/app" || fail retirement-generate
+    grep -qFx "RETIREMENT_RECEIVE_BLOCK_ENABLE=\"$retirement_flag\"" "$TMP/app/webmail.env" || fail public-retirement-flag
+    grep -qFx "WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=\"$retirement_flag\"" "$TMP/app/webmail-admin.env" || fail admin-retirement-flag
+    cmp -s "$TMP/stack.env" "$TMP/retirement-source.before" || fail retirement-source-changed
+done
+pass 'retirement flag derives public/admin runtime booleans without changing the source env'
+WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=invalid
+if webmail_options > "$TMP/result" 2>&1; then fail retirement-invalid-accepted; fi
+WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=
+webmail_options || fail retirement-empty-default
+[ "$WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE" = false ] || fail retirement-empty-not-off
+pass 'retirement source flag is strict and empty defaults OFF'
+
 reset_env; printf '1\n' > "$TMP/present"; printf '0\n' > "$TMP/registered"
 webmail_ensure_otp_key > "$TMP/result"
 pass 'empty existing schema permits first key generation'

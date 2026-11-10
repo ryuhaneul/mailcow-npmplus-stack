@@ -14,7 +14,7 @@ import { AppError } from '../../server/errors.js';
 const xml = await readFile(new URL('../fixtures/gmail-xml/basic.xml', import.meta.url), 'utf8');
 const web = 'webmail-rules', original = '# synthetic example.com\nkeep;\n';
 const writes = commands => commands.filter(([command]) => ['PUTSCRIPT', 'CHECKSCRIPT', 'SETACTIVE', 'DELETESCRIPT'].includes(command));
-async function fixture(t, { folderFailure, active = 'legacy' } = {}) {
+async function fixture(t, { folderFailure, active = 'legacy', retirement = null } = {}) {
   const scripts = new Map(active ? [[active, original]] : []), commands = [], failures = [];
   let activeName = active;
   const execute = (command, name, operation) => {
@@ -39,8 +39,8 @@ async function fixture(t, { folderFailure, active = 'legacy' } = {}) {
   });
   const folders = [{ path: 'INBOX', flags: new Set() }, { path: 'Archive', specialUse: '\\Archive', flags: new Set() }];
   const tempRoot = await mkdtemp(join(tmpdir(), 'webmail-xml-api-'));
-  const app = await createApp({ logger: false, staticDir: '/nonexistent-xml-api-fixture', auth: { tempRoot },
-    config: { publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
+  const app = await createApp({ retirement: { store: retirement }, logger: false, staticDir: '/nonexistent-xml-api-fixture', auth: { tempRoot },
+    config: { retirementReceiveBlockEnabled: Boolean(retirement), publicHostnames: ['newmail.example.com'], trustProxy: [], sessionIdleMin: 480, sessionMaxHours: 24,
       dbHost: '127.0.0.1', dbName: 'mailcow', dbUser: 'webmail_ro', dbPassword: 'synthetic-password', internalDomains: [] },
     rules: { connect, now: () => Date.UTC(2026, 9, 20), folderService: { create: async (_session, body) => {
       const path = body.parent ? `${body.parent}/${body.name}` : body.name;
@@ -482,4 +482,13 @@ for (const target of [web, 'legacy']) test(`Gate D: pending import-record cleanu
   assert.notEqual(next.importInfo.at, at);
   assert.equal(next.importInfo.undo.available, true);
   assert.equal(next.importInfo.undo.edited, false);
+});
+
+test('public retirement XML HTTP: preserved inactive webmail forward is checked before creating folders or backups', async t => {
+  const target = 'retired@example.com'; let queries = 0;
+  const f = await fixture(t, { retirement: { async blockedRecipients(values) { if (!values.length) return []; queries++; return values.filter(value => value === target); } } });
+  f.scripts.set(web, generateScript({ v: 1, rev: 3, rules: [{ id: 'old00001', enabled: true, match: 'all', conditions: [{ field: 'subject', op: 'has', value: 'Synthetic' }], actions: { forward: [target] }, stop: false }], blocked: [], vacation: { enabled: false, start: null, end: null, subject: '', body: '' } }, { internalDomains: ['example.com'], folders: [{ path: 'INBOX' }, { path: 'Archive' }], addresses: ['user@example.com'] }));
+  f.body.mode = 'append';
+  const response = await f.apply(); status(response, 409, 'RETIREMENT_RECIPIENT_BLOCKED');
+  assert.equal(queries, 1); assert.deepEqual(writes(f.commands), []); assert.ok(!f.folders.some(row => row.path === 'News'));
 });

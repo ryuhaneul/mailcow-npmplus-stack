@@ -4,6 +4,7 @@ import Icon from './Icon.jsx';
 
 export function importErrorMessage(error) {
   if (error.code === 'IMPORT_WRITE_FAILED') {
+    if (error.detail?.recoveryBlocked === true) return error.message;
     const reason = /^QUOTA(?:\/|$)/.test(error.detail?.responseCode ?? '') ? '보관 공간 부족: '
       : error.detail?.command === 'CHECKSCRIPT' ? '서버 검사 실패: '
       : error.detail?.command === 'PUTSCRIPT' ? '서버 저장 거절: ' : '';

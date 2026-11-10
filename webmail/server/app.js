@@ -1,3 +1,4 @@
+import { createRetirementStore } from './security/retirement-store.js';
 import { createOtpStore } from './security/otp-store.js';
 import otpRoutes from './routes/otp.js';
 import Fastify, { LogController } from 'fastify';
@@ -42,7 +43,7 @@ import { createSmtpService } from './mail/smtp.js';
 import rulesRoutes from './routes/rules.js';
 import { createRulesService } from './sieve/service.js';
 
-export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {}, directory = {}, publicTemplates = {}, otp = {} } = {}) {
+export async function createApp({ config = loadConfig(), staticDir = fileURLToPath(new URL('../web/dist/', import.meta.url)), logger = logOptions(config.logLevel), auth = {}, folders = {}, messages = {}, rules = {}, notices = {}, directory = {}, publicTemplates = {}, otp = {}, retirement = {} } = {}) {
   const app = Fastify({ logger, trustProxy: config.trustProxy, logController: new LogController({ disableRequestLogging: true }) });
   installErrors(app);
   installHeaders(app);
@@ -59,7 +60,9 @@ export async function createApp({ config = loadConfig(), staticDir = fileURLToPa
   const images = createSignatureImagesService({ imap: app.imap, getReferences: context => signatures.getReferences(context) });
   const compose = createComposeService({ config, images, imap: app.imap, directory: app.directory, smtp: createSmtpService({ config }), logger: app.log, tempRoot: auth.tempRoot, now: auth.now });
   await app.register(composeRoutes, { config, service: compose });
-  const rulesService = rules.service ?? createRulesService({ ...rules, config, imap: app.imap, directory: app.directory, logger: app.log });
+  const retirementStore = config.retirementReceiveBlockEnabled === true ? retirement.store ?? createRetirementStore({ config, mode: 'public' }) : null;
+  app.addHook('onClose', async () => { await retirementStore?.close?.(); });
+  const rulesService = rules.service ?? createRulesService({ ...rules, retirement: retirementStore, config, imap: app.imap, directory: app.directory, logger: app.log });
   app.decorate('rules', rulesService);
   await app.register(rulesRoutes, { service: rulesService });
   const folderService = createFolderService({ rulesService, ...folders, imap: app.imap, logger: app.log });

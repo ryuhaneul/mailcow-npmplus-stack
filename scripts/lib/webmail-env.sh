@@ -24,6 +24,7 @@ webmail_options() {
         true|false) ;;
         *) webmail_error "MAILCOW_WEB_PUBLIC_ENABLE must be true or false"; return 1 ;;
     esac
+    WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE="${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}"
     WEBMAIL_ADMIN_DOVEADM_ENABLE="${WEBMAIL_ADMIN_DOVEADM_ENABLE:-false}"
     WEBMAIL_ADMIN_RELAY_ENABLE="${WEBMAIL_ADMIN_RELAY_ENABLE:-false}"
     WEBMAIL_OTP_KEY="${WEBMAIL_OTP_KEY:-}"
@@ -57,7 +58,7 @@ webmail_options() {
     log_archive_validate_sources || return 1
     local flag host joined="" label time
     local -a hosts labels
-    for flag in "$LOG_ARCHIVE_ENABLE" "$MAIL_FTS_NIGHTLY_ENABLE" "$WEBMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
+    for flag in "$WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE" "$LOG_ARCHIVE_ENABLE" "$MAIL_FTS_NIGHTLY_ENABLE" "$WEBMAIL_ENABLE" "$MAIL_AUTOEXPUNGE_ENABLE" "$MAIL_SHARE_WHOLE_MAILBOX" "$MAIL_TRUSTED_SENDER_ENABLE" "$WEBMAIL_ADMIN_ENABLE" "$WEBMAIL_ADMIN_DOVEADM_ENABLE" "$WEBMAIL_ADMIN_RELAY_ENABLE"; do
         case "$flag" in true|false) ;; *) webmail_error "component enable flags must be true or false"; return 1 ;; esac
     done
     for time in "$MAIL_FTS_NIGHTLY_START" "$MAIL_FTS_NIGHTLY_END"; do
@@ -130,6 +131,7 @@ webmail_load_config() {
     LOG_ARCHIVE_REQUIRED_SOURCES=
     WEBMAIL_ENABLE=true
     WEBMAIL_ADMIN_ENABLE=false
+    WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=false
     WEBMAIL_ADMIN_DOVEADM_ENABLE=false
     WEBMAIL_ADMIN_RELAY_ENABLE=false
     WEBMAIL_ADMIN_DOVEADM_KEY=
@@ -518,6 +520,7 @@ webmail_generate_env() (
         webmail_env_line DEFAULT_THEME "$WEBMAIL_DEFAULT_THEME" &&
         webmail_env_line DEFAULT_MODE "$WEBMAIL_DEFAULT_MODE" &&
         webmail_env_line CONTACTS_ENABLE "${WEBMAIL_CONTACTS_ENABLE-true}" &&
+        webmail_env_line RETIREMENT_RECEIVE_BLOCK_ENABLE "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" &&
         webmail_env_line INTERNAL_DOMAINS "$WEBMAIL_INTERNAL_DOMAINS" &&
         webmail_env_line ATTACH_MAX_MB "$WEBMAIL_ATTACH_MAX_MB" &&
         webmail_env_line SESSION_IDLE_MIN "$WEBMAIL_SESSION_IDLE_MIN" &&
@@ -763,6 +766,7 @@ webmail_generate_admin_env() (
         webmail_env_line BOUNCE_POLICY_PEER "$bounce_peer" &&
         webmail_env_line BOUNCE_POLICY_PORT 10040 &&
         webmail_env_line ADMIN_MODE true &&
+        webmail_env_line WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" &&
         webmail_env_line FTS_NIGHTLY_ENABLE "${MAIL_FTS_NIGHTLY_ENABLE:-false}" &&
         webmail_env_line FTS_NIGHTLY_START "${MAIL_FTS_NIGHTLY_START:-03:00}" &&
         webmail_env_line FTS_NIGHTLY_END "${MAIL_FTS_NIGHTLY_END:-06:00}" &&

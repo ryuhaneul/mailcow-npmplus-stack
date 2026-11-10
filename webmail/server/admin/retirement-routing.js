@@ -141,7 +141,8 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
       try { resolved = redirects.map(redirect => ({ redirect, result: plan.projected.resolve(redirect.target) })); }
       catch { blockers.push(issue('FILTER_ROUTE_UNKNOWN', location.address, location)); return; }
       if (location.address === owner) {
-        const outgoing = resolved.filter(row => row.result.targets.some(target => target !== owner)).map(row => row.redirect);
+        const outgoing = resolved.filter(row => row.result.targets.some(target => target !== owner) ||
+          row.result.problems.some(problem => problem.code === 'UNRESOLVED_INTERNAL')).map(row => row.redirect);
         if (outgoing.length) {
           blockers.push(issue('OWNER_FORWARD_ACTIVE', owner, { ...location, targets: unique(outgoing.map(row => row.target)) })); return;
         }

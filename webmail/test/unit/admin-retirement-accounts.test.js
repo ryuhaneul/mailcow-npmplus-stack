@@ -666,3 +666,20 @@ test('D2-01 dormant Sieve activation and mailbox history guard all three layers 
     });
   }
 });
+
+
+test('F6 settings ON requires explicit removal of a pure owner prefilter with an unresolved literal', async t => {
+  const f = await fixture(t); retired(f);
+  f.filters.push({ id: 10, username: user, filter_type: 'prefilter', active: 1,
+    script_data: 'require ["copy"]; redirect :copy "missing@example.com";' });
+  const kept = await settingsPreview(f, { receiveBlocked: true });
+  assert.ok(kept.blockers.some(row => ['OWNER_FORWARD_ACTIVE', 'FILTER_ROUTE_UNKNOWN'].includes(row.code)));
+  await assert.rejects(settingsRun(f, { receiveBlocked: true, etag: kept.etag }), { statusCode: 409, code: 'RETIREMENT_ROUTES_REMAIN' });
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+  const removed = await settingsPreview(f, { receiveBlocked: true, forwardTo: null });
+  assert.deepEqual(removed.blockers, []); assert.equal(removed.changes[0].kind, 'owner-forward');
+  await assert.rejects(settingsRun(f, { receiveBlocked: true, forwardTo: null, etag: removed.etag }), { statusCode: 409, code: 'RETIREMENT_CLEANUP_CONFIRM_REQUIRED' });
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+  const result = await settingsRun(f, { receiveBlocked: true, forwardTo: null, cleanupConfirmed: true, etag: removed.etag });
+  assert.equal(result.result, 'ok'); assert.equal(result.retirement.receiveBlocked, true); assert.equal(f.filters.length, 0);
+});

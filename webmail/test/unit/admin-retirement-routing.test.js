@@ -307,3 +307,16 @@ test('F5c ON inspection: dynamic targets and include still fail closed', async (
     assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
   }
 });
+
+
+for (const layer of ['prefilter', 'postfilter', 'user']) test(`F6 owner unresolved literal stays blocked in ${layer}`, async () => {
+  const f = fixture(), script = 'require ["copy"]; redirect :copy "missing@example.test";';
+  if (layer === 'user') {
+    f.scripts.set(owner, script); f.names.set(owner, [{ name: 'personal', active: true }]);
+  } else f.filters.push(filter(script, layer, owner));
+  const plan = await inspect(f);
+  assert.equal(plan.ready, false); assert.equal(plan.canPrepare, false);
+  assert.ok(codes(plan).some(code => ['OWNER_FORWARD_ACTIVE', 'FILTER_ROUTE_UNKNOWN'].includes(code)));
+  assert.deepEqual(plan.changes, []);
+  assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
+});

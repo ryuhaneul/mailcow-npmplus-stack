@@ -19,6 +19,8 @@ test('administrator UI follows the account contracts and protects credential inp
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     if (pending) await pending.promise;
+    if (failure instanceof Error) throw failure;
+    if (failure?.invalidJson) return { status: 200, ok: true, json: async () => { throw new SyntaxError('Invalid JSON'); } };
     return failure ? response(failure.status, { error: failure }) : response(200, { ok: true });
   };
   const server = await createServer({ root: fileURLToPath(new URL('../../web', import.meta.url)), configFile: fileURLToPath(new URL('../../web/vite.admin.config.js', import.meta.url)), server: { middlewareMode: true, watch: null, ws: false }, appType: 'custom', logLevel: 'error' });
@@ -76,6 +78,15 @@ test('administrator UI follows the account contracts and protects credential inp
       assert.equal(root.querySelector('[role=status]'), null); assert.equal(calls.length, 1); assert.equal(reloads, 0);
       if (status >= 500 || status === 409) { assert.equal(root.querySelector('button[type=submit]').disabled, true); await submit(); assert.equal(calls.length, 1); }
       if (status === 409) { await click([...root.querySelectorAll('dialog button')].find(n => n.textContent === '다시 읽기')); assert.equal(root.querySelector('dialog'), null); assert.equal(reloads, 1); }
+    });
+    for (const [name, failedResponse] of [['connection loss without status', new TypeError('Failed to fetch')], ['HTTP 200 with invalid JSON', { invalidJson: true }]]) await t.test(`${name} requires reloading before another write`, async () => {
+      await mount(); await click(action('끄기')); failure = failedResponse; await submit();
+      assert.match(root.querySelector('dialog').textContent, /적용 여부를 확인할 수 없습니다/);
+      assert.equal(root.querySelector('[role=status]'), null); assert.equal(calls.length, 1); assert.equal(reloads, 0);
+      assert.equal(root.querySelector('button[type=submit]').disabled, true);
+      await submit(); await submit(); assert.equal(calls.length, 1);
+      await click([...root.querySelectorAll('dialog button')].find(n => n.textContent === '목록 다시 읽기'));
+      assert.equal(root.querySelector('dialog'), null); assert.equal(reloads, 1); assert.equal(calls.length, 1);
     });
     await t.test('cancel, Escape and unmount clear input and restore the calling control', async () => {
       await mount(); const trigger = action('암호 재설정'); await click(trigger); await fillPasswords(); const node = root.querySelector('#admin-account-password'); await cancel(); assert.equal(node.value, ''); assert.equal(document.activeElement, trigger);

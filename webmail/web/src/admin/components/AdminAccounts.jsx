@@ -30,7 +30,7 @@ function AccountAction({ action, close, reload, saved }) {
   const dismiss = () => { if (!pending.current) close(); };
   async function submit(event) {
     event.preventDefault();
-    if (pending.current || (deleting && confirmation !== item.username) || error?.status === 409 || error?.status >= 500) return;
+    if (pending.current || (deleting && confirmation !== item.username) || error?.status === 409 || error?.uncertain) return;
     setError(null);
     if ((adding || resetting) && password.current.value !== password2.current.value) {
       setError({ code: 'INVALID_INPUT', message: '암호와 확인이 일치하지 않습니다.' }); password2.current.focus(); return;
@@ -43,10 +43,10 @@ function AccountAction({ action, close, reload, saved }) {
     try {
       await adminApi(path, { method: adding || resetting ? 'POST' : deleting ? 'DELETE' : 'PATCH', body });
       if (alive.current) saved(adding ? '관리자를 추가했습니다.' : resetting ? '암호를 재설정했습니다. 이 관리자는 다시 로그인해야 합니다.' : deleting ? '관리자를 삭제했습니다.' : item.active ? '관리자를 껐습니다.' : '관리자를 켰습니다.');
-    } catch (failure) { if (alive.current) setError(failure); }
+    } catch (failure) { if (alive.current) setError(Object.assign(failure, { uncertain: failure.status == null || failure.code === 'INVALID_RESPONSE' || failure.status >= 500 })); }
     finally { body.password = undefined; body.password2 = undefined; pending.current = false; if (alive.current) setBusy(false); }
   }
-  const uncertain = error?.status >= 500;
+  const uncertain = error?.uncertain;
   return <ManagementDialog title={title} close={dismiss} busy={busy}>
     <form ref={form} onSubmit={submit}>
       <MutationError error={error} reload={() => { dismiss(); reload(); }}/>

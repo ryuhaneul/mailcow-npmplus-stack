@@ -165,7 +165,7 @@ test('shares: listing and search never read ACLs; detail reads only the selected
   } };
   const service = createSharesService({ mailcow, aclFolders, history: { register() {} } });
   const first = await service.list({});
-  assert.deepEqual(first.items, owners.slice(0, 50).map(owner => ({ owner, name: owner, group: false })));
+  assert.deepEqual(first.items, owners.slice(0, 50).map(owner => ({ owner, name: owner, ownerActive: 1, group: false })));
   assert.equal(first.total, 60);
   const second = await service.list({}, { page: '2' }); assert.equal(second.items.length, 10);
   assert.equal((await service.list({}, { q: 'mailbox59' })).total, 1);
@@ -314,8 +314,8 @@ test('shares: revert adapter rechecks expected snapshot and only changes the rec
   assert.deepEqual(f.acl.get(`${owner}|${other}`), ['lookup', 'read']);
 });
 
-test('shares HTTP: common guard, CSRF, add/revoke and history operate without leaking Env', async t => {
-  const f = await fixture(t, { filters: {} }); let logs = '';
+test('shares HTTP: retired owner uses existing grant/revoke endpoints with common guard, CSRF and history without leaking Env', async t => {
+  const f = await fixture(t, { filters: {} }); f.boxes.find(row => row.username === owner).active = '2'; let logs = '';
   const stream = new Writable({ write(chunk, _encoding, done) { logs += chunk.toString(); done(); } });
   const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir },
     logger: { ...logOptions('info'), stream }, dockerapi: f.client, auth: { client: { ...f.mailcow, async login({ username }) { return { state: 'ready', username }; }, async logout() {} } } });
@@ -325,11 +325,11 @@ test('shares HTTP: common guard, CSRF, add/revoke and history operate without le
   const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
   let response = await app.inject({ url: '/api/admin/shares', headers }); assert.equal(response.statusCode, 200);
   const item = response.json().items.find(row => row.owner === owner);
-  assert.equal(item.group, false); assert.equal(item.etag, undefined);
+  assert.equal(item.group, false); assert.equal(item.ownerActive, 2); assert.equal(item.etag, undefined);
   const url = `/api/admin/shares/${owner}`;
   assert.equal((await app.inject(url)).statusCode, 403);
   response = await app.inject({ url, headers }); assert.equal(response.statusCode, 200);
-  item.etag = response.json().etag;
+  assert.equal(response.json().ownerActive, 2); item.etag = response.json().etag;
   assert.match(item.etag, /^[a-f0-9]{64}$/);
   assert.equal((await app.inject({ method: 'POST', url, headers: { ...headers, 'x-mailadmin-csrf': 'bad' }, payload: { grantee, etag: item.etag } })).statusCode, 403);
   response = await app.inject({ method: 'POST', url, headers, payload: { grantee, etag: item.etag } }); assert.equal(response.statusCode, 200, response.body);
@@ -373,4 +373,54 @@ test('dockerapi: invalid folder arguments reject both commands before any HTTP',
     for (const method of ['setAcl', 'deleteAcl']) await assert.rejects(f.client[method](owner, grantee, mailbox), { statusCode: 422, code: 'INVALID_INPUT' });
   }
   assert.equal(f.calls.length, 0);
+});
+
+for (const ownerActive of [0, 1, 2]) for (const granteeActive of [0, 1, 2]) test(`shares retirement matrix: owner=${ownerActive}, new grantee=${granteeActive}`, async t => {
+  const f = await fixture(t);
+  f.boxes.find(row => row.username === owner).active = String(ownerActive);
+  f.boxes.find(row => row.username === grantee).active = String(granteeActive);
+  const list = await f.service.list({}), listed = list.items.find(row => row.owner === owner);
+  if (ownerActive === 0) {
+    assert.equal(listed, undefined);
+    await assert.rejects(ownerItem(f), { statusCode: 404, code: 'NOT_FOUND' });
+  } else {
+    assert.equal(listed.ownerActive, ownerActive);
+    assert.equal((await ownerItem(f)).ownerActive, ownerActive);
+  }
+  const expected = etag({ version: 2, grants: [] });
+  if (ownerActive !== 0 && granteeActive === 1) {
+    const result = await change(f, expected);
+    assert.deepEqual(result.grantees, [grantee]); assert.deepEqual(f.acl.get(`${owner}|${grantee}`), ['lookup', 'read']);
+  } else {
+    await assert.rejects(change(f, expected), { statusCode: 422, code: 'INVALID_INPUT' });
+    assert.equal(f.calls.filter(call => ['set_acl', 'delete_acl'].includes(call.body?.task)).length, 0);
+    assert.equal((await f.audit.read()).rows.length, 0);
+  }
+});
+
+for (const ownerActive of [0, 1, 2]) for (const granteeActive of [0, 1, 2]) test(`shares history addition matrix: owner=${ownerActive}, grantee=${granteeActive}`, async t => {
+  const f = await fixture(t);
+  f.acl.set(`${owner}|${grantee}`, ['lookup', 'read']);
+  const removed = await change(f, (await ownerItem(f)).etag, false);
+  f.boxes.find(row => row.username === owner).active = ownerActive;
+  f.boxes.find(row => row.username === grantee).active = granteeActive;
+  const writes = f.calls.filter(call => ['set_acl', 'delete_acl'].includes(call.body?.task)).length;
+  const operation = f.history.revert(removed.auditId, { confirm: true, session: {}, actor: 'admin', ip: '198.51.100.9' });
+  if (ownerActive !== 0 && granteeActive === 1) {
+    await operation; assert.deepEqual(f.acl.get(`${owner}|${grantee}`), ['lookup', 'read']);
+  } else {
+    await assert.rejects(operation, { statusCode: 422, code: 'INVALID_INPUT' });
+    assert.equal(f.calls.filter(call => ['set_acl', 'delete_acl'].includes(call.body?.task)).length, writes);
+    assert.equal(f.acl.has(`${owner}|${grantee}`), false);
+  }
+});
+
+for (const state of [0, 2, 'deleted']) for (const historyOnly of [false, true]) test(`shares cleanup: owner/grantee ${state}, history deletion=${historyOnly}`, async t => {
+  const f = await fixture(t);
+  const granted = await change(f, (await ownerItem(f)).etag), expected = (await ownerItem(f)).etag;
+  if (state === 'deleted') f.boxes.splice(0, 2);
+  else for (const box of f.boxes.filter(row => [owner, grantee].includes(row.username))) box.active = state;
+  if (historyOnly) await f.history.revert(granted.auditId, { confirm: true, session: {}, actor: 'admin', ip: '198.51.100.9' });
+  else await change(f, expected, false);
+  assert.equal(f.acl.has(`${owner}|${grantee}`), false);
 });

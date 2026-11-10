@@ -3,7 +3,7 @@ import { AppError } from '../../errors.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { createAclFolders } from '../acl-folders.js';
 
-const invalid = () => new AppError(422, 'INVALID_INPUT', '서로 다른 활성 메일함을 선택해 주세요.');
+const invalid = () => new AppError(422, 'INVALID_INPUT', '공유할 메일함과 서로 다른 활성 수혜 메일함을 선택해 주세요.');
 const unsupported = () => new AppError(409, 'ACL_UNSUPPORTED', '이 공유는 다른 권한이 섞여 있어 화면에서 바꿀 수 없어요. 관리자에게 문의해 주세요.');
 const isTemplateFolder = mailbox => mailbox === 'Templates' || mailbox.startsWith('Templates/');
 const readOnly = rights => isDeepStrictEqual(rights, ['lookup', 'read']);
@@ -28,11 +28,13 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     let rows = await mailcow.call(session, 'GET', '/api/v1/get/mailbox/all');
     if (rows && typeof rows === 'object' && !Object.keys(rows).length) rows = [];
     if (!Array.isArray(rows)) throw new AppError(502, 'MAILCOW_REJECTED', '메일함 목록을 읽을 수 없어요.');
-    return rows.filter(row => typeof row?.username === 'string' && String(row.active) === '1').map(row => ({ owner: row.username.toLowerCase(), name: typeof row.name === 'string' ? row.name : '' }));
+    return rows.filter(row => typeof row?.username === 'string' && ['1', '2'].includes(String(row.active))).map(row => ({ owner: row.username.toLowerCase(), name: typeof row.name === 'string' ? row.name : '', ownerActive: Number(row.active) }));
   }
   async function validate(session, owner, grantees) {
-    const active = new Set((await mailboxes(session)).map(row => row.owner));
-    if (!active.has(owner) || grantees.some(grantee => !active.has(grantee) || grantee === owner)) throw invalid();
+    const boxes = await mailboxes(session);
+    const owners = new Set(boxes.map(row => row.owner));
+    const granteesActive = new Set(boxes.filter(row => row.ownerActive === 1).map(row => row.owner));
+    if (!owners.has(owner) || grantees.some(grantee => !granteesActive.has(grantee) || grantee === owner)) throw invalid();
   }
   async function snapshot(owner) {
     const grants = new Map();

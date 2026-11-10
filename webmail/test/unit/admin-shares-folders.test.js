@@ -48,9 +48,10 @@ async function fixture(t, initial = [], options = {}) {
   };
   const aclFolders = createAclFolders({ doveadm, dockerapi, config: options.disabled ? {} : config });
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
+  f.boxes = [owner, grantee, other].map(username => ({ username, active: username === owner ? options.ownerActive ?? 1 : 1 }));
   const mailcow = { async call(_session, _method, path) {
     if (path.endsWith('/filters/all')) return [];
-    return [owner, grantee, other].map(username => ({ username, active: 1 }));
+    return f.boxes;
   } };
   // Limit listing to the tested owner: readOwned must never receive a grantee address.
   const service = createSharesService({ dockerapi, aclFolders, mailcow, audit, lock, history, config: { wholeMailbox: options.wholeMailbox === true } });
@@ -314,4 +315,29 @@ for (const action of ['share.grant', 'share.revoke']) test(`history: ${action} r
   assert.deepEqual(f.rows, [...protectedRows, row('Templates-old')]);
   const restored = await f.history.detail(result.id);
   assert.ok(restored.after.grants.some(item => item.grantee === other && item.folders.some(folder => folder.mailbox === 'Templates')));
+});
+
+test('shares retirement: active=2 owner retains INBOX and two subfolders through revoke/history and grant', async t => {
+  const f = await fixture(t, [row('INBOX'), row('Archive'), row('Archive/2026'), row('Archive', other)], { ownerActive: '2' });
+  assert.equal((await f.item()).ownerActive, 2);
+  assert.equal((await f.service.list({})).items.find(item => item.owner === owner).ownerActive, 2);
+  const before = structuredClone(f.rows), removed = await f.change(false);
+  assert.deepEqual(f.rows, [row('Archive', other)]);
+  assert.deepEqual(f.writes, [['delete', grantee, 'Archive'], ['delete', grantee, 'Archive/2026'], ['delete', grantee, 'INBOX']]);
+  await f.history.revert(removed.auditId, revertOptions);
+  assert.deepEqual(f.rows.toSorted((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))), before.toSorted((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+  const writes = f.writes.length;
+  assert.equal((await f.change(true)).unchanged, true); assert.equal(f.writes.length, writes);
+  await f.change(false); await f.change(true);
+  assert.deepEqual(f.rows.filter(item => item.id === grantee), [row('INBOX')]);
+  assert.ok(f.reads.includes('INBOX') && f.reads.includes('Archive') && f.reads.includes('Archive/2026'));
+  assert.equal(f.boxes.find(item => item.username === owner).active, '2');
+});
+
+for (const state of [0, 2]) test(`shares retirement: subfolder history additions reject grantee=${state} before restoring any folder`, async t => {
+  const f = await fixture(t, [row('Archive'), row('Archive/2026')], { ownerActive: 2 });
+  const removed = await f.change(false), writes = f.writes.length;
+  f.boxes.find(item => item.username === grantee).active = state;
+  await assert.rejects(f.history.revert(removed.auditId, revertOptions), { statusCode: 422, code: 'INVALID_INPUT' });
+  assert.equal(f.writes.length, writes); assert.deepEqual(f.rows, []);
 });

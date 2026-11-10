@@ -225,22 +225,73 @@ class Response:
     def __enter__(self): return self
     def __exit__(self,*args): pass
     def read(self): return self.body
+def cli(args, opener):
+    out=io.StringIO()
+    with patch('urllib.request.build_opener',return_value=opener),patch('time.monotonic',side_effect=range(0,10000,100)),patch.object(sys,'argv',args),contextlib.redirect_stdout(out),contextlib.redirect_stderr(out):
+        try: runpy.run_path(str(source),run_name='__main__')
+        except SystemExit as e: code=e.code
+        else: raise AssertionError('CLI did not exit')
+    assert 'synthetic-password' not in out.getvalue() and 'synthetic-cookie' not in out.getvalue()
+    return code,out.getvalue()
+
+for mode in ('preflight','apply','verify'):
+    login=work/'login.json';login.write_text(json.dumps(dict(identity='admin@example.test',secret='synthetic-password')))
+    state={**base,'enabled':mode=='apply'};calls=[]
+    def open_success(req,timeout):
+        calls.append((req.method,req.full_url,req.data))
+        if req.full_url.endswith('/tokens'): return Response(b'{}')
+        if req.full_url.endswith('/nginx/proxy-hosts'): value=[state]
+        elif req.full_url.endswith('/31/disable'):
+            assert req.method=='POST' and req.data==b'{}'
+            state['enabled']=False;value={}
+        else:
+            assert req.full_url.endswith('/31');value=state
+        return Response(json.dumps(value).encode())
+    opener=type('Opener',(),{'open':staticmethod(open_success)})()
+    args=[str(source),'mcweb-'+mode,str(work),'https://unused.invalid','example.test','false','','update']
+    # Preserve the actual private backup operation, redirecting only its destination.
+    backup_path=work/('cli-backup-'+mode);real_path=type(work)
+    def backup_destination(value,*args,**kwargs):
+        if isinstance(value,str) and value.startswith('/root/mailcow-web-public-backup-'): return backup_path
+        return real_path(value,*args,**kwargs)
+    with patch('pathlib.Path',side_effect=backup_destination): code,output=cli(args,opener)
+    assert len(args)==8 and code==0 and calls,(mode,code,output)
+    assert any(url.endswith('/nginx/proxy-hosts/31') for _,url,_ in calls)
+    assert sum(url.endswith('/disable') for _,url,_ in calls)==(mode=='apply')
+    assert state['enabled'] is False
+    counts['CLI-success']+=1
+
+for size in (7,9):
+    calls=[]
+    def unexpected(req,timeout): calls.append(req);raise AssertionError('invalid argc reached transport')
+    opener=type('Opener',(),{'open':staticmethod(unexpected)})()
+    args=[str(source),'mcweb-verify',str(work),'https://unused.invalid','example.test','false','','verify']
+    args=args[:size] if size==7 else args+['extra']
+    code,output=cli(args,opener)
+    assert len(args)==size and code==1 and not calls and output.startswith('FAIL mailcow web policy:')
+    counts['CLI-argc']+=1
+
 for kind in ('forbidden','timeout','bad-json','invalid-inventory','invalid-desired'):
     login=work/'login.json';login.write_text(json.dumps(dict(identity='admin@example.test',secret='synthetic-password')))
+    calls=[]
     def open_request(req,timeout):
+        calls.append((req.method,req.full_url))
         if kind=='forbidden': raise urllib.error.HTTPError(req.full_url,403,'denied',{},None)
         if kind=='timeout': raise TimeoutError('synthetic-password')
         if req.full_url.endswith('/tokens'): return Response(b'{}')
         return Response(b'not json' if kind=='bad-json' else b'{}')
     opener=type('Opener',(),{'open':staticmethod(open_request)})()
-    out=io.StringIO();args=[str(source),'mcweb-verify',str(work),'https://unused.invalid','example.test','invalid' if kind=='invalid-desired' else 'false','','verify']
-    # Avoid the login retry delay while retaining the real transport error handling.
-    with patch('urllib.request.build_opener',return_value=opener),patch('time.monotonic',side_effect=range(0,10000,100)),patch.object(sys,'argv',args),contextlib.redirect_stdout(out),contextlib.redirect_stderr(out):
-        try: runpy.run_path(str(source),run_name='__main__')
-        except SystemExit as e: assert e.code==1
-        else: raise AssertionError('CLI did not exit')
-    assert 'FAIL mailcow web policy:' in out.getvalue() and 'PASS' not in out.getvalue() and 'SKIP' not in out.getvalue()
-    assert 'synthetic-password' not in out.getvalue() and 'synthetic-cookie' not in out.getvalue()
+    args=[str(source),'mcweb-verify',str(work),'https://unused.invalid','example.test','invalid' if kind=='invalid-desired' else 'false','','verify']
+    code,output=cli(args,opener)
+    assert code==1 and 'FAIL mailcow web policy:' in output and 'PASS' not in output and 'SKIP' not in output
+    if kind=='invalid-desired':
+        assert not calls and 'invalid mailcow web policy arguments' in output
+    elif kind in ('forbidden','timeout'):
+        assert calls==[('POST','https://unused.invalid/tokens')]
+        assert ('HTTPError' if kind=='forbidden' else 'TimeoutError') in output
+    else:
+        assert calls==[('POST','https://unused.invalid/tokens'),('GET','https://unused.invalid/nginx/proxy-hosts')]
+        assert ('NPM GET /nginx/proxy-hosts failed' if kind=='bad-json' else 'invalid proxy-host response') in output
     counts['L12']+=1
 # Disabled ACME rows are excluded in both verify and resave; active rows still run.
 for mode in ('acme-verify','acme-resave'):

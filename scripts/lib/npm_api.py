@@ -532,7 +532,7 @@ if __name__ == '__main__':
     mode = sys.argv[1]
     try:
         if mode in ('mcweb-preflight', 'mcweb-apply', 'mcweb-verify'):
-            if len(sys.argv) != 9:
+            if len(sys.argv) != 8:
                 raise ValueError('invalid mailcow web policy arguments')
             sys.exit(mailcow_web_main(mode, pathlib.Path(sys.argv[2]), *sys.argv[3:]))
         if mode in ('acme-resave', 'acme-verify', 'acme-restore'):

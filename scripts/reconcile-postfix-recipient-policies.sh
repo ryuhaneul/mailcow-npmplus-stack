@@ -1,9 +1,13 @@
 #!/bin/bash
 # Reconcile the owned recipient layers in canonical B(R(base)) order.
+webmail_reconcile_postfix_recipient_policies() (
 set +x
+local -r allow_r_install="$1"
+shift
+[[ "$allow_r_install" = true || "$allow_r_install" = false ]] || return 2
 set -euo pipefail
 umask 077
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/lib/webmail-env.sh"
 MODE=apply YES=0 COUNT=0 REPAIR=false
 for arg in "$@"; do
@@ -225,6 +229,12 @@ step() {
     inspect expected || die 'policy step chain verification failed'
     LAYERS=$(cat "$WORK/layers")
 }
+# A normal apply prepares B only when R has never been installed in this transition.
+# Only finish, after its routing CLI succeeds, supplies the internal install permission.
+if [ "$MODE" = apply ] && [ "$WANT_R" = true ] && [[ "$LAYERS" != *R* ]] && [ "$allow_r_install" = false ]; then
+    WANT_R=false
+    log 'R activation deferred until final routing verification; readiness=false'
+fi
 if [ "$MODE" = --check ]; then
     [[ ( "$WANT_R" = true && "$LAYERS" = *R* || "$WANT_R" = false && "$LAYERS" != *R* ) && ( "$WANT_B" = true && "$LAYERS" = *B* || "$WANT_B" = false && "$LAYERS" != *B* ) ]] || die 'desired layers not installed'
     if [ "$WANT_R" = true ]; then resource_check || resource_stop; fi
@@ -249,3 +259,10 @@ if [ "$WANT_R" = true ]; then bash "$SCRIPT_DIR/apply-postfix-retirement-access.
 capture recheck && same expected recheck || die 'final settings drift'
 PENDING=0
 log 'reconcile complete; owned layers and relay preserved'
+
+)
+
+# Public CLI/env cannot grant R activation; the final deployment helper calls the function internally.
+if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then
+    webmail_reconcile_postfix_recipient_policies false "$@"
+fi

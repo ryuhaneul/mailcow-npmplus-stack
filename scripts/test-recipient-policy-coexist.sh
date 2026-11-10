@@ -96,6 +96,8 @@ if service=='webmail-admin':
             sys.exit(125 if (p/'require-new-admin').read_text()=='fresh' else 1)
         failed=settings.get('routing_error') or settings.get('routing_changes') or settings.get('routing_db_error')
         print(json.dumps({'ready':not failed,'checked':2,'failures':[{'address':'retired@example.test','code':'RETIREMENT_ROUTES_REMAIN'}] if failed else []}))
+        if not failed:
+            with (p/'route-successes').open('a') as f:f.write('success\n')
         sys.exit(2 if failed else 0)
     result={'bind':'192.0.2.241','peer':settings.get('postfix',{'mailcow-network':{'IPAddress':'192.0.2.253'}})['mailcow-network']['IPAddress'],'port':'10040'}
     print(json.dumps(result if '--input-type=module' in args else list(result.values())));sys.exit(0)
@@ -135,6 +137,9 @@ if args[0]=='postconf':
         for assignment in args[2:]:
             key,value=assignment.split('=',1);key=key.strip();assert key in managed
             state[key]=value.strip();save()
+            if key=='smtpd_recipient_restrictions' and value.strip()=='$mailstack_retirement_recipient_access, $mailstack_retirement_previous_recipient_restrictions':
+                events=p/'activation-events'
+                with events.open('a') as f:f.write(json.dumps({'successes':len((p/'route-successes').read_text().splitlines()) if (p/'route-successes').exists() else 0,'admin_deployed':(p/'admin-deployed').exists()})+'\n')
             if fault('fail-edit'):sys.exit(7)
     elif op=='-X':
         for key in args[2:]:assert key in managed;state.pop(key,None)
@@ -243,6 +248,8 @@ pass(){ N=$((N+1)); printf 'ok %s - %s\n' "$N" "$*"; }
 fail(){ echo "not ok - $*" >&2; sed -E 's/[a-f0-9]{64}/[redacted]/g;s/synthetic-root/[redacted]/g' "$TMP/stdout" "$TMP/stderr" >&2; exit 1; }
 flags(){ printf 'DOMAIN=example.test\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=%s\nWEBMAIL_ADMIN_ENABLE=true\nWEBMAIL_ADMIN_DB_IPV4=192.0.2.241\nLOG_ARCHIVE_ENABLE=%s\n' "$1" "$2" > "$WEBMAIL_ENV_FILE"; }
 reset(){
+    rm -f "$TMP/activation-events" "$TMP/route-successes"
+    : > "$TMP/route-checks"
     rm -f "$TMP/require-new-admin" "$TMP/admin-deployed" "$TMP/app-deployment-reached" "$TMP/premature-route-check"
     rm -rf "$CONF/mailstack-retirement" "$TMP/work/"*; rm -f "$CONF/"*.bak-* "$TMP/backup-count"; rm -f "$TMP/"fail-* "$CONF/.recipient-policy-reconcile.lock"
     printf 'myhostname = mail.example.test\n' > "$CONF/extra.cf"
@@ -253,6 +260,8 @@ reset(){
     flags true true
 }
 run(){ local rc=0; bash "$ROOT/scripts/reconcile-postfix-recipient-policies.sh" "$@" > "$TMP/stdout" 2> "$TMP/stderr" || rc=$?; no_secrets || fail credential-disclosure; return "$rc"; }
+# Model the existing final deployment helper, after the admin is available.
+activate(){ local rc=0; bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"; webmail_retirement_finish "$1/scripts" "$WEBMAIL_DIR"' activate "$ROOT" > "$TMP/stdout" 2> "$TMP/stderr" || rc=$?; no_secrets || fail activation-secret-output; return "$rc"; }
 bounce(){ bash "$ROOT/scripts/apply-postfix-bounce-policy.sh" "$@" > "$TMP/stdout" 2> "$TMP/stderr"; }
 legacy(){ bash -c 'source "$1/scripts/lib/webmail-env.sh"; webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"; webmail_reconcile_bounce_policy "$1/scripts" "$WEBMAIL_DIR" "$2"' legacy "$ROOT" "$1" > "$TMP/stdout" 2> "$TMP/stderr"; }
 no_secrets(){ python3 - "$TMP" <<'PYSECRET'
@@ -294,14 +303,28 @@ else:assert s=={}
 assert s.get('smtpd_relay_restrictions') is None
 PYLAYERS
 }
+no_r_activation(){
+    ! grep -q 'BEGIN mailstack-retirement-access' "$CONF/extra.cf" || fail unexpected-r-hook
+    [ ! -s "$TMP/activation-events" ] || fail premature-r-activation
+    python3 - "$TMP/main.json" <<'PYNORUNTIME' || fail unexpected-r-runtime
+import json,sys
+value=json.load(open(sys.argv[1]));assert not any('mailstack_retirement' in str(k)+str(v) for k,v in value.items())
+PYNORUNTIME
+}
+activation_after_routes(){
+    python3 - "$TMP/activation-events" <<'PYACTIVATEORDER' || fail activation-before-successful-routing
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1])];assert rows and all(row['successes']>0 for row in rows)
+PYACTIVATEORDER
+}
 reset
-run apply -y && run --check || fail fresh
+run apply -y && layers B && activate && run --check || fail fresh
 layers BR
 pass '1: base -> R -> B; resources and B(R(base)) verified'
 reset
 bounce apply -y || fail initial-bounce
 cp "$CONF/extra.cf" "$TMP/legacy.extra";cp "$TMP/main.json" "$TMP/legacy.live"
-run apply -y && run --check || fail existing-bounce
+activate && run --check || fail existing-bounce
 layers BR
 pass '2: existing B is peeled, then R and B installed'
 snapshot
@@ -342,13 +365,13 @@ p=Path(sys.argv[1]);assert json.loads((p/'main.json').read_text())==json.loads((
 PYBYTE
 pass '5: R OFF preserves B and restores legacy-only bytes/runtime'
 flags true true
-run apply -y || fail both-setup
+activate || fail both-setup
 run --revert -y || fail both-remove
 layers ''
 cmp -s "$CONF/extra.cf" "$TMP/base.extra" || fail remove-base
 pass '6: inverse removal restores the exact base'
 flags true false
-run apply -y || fail archive-off
+activate || fail archive-off
 layers R
 flags true true
 run apply -y && run --check || fail archive-on
@@ -398,7 +421,7 @@ if run apply -y; then fail explicit-base-coexistence; fi
 restored;no_mutations
 grep -q 'outside owned blocks.*nothing changed' "$TMP/stderr" || fail explicit-base-guidance
 flags true false
-run apply -y && run --check || fail explicit-base-r-only
+activate && run --check || fail explicit-base-r-only
 layers R
 flags false true
 snapshot
@@ -431,7 +454,7 @@ PYLOCK
 restored
 # 10a: reject both persistent and runtime drift before mutation.
 reset
-run apply -y || fail failure-setup
+activate || fail failure-setup
 snapshot
 : > "$TMP/calls"
 sed -i 's/default_action=DUNNO/default_action=REJECT/' "$CONF/extra.cf"
@@ -451,7 +474,7 @@ restored
 no_mutations
 # Existing correct hooks must not be disturbed on a DB outage or IP/GID drift.
 reset
-run apply -y || fail resource-setup
+activate || fail resource-setup
 snapshot
 cp "$CONF/mailstack-retirement/recipient-access.cf" "$TMP/resource.map"
 cp "$TMP/users.json" "$TMP/resource.users"
@@ -486,7 +509,7 @@ for injected in fail-check fail-b-install; do
  reset
  if [ "$injected" = fail-b-install ]; then
   flags true false
-  run apply -y && run --revert -y || fail retained-credential-setup
+  activate && run --revert -y || fail retained-credential-setup
   cp "$CONF/mailstack-retirement/recipient-access.cf" "$TMP/rollback.map"
   cp "$TMP/users.json" "$TMP/rollback.users"
   flags true true
@@ -496,7 +519,7 @@ for injected in fail-check fail-b-install; do
   # Schedule the check fault only after R reload, when B attempts installation.
   touch "$TMP/fail-b-check"
  else touch "$TMP/$injected"; fi
- if run apply -y; then fail "$injected accepted"; fi
+ if activate; then fail "$injected accepted"; fi
  restored
  grep -q 'readiness=false' "$TMP/stderr" || fail failed-readiness
  if [ "$injected" = fail-b-install ]; then
@@ -513,7 +536,7 @@ python3 - "$TMP/fixture.json" <<'PYFAULT'
 import json,sys
 open(sys.argv[1],'w').write(json.dumps({'fail_restore':True}))
 PYFAULT
-if run apply -y; then fail restore-failure-success; fi
+if activate; then fail restore-failure-success; fi
 grep -q 'protection state UNKNOWN; manual recovery required' "$TMP/stderr" || fail restore-unknown
 [ -n "$(find "$TMP/work" -mindepth 1 -maxdepth 1 -type d -print -quit)" ] || fail recovery-snapshot
 # P6b-2: execute the real update app-deployment block, with unrelated infra stubbed.
@@ -717,16 +740,19 @@ rm "$TMP/fail-publication" "$TMP/fail-publication-unlink"
 flags false false;run apply -y || fail d3-off-again
 flags true false
 printf '{"routing_error":true}' > "$TMP/fixture.json"
+: > "$TMP/route-checks"
+rm -f "$TMP/activation-events" "$TMP/route-successes"
 run apply -y || fail d3-unverified-policy-prepare
-not_on
+not_on;no_r_activation
+[ ! -s "$TMP/route-checks" ] || fail d3-predeploy-cli
 webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
 snapshot;: > "$TMP/calls"
 if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" > "$TMP/stdout" 2> "$TMP/stderr"; then fail d3-unsafe-reenable; fi
-restored;no_mutations;not_on
+restored;no_mutations;not_on;no_r_activation
 grep -q 'retired@example.test' "$TMP/stdout" || fail d3-missing-account-guidance
 printf '{"routing_db_error":true}' > "$TMP/fixture.json"
 if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" > "$TMP/stdout" 2> "$TMP/stderr"; then fail d3-db-reenable; fi
-restored;no_mutations;not_on
+restored;no_mutations;not_on;no_r_activation
 printf '{}' > "$TMP/fixture.json"
 run apply -y || fail d3-fixed-reenable
 webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
@@ -739,7 +765,7 @@ not_on
 pass '11: OFF/revert invalidation precedes mutation; stored ON routes gate activation and readiness'
 # D3-2: execute the actual verify publication tail after failed routing checks.
 reset;flags true false
-run apply -y || fail verify-route-install
+activate || fail verify-route-install
 webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
 for fault in routing_error routing_changes routing_db_error; do
     webmail_retirement_begin "$WEBMAIL_DIR" || fail verify-route-begin
@@ -794,8 +820,14 @@ for image in fresh old; do
         [ -f "$TMP/app-deployment-reached" ] && [ -f "$TMP/admin-deployed" ] || fail preboot-admin-not-reached
         [ ! -e "$TMP/premature-route-check" ] || fail preboot-new-cli-required
         [ "$(wc -l < "$TMP/route-checks")" -eq 1 ] || fail preboot-final-route-check-missing
-        if [ "$fault" = none ]; then [ "$rc" -eq 0 ] || fail preboot-safe-update;json_ready true
-        else [ "$rc" -ne 0 ] || fail preboot-unsafe-ready;not_on;fi
+        if [ "$fault" = none ]; then
+            [ "$rc" -eq 0 ] || fail preboot-safe-update;json_ready true;layers R
+            activation_after_routes
+            python3 - "$TMP/activation-events" <<'PYPREBOOTORDER' || fail preboot-activation-before-admin
+import json,sys
+assert all(json.loads(line)['admin_deployed'] for line in open(sys.argv[1]))
+PYPREBOOTORDER
+        else [ "$rc" -ne 0 ] || fail preboot-unsafe-ready;not_on;no_r_activation;fi
         no_secrets || fail preboot-update-secret
     done
     reset;flags true false
@@ -804,8 +836,42 @@ for image in fresh old; do
     bash "$TMP/preboot-setup.sh" > "$TMP/stdout" 2> "$TMP/stderr" || fail preboot-setup
     [ -f "$TMP/app-deployment-reached" ] || fail preboot-setup-not-reached
     [ ! -e "$TMP/premature-route-check" ] && [ ! -s "$TMP/route-checks" ] || fail preboot-setup-new-cli-required
-    not_on
+    not_on;no_r_activation
     no_secrets || fail preboot-setup-secret
  done
 pass '13: fresh/old image setup/update reaches app deployment; final routing checks alone publish readiness'
+# F3-01: stored keys must not start rejecting before successful final route validation.
+for fault in routing_error routing_changes routing_db_error; do
+    reset;flags true true
+    printf '{"keys":["retired@example.test"],"%s":true}' "$fault" > "$TMP/fixture.json"
+    run apply -y || fail f4-prepare
+    layers B;no_r_activation
+    [ ! -s "$TMP/route-checks" ] || fail f4-predeploy-routing
+    snapshot;: > "$TMP/calls"
+    if activate; then fail f4-unsafe-finish; fi
+    restored;no_mutations;no_r_activation;not_on
+    grep -q 'retired@example.test' "$TMP/stdout" || fail f4-account-guidance
+ done
+# Public arguments/env cannot promote a deferred transition.
+reset;flags true false
+allow_r_install=true run apply -y || fail f4-env-prepare
+no_r_activation
+printf 'allow_r_install=true\n' >> "$WEBMAIL_ENV_FILE"
+if run apply -y; then fail f4-stack-env-override-accepted; fi
+no_r_activation
+sed -i '/^allow_r_install=/d' "$WEBMAIL_ENV_FILE"
+if run apply --allow-r-install -y; then fail f4-public-flag-accepted; fi
+no_r_activation
+if run true apply -y; then fail f4-public-internal-arg-accepted; fi
+no_r_activation
+activate || fail f4-safe-finish
+layers R;activation_after_routes
+before=$(wc -l < "$TMP/activation-events")
+run apply -y || fail f4-existing-r-update
+[ "$(wc -l < "$TMP/activation-events")" -eq "$before" ] || fail f4-existing-r-reinstalled
+printf '{"routing_error":true}' > "$TMP/fixture.json"
+snapshot;: > "$TMP/calls"
+if activate; then fail f4-existing-r-unsafe; fi
+restored;no_mutations;layers R;not_on
+pass '14: deferred R cannot activate through public apply/env; final routing success precedes installation'
 echo "1..$N"

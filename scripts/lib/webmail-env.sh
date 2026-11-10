@@ -680,11 +680,17 @@ webmail_retirement_validate_routes() (
 
 webmail_retirement_finish() {
     webmail_retirement_invalidate "$2" || return 1
-    webmail_reconcile_recipient_policies "$1" "$2" --check || return 1
     if [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
         webmail_retirement_validate_routes "$2" || return 1
+        # A fresh Bash preserves the wrapper's errexit/traps even when finish is called in an if.
+        MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$2" WEBMAIL_ENV_FILE="${WEBMAIL_STACK_ENV:-${ENV_FILE:-$(dirname "$1")/.env}}" \
+            bash -c 'source "$1/reconcile-postfix-recipient-policies.sh"; webmail_reconcile_postfix_recipient_policies true apply -y' retirement-final "$1" || return 1
+        webmail_reconcile_recipient_policies "$1" "$2" --check || return 1
         webmail_retirement_readiness "$2" true || { webmail_retirement_invalidate "$2" || return 1; return 1; }
-    else webmail_retirement_begin "$2"; fi
+    else
+        webmail_reconcile_recipient_policies "$1" "$2" --check || return 1
+        webmail_retirement_begin "$2"
+    fi
 }
 
 webmail_reconcile_bounce_policy() {

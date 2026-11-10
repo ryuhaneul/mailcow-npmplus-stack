@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -167,7 +169,7 @@ test('alias flow: inactive actual grantee mailbox is accepted and explicit sende
 });
 
 async function httpFixture(t, f) {
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const app = await createAdminApp({ retirement: { routing: { withRoutingLock: operation => operation(), assertAdminScript: async () => {}, assertMutation: async () => {} } }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
   const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
@@ -208,4 +210,42 @@ test('alias flow: empty mailbox object preserves 422 for a requested send grante
   const flows = createFlowsService({ mailcow: f.mailcow, aliases: { async previewEdit() { return {}; } } });
   await assert.rejects(flows.alias({ ...ctx, data: { ...aliasData, action: 'preview' } }), { statusCode: 422, code: 'INVALID_INPUT' });
   assert.equal(writes(f).length, 0);
+});
+
+function retirementGuard(f) {
+  const blocked = new Set(), scope = new AsyncLocalStorage(), events = [];
+  const store = { async blockedRecipients(values) { return values.filter(value => blocked.has(value) || blocked.has(value.replace(/\+[^@]+@/, '@'))); },
+    async withRoutingLock(operation) { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const call = f.mailcow.call, run = f.lock.run;
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true, 'named lock must surround writes'); return call(...args); };
+  f.lock.run = (key, operation) => { events.push(`resource:${key}`); return run(key, operation); };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store });
+  return { blocked, events, routing };
+}
+
+test('retirement flow guard: named lock precedes flow resources and delegated alias writes reject blocked targets', async t => {
+  const f = await fixture(t), g = retirementGuard(f);
+  f.aliasService = createAliasesService({ ...f, retirement: g.routing });
+  f.flows = createFlowsService({ ...f, aliases: f.aliasService, retirement: g.routing });
+  const p = await aliasPreview(f); g.blocked.add(newTeam); g.events.length = 0;
+  await assert.rejects(aliasRun(f, p), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0); assert.equal(g.events[0], 'named');
+});
+
+test('retirement flow guard: nested healthy writes reuse the named lock before any resource lock', async t => {
+  const f = await fixture(t), g = retirementGuard(f);
+  f.teams = createTeamsService({ ...f, auditDir: f.dir, retirement: g.routing });
+  f.aliasService = createAliasesService({ ...f, retirement: g.routing });
+  f.flows = createFlowsService({ ...f, aliases: f.aliasService, retirement: g.routing });
+  const p = await aliasPreview(f); g.events.length = 0;
+  const result = await aliasRun(f, p); assert.equal(result.result, 'ok'); assert.equal(g.events[0], 'named'); assert.equal(g.events.filter(value => value === 'named').length, 1);
+});
+
+test('retirement flow guard: a blocked insertion cannot bypass lower guards after a completed removal', async t => {
+  const f = await fixture(t), g = retirementGuard(f);
+  f.teams = createTeamsService({ ...f, auditDir: f.dir, retirement: g.routing });
+  f.flows = createFlowsService({ ...f, aliases: f.aliasService, retirement: g.routing });
+  const p = await teamPreview(f, { ...teamData, sendGrant: false }); g.blocked.add(member); g.events.length = 0;
+  const r = await teamRun(f, p, { ...teamData, sendGrant: false });
+  assert.equal(r.result, 'partial'); assert.equal(r.steps.at(-1).code, 'RETIREMENT_ROUTE_PROTECTED'); assert.equal(g.events[0], 'named');
+  assert.ok(!f.filters.find(row => row.username === newTeam).script_data.includes(member));
 });

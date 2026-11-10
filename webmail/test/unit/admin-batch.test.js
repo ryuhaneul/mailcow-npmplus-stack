@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { emptyRetirementState } from '../../server/security/retirement-store.js';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,6 +19,7 @@ import { createAdminApp } from '../../server/admin/app.js';
 import { AppError } from '../../server/errors.js';
 import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
 
+const legacyRetirement = { store: { read: async () => emptyRetirementState(), keysForOwner: async () => [], blockedRecipients: async () => [] }, routing: { withRoutingLock: operation => operation(), assertMutation: async () => {}, assertAdminScript: async () => {} } };
 const GB = 1024 ** 3, ctx = { session: {}, actor: 'admin', ip: '198.51.100.9' };
 const makeBox = (username, name = username.split('@')[0], quota = 20) => ({ username, name, quota: quota * GB, active: 1, quota_used: 0, messages: 0, sender_acl: [], attributes: {} });
 async function fixture(t) {
@@ -140,7 +144,7 @@ test('batch: 1000 physical lines and1MB boundaries, quoted multiline contributes
   assert.throws(() => parseCsv('email,name\na@example.com,"' + '\n'.repeat(999) + '"'), { statusCode: 422 });
 });
 test('batch HTTP: guarded single action endpoint, syntax line422, >64KB valid CSV accepted, no CSV/password logs', async t => {
-  const f = await fixture(t), logs = []; const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const f = await fixture(t), logs = []; const app = await createAdminApp({ retirement: legacyRetirement, protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   assert.equal((await app.inject({ method: 'POST', url: '/api/admin/batch/mailboxes', headers: { origin: 'https://mailadmin.example.com' }, payload: { action: 'parse', csv: mailCsv } })).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': logged.json().csrf };
   const post = payload => app.inject({ method: 'POST', url: '/api/admin/batch/mailboxes', headers, payload });
@@ -228,7 +232,7 @@ test('batch sync: no new job readback causes502; current duplicate rechecked und
   const outcomes = await Promise.all([sync(f, { action: 'retry', lines: [2] }), sync(f, { action: 'retry', lines: [2] })]); assert.equal(outcomes.flatMap(row => row.results).filter(row => row.result === 'ok').length, 1); assert.equal(f.jobs.length, 1);
 });
 test('batch sync HTTP: parse/run/error/audit/logger redact raw secrets and key even when add response echoes plaintext', async t => {
-  const f = await fixture(t), logs = []; const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const f = await fixture(t), logs = []; const app = await createAdminApp({ retirement: legacyRetirement, protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   const send = payload => app.inject({ method: 'POST', url: '/api/admin/batch/syncjobs', headers, payload });
   for (const payload of [{ action: 'parse', csv: syncCsv() }, { action: 'run', csv: syncCsv(), lines: [2] }]) { const response = await send(payload); assert.equal(response.statusCode, 200, response.body); assert.ok(!response.body.includes(sourceSecret)); assert.ok(!response.body.includes('password1')); }
@@ -265,7 +269,7 @@ test('batch sync: source case preserved in API, duplicate matching case-insensit
 test('batch sync: upstream parse error is redacted in HTTP error and logger; missing domain never auto-created', async t => {
   const f = await fixture(t), logs = [];
   await assert.rejects(sync(f, { csv: syncCsv('old@example.net', 'new@missing.example.com'), action: 'run', lines: [2] }), { statusCode: 422 }); assert.equal(writes(f).length, 0);
-  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const app = await createAdminApp({ retirement: legacyRetirement, protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   f.options.onCall = ({ path }) => { if (path.endsWith('/syncjobs/all/no_log')) throw new AppError(503, 'MAILCOW_UNAVAILABLE', `remote detail ${sourceSecret}`); };
   const result = await app.inject({ method: 'POST', url: '/api/admin/batch/syncjobs', headers, payload: { action: 'parse', csv: syncCsv() } }); assert.equal(result.statusCode, 503); assert.ok(!result.body.includes(sourceSecret)); assert.match(result.json().error.message, /\*\*\*/); assert.ok(!logs.join('').includes(sourceSecret));
@@ -273,7 +277,7 @@ test('batch sync: upstream parse error is redacted in HTTP error and logger; mis
 
 test('batch sync HTTP: comma password in flag error fully masked, disk/logger values0', async t => {
   const f = await fixture(t), logs = [], secret = 'Synthetic,Quoted-Password!';
-  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const app = await createAdminApp({ retirement: legacyRetirement, protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi, logger: { level: 'info', stream: { write: line => logs.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } }); const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin: 'https://mailadmin.example.com', 'x-mailadmin-csrf': login.json().csrf };
   f.options.onCall = ({ path }) => { if (path === '/api/v1/add/syncjob') throw new AppError(422, 'MAILCOW_REJECTED', `remote --password1 ${secret}`); };
   const csv = `source,password,target,host\nold@example.net,"${secret}",new@example.com,imap.example.net`;
@@ -324,4 +328,36 @@ for (const [kind, csv, padded] of [
 ]) test(`batch ${kind}: quoted padding keeps existing validation and normalized values`, async t => {
   const f = await fixture(t);
   assert.deepEqual(await run(f, { csv: padded }, kind), await run(f, { csv }, kind));
+});
+
+test('retirement batch guard: alias rows delegate to the protected alias service and never write a blocked target', async t => {
+  const f = await fixture(t), blocked = 'existing@example.com';
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store: { blockedRecipients: async values => values.filter(value => value === blocked), withRoutingLock: operation => operation() } });
+  const aliases = createAliasesService({ ...f, retirement: routing });
+  f.service = createBatchService({ ...f, aliases });
+  const r = await run(f, { action: 'run', csv: 'address,targets\nnew@example.com,existing@example.com', lines: [2] }, 'aliases');
+  assert.equal(r.result, 'partial'); assert.equal(r.results[0].code, 'RETIREMENT_ROUTE_PROTECTED'); assert.equal(writes(f).length, 0);
+});
+
+test('retirement batch guard: sync auto-creation acquires named lock before sync resource and reuses it in accounts', async t => {
+  const f = await fixture(t), scope = new AsyncLocalStorage(), events = [];
+  const store = { read: async () => emptyRetirementState(), keysForOwner: async () => [], blockedRecipients: async () => [],
+    withRoutingLock: operation => { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store }), originalLock = f.lock.run, call = f.mailcow.call;
+  f.lock.run = (target, operation) => { events.push(`resource:${target}`); return originalLock(target, operation); };
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true); return call(...args); };
+  const accounts = createAccountsService({ ...f, protocolNetlimit: f.netlimit, retirement: { store, routing, featureEnabled: false, ready: false } });
+  f.service = createBatchService({ ...f, accounts, retirement: routing });
+  const csv = 'source,password,target,host\nsource@example.net,synthetic-password,new@example.com,imap.example.net';
+  await run(f, { action: 'parse', csv }, 'syncjobs'); assert.deepEqual(events, []);
+  const result = await run(f, { action: 'run', csv, lines: [2] }, 'syncjobs');
+  assert.equal(result.result, 'ok', JSON.stringify(result)); assert.equal(result.results[0].mailboxCreated, true);
+  assert.equal(events[0], 'named'); assert.equal(events[1], 'resource:sync-create:new@example.com'); assert.equal(events.filter(value => value === 'named').length, 1);
+});
+
+test('retirement batch guard: sync lock failure keeps row identity and writes nothing', async t => {
+  const f = await fixture(t);
+  f.service = createBatchService({ ...f, retirement: { withRoutingLock: async () => { throw new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', 'DB'); } } });
+  const r = await run(f, { action: 'run', csv: 'source,password,target,host\nsource@example.net,synthetic-password,new@example.com,imap.example.net', lines: [2] }, 'syncjobs');
+  assert.equal(r.result, 'partial'); assert.equal(r.results[0].code, 'RETIREMENT_BLOCK_UNAVAILABLE'); assert.equal(r.results[0].target, 'new@example.com'); assert.equal(r.results[0].source, 'source@example.net'); assert.equal(writes(f).length, 0);
 });

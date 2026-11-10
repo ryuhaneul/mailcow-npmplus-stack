@@ -33,7 +33,8 @@ export function dnsRecords(name, serverIp, dkim) {
   ];
 }
 
-export function createDomainsService({ mailcow, audit, lock, history }) {
+export function createDomainsService({ mailcow, audit, lock, history, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   async function rows(session, path) {
     const value = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
     if (Array.isArray(value)) return value;
@@ -68,6 +69,7 @@ export function createDomainsService({ mailcow, audit, lock, history }) {
   }
   async function applyActive(session, name, before, after) {
     assertUnchanged(etag(before), await read(session, name));
+    await retirement?.assertMutation(session, { kind: 'domain', address: name, after: { active: after.active ? '1' : '0' } });
     await mailcow.call(session, 'POST', '/api/v1/edit/domain', { items: [name], attr: { active: after.active ? '1' : '0' } });
     if (!isDeepStrictEqual(await read(session, name), after)) throw verify();
   }
@@ -95,6 +97,7 @@ export function createDomainsService({ mailcow, audit, lock, history }) {
       return audit.run({ actor, ip, action: 'domain.create', target: name, kind: 'config', revertible: false, before: null, after: body }, async intent => {
         const latest = await context(session);
         if (latest.primary.some(row => primaryName(row) === name) || latest.aliases.some(row => normalize(row.alias_domain) === name)) throw conflict();
+        await retirement?.assertMutation(session, { kind: 'domain', address: name, after: { ...body, domain_name: name } });
         await mailcow.call(session, 'POST', '/api/v1/add/domain', body);
         const row = (await rows(session, 'domain/all')).find(item => primaryName(item) === name);
         const expected = { description: body.description, max_num_mboxes_for_domain: +body.mailboxes, max_num_aliases_for_domain: +body.aliases,
@@ -127,6 +130,7 @@ export function createDomainsService({ mailcow, audit, lock, history }) {
   }
   async function applyAlias(session, name, before, after) {
     assertUnchanged(etag(before), await readAlias(session, name));
+    await retirement?.assertMutation(session, { kind: 'alias-domain', address: name, after: after.alias ? { alias_domain: name, target_domain: after.alias.targetDomain, active: after.alias.active ? '1' : '0' } : null });
     if (after.alias) {
       const data = await context(session);
       if (!data.primary.some(row => primaryName(row) === after.alias.targetDomain && String(row.backupmx) !== '1')) throw new AppError(409, 'INVALID_TARGET_DOMAIN', '기본 도메인이 없거나 전달용 도메인이에요.');
@@ -214,10 +218,11 @@ export function createDomainsService({ mailcow, audit, lock, history }) {
       });
     });
   }
-  history.register('domain.active', { label: '도메인 사용 상태를 바꿨어요', read: ({ session, target }) => read(session, target), write: ({ session, target, expected, value }) => applyActive(session, target, expected, value) });
+  history.register('domain.active', { runLocked: (target, operation) => routingLock(() => lock.run(target, operation)), label: '도메인 사용 상태를 바꿨어요', read: ({ session, target }) => read(session, target), write: ({ session, target, expected, value }) => applyActive(session, target, expected, value) });
   for (const action of ['alias-domain.create', 'alias-domain.delete']) history.register(action, {
+    runLocked: (target, operation) => routingLock(() => lock.run(target, operation)),
     label: '별칭 도메인을 바꿨어요', read: ({ session, target }) => readAlias(session, target),
     write: ({ session, target, expected, value }) => applyAlias(session, target, expected, value),
   });
-  return { list, create, edit, listAliases, createAlias: args => changeAlias(args), removeAlias: args => changeAlias({ ...args, remove: true }), dkim, duplicate, dns };
+  return { list, create: args => routingLock(() => create(args)), edit: args => args.data?.action === 'preview' ? edit(args) : routingLock(() => edit(args)), listAliases, createAlias: args => routingLock(() => changeAlias(args)), removeAlias: args => routingLock(() => changeAlias({ ...args, remove: true })), dkim, duplicate, dns };
 }

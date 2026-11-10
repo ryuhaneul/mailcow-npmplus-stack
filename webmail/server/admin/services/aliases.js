@@ -77,7 +77,8 @@ export function validateAlias(alias, context, all, { allowCatchAll = false, allo
   if (reachesLoop(graph(desired, context.map, true, context.mailboxes), alias.address)) throw loopError();
 }
 
-export function createAliasesService({ mailcow, audit, lock, history }) {
+export function createAliasesService({ mailcow, audit, lock, history, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   const api = createAliasApi(mailcow);
   async function rows(session, path) {
     const value = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
@@ -136,6 +137,7 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
     const names = unique([...before.senders, ...after.senders].map(row => row.mailbox));
     assertUnchanged(etag(before), await read(session, addr, names));
     const aliases = await rows(session, 'alias/all');
+    await retirement?.assertMutation(session, { kind: 'alias', address: addr, after: after.alias });
     if (after.alias) {
       validateAlias(after.alias, await domains(session), aliases, { allowCatchAll, allowDiscard });
       if (!before.alias && (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === addr)) throw new AppError(409, 'ADDRESS_IN_USE', '이미 메일함이 있는 주소예요.');
@@ -227,10 +229,10 @@ export function createAliasesService({ mailcow, audit, lock, history }) {
   }
   const adapter = {
     label: '별칭 설정을 바꿨어요',
-    runLocked: (target, operation) => lock.run('alias-graph', () => lock.run(target, operation)),
+    runLocked: (target, operation) => routingLock(() => lock.run('alias-graph', () => lock.run(target, operation))),
     read: ({ session, target, record }) => read(session, target, unique([...(record?.before?.senders ?? []), ...(record?.after?.senders ?? [])].map(row => row.mailbox))),
     write: ({ session, target, expected, value }) => apply(session, target, expected, value, { allowCatchAll: Boolean(value.alias && catchAll(value.alias.address)), allowDiscard: value.alias?.goto === 'null@localhost' }),
   };
   for (const operation of ['create', 'edit', 'delete']) history.register(`alias.${operation}`, adapter);
-  return { list, checks, previewEdit, create: args => change({ ...args, operation: 'create' }), edit: args => change({ ...args, operation: 'edit' }), remove: args => change({ ...args, operation: 'delete' }) };
+  return { list, checks, previewEdit, create: args => routingLock(() => change({ ...args, operation: 'create' })), edit: args => routingLock(() => change({ ...args, operation: 'edit' })), remove: args => routingLock(() => change({ ...args, operation: 'delete' })) };
 }

@@ -51,7 +51,8 @@ export function createFilterBackups({ dir }) {
   }
   return { write, read };
 }
-export function createTeamsService({ mailcow, audit, lock, history, auditDir }) {
+export function createTeamsService({ mailcow, audit, lock, history, auditDir, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   const backups = createFilterBackups({ dir: auditDir });
   async function filters(session) {
     let rows = await mailcow.call(session, 'GET', '/api/v1/get/filters/all');
@@ -96,6 +97,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     const current = entries[0];
     const attr = { script_data: next };
     for (const key of ['script_desc', 'active', 'filter_type']) if (current[key] !== undefined && current[key] !== null) attr[key] = String(current[key]);
+    await retirement?.assertAdminScript(session, next, team);
     await mailcow.call(session, 'POST', '/api/v1/edit/filter', { items: [String(current.id)], attr });
     const checked = prefilters(await filters(session), team);
     if (checked.length !== 1 || checked[0].script_data !== next) throw verifyFailed();
@@ -161,6 +163,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
     try { fresh = memberAlias(current, await aliases(session)); } catch (error) { refused(error); }
     if (!fresh || String(fresh.id) !== String(alias.id)) throw conflict();
     assertUnchanged(etag(combinedRevision(filter, alias)), combinedRevision(current, fresh));
+    await retirement?.assertMutation(session, { kind: 'alias', address: alias.address, after: { ...fresh, goto }, owner: team });
     await mailcow.call(session, 'POST', '/api/v1/edit/alias', { items: [String(fresh.id)], attr: { goto } });
     const checked = (await aliases(session)).find(row => String(row.id) === String(fresh.id));
     if (!checked || checked.goto !== goto) throw verifyFailed();
@@ -233,6 +236,8 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
         after: memberState({ script_data: source }, alias), ...hashFields('', source) }, async () => {
         await absent();
         if (alias) await aliasAbsent();
+        await retirement?.assertAdminScript(session, addresses.map(member => `redirect :copy "${member}";`).join('\n'), team);
+        if (alias) await retirement?.assertMutation(session, { kind: 'alias', address: alias.address, after: alias });
         try {
           if (alias) {
             await mailcow.call(session, 'POST', '/api/v1/add/alias', alias);
@@ -241,6 +246,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
               String(checkedAlias.active) !== '1' || checkedAlias.private_comment !== alias.private_comment) throw verifyFailed();
           }
           await absent();
+          await retirement?.assertAdminScript(session, source, team);
           await mailcow.call(session, 'POST', '/api/v1/add/filter', { username: team, filter_type: 'prefilter', active: '1', script_desc: '팀 분배', script_data: source });
           const checked = prefilters(await filters(session), team);
           if (checked.length !== 1 || checked[0].script_data !== source) throw verifyFailed();
@@ -309,6 +315,8 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
         before: state(filter.script_data), after: memberState({ ...filter, script_data: next }, alias), ...hashFields(filter.script_data, next) }, async intent => {
         // Recheck address ownership after the durable backup and intent, before creation.
         await assertAliasAbsent(session, alias.address);
+        await retirement?.assertAdminScript(session, filter.script_data, team);
+        await retirement?.assertMutation(session, { kind: 'alias', address: alias.address, after: alias });
         let created = false;
         try {
           await mailcow.call(session, 'POST', '/api/v1/add/alias', alias);
@@ -363,6 +371,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
         if (!fresh || normalize(fresh.username) !== owner || fresh.script_data !== filter.script_data) throw conflict();
         const attr = { script_data: edited.script };
         for (const key of ['script_desc', 'active', 'filter_type']) if (fresh[key] !== undefined && fresh[key] !== null) attr[key] = String(fresh[key]);
+        if (edited.changed) await retirement?.assertAdminScript(session, edited.script, owner);
         if (edited.changed) await mailcow.call(session, 'POST', '/api/v1/edit/filter', { items: [String(filter.id)], attr });
         const checked = await read();
         if (!checked || normalize(checked.username) !== owner || checked.script_data !== edited.script) throw verifyFailed();
@@ -398,6 +407,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
         if (plan.original) await save(session, team, plan.original, plan.next);
         else {
           if (prefilters(await filters(session), team).length) throw conflict();
+          await retirement?.assertAdminScript(session, plan.next, team);
           await mailcow.call(session, 'POST', '/api/v1/add/filter', { username: team, filter_type: 'prefilter', active: '1', script_desc: '퇴사 후 내부 전달', script_data: plan.next });
           const checked = prefilters(await filters(session), team);
           if (checked.length !== 1 || checked[0].script_data !== plan.next) throw verifyFailed();
@@ -408,7 +418,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
   }
   const adapter = {
     label: '팀 구성원을 바꿨어요',
-    runLocked: (target, operation) => lock.run('alias-graph', () => lock.run(target, operation)),
+    runLocked: (target, operation) => routingLock(() => lock.run('alias-graph', () => lock.run(target, operation))),
     async read({ session, target, record }) {
       const entries = prefilters(await filters(session), target);
       if (entries.length !== 1 || typeof entries[0].script_data !== 'string') return { members: [], sha256: etag(entries), bytes: 0 };
@@ -448,6 +458,7 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       if (!alias || !isDeepStrictEqual(memberState(filter, alias), expected)) throw conflict();
       const original = await backups.read(record, 'before');
       if (sha256(original) !== value.sha256) throw new AppError(409, 'NOT_REVERTIBLE', '백업 내용이 기록과 달라 되돌릴 수 없어요.');
+      await retirement?.assertMutation(session, { kind: 'alias', address: alias.address, after: null });
       // save verifies restoration before the alias is removed, so no filter points to a deleted destination.
       await save(session, target, filter, original);
       try {
@@ -456,5 +467,5 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir }) 
       } catch (error) { throw remainingAlias(error, alias.address); }
     },
   });
-  return { list, change, create, previewConvert, convert, previewForward, forward, renameFilter, deleteFilter };
+  return { list, change: args => routingLock(() => change(args)), create: args => routingLock(() => create(args)), previewConvert, convert: args => routingLock(() => convert(args)), previewForward, forward: args => routingLock(() => forward(args)), renameFilter: args => routingLock(() => renameFilter(args)), deleteFilter: args => routingLock(() => deleteFilter(args)) };
 }

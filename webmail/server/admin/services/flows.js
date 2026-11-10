@@ -33,7 +33,8 @@ function aliasParams(data) {
   return { alias: address(data.alias), target: address(data.target), grantSendTo: recipients.sort() };
 }
 
-export function createFlowsService({ mailcow, teams, aliases, senders, audit, lock }) {
+export function createFlowsService({ mailcow, teams, aliases, senders, audit, lock, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   async function getTeam(session, addr) {
     let page = 1;
     for (;;) {
@@ -142,5 +143,5 @@ export function createFlowsService({ mailcow, teams, aliases, senders, audit, lo
       return result;
     });
   }
-  return { teamMove: args => execute('team-move', args), alias: args => execute('alias', args) };
+  return { teamMove: args => args.data?.action === 'preview' ? execute('team-move', args) : routingLock(() => execute('team-move', args)), alias: args => args.data?.action === 'preview' ? execute('alias', args) : routingLock(() => execute('alias', args)) };
 }

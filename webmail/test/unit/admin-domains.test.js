@@ -1,3 +1,6 @@
+import { AppError } from '../../server/errors.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -40,7 +43,7 @@ async function fixture(t) {
   } };
   const audit = createAudit({ dir, logger: { info: (...args) => logs.push(args) } }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const service = createDomainsService({ mailcow, audit, lock, history });
-  return { dir, primary, aliases, boxes, addresses, bcc, keys, calls, logs, options, mailcow, audit, history, service };
+  return { dir, primary, aliases, boxes, addresses, bcc, keys, calls, logs, options, mailcow, audit, lock, history, service };
 }
 const edit = (f, data, domain = name) => f.service.edit({ ...ctx, name: domain, data });
 const preview = f => edit(f, { action: 'preview', active: false });
@@ -205,7 +208,7 @@ test('DKIM: malformed upstream public fields cannot carry nested secrets', async
 });
 test('domains HTTP: registered APIs share guard; safe DKIM/DNS and dependency conflict bodies', async t => {
   const f = await fixture(t), logLines = [];
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir },
+  const app = await createAdminApp({ retirement: { routing: { withRoutingLock: operation => operation(), assertAdminScript: async () => {}, assertMutation: async () => {} } }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir },
     logger: { level: 'info', stream: { write: line => logLines.push(line) } },
     auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const denied = await app.inject('/api/admin/domains'); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
@@ -225,4 +228,36 @@ test('domains HTTP: registered APIs share guard; safe DKIM/DNS and dependency co
   assert.equal(exists.statusCode, 409, exists.body); assert.deepEqual(exists.json().error.domains, [target]);
   assert.ok(!/privkey|private_key|SYNTHETIC_PRIVATE_SENTINEL/.test(responses.join('') + logLines.join('')));
   assert.equal((await app.inject('/healthz')).json().ok, true);
+});
+
+function retirementGuard(f) {
+  const blocked = new Set(), scope = new AsyncLocalStorage(), events = [];
+  const store = { async blockedRecipients(values) { return values.filter(value => blocked.has(value) || blocked.has(value.replace(/\+[^@]+@/, '@'))); },
+    async withRoutingLock(operation) { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const call = f.mailcow.call, run = f.lock.run;
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true, 'named lock must surround writes'); return call(...args); };
+  f.lock.run = (key, operation) => { events.push(`resource:${key}`); return run(key, operation); };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store });
+  return { blocked, events, routing };
+}
+
+async function protectedDomains(t) {
+  const f = await fixture(t); for (const box of f.boxes) box.active = 1;
+  for (const address of f.addresses) Object.assign(address, { active: 1, goto: 'first@example.com' });
+  const g = retirementGuard(f); f.service = createDomainsService({ ...f, retirement: g.routing }); return { f, g };
+}
+test('retirement domain guard: new alias-domain equivalence and primary active changes require OFF first', async t => {
+  const { f, g } = await protectedDomains(t); g.blocked.add('first@example.com');
+  await assert.rejects(aliasCreate(f), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  const p = await preview(f);
+  await assert.rejects(edit(f, { action: 'run', active: false, etag: p.etag, confirmDomain: name }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, 0); assert.equal(g.events[0], 'named');
+});
+test('retirement domain guard: history cannot recreate a namespace after a canonical recipient was blocked', async t => {
+  const { f, g } = await protectedDomains(t), added = await aliasCreate(f);
+  const listed = (await f.service.listAliases({})).items.find(row => row.aliasDomain === 'extra.example.com');
+  const removed = await f.service.removeAlias({ ...ctx, name: 'extra.example.com', data: { etag: listed.etag, confirmDomain: 'extra.example.com' } });
+  const count = writes(f).length; g.blocked.add('first@example.com'); g.events.length = 0;
+  await assert.rejects(revert(f, removed.auditId), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, count); assert.equal(g.events[0], 'named');
 });

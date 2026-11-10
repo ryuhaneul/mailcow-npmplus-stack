@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -31,6 +33,7 @@ async function fixture(t) {
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});
     if (path.startsWith('/api/v1/get/filters/')) return structuredClone(filters.filter(row => row.username === decodeURIComponent(path.split('/').at(-1))));
+    if (path === '/api/v1/get/alias/all') return [];
     if (path === '/api/v1/get/domain/all') return structuredClone(domains);
     if (path === '/api/v1/get/alias-domain/all') return structuredClone(aliasDomains);
     if (path === '/api/v1/get/global_filters/all') return structuredClone(global);
@@ -44,7 +47,7 @@ async function fixture(t) {
   const dockerapi = { async listSieve(address) { await options.onList?.(address); return structuredClone(names.get(address) ?? []); } };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const service = createFiltersService({ mailcow, dockerapi, audit, lock, history, auditDir: dir });
-  return { dir, boxes, filters, domains, aliasDomains, scripts, names, global, calls, options, mailcow, dockerapi, audit, history, service };
+  return { dir, boxes, filters, domains, aliasDomains, scripts, names, global, calls, options, mailcow, dockerapi, audit, lock, history, service };
 }
 const item = async f => (await f.service.list({}, owner)).items[0];
 const edit = (f, etag, script = 'discard;\n', extra = {}) => f.service.edit({ ...ctx, id: '1', data: { etag, script, ...extra } });
@@ -157,7 +160,7 @@ test('filter checks: authentication loss is propagated as 403, not a mailbox fai
 });
 test('user filters: script/name only, empty script state supported, no download/write route or attachment header', async t => {
   const f = await fixture(t), marker = '# synthetic-user-script-marker\nkeep;\n', logLines = []; f.scripts.set(owner, marker);
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi,
+  const app = await createAdminApp({ retirement: { routing: { withRoutingLock: operation => operation(), assertAdminScript: async () => {}, assertMutation: async () => {} } }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, dockerapi: f.dockerapi,
     logger: { level: 'info', stream: { write: line => logLines.push(line) } }, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   assert.equal((await app.inject(`/api/admin/user-filters/${owner}`)).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
@@ -261,4 +264,40 @@ test('unused variable strings without redirect are inspectable and can be saved'
   const f = await fixture(t), source = 'set "value" "${unknown}"; keep;';
   assert.deepEqual(inspectRedirects(source), []);
   assert.equal((await edit(f, (await item(f)).etag, source)).script, source);
+});
+
+function retirementGuard(f) {
+  const blocked = new Set(), scope = new AsyncLocalStorage(), events = [];
+  const store = { async blockedRecipients(values) { return values.filter(value => blocked.has(value) || blocked.has(value.replace(/\+[^@]+@/, '@'))); },
+    async withRoutingLock(operation) { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const call = f.mailcow.call, run = f.lock.run;
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true, 'named lock must surround writes'); return call(...args); };
+  f.lock.run = (key, operation) => { events.push(`resource:${key}`); return run(key, operation); };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store });
+  return { blocked, events, routing };
+}
+
+async function protectedFilters(t) {
+  const f = await fixture(t); f.boxes.push({ username: 'keep@example.com', active: 1 }, { username: 'blocked@example.com', active: 2 });
+  const g = retirementGuard(f); f.service = createFiltersService({ ...f, auditDir: f.dir, retirement: g.routing }); return { f, g };
+}
+test('retirement filter guard: create/edit reject protected recipients before their first write', async t => {
+  const { f, g } = await protectedFilters(t); g.blocked.add('blocked@example.com');
+  const source = 'redirect :copy "blocked@example.com";';
+  await assert.rejects(edit(f, (await item(f)).etag, source), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  await assert.rejects(create(f, { preset: 'custom', script: source }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, 0); assert.equal(g.events[0], 'named');
+});
+test('retirement filter guard: history checks restored source/type/active against current keys', async t => {
+  const { f, g } = await protectedFilters(t), changed = await edit(f, (await item(f)).etag, 'discard;\n');
+  const count = writes(f).length; g.blocked.add('keep@example.com'); g.events.length = 0;
+  await assert.rejects(revert(f, changed.auditId), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, count); assert.equal(g.events[0], 'named');
+});
+
+for (const blocked of [false, true]) test(`retirement filter compatibility: inactive literal recipient protected=${blocked}`, async t => {
+  const { f, g } = await protectedFilters(t), target = 'disabled@example.com'; f.boxes.push({ username: target, active: 0 });
+  if (blocked) g.blocked.add(target);
+  const source = `redirect :copy "${target}";\n`;
+  if (blocked) { await assert.rejects(edit(f, (await item(f)).etag, source), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0); }
+  else { assert.equal((await edit(f, (await item(f)).etag, source)).script, source); assert.equal(writes(f).length, 1); }
 });

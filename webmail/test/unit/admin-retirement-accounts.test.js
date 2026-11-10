@@ -1,3 +1,4 @@
+import { createAliasesService } from '../../server/admin/services/aliases.js';
 import { emptyRetirementState, retirementVersion } from '../../server/security/retirement-store.js';
 import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { loadAdminConfig } from '../../server/admin/config.js';
@@ -80,7 +81,6 @@ async function fixture(t, populated = false) {
     async deleteAcl(owner, grantee, mailbox = 'INBOX') { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee, mailbox } }); if (!options.ignoreAclWrites) acl.set(owner, (acl.get(owner) ?? []).filter(row => row.mailbox !== mailbox || row.id !== grantee)); },
   };
   const audit = createAudit({ dir }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
-  const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
   const aclFolders = {
     enabled: true,
     async readOwned(owner) { return (await dockerapi.getAcl(owner)).filter(row => row.user === owner && (aclFolders.enabled || row.mailbox === 'INBOX')); },
@@ -120,6 +120,7 @@ async function fixture(t, populated = false) {
   };
   const routing = createRetirementRouting({ mailcow, dockerapi, store });
   const retirement = { store, routing, featureEnabled: true, ready: true };
+  const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir, retirement: routing });
   const service = createAccountsService({ retirement, protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
   return { states, keyRows, storeCalls, store, routing, retirement, lockDepth: () => lockDepth, netlimit, otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
 }
@@ -539,4 +540,37 @@ test('retirement: lost active-write response returns partial with current login 
   const r = await leave(f, { action: 'run', receiveBlocked: true, etag: p.etag });
   assert.equal(r.result, 'partial'); assert.equal(r.accountActive, 2); assert.equal(r.retirement.retired, false); assert.equal(r.requested.receiveBlocked, true);
   assert.equal(r.steps.at(-1).stage, 'active'); assert.deepEqual(f.keyRows.get(user) ?? [], []);
+});
+
+test('retirement admin writes: protected alias deletion is refused by alias API but ON mailbox permanent deletion cleans its own aliases', async t => {
+  const f = await fixture(t); retired(f, { blocked: true }); const protectedAlias = 'protected@example.com';
+  f.aliases.push({ id: 10, address: protectedAlias, goto: user, active: 1 }); f.keyRows.set(user, [protectedAlias, user]);
+  const aliases = createAliasesService({ ...f, retirement: f.routing });
+  const alias = (await aliases.list({})).items.find(row => row.address === protectedAlias);
+  await assert.rejects(aliases.remove({ ...context, addr: protectedAlias, data: { etag: alias.etag, confirmAddress: protectedAlias } }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, 0);
+  const p = await f.service.deletePreview({}, user), r = await f.service.remove({ ...context, addr: user, data: confirmed(p.etag) });
+  assert.equal(r.result, 'ok', JSON.stringify(r)); assert.equal(f.aliases.length, 0); assert.equal(f.states.has(user), false); assert.equal(f.keyRows.has(user), false);
+});
+
+test('retirement admin writes: ordinary active edit and history use the same current protection', async t => {
+  const f = await fixture(t); retired(f, { blocked: true }); const p = await f.service.detail({}, user);
+  await assert.rejects(f.service.edit({ ...context, addr: user, data: { etag: p.etag, active: true } }), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0);
+  f.states.get(user).receiveBlocked = false; f.keyRows.set(user, []);
+  const edit = await f.service.edit({ ...context, addr: user, data: { etag: p.etag, active: true } });
+  assert.equal(edit.result, 'ok'); const record = (await f.history.list()).items.find(row => row.action === 'mailbox.edit');
+  f.keyRows.set(user, [user]); const count = writes(f).length;
+  await assert.rejects(f.history.revert(record.id, { ...context, confirm: true }), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, count);
+});
+
+test('retirement admin HTTP: production factory injects one guard into alias writes and returns 409 without side effects', async t => {
+  const f = await fixture(t); retired(f, { blocked: true });
+  const app = await createAdminApp({ retirement: { store: f.store, featureEnabled: true, ready: true }, protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore },
+    config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+    dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
+  const origin = 'https://mailadmin.example.com', logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin }, payload: { username: 'admin', password: 'synthetic' } });
+  const headers = { cookie: logged.headers['set-cookie'].split(';')[0], origin, 'x-mailadmin-csrf': logged.json().csrf };
+  const response = await app.inject({ method: 'POST', url: '/api/admin/aliases', headers, payload: { address: 'new@example.com', targets: [user] } });
+  assert.equal(response.statusCode, 409, response.body); assert.equal(response.json().error.code, 'RETIREMENT_ROUTE_PROTECTED');
+  assert.equal(response.headers['www-authenticate'], undefined); assert.equal(writes(f).length, 0); assert.equal(f.lockDepth(), 0);
 });

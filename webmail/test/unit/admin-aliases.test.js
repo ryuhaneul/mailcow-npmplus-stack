@@ -1,3 +1,6 @@
+import { AppError } from '../../server/errors.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -203,7 +206,7 @@ test('aliases: concurrent stale PATCH serializes and only first changes target',
 });
 
 test('aliases HTTP: list/checks and mutation use admin guard, 403 without challenge and no-store responses', async t => {
-  const f = await fixture(t); const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t); const app = await createAdminApp({ retirement: { routing: { withRoutingLock: operation => operation(), assertAdminScript: async () => {}, assertMutation: async () => {} } }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   assert.equal((await app.inject('/api/admin/aliases')).statusCode, 403);
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
@@ -302,4 +305,45 @@ test('aliases: bundled team alias is marked and rejects direct edit and deletion
   await assert.rejects(edit(f, bundle.etag, { targets: [second], mode: 'move' }), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
   await assert.rejects(remove(f, bundle.etag), { statusCode: 409, code: 'TEAM_MEMBER_ALIAS' });
   assert.equal(writes(f).length, 0); assert.equal(f.aliases[0].goto, first);
+});
+
+function retirementGuard(f) {
+  const blocked = new Set(), scope = new AsyncLocalStorage(), events = [];
+  const store = { async blockedRecipients(values) { return values.filter(value => blocked.has(value) || blocked.has(value.replace(/\+[^@]+@/, '@'))); },
+    async withRoutingLock(operation) { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const call = f.mailcow.call, run = f.lock.run;
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true, 'named lock must surround writes'); return call(...args); };
+  f.lock.run = (key, operation) => { events.push(`resource:${key}`); return run(key, operation); };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store });
+  return { blocked, events, routing };
+}
+
+test('retirement alias guard: create/edit/delete cannot add a blocked target or replace a protected envelope', async t => {
+  const f = await fixture(t), g = retirementGuard(f); f.service = createAliasesService({ ...f, retirement: g.routing });
+  g.blocked.add(first);
+  await assert.rejects(create(f), { code: 'RETIREMENT_ROUTE_PROTECTED', statusCode: 409 });
+  g.blocked.clear(); g.blocked.add(alias); const p = await item(f);
+  await assert.rejects(edit(f, p.etag, { targets: [second], mode: 'move' }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  await assert.rejects(remove(f, p.etag), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, 0); assert.equal(g.events[0], 'named');
+});
+
+test('retirement alias guard: history rechecks current protection before restoring old targets', async t => {
+  const f = await fixture(t), g = retirementGuard(f); f.service = createAliasesService({ ...f, retirement: g.routing });
+  const changed = await edit(f, (await item(f)).etag, { targets: [second], mode: 'move' }); const count = writes(f).length;
+  g.blocked.add(first); g.events.length = 0;
+  await assert.rejects(revert(f, changed.auditId), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, count); assert.equal(g.events[0], 'named');
+});
+
+test('retirement alias guard: DB/lock unavailability stops before any business write', async t => {
+  const f = await fixture(t), g = retirementGuard(f); g.routing.withRoutingLock = async () => { throw new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', 'lock'); };
+  f.service = createAliasesService({ ...f, retirement: g.routing });
+  await assert.rejects(create(f), { statusCode: 503 }); assert.equal(writes(f).length, 0);
+});
+
+test('retirement alias guard: reactivating an inactive alias checks its stored target', async t => {
+  const f = await fixture(t), g = retirementGuard(f); f.service = createAliasesService({ ...f, retirement: g.routing });
+  f.aliases[0].active = '0'; g.blocked.add(first);
+  await assert.rejects(edit(f, (await item(f)).etag, { active: true }), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0);
 });

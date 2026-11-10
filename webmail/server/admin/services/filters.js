@@ -22,7 +22,8 @@ const state = row => row ? { id: String(row.id), type: row.filter_type, active: 
 const hashes = (before, after) => ({ scriptSha256Before: sha256(before), scriptSha256After: sha256(after), bytesBefore: Buffer.byteLength(before), bytesAfter: Buffer.byteLength(after) });
 
 
-export function createFiltersService({ mailcow, dockerapi, audit, lock, history, auditDir }) {
+export function createFiltersService({ mailcow, dockerapi, audit, lock, history, auditDir, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   const backups = createFilterBackups({ dir: auditDir });
   const get = (session, path) => mailcow.call(session, 'GET', `/api/v1/get/${path}`);
   async function rows(session, path) {
@@ -48,6 +49,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
   async function list(session, rawAddress) { const addr = address(rawAddress); await owner(session, addr); return { address: addr, items: (await filterRows(session, addr)).map(dto) }; }
   async function apply(session, addr, id, expected, value, source) {
     const row = (await filterRows(session, addr)).find(row => String(row.id) === id); assertUnchanged(etag(expected), state(row));
+    await retirement?.assertAdminScript(session, source, addr);
     await mailcow.call(session, 'POST', '/api/v1/edit/filter', { items: [id], attr: { script_data: source, script_desc: value.label, active: value.active, filter_type: value.type } });
     const saved = (await filterRows(session, addr)).find(row => String(row.id) === id);
     if (!isDeepStrictEqual(state(saved), value)) throw verifyFailed(); return saved;
@@ -80,7 +82,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
       const absent = async () => { const current = await filterRows(session, addr); if (current.some(row => row.filter_type === data.type && String(row.active) === '1')) throw new AppError(409, 'FILTER_EXISTS', '이미 같은 종류의 활성 관리자 필터가 있어요.'); return current; };
       const beforeRows = await absent(), wanted = { username: addr, filter_type: data.type, active: '1', script_desc: '관리자 필터', script_data: source };
       return audit.run({ actor, ip, action: 'filter.create', target: addr, kind: 'config', revertible: false, before: { type: data.type, sha256: sha256(''), bytes: 0 }, after: state({ ...wanted, id: '' }), ...hashes('', source) }, async intent => {
-        await absent(); await mailcow.call(session, 'POST', '/api/v1/add/filter', wanted);
+        await absent(); await retirement?.assertAdminScript(session, source, addr); await mailcow.call(session, 'POST', '/api/v1/add/filter', wanted);
         const beforeIds = new Set(beforeRows.map(row => String(row.id))), saved = (await filterRows(session, addr)).filter(row => row.filter_type === data.type && String(row.active) === '1' && !beforeIds.has(String(row.id)));
         if (saved.length !== 1 || !isDeepStrictEqual(state(saved[0]), state({ ...wanted, id: saved[0].id }))) throw verifyFailed();
         return { ...dto(saved[0]), auditId: intent.id };
@@ -155,6 +157,7 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
   history.register('filter.create', { label: '관리자 필터를 만들었어요' });
   history.register('filter.edit', {
     label: '관리자 필터를 바꿨어요',
+    runLocked: (target, operation) => routingLock(() => lock.run(target, operation)),
     read: async ({ session, target, record }) => state((await filterRows(session, target)).find(row => String(row.id) === String(record.before.id))),
     prepare: async ({ record, intent }) => { const before = await backups.read(record, 'before'), after = await backups.read(record, 'after'); await backups.write(intent.id, after, before); },
     write: async ({ session, target, expected, value, record }) => {
@@ -164,5 +167,5 @@ export function createFiltersService({ mailcow, dockerapi, audit, lock, history,
       await apply(session, target, String(value.id), expected, value, source);
     },
   });
-  return { list, edit, create, user, checks };
+  return { list, edit: args => routingLock(() => edit(args)), create: args => routingLock(() => create(args)), user, checks };
 }

@@ -191,3 +191,71 @@ test('retirement routes: recipient/script guards and lock failure stop before th
   f.options.lockError = new AppError(503,'RETIREMENT_BLOCK_UNAVAILABLE','busy'); let writes = 0;
   await assert.rejects(f.routing.withRoutingLock(() => { writes++; }), { statusCode: 503 }); assert.equal(writes, 0); assert.equal(f.lockCalls, 1);
 });
+
+test('retirement writes: projected alias chains and alias-domain namespaces cannot introduce a blocked recipient', async () => {
+  const f = fixture();
+  for (const mutation of [
+    { kind: 'alias', address: 'new@example.test', after: alias('new@example.test', owner) },
+    { kind: 'alias', address: 'new@example.test', after: alias('new@example.test', 'retired+tag@example.test') },
+    { kind: 'alias-domain', address: 'new.test', after: { alias_domain: 'new.test', target_domain: 'example.test', active: 1 } },
+    { kind: 'domain', address: 'example.test', after: { active: 0 } },
+    { kind: 'mailbox', address: owner, after: { active: 1 } },
+  ]) await assert.rejects(f.routing.assertMutation({}, mutation), { statusCode: 409, code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(f.calls.filter(row => row.method !== 'GET').length, 0);
+});
+
+test('retirement writes: a fresh alias-domain is rejected even though its new envelope key is not in the DB', async () => {
+  const f = fixture();
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias-domain', address: 'new.test', after: { alias_domain: 'new.test', target_domain: 'example.test', active: 1 } }), error => error.code === 'RETIREMENT_ROUTE_PROTECTED' && error.message.includes('먼저 해당 계정의 수신 차단을 끄세요'));
+  assert.ok(f.dbCalls.at(-1).includes(owner)); assert.ok(f.dbCalls.at(-1).includes('retired@new.test'));
+});
+
+test('retirement writes: protected alias cannot be deleted or reassigned; unrelated healthy aliases still work', async () => {
+  const f = fixture(), protectedAlias = 'protected@example.test'; f.facts.aliases.push(alias(protectedAlias, owner));
+  f.store.blockedRecipients = async addresses => addresses.filter(value => [owner, protectedAlias].includes(value));
+  for (const after of [null, alias(protectedAlias, healthy)]) await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: protectedAlias, after }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  await f.routing.assertMutation({}, { kind: 'alias', address: 'new@example.test', after: alias('new@example.test', healthy) });
+  await f.routing.assertMutation({}, { kind: 'alias', address: protectedAlias, after: { ...f.facts.aliases.at(-1), sender_allowed: '1' } });
+});
+
+test('retirement writes: projected fallback captures, reactivation and indirect targets are guarded', async () => {
+  const f = fixture(); f.facts.aliasDomains.push({ alias_domain: 'alternate.test', target_domain: 'example.test', active: 1 });
+  f.facts.aliases.push(alias('retired@alternate.test', healthy), alias('first@example.test', owner));
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: 'retired@alternate.test', after: null }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: 'new@example.test', after: alias('new@example.test', 'first@example.test') }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  f.facts.aliasDomains[0].active = 0;
+  f.facts.aliases = f.facts.aliases.filter(row => row.address !== 'retired@alternate.test');
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias-domain', address: 'alternate.test', after: { active: 1 } }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+});
+
+test('retirement writes: admin script guards target chains and the blocked owner before enabling forwarding', async () => {
+  const f = fixture(); f.facts.aliases.push(alias('indirect@example.test', owner));
+  for (const [target, sender] of [[owner, healthy], ['retired+tag@example.test', healthy], ['indirect@example.test', healthy], [healthy, owner]]) {
+    await assert.rejects(f.routing.assertAdminScript({}, `redirect :copy "${target}";`, sender), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  }
+  await f.routing.assertAdminScript({}, 'discard;', owner);
+  await f.routing.assertAdminScript({}, `redirect :copy "${healthy}";`, team);
+  await assert.rejects(f.routing.assertAdminScript({}, 'include "dynamic";', healthy), { code: 'FILTER_UNINSPECTABLE' });
+});
+
+test('retirement writes: DB failure propagates and healthy removal does not require invented recipients', async () => {
+  const f = fixture(); await f.routing.assertMutation({}, { kind: 'alias', address: healthy, after: null });
+  f.options.dbError = new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', 'unavailable');
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: 'new@example.test', after: alias('new@example.test', healthy) }), { statusCode: 503 });
+  await assert.rejects(f.routing.assertAdminScript({}, `redirect :copy "${healthy}";`, team), { statusCode: 503 });
+});
+
+test('retirement writes: unresolved literal compatibility does not change the ON inspection blockers', async () => {
+  const f = fixture();
+  await f.routing.assertMutation({}, { kind: 'alias', address: 'future@example.test', after: alias('future@example.test', 'not-created@example.test') });
+  await f.routing.assertAdminScript({}, 'redirect :copy "not-created@example.test";', healthy);
+  f.filters.push(filter('redirect :copy "not-created@example.test";'));
+  assert.ok(codes(await inspect(f)).includes('FILTER_ROUTE_UNKNOWN'));
+  f.store.blockedRecipients = async values => values.filter(value => value === 'not-created@example.test');
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: 'future@example.test', after: alias('future@example.test', 'not-created@example.test') }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+});
+
+test('retirement writes: a new alias-domain cannot activate a previously external alias cycle', async () => {
+  const f = fixture(); f.facts.aliases[0].goto = 'retired@loop.test'; f.store.blockedRecipients = async () => [];
+  await assert.rejects(f.routing.assertMutation({}, { kind: 'alias-domain', address: 'loop.test', after: { target_domain: 'example.test', active: 1 } }), { statusCode: 409, code: 'RETIREMENT_ROUTES_REMAIN' });
+});

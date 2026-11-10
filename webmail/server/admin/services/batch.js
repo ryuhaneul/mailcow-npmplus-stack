@@ -69,7 +69,8 @@ const validHost = value => isIPv4(value) || !/^\d+(?:\.\d+){3}$/.test(value) && 
 const sameJob = (job, row) => normalize(job.user1) === normalize(row.source) && normalize(job.host1) === row.host && normalize(job.user2) === row.target;
 // toolkit/app/mailcow_api.py add_syncjob defaults with api_batch_create's basic inputs.
 const syncDefaults = { port1: '993', enc1: 'SSL', mins_interval: '20', subfolder2: '', maxage: '0', maxbytespersecond: '0', timeout1: '600', timeout2: '600', exclude: '', custom_params: '', delete2duplicates: '1', delete1: '0', delete2: '0', automap: '1', skipcrossduplicates: '0', subscribeall: '1', active: '1' };
-export function createBatchService({ mailcow, accounts, domains, teams, aliases, audit, lock }) {
+export function createBatchService({ mailcow, accounts, domains, teams, aliases, audit, lock, retirement = null }) {
+  const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   async function rows(session, path) {
     const result = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
     if (Array.isArray(result)) return result;
@@ -169,7 +170,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     return { kind, rows: result, normal: result.filter(row => row.valid).length, errors: result.filter(row => !row.valid).length };
   }
   async function executeSync({ session, actor, ip, row, options, sourcePassword }) {
-    return lock.run(`sync-create:${row.target}`, async () => {
+    return routingLock(() => lock.run(`sync-create:${row.target}`, async () => {
       let mailboxCreated = false;
       const identity = { source: row.source, host: row.host, target: row.target };
       try {
@@ -201,7 +202,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
         return sanitizeSyncResponse({ line: row.line, ...identity, result: mailboxCreated ? 'partial' : 'failed', mailboxCreated, code: code(error), error: error instanceof AppError ? error.message : '동기화 작업을 만들지 못했어요.',
           ...(mailboxCreated ? { recovery: ['대상 메일함은 만들어졌고 동기화 작업만 실패 — 이 줄만 다시 실행하면 메일함은 그대로 두고 작업만 만듦'] } : {}) }, [sourcePassword]);
       }
-    });
+    }));
   }
   async function executeRow({ session, actor, ip, kind, row, options, sourcePassword }) {
     const steps = []; let initialPassword;
@@ -223,7 +224,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
       return { line: row.line, email: row.email, ...result, ...(result.result === 'ok' && !result.steps.length ? { unchanged: true } : {}) };
     } catch (error) {
       if (error instanceof MailcowAuthLost) throw error;
-      return { line: row.line, ...(kind === 'aliases' ? { address: row.address } : { email: row.email }), result: steps.length ? 'partial' : 'failed', code: code(error),
+      return { line: row.line, ...(kind === 'syncjobs' ? { source: row.source, host: row.host, target: row.target } : kind === 'aliases' ? { address: row.address } : { email: row.email }), result: steps.length ? 'partial' : 'failed', code: code(error),
         error: error instanceof AppError ? sanitizeSyncResponse(error.message, initialPassword ? [initialPassword] : []) : '일괄 작업 중 오류가 발생했어요.',
         steps, ...(steps.length ? { recovery: ['도메인은 만들어졌어요. 메일함 상태를 확인한 뒤 해당 줄만 다시 실행해 주세요.'] } : {}) };
     } finally { initialPassword = undefined; }

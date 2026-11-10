@@ -143,6 +143,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   }
   async function editAliasPreservingSenders(session, alias, body, changed = () => {}) {
     const addr = normalize(alias.address), destinations = targets(body.attr.goto);
+    await retirement?.routing.assertMutation(session, { kind: 'alias', address: addr, after: { ...alias, ...body.attr } });
     // Every caller holds the alias address key already; never re-enter that key.
     // Keep flow → alias → sorted mailbox order; goto may also contain alias addresses.
     const mailboxKeys = [...new Set((await rows(session, 'mailbox/all')).map(row => normalize(row.username))
@@ -249,12 +250,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   async function save(session, addr, before, after, attempted = () => {}) {
     assertUnchanged(etag(before), snapshot(await box(session, addr)));
     const attr = attrs(before, after);
+    if (before.active !== after.active) await retirement?.routing.assertMutation(session, { kind: 'mailbox', address: addr, after: { active: after.active } });
     if (Object.keys(attr).length) { attempted(); await mailcow.call(session, 'POST', '/api/v1/edit/mailbox', { items: [addr], attr }); }
     const applied = snapshot(await box(session, addr));
     if (!isDeepStrictEqual(applied, after)) throw verifyFailed();
     return applied;
   }
-  const adapter = { label: '계정 설정을 바꿨어요', read: async ({ session, target }) => snapshot(await box(session, target)),
+  const adapter = { runLocked: (target, operation) => routingLock(() => lock.run(target, operation)), label: '계정 설정을 바꿨어요', read: async ({ session, target }) => snapshot(await box(session, target)),
     write: ({ session, target, value, expected }) => save(session, target, expected, value) };
   history.register('mailbox.edit', adapter); history.register('mailbox.sender', adapter);
   async function edit({ session, actor, ip, addr: rawAddress, data }) {
@@ -339,6 +341,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           await cleanupNetlimit({ actor, ip, addr });
           await audit.run({ actor, ip, action: 'mailbox/create', target: addr, kind: 'config', revertible: false, before: {}, after: { ...desired, password: 'set' } }, async intent => {
             const body = { local_part: addr.split('@')[0], domain, name: data.name, quota: String(quotaGb * 1024), active: '1', force_pw_update: '0', tls_enforce_in: '1', tls_enforce_out: '1', password: password.toString(), password2: password.toString() };
+            await retirement?.routing.assertMutation(session, { kind: 'mailbox', address: addr, after: { username: addr, active: 1 } });
             try { await mailcow.call(session, 'POST', '/api/v1/add/mailbox', body); }
             finally { delete body.password; delete body.password2; }
             mailbox = snapshot(await box(session, addr));
@@ -366,6 +369,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
               await assertReusable(alias);
               if ((await rows(session, 'alias/all')).some(row => normalize(row.address) === alias) || (await rows(session, 'mailbox/all')).some(row => normalize(row.username) === alias)) throw new AppError(409, 'ALIAS_EXISTS', '이미 있는 주소라 별칭을 만들지 않았어요.');
               await audit.run({ actor, ip, action: 'alias/create', target: alias, kind: 'config', revertible: false, before: {}, after: { address: alias, targets: [addr], active: 1 } }, async intent => {
+                await retirement?.routing.assertMutation(session, { kind: 'alias', address: alias, after: { address: alias, goto: addr, active: 1 } });
                 await aliasApi.add(session, { address: alias, goto: addr, active: '1', sogo_visible: '0', comment: '' });
                 const checked = (await rows(session, 'alias/all')).find(row => normalize(row.address) === alias);
                 if (!checked || !isDeepStrictEqual(targets(checked.goto), [addr]) || String(checked.active) !== '1') throw verifyFailed();
@@ -509,7 +513,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 assertUnchanged(etag(alias), current ?? {});
                 const remaining = targets(alias.goto).filter(target => target !== addr);
                 if (remaining.length) await editAliasPreservingSenders(session, alias, { items: [String(alias.id)], attr: { goto: remaining.join(',') } }, () => { touched = true; });
-                else await aliasApi.remove(session, [String(alias.id)]);
+                else {
+                  // Permanent deletion only: remove this owner's alias while its rejection keys remain until mailbox absence is verified.
+                  await aliasApi.remove(session, [String(alias.id)]);
+                }
                 const checked = (await rows(session, 'alias/all')).find(row => String(row.id) === String(alias.id));
                 if (remaining.length ? !checked || !isDeepStrictEqual(targets(checked.goto), remaining) : Boolean(checked)) throw verifyFailed();
               });
@@ -944,6 +951,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
                 stage = 'mailbox';
               }
               assertUnchanged(etag(plan.state.netlimit), await netState(old));
+              await retirement?.routing.assertMutation(session, { kind: 'mailbox', address: next, after: { username: next, active: plan.account.active } });
               await mailcow.call(session, 'POST', '/api/v1/edit/rename-mbox', { items: [old], attr: { domain: old.split('@')[1], old_local_part: old.split('@')[0], new_local_part: next.split('@')[0], create_alias: '0' } });
               renamed = true;
               await verifyMailbox();
@@ -1012,6 +1020,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           await lock.run(old, async () => {
             await runStage('oldAlias', old, {}, { address: old, targets: [next] }, async () => {
               if ((await rows(session, 'alias/all')).some(item => normalize(item.address) === old)) throw new AppError(409, 'ADDRESS_IN_USE', '옛 주소가 이미 별칭으로 있어요. 현재 대상을 확인해 주세요.');
+              await retirement?.routing.assertMutation(session, { kind: 'alias', address: old, after: { address: old, goto: next, active: 1 } });
               await aliasApi.add(session, { address: old, goto: next, active: '1', sogo_visible: '0', comment: '' });
               const checked = (await rows(session, 'alias/all')).find(item => normalize(item.address) === old);
               if (!checked || String(checked.active) !== '1' || !isDeepStrictEqual(targets(checked.goto), [next])) throw verifyFailed();
@@ -1078,6 +1087,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const internal = new Set(boxes.filter(row => String(row.active) === '1').map(row => normalize(row.username)));
     const destinations = direction === 'mailbox-to-alias' ? options.targets : [options.copyTo, options.sendGrantTo].filter(Boolean);
     if (destinations.some(destination => destination === addr || !internal.has(destination))) throw invalid();
+    await retirement?.routing.assertMutation(session, { kind: 'mailbox', address: addr, after: direction === 'mailbox-to-alias' ? null : { username: addr, active: 1 } });
+    if (direction === 'mailbox-to-alias') await retirement?.routing.assertMutation(session, { kind: 'alias', address: addr, after: { address: addr, goto: options.targets.join(','), active: 1 } });
     const senders = boxes.filter(row => normalize(row.username) !== addr && (targets(row.sender_acl).includes(addr) || normalize(row.username) === options.sendGrantTo)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const senderVersions = senders.map(row => ({ address: normalize(row.username), sha256: etag(row.sender_acl) }));
     const senderRestore = senders.filter(row => targets(row.sender_acl).includes(addr));
@@ -1175,6 +1186,12 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           { stage: 'grant', message: '권한 화면에서 요청자의 보내기 권한 목록에 새 메일함 주소를 추가해 주세요.' },
         ];
         const mutate = async (path, body) => {
+          if (path === '/api/v1/add/alias') await retirement?.routing.assertMutation(session, { kind: 'alias', address: body.address, after: body });
+          if (path === '/api/v1/add/mailbox') await retirement?.routing.assertMutation(session, { kind: 'mailbox', address: `${body.local_part}@${body.domain}`, after: { username: `${body.local_part}@${body.domain}`, active: body.active } });
+          if (['/api/v1/delete/alias', '/api/v1/edit/alias'].includes(path) && retirement) for (const id of body.items ?? body) {
+            const alias = (await rows(session, 'alias/all')).find(row => String(row.id) === String(id));
+            if (alias) await retirement.routing.assertMutation(session, { kind: 'alias', address: alias.address, after: path === '/api/v1/delete/alias' ? null : { ...alias, ...body.attr } });
+          }
           const value = path === '/api/v1/add/alias' ? await aliasApi.add(session, body) : path === '/api/v1/edit/alias' ? await aliasApi.edit(session, body) :
             path === '/api/v1/delete/alias' ? await aliasApi.remove(session, body) : await mailcow.call(session, 'POST', path, body);
           touched = true; return value;
@@ -1294,7 +1311,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       });
     } finally { password?.fill(0); }
   }
-  return { list, quotaList, detail, create: args => routingLock(() => create(args)), edit, deletePreview,
+  return { list, quotaList, detail, create: args => routingLock(() => create(args)), edit: args => routingLock(() => edit(args)), deletePreview,
     remove: args => routingLock(() => lifecycleRun(args)), leave: args => args.data?.action === 'preview' ? leave(args) : routingLock(() => leave(args)),
     rename: args => args.data?.action === 'preview' ? rename(args) : routingLock(() => rename(args)),
     convert: args => args.data?.action === 'preview' ? convert(args) : routingLock(() => convert(args)), retirementPreview, retirementUpdate };

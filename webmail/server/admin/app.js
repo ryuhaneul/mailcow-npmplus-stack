@@ -158,7 +158,13 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const shares = createSharesService({ mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, config, audit, lock: adminLock, history });
   app.decorate('shares', shares);
   await app.register(sharesRoutes, { service: shares });
-  const teams = createTeamsService({ mailcow: app.mailcow, audit, lock: adminLock, history, auditDir: config.auditDir });
+  const retirementStore = retirement.store ?? createRetirementStore({ config, mode: 'admin' });
+  const retirementRouting = retirement.routing ?? createRetirementRouting({ mailcow: app.mailcow, dockerapi: sharesDockerapi, store: retirementStore });
+  const retirementOptions = { store: retirementStore, routing: retirementRouting,
+    featureEnabled: retirement.featureEnabled ?? config.retirementReceiveBlockEnabled ?? false,
+    ready: retirement.ready ?? false }; // P6: replace the false fallback only with verified deployment readiness.
+  app.addHook('onClose', async () => { await retirementStore.close?.(); });
+  const teams = createTeamsService({ retirement: retirementRouting, mailcow: app.mailcow, audit, lock: adminLock, history, auditDir: config.auditDir });
   app.decorate('teams', teams);
   await app.register(teamsRoutes, { service: teams });
   const otpStore = otp.store ?? createOtpStore({ config, mode: 'admin' });
@@ -171,12 +177,6 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const authPolicy = createAuthPolicyListener({ config: config.authPolicy, store: protocolNetlimitStore, logger: app.log });
   app.addHook('onReady', async () => { await authPolicy.start(); });
   app.addHook('preClose', async () => { await authPolicy.stop(); });
-  const retirementStore = retirement.store ?? createRetirementStore({ config, mode: 'admin' });
-  const retirementRouting = retirement.routing ?? createRetirementRouting({ mailcow: app.mailcow, dockerapi: sharesDockerapi, store: retirementStore });
-  const retirementOptions = { store: retirementStore, routing: retirementRouting,
-    featureEnabled: retirement.featureEnabled ?? config.retirementReceiveBlockEnabled ?? false,
-    ready: retirement.ready ?? false }; // P6: replace the false fallback only with verified deployment readiness.
-  app.addHook('onClose', async () => { await retirementStore.close?.(); });
   const accounts = createAccountsService({ retirement: retirementOptions, mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });
@@ -210,10 +210,10 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   app.addHook('preClose', async () => monitorScheduler.stop());
   await app.register(monitorRoutes, { service: monitor });
 
-  const aliases = createAliasesService({ mailcow: app.mailcow, audit, lock: adminLock, history });
+  const aliases = createAliasesService({ retirement: retirementRouting, mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('aliases', aliases);
   await app.register(aliasesRoutes, { service: aliases });
-  const domains = createDomainsService({ mailcow: app.mailcow, audit, lock: adminLock, history });
+  const domains = createDomainsService({ retirement: retirementRouting, mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('domains', domains);
   await app.register(domainsRoutes, { service: domains });
   const loginIpStore = loginIps.store ?? createLoginIpStore({ ...loginIps, config, mode: 'admin' });
@@ -232,16 +232,16 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const senders = createSendersService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('senders', senders);
   await app.register(sendersRoutes, { service: senders });
-  const flows = createFlowsService({ mailcow: app.mailcow, teams, aliases, senders, audit, lock: adminLock });
+  const flows = createFlowsService({ retirement: retirementRouting, mailcow: app.mailcow, teams, aliases, senders, audit, lock: adminLock });
   app.decorate('flows', flows);
   await app.register(flowsRoutes, { service: flows });
-  const filters = createFiltersService({ mailcow: app.mailcow, dockerapi, audit, lock: adminLock, history, auditDir: config.auditDir });
+  const filters = createFiltersService({ retirement: retirementRouting, mailcow: app.mailcow, dockerapi, audit, lock: adminLock, history, auditDir: config.auditDir });
   app.decorate('filters', filters);
   await app.register(filtersRoutes, { service: filters });
   const sync = createSyncService({ mailcow: app.mailcow, audit, lock: adminLock, history });
   app.decorate('sync', sync);
   await app.register(syncRoutes, { service: sync });
-  const batch = createBatchService({ mailcow: app.mailcow, accounts, domains, teams, aliases, audit, lock: adminLock });
+  const batch = createBatchService({ retirement: retirementRouting, mailcow: app.mailcow, accounts, domains, teams, aliases, audit, lock: adminLock });
   app.decorate('batch', batch);
   await app.register(batchRoutes, { service: batch });
   const quarantine = createQuarantineService({ mailcow: app.mailcow, audit, lock: adminLock });

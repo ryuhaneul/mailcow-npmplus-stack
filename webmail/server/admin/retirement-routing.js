@@ -227,5 +227,54 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
     if (blocked.length) { const error = new AppError(409, 'RETIREMENT_RECIPIENT_BLOCKED', '수신 차단된 계정으로 전달할 수 없어요.'); error.details = { recipients: blocked }; throw error; }
   }
   async function assertScript(source) { await assertRecipients(retirementRedirects(source).map(row => row.target)); }
-  return { inspect, assertReady, assertRecipients, assertScript, withRoutingLock: operation => store.withRoutingLock(operation) };
+  const protectedRoute = () => new AppError(409, 'RETIREMENT_ROUTE_PROTECTED', '먼저 해당 계정의 수신 차단을 끄세요.');
+  async function routingFacts(session) {
+    const [mailboxes, aliases, aliasDomains, domains] = await Promise.all(['mailbox/all', 'alias/all', 'alias-domain/all', 'domain/all'].map(path => rows(session, path)));
+    return { mailboxes, aliases, aliasDomains, domains };
+  }
+  async function assertAdminScript(session, source, owner) {
+    const redirects = retirementRedirects(source).map(row => row.target).filter(target => target !== 'null@localhost');
+    if (!redirects.length) return;
+    const graph = createRetirementGraph(await routingFacts(session)), keys = [...redirects];
+    for (const target of redirects) {
+      const result = graph.resolve(target);
+      if (result.problems.some(issue => issue.code !== 'UNRESOLVED_INTERNAL')) throw refused();
+      keys.push(...result.targets, ...result.problems.map(issue => issue.address));
+    }
+    if (owner) keys.push(retirementAddress(owner));
+    if ((await store.blockedRecipients(unique(keys))).length) throw protectedRoute();
+  }
+  async function assertMutation(session, { kind, address, after, owner }) {
+    const fields = { alias: ['aliases', 'address'], 'alias-domain': ['aliasDomains', 'alias_domain'], mailbox: ['mailboxes', 'username'], domain: ['domains', 'domain_name'] };
+    if (!fields[kind]) throw unavailable();
+    const facts = await routingFacts(session), [collection, field] = fields[kind];
+    const name = String(address).trim().toLowerCase();
+    const rowName = row => String(row[field] ?? (kind === 'domain' ? row.domain : '')).trim().toLowerCase();
+    const original = facts[collection].find(row => rowName(row) === name);
+    const changed = after === null ? null : { ...original, ...after, [field]: name };
+    if (kind === 'alias' && original && changed && original.goto === changed.goto && String(original.active) === String(changed.active)) return;
+    const projected = { ...facts, [collection]: [...facts[collection].filter(row => rowName(row) !== name), ...(changed ? [changed] : [])] };
+    const before = createRetirementGraph(facts), next = createRetirementGraph(projected);
+    const names = new Set([...facts.aliases, ...projected.aliases].map(row => String(row.address).trim().toLowerCase()).filter(value => !value.startsWith('@')));
+    for (const mailbox of [...facts.mailboxes, ...projected.mailboxes]) {
+      const addr = retirementAddress(mailbox.username); names.add(addr);
+      for (const map of [...facts.aliasDomains, ...projected.aliasDomains]) if (String(map.target_domain).toLowerCase() === addr.split('@')[1]) names.add(`${addr.split('@')[0]}@${String(map.alias_domain).toLowerCase()}`);
+    }
+    if (['alias','mailbox'].includes(kind) && !name.startsWith('@')) names.add(name);
+    const protectedKeys = owner ? [retirementAddress(owner)] : [];
+    for (const envelope of names) {
+      const old = before.resolve(envelope), value = next.resolve(envelope);
+      if (kind === 'alias-domain' && JSON.stringify(old) !== JSON.stringify(value) && value.problems.some(issue => issue.code === 'ALIAS_LOOP')) throw refused();
+      const explicit = ['alias','mailbox'].includes(kind) && envelope === name;
+      const domainAffected = kind === 'domain' && (envelope.split('@')[1] === name || [...before.mappedDomains, ...next.mappedDomains].some(([alias, target]) => target === name && envelope.split('@')[1] === alias));
+      if (explicit || domainAffected || JSON.stringify(old) !== JSON.stringify(value)) protectedKeys.push(envelope, ...value.targets, ...value.problems.filter(issue => issue.code === 'UNRESOLVED_INTERNAL').map(issue => issue.address));
+    }
+    if (kind === 'alias' && changed && enabled(changed.active)) {
+      const result = next.resolveAlias(name);
+      if (result.problems.some(issue => issue.code !== 'UNRESOLVED_INTERNAL')) throw refused();
+      protectedKeys.push(...destinations(changed.goto).filter(target => target !== 'null@localhost'), ...result.targets, ...result.problems.map(issue => issue.address));
+    }
+    if ((await store.blockedRecipients(unique(protectedKeys))).length) throw protectedRoute();
+  }
+  return { inspect, assertReady, assertRecipients, assertScript, assertAdminScript, assertMutation, withRoutingLock: operation => store.withRoutingLock(operation) };
 }

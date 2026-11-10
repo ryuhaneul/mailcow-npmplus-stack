@@ -1,3 +1,6 @@
+import { AppError } from '../../server/errors.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -260,7 +263,7 @@ test('audit: prepare runs before intent, safe hash exceptions are narrow, ordina
 
 test('teams HTTP: authentication, CSRF, list and member editing use the existing guard and history', async t => {
   const f = await fixture(t);
-  const app = await createAdminApp({ config: { adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir }, logger: false,
+  const app = await createAdminApp({ retirement: { routing: { withRoutingLock: operation => operation(), assertAdminScript: async () => {}, assertMutation: async () => {} } }, config: { adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir }, logger: false,
     auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } });
   t.after(() => app.close());
   assert.equal((await app.inject('/api/admin/teams')).statusCode, 403);
@@ -509,4 +512,55 @@ test('teams convert: undo preserves alias when filter restoration cannot be veri
   await assert.rejects(f.history.revert(result.auditId, { confirm: true, session: {} }), { code: 'WRITE_VERIFY_FAILED' });
   assert.equal(f.options.aliases.length, 1); assert.equal(f.rows[0].script_data, preview.after);
   assert.ok(!writes(f).some(row => row.path === '/api/v1/delete/alias'));
+});
+
+function retirementGuard(f) {
+  const blocked = new Set(), scope = new AsyncLocalStorage(), events = [];
+  const store = { async blockedRecipients(values) { return values.filter(value => blocked.has(value) || blocked.has(value.replace(/\+[^@]+@/, '@'))); },
+    async withRoutingLock(operation) { if (scope.getStore()) return operation(); events.push('named'); return scope.run(true, operation); } };
+  const call = f.mailcow.call, run = f.lock.run;
+  f.mailcow.call = (...args) => { if (args[1] === 'POST') assert.equal(scope.getStore(), true, 'named lock must surround writes'); return call(...args); };
+  f.lock.run = (key, operation) => { events.push(`resource:${key}`); return run(key, operation); };
+  const routing = createRetirementRouting({ mailcow: f.mailcow, store });
+  return { blocked, events, routing };
+}
+
+async function protectedTeam(t, source = `require ["copy"];\nredirect :copy "${first}";\nredirect :copy "${second}";\n`) {
+  const f = await fixture(t, source), g = retirementGuard(f); f.service = createTeamsService({ ...f, auditDir: f.dir, retirement: g.routing }); return { f, g };
+}
+test('retirement team guard: change, forward and create reject blocked members before first API write', async t => {
+  const { f, g } = await protectedTeam(t); g.blocked.add(next);
+  await assert.rejects(change(f, (await item(f)).etag), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  const p = await f.service.previewForward({}, team, next);
+  await assert.rejects(f.service.forward({ session: {}, actor: 'admin', team, member: next, etag: p.etag }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  f.rows.length = 0;
+  await assert.rejects(f.service.create({ session: {}, actor: 'admin', teamAddress: team, members: [first, next] }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, 0); assert.equal(g.events[0], 'named');
+});
+test('retirement team guard: bundled alias edit and history restoration use the same protection', async t => {
+  const { f, g } = await protectedTeam(t, `require ["copy"];\nredirect :copy "bundle@example.com";\n`);
+  f.options.aliases = [{ id: 7, address: 'bundle@example.com', goto: `${first},${second}`, active: '1', private_comment: 'mailadmin:team-members' }];
+  const changed = await change(f, (await item(f)).etag, false, first); const count = writes(f).length;
+  g.blocked.add(first); g.events.length = 0;
+  await assert.rejects(f.history.revert(changed.auditId, { confirm: true, session: {}, actor: 'admin' }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+  assert.equal(writes(f).length, count); assert.equal(g.events[0], 'named');
+  g.blocked.add(next); await assert.rejects(change(f, (await item(f)).etag), { code: 'RETIREMENT_ROUTE_PROTECTED' });
+});
+test('retirement team guard: blocked owner cannot gain forwarding even to an allowed recipient', async t => {
+  const { f, g } = await protectedTeam(t, null); g.blocked.add(team);
+  const p = await f.service.previewForward({}, team, next);
+  await assert.rejects(f.service.forward({ session: {}, actor: 'admin', team, member: next, etag: p.etag }), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0);
+});
+
+test('retirement team guard: conversion guards both its member alias and history source before writes', async t => {
+  const { f, g } = await protectedTeam(t, `require ["copy"];\nredirect :copy "${first}";\nredirect :copy "${second}";\nredirect :copy "${next}";\n`);
+  const p = await f.service.previewConvert({}, team), r = await f.service.convert({ session: {}, actor: 'admin', team, etag: p.etag });
+  assert.ok(r.auditId); const count = writes(f).length; g.blocked.add(first);
+  await assert.rejects(f.history.revert(r.auditId, { confirm: true, session: {}, actor: 'admin' }), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, count);
+});
+
+test('retirement team guard: a blocked owner cannot gain forwarding through an existing member bundle', async t => {
+  const { f, g } = await protectedTeam(t, `require ["copy"];\nredirect :copy "bundle@example.com";\n`);
+  f.options.aliases = [{ id: 7, address: 'bundle@example.com', goto: `${first},${second}`, active: '1', private_comment: 'mailadmin:team-members' }];
+  g.blocked.add(team); await assert.rejects(change(f, (await item(f)).etag), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0);
 });

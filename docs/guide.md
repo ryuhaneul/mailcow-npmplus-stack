@@ -1824,6 +1824,7 @@ readiness는 마지막 배포 준비 검증이며 실시간 SMTP 가용성 검�
 - public Sieve guard는 SELECT와 저장 사이에 경합 창이 남습니다. admin 관련 쓰기는 공통 named lock을 사용합니다.
 - mailcow UI/API·직접 ManageSieve 변경은 앱 쓰기 guard의 통제 밖입니다. 배포 밖 수동 변경도 지속 감시하지 않습니다.
 - R의 DB map 오류는 R까지 도달한 **모든 RCPT**를 4xx로 지연시킵니다. 정상 외부 수신과 인증 사용자의 외부 발송도 포함합니다. B에서 먼저 끝난 RCPT까지 R이 검사했다는 뜻은 아닙니다.
+- DB 접속이 복구된 뒤에도 Postfix SQL map 이 잠시 4xx 를 유지할 수 있습니다(시험 환경에서 권한 복구 후 약 2분 관찰, 정확한 상한은 측정하지 않음). 이 동안 메일은 반송되지 않고 보낸 쪽이 다시 보냅니다.
 - 지속 장애는 송신 측 또는 이미 접수된 전달 큐의 만료·DSN을 일으킬 수 있습니다. 이미 접수한 메일을 취소하거나 반송이 없다고 보장하지 않습니다.
 - alias/alias-domain/plus fallback·Sieve 재주입·실제 uid/gid/SELinux·공식 update 후 보존은 격리 VM 통합 시험이 필요합니다. 로컬 fixture는 실배달 증거가 아닙니다.
 

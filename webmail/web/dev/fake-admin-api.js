@@ -44,6 +44,21 @@ export function createFakeAdminApi() {
     { address: 'off@example.com', name: '합성 비활성', kind: 'personal', active: 0, quotaGb: 20, usedBytes: 0, messages: 0 },
     { address: 'admin@example.com', name: '합성 관리', kind: 'admin', active: 2, quotaGb: 3, usedBytes: 1024, messages: 1 },
   ].map(row => ({ ...row, protocols: { ...accountProtocols }, senderAcl: [] })) };
+  state.accounts.retirementFeatureEnabled = true;
+  state.accounts.retirementBlockers = [];
+  state.accounts.retirementChanges = [];
+  state.accounts.retirementBodies = [];
+  const retirementInfo = row => ({ retired: false, receiveBlocked: false, pendingOperation: null, forwarding: [], recordedAt: null, ...row.retirement,
+    featureEnabled: state.accounts.retirementFeatureEnabled,
+    effectiveReceiveBlock: row.retirement?.receiveBlocked ? state.accounts.retirementFeatureEnabled ? 'on' : 'unverified' : 'off', warnings: [] });
+  function retirementPlan(row, body) {
+    const retirement = retirementInfo(row), targets = retirement.forwarding || [];
+    return { address: row.address, etag: `synthetic-account-${state.accounts.version}`, retirement, after: { receiveBlocked: body.receiveBlocked, ...(Object.hasOwn(body, 'forwardTo') ? { forwardTo: body.forwardTo } : {}) },
+      forwarding: targets.length ? [{ address: row.address, source: 'admin', type: 'prefilter', inspected: true, targets }] : [],
+      forwardingChange: { effect: body.forwardTo === null ? 'remove-managed' : body.forwardTo ? 'add' : 'kept', existingTargets: targets, message: body.forwardTo === null ? '미리보기에 표시된 관리 전달만 지워요.' : body.forwardTo ? `새 메일 전달: ${body.forwardTo}` : '기존 전달을 유지해요.' },
+      changes: state.accounts.retirementChanges, blockers: state.accounts.retirementBlockers,
+      canPrepare: state.accounts.retirementBlockers.length === 0, cleanupRequired: state.accounts.retirementChanges.length > 0, warnings: [] };
+  }
   state.accountRefs = { aliases: [{ address: 'contact@example.com', targets: ['person@example.com'], active: 1, senderAllowed: false }], teams: [{ mailbox: 'team@example.com', filterId: 8, members: ['person@example.com', 'other@example.com'] }], senders: [{ mailbox: 'person@example.com', sendAs: 'team@example.com', direction: 'received' }], shares: [{ owner: 'team@example.com', grantee: 'person@example.com', mailbox: 'INBOX', rights: ['lookup', 'read'] }], syncjobs: [{ id: 9, target: 'person@example.com', active: 1 }] };
   const leaveWarnings = [{ code: 'LOGIN_BLOCK_DELAY', message: '로그인 차단은 최대 5분 안에 적용돼요' }, { code: 'REMOVE_DEVICE_ACCOUNT', message: '퇴사자 기기의 메일 계정 설정을 지워 주세요' }];
   state.distribution = { readError: null, teamError: null, aliasError: null, senderError: null, flowError: null, flowResult: 'ok', flowBodies: [], version: 1,
@@ -266,16 +281,17 @@ export function createFakeAdminApi() {
     }
     const operationResource=/^\/api\/admin\/(shares|syncjobs|fail2ban)(?:\/|$)/.test(url.pathname);
     if(operationResource&&request.method==='GET'&&state.operations.readError)return fail(state.operations.readError);
-    if(url.pathname==='/api/admin/shares'&&request.method==='GET'){const q=(url.searchParams.get('q')||'').toLowerCase(),page=Number(url.searchParams.get('page')||1),items=state.shares.items.filter(row=>(row.owner+' '+row.name).toLowerCase().includes(q));return response.end(JSON.stringify({items:items.slice((page-1)*50,page*50).map(({owner,name,group})=>({owner,name,group})),total:items.length,page,pageSize:50,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings}));}
+    if(url.pathname==='/api/admin/shares'&&request.method==='GET'){const q=(url.searchParams.get('q')||'').toLowerCase(),page=Number(url.searchParams.get('page')||1),items=state.shares.items.filter(row=>state.accounts.items.some(account=>account.address===row.owner&&[1,2].includes(account.active))&&(row.owner+' '+row.name).toLowerCase().includes(q));return response.end(JSON.stringify({items:items.slice((page-1)*50,page*50).map(({owner,name,group})=>({owner,name,group,ownerActive:state.accounts.items.find(row=>row.address===owner)?.active??1})),total:items.length,page,pageSize:50,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings}));}
     const shareMatch=url.pathname.match(/^\/api\/admin\/shares\/(.+)$/);
-    if(shareMatch&&request.method==='GET'){const row=state.shares.items.find(row=>row.owner===decodeURIComponent(shareMatch[1]));return row?response.end(JSON.stringify({...row,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings})):fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});}
+    if(shareMatch&&request.method==='GET'){const address=decodeURIComponent(shareMatch[1]),account=state.accounts.items.find(row=>row.address===address&&[1,2].includes(row.active));if(account&&!state.shares.items.some(row=>row.owner===address))state.shares.items.push({owner:address,name:account.name,grants:[],grantees:[],etag:'share-'+(++state.operations.version)});const row=state.shares.items.find(row=>row.owner===decodeURIComponent(shareMatch[1]));return row&&account?response.end(JSON.stringify({...row,ownerActive:state.accounts.items.find(value=>value.address===row.owner)?.active??1,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings})):fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});}
     if(shareMatch){let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),row=state.shares.items.find(row=>row.owner===decodeURIComponent(shareMatch[1]));if(state.operations.shareError)return fail(state.operations.shareError);if(!row||body.grantee===row.owner)return fail({status:422,code:'INVALID_INPUT',message:'서로 다른 활성 메일함을 선택해 주세요.'});if(body.etag!==row.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.'});if(request.method==='POST'){
+      if(!state.accounts.items.some(value=>value.address===body.grantee&&value.active===1)||!state.accounts.items.some(value=>value.address===row.owner&&[1,2].includes(value.active)))return fail({status:422,code:'INVALID_INPUT',message:'활성 수혜 메일함을 선택해 주세요.'});
       let grant=row.grants.find(value=>value.grantee===body.grantee);
       if(!grant){grant={grantee:body.grantee,folders:[],shared:false,residualFolders:0,readOnly:true};row.grants.push(grant);}
       if(!grant.folders.some(value=>value.mailbox==='INBOX'))grant.folders.push({mailbox:'INBOX',rights:['lookup','read']});
       grant.shared=true;grant.residualFolders=0;
     }else row.grants=row.grants.filter(value=>value.grantee!==body.grantee);
-    row.grantees=row.grants.filter(value=>value.shared).map(value=>value.grantee);row.etag='share-'+(++state.operations.version);return response.end(JSON.stringify({...row,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings,auditId:'77777777777777777777777777777777'}));}
+    row.grantees=row.grants.filter(value=>value.shared).map(value=>value.grantee);row.etag='share-'+(++state.operations.version);return response.end(JSON.stringify({...row,ownerActive:state.accounts.items.find(value=>value.address===row.owner)?.active??1,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings,auditId:'77777777777777777777777777777777'}));}
     if(url.pathname==='/api/admin/syncjobs'&&request.method==='GET')return response.end(JSON.stringify({items:state.syncjobs.items.map(({log,...row})=>row)}));
     const syncMatch=url.pathname.match(/^\/api\/admin\/syncjobs\/(\d+)(\/run-now)?$/);
     if(syncMatch){const row=state.syncjobs.items.find(row=>row.id===syncMatch[1]);if(!row)return fail({status:404,code:'NOT_FOUND',message:'동기화 작업을 찾을 수 없어요.'});if(request.method==='GET'){if(row.custom_params.includes('showpasswords')){const{log,...safe}=row;return response.end(JSON.stringify({...safe,logHidden:true,logHiddenReason:'추가 인자에 showpasswords 가 있어 로그에 원본 암호가 찍힐 수 있음 — 인자에서 빼면 로그를 볼 수 있음'}));}return response.end(JSON.stringify(row));}
@@ -309,7 +325,23 @@ export function createFakeAdminApi() {
     if (url.pathname === '/api/admin/mailboxes' && request.method === 'GET') {
       const q = (url.searchParams.get('q') ?? '').toLowerCase(), kind = url.searchParams.get('kind') ?? 'all', page = Number(url.searchParams.get('page') ?? 1);
       const items = state.accounts.items.filter(row => `${row.name} ${row.address}`.toLowerCase().includes(q) && (kind === 'all' || (kind === 'off' ? row.active !== 1 : row.kind === kind))).sort((a,b) => a.address.localeCompare(b.address));
-      return response.end(JSON.stringify({ items: items.slice((page-1)*50, page*50), total: items.length, page, pageSize: 50 }));
+      return response.end(JSON.stringify({ items: items.slice((page-1)*50, page*50).map(row=>({...row,retirement:retirementInfo(row)})), total: items.length, page, pageSize: 50 }));
+    }
+    const retirementMatch = url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)\/(retirement-preview|retirement)$/);
+    if (retirementMatch) {
+      let raw=''; for await (const part of request) raw+=part; const body=JSON.parse(raw||'{}');
+      state.accounts.retirementBodies.push({ path: url.pathname, method: request.method, body });
+      const row=state.accounts.items.find(row=>row.address===decodeURIComponent(retirementMatch[1]));
+      if(!row)return fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});
+      if(state.accounts.patchError)return fail(state.accounts.patchError);
+      if(body.receiveBlocked&&(!state.accounts.retirementFeatureEnabled||body.forwardTo))return fail({status:503,code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'서버 수신 차단 준비 상태를 확인해 주세요.'});
+      const plan=retirementPlan(row,body);
+      if(retirementMatch[2]==='retirement-preview')return response.end(JSON.stringify(plan));
+      if(body.etag!==plan.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'현재 값으로 다시 미리보기해 주세요.'});
+      if(!plan.canPrepare||plan.cleanupRequired&&!body.cleanupConfirmed)return fail({status:409,code:'RETIREMENT_ROUTES_REMAIN',message:'남은 연결을 확인해 주세요.'});
+      row.retirement={...retirementInfo(row),receiveBlocked:body.receiveBlocked,forwarding:body.forwardTo===null?[]:body.forwardTo?[...new Set([...(row.retirement?.forwarding||[]),body.forwardTo])]:row.retirement?.forwarding||[],pendingOperation:null};
+      state.accounts.version++;
+      return response.end(JSON.stringify({result:'ok',retirement:retirementInfo(row),steps:[{stage:'receive',status:'ok'}]}));
     }
     const accountMatch = url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)(\/delete-preview)?$/), leaving = url.pathname === '/api/admin/flows/leave';
     if (accountMatch || leaving) {
@@ -317,7 +349,7 @@ export function createFakeAdminApi() {
       const address = leaving ? body.address : decodeURIComponent(accountMatch[1]), row = state.accounts.items.find(row => row.address === address), etag = `synthetic-account-${state.accounts.version}`;
       if (!row) return fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});
       const send = value => response.end(JSON.stringify(value));
-      if (request.method === 'GET') return send({ protocolInternalOnly: false, protocolInternalVersion: null, protocolInternalAllowlistEmpty: Boolean(state.accounts.allowlistEmpty), ...row, etag, refs: state.accountRefs, sharesScope: 'teams+own', appPasswordCount: 2, warnings: state.accounts.warnings || [] });
+      if (request.method === 'GET') return send({ protocolInternalOnly: false, protocolInternalVersion: null, protocolInternalAllowlistEmpty: Boolean(state.accounts.allowlistEmpty), ...row, retirement: retirementInfo(row), etag, refs: state.accountRefs, sharesScope: 'teams+own', appPasswordCount: 2, warnings: state.accounts.warnings || [] });
       if (request.method === 'PATCH') {
         if (state.accounts.patchError) return fail(state.accounts.patchError);
         if (body.etag !== etag) return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요.'});
@@ -326,14 +358,27 @@ export function createFakeAdminApi() {
         return send({ result: state.accounts.patchPartial ? 'partial' : 'ok', ...(state.accounts.patchPartial ? {reloadRequired:true} : {}), mailbox: row, etag: state.accounts.patchPartial ? null : `synthetic-account-${state.accounts.version}`, warnings: body.protocols?.sieve===false ? [{...sieveDisabledWarning}] : [], steps:[{stage:'settings',status:'ok',auditId:'11111111111111111111111111111111'}] });
       }
       const mode = leaving ? body.mode : 'delete', previewing = leaving ? body.action === 'preview' : Boolean(accountMatch[2]);
-      if (previewing) return send({ address, mode, cleanRefs: leaving ? body.cleanRefs : true, forwardTo: body.forwardTo || null, etag, messages: row.messages, usedBytes: row.usedBytes, refs: body.cleanRefs === false ? {} : { ...state.accountRefs, aliases: state.accountRefs.aliases.map(alias => ({ ...alias, effect: mode==='delete' ? 'deleted' : 'kept' })) }, sharesScope: body.cleanRefs===false ? 'none' : 'all', irreversible: mode==='delete', confirmAddress: mode==='delete' ? address : null, confirmation: mode==='delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.', warnings: [...(leaving ? leaveWarnings : []), ...(state.accounts.warnings || [])] });
+      if (leaving) {
+        state.accounts.retirementBodies.push({ path: url.pathname, method: request.method, body });
+        if (row.retirement?.retired && !row.retirement.pendingOperation) return send({result:'unchanged',alreadyRetired:true,retirement:retirementInfo(row)});
+        if (body.receiveBlocked && !state.accounts.retirementFeatureEnabled) return fail({status:503,code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'서버 수신 차단 기능을 먼저 켜 주세요.'});
+      }
+      if (previewing) {
+        const plan=retirementPlan(row,body);
+        return send({ address, mode, cleanRefs: leaving ? body.cleanRefs : true, cleanShares: leaving ? body.cleanShares??false : true, forwardTo: body.forwardTo??null, etag, messages:row.messages,usedBytes:row.usedBytes,
+          refs:Object.fromEntries(Object.entries(state.accountRefs).map(([kind,rows])=>[kind,rows.map(ref=>({...ref,effect:kind==='shares'?body.cleanShares||!leaving?'deleted':'kept':body.cleanRefs===false?'kept':kind==='aliases'&&mode==='disable'?'kept':'removed'}))])),
+          sharesScope:'all',irreversible:mode==='delete',confirmAddress:mode==='delete'?address:null,confirmation:mode==='delete'?'메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.':'로그인을 막고 메일은 보존해요.',
+          ...(leaving?{...plan,receiveChanges:plan.changes,receiveBlocked:body.receiveBlocked??false,pendingOperation:row.retirement?.pendingOperation??null}:{}),warnings:[...(leaving?leaveWarnings:[]),...(state.accounts.warnings||[])] });
+      }
       if (body.etag !== etag) return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요.'});
       if (mode==='delete' && (body.confirmAddress!==address || body.cleanRefs!==true)) return fail({status:422,code:'INVALID_INPUT',message:'주소 확인이 필요해요.'});
-      if (mode==='disable') row.active=2;
+      if (leaving && state.accounts.retirementBlockers.length) return fail({status:409,code:'RETIREMENT_ROUTES_REMAIN',message:'남은 연결을 확인해 주세요.'});
+      if (mode==='disable') { row.active=2; row.retirement={...retirementInfo(row),retired:true,recordedAt:new Date().toISOString(),receiveBlocked:body.receiveBlocked??false,forwarding:body.forwardTo?[body.forwardTo]:[],pendingOperation:state.accounts.result==='partial'?{kind:'leave',request:{cleanRefs:body.cleanRefs,cleanShares:body.cleanShares??false,receiveBlocked:body.receiveBlocked??false,forwardTo:body.forwardTo??null}}:null}; }
       const steps = mode==='disable' ? [{stage:'active',target:address,status:'ok'}] : [{stage:'aliases',target:'contact@example.com',status:'ok'}];
       if (state.accounts.result==='partial') steps.push({stage: mode==='delete'?'mailbox':'teams',status:'failed',code:'SYNTHETIC_CLEANUP_FAILED'});
       else { if (mode==='delete') { steps.push({stage:'mailbox',target:address,status:'ok'}); state.accounts.items=state.accounts.items.filter(item=>item!==row); } else { row.active=2; if(body.forwardTo) steps.push({stage:'forward',target:body.forwardTo,status:'ok'}); } }
-      return send({result:state.accounts.result,steps,warnings:[...(leaving?leaveWarnings:[]),...(state.accounts.warnings||[])],detail:{steps}});
+      state.accounts.version++;
+      return send({result:state.accounts.result,retirement:retirementInfo(row),accountActive:row.active,steps,warnings:[...(leaving?leaveWarnings:[]),...(state.accounts.warnings||[])],detail:{steps}});
     }
     if (url.pathname === '/api/admin/teams' && request.method==='GET') {
       if(state.distribution.readError)return fail(state.distribution.readError);

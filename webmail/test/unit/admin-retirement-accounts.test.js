@@ -574,3 +574,17 @@ test('retirement admin HTTP: production factory injects one guard into alias wri
   assert.equal(response.statusCode, 409, response.body); assert.equal(response.json().error.code, 'RETIREMENT_ROUTE_PROTECTED');
   assert.equal(response.headers['www-authenticate'], undefined); assert.equal(writes(f).length, 0); assert.equal(f.lockDepth(), 0);
 });
+
+
+test('retirement detail exposes current forwarding targets using preview inspection without extra filter fetches', async t => {
+  const f = await fixture(t); retired(f);
+  assert.deepEqual((await f.service.detail({}, user)).retirement.forwarding, []);
+  f.filters.push({ id: 91, username: user, filter_type: 'prefilter', active: 1, script_data: `require ["copy"]; redirect :copy "${other}";` });
+  const reads = f.calls.filter(row => row.path === '/api/v1/get/filters/all').length;
+  assert.deepEqual((await f.service.detail({}, user)).retirement.forwarding, [other]);
+  assert.equal(f.calls.filter(row => row.path === '/api/v1/get/filters/all').length, reads + 1);
+  const preview = await settingsPreview(f, { receiveBlocked: false });
+  assert.deepEqual(preview.forwarding.flatMap(row => row.targets), [other]);
+  f.filters.push({ id: 92, username: user, filter_type: 'prefilter', active: 1, script_data: 'include "opaque";' });
+  assert.equal((await f.service.detail({}, user)).retirement.forwarding, null);
+});

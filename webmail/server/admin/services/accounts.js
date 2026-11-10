@@ -227,7 +227,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
     const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
-    return { ...summary(row, groups), retirement: retirementDto(await retirementState(addr), Number(row.active)), ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
+    const forwarding = inspectForwarding(filters, addr);
+    return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null }, ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
       refs: {
         aliases: aliases.filter(alias => !isMemberAlias(alias) && targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
@@ -630,6 +631,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (value.receiveBlocked && value.forwardTo) throw retirementConflict('RETIREMENT_FORWARD_CONFLICT');
     return value;
   }
+  function inspectForwarding(filters, addr) {
+    return prefilters(filters, addr).map(filter => {
+      const location = { source: 'admin', type: 'prefilter', address: addr, id: String(filter.id) };
+      try { return { ...location, targets: [...new Set(retirementRedirects(filter.script_data).map(row => row.target))], inspected: true }; }
+      catch { return { ...location, targets: [], inspected: false }; }
+    });
+  }
   async function retirementPlan(session, addr, request, { initialLeave = false, allowPendingLeave = initialLeave } = {}) {
     if (!retirement) throw blockUnavailable();
     const state = await retirementState(addr), account = snapshot(await box(session, addr));
@@ -638,11 +646,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (!initialLeave && (!state.retired || account.active !== 2)) throw retirementConflict('RETIREMENT_STATE_CONFLICT');
     if (request.receiveBlocked && (!retirement.featureEnabled || !retirement.ready)) throw blockUnavailable(state.pendingOperation?.kind === 'leave');
     const own = prefilters(await rows(session, 'filters/all'), addr), removeForward = [], blockers = [];
-    const forwarding = own.map(filter => {
-      const location = { source: 'admin', type: 'prefilter', address: addr, id: String(filter.id) };
-      try { return { ...location, targets: [...new Set(retirementRedirects(filter.script_data).map(row => row.target))], inspected: true }; }
-      catch { return { ...location, targets: [], inspected: false }; }
-    });
+    const forwarding = inspectForwarding(own, addr);
     const existingTargets = [...new Set(forwarding.flatMap(row => row.targets))].sort();
     const forwardingChange = request.forwardTo ? { effect: existingTargets.includes(request.forwardTo) ? 'unchanged' : 'add', target: request.forwardTo,
       existingTargets, message: existingTargets.includes(request.forwardTo) ? '이미 있는 관리 전달을 유지해요.' : `기존 관리 전달 ${existingTargets.length}개에 ${request.forwardTo} 추가` } :

@@ -1,3 +1,4 @@
+import { checkRetirementRoutes } from '../../bin/check-retirement-routes.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRetirementGraph, createRetirementRouting } from '../../server/admin/retirement-routing.js';
@@ -258,4 +259,18 @@ test('retirement writes: unresolved literal compatibility does not change the ON
 test('retirement writes: a new alias-domain cannot activate a previously external alias cycle', async () => {
   const f = fixture(); f.facts.aliases[0].goto = 'retired@loop.test'; f.store.blockedRecipients = async () => [];
   await assert.rejects(f.routing.assertMutation({}, { kind: 'alias-domain', address: 'loop.test', after: { target_domain: 'example.test', active: 1 } }), { statusCode: 409, code: 'RETIREMENT_ROUTES_REMAIN' });
+});
+
+
+test('D3-2 deployment checks every stored ON account with existing inspect/assertReady, without writes', async () => {
+  const f = fixture(); f.facts.mailboxes.find(row => row.username === healthy).active = 2;
+  const dbCalls = [];
+  const db = { async execute(options) { dbCalls.push(options); return [[{email:owner},{email:healthy}]]; } };
+  const run = () => checkRetirementRoutes({db,store:f.store,routing:f.routing,session:{}});
+  f.scripts.set(team,`redirect "${owner}";`);f.names.set(team,[{name:'personal',active:true}]);
+  let result = await run();assert.equal(result.ready,false);assert.equal(result.checked,2);assert.ok(result.failures.some(row=>row.address===owner));
+  assert.equal(f.lockCalls,1);assert.equal(dbCalls[0].timeout,1000);assert.match(dbCalls[0].sql,/WHERE receive_blocked=1/);assert.equal(f.calls.filter(row=>row.method!=='GET').length,0);
+  f.scripts.clear();f.names.clear();result=await run();assert.deepEqual(result,{ready:true,checked:2,failures:[]});
+  f.options.failUser=team;result=await run();assert.equal(result.ready,false);assert.equal(result.failures.length,2);
+  db.execute=async()=>{throw new Error('synthetic DB secret');};await assert.rejects(run(),/synthetic DB secret/);
 });

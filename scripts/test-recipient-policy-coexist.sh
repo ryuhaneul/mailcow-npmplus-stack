@@ -88,6 +88,11 @@ if args[:2]==['-e','MYSQL_PWD']:
 service=args[0];args=args[1:]
 if service=='webmail-admin':
     assert args[0]=='node'
+    if args[1:] == ['bin/check-retirement-routes.js']:
+        with (p/'route-checks').open('a') as f:f.write('check\n')
+        failed=settings.get('routing_error') or settings.get('routing_db_error')
+        print(json.dumps({'ready':not failed,'checked':2,'failures':[{'address':'retired@example.test','code':'RETIREMENT_ROUTES_REMAIN'}] if failed else []}))
+        sys.exit(2 if failed else 0)
     result={'bind':'192.0.2.241','peer':settings.get('postfix',{'mailcow-network':{'IPAddress':'192.0.2.253'}})['mailcow-network']['IPAddress'],'port':'10040'}
     print(json.dumps(result if '--input-type=module' in args else list(result.values())));sys.exit(0)
 assert service=='postfix-mailcow'
@@ -667,4 +672,61 @@ assert not any(x in str(s) for x in ('password','synthetic-root','synthetic-api-
 PYNOPRIVATE
 
 pass '10: drift/resource/rollback failures; real update block OFF/ON and verify wiring; dynamic publication, ownership and I/O failure recovery'
+# D3-1: the live app DTO consumes the invalidated publication on the next read.
+not_on(){ WEBMAIL_REPO_ROOT="$ROOT" node --input-type=module <<'JSNOTON' || fail stale-effective-on
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const load=path=>import(pathToFileURL(process.env.WEBMAIL_REPO_ROOT+'/webmail/'+path));
+const {createRetirementReadiness}=await load('server/admin/retirement-readiness.js');
+const {createAccountsService}=await load('server/admin/services/accounts.js');
+const address='retired@example.test',row={username:address,active:2,quota:1073741824,sender_acl:[]};
+const read=createRetirementReadiness({enabled:true,file:process.env.WEBMAIL_DIR+'/retirement-readiness/state.json'});
+const service=createAccountsService({mailcow:{async call(session,method,path){assert.equal(method,'GET');return path==='/api/v1/get/mailbox/all'?[row]:path.startsWith('/api/v1/get/mailbox/')?row:[];}},dockerapi:{async getAcl(){return[];}},history:{register(){}},retirement:{store:{async read(){return{retired:true,receiveBlocked:true};}},featureEnabled:true,get ready(){return read();}}});
+const result=await service.detail({},address,{includeProtocolNetlimit:false});assert.equal(result.retirement.effectiveReceiveBlock,'unverified');
+JSNOTON
+}
+reset;flags true false
+run apply -y || fail d3-initial
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" || fail d3-initial-finish
+json_ready true
+flags false false
+run apply -y || fail d3-off
+run --check || fail d3-off-check
+not_on
+flags true false
+run apply -y || fail d3-reinstall
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" || fail d3-reinstall-finish
+run --revert -y || fail d3-revert
+not_on
+# Failed publication + failed unlink must stop before any policy change.
+run apply -y || fail d3-fault-install
+webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" || fail d3-fault-finish
+snapshot;: > "$TMP/calls"
+touch "$TMP/fail-publication" "$TMP/fail-publication-unlink"
+if run --revert -y; then fail d3-invalidated-failure-accepted; fi
+restored;no_mutations
+rm "$TMP/fail-publication" "$TMP/fail-publication-unlink"
+# OFF-period unsafe routing refuses re-enable, retains records, and never restores ready.
+flags false false;run apply -y || fail d3-off-again
+flags true false
+printf '{"routing_error":true}' > "$TMP/fixture.json"
+snapshot;: > "$TMP/calls"
+if run apply -y; then fail d3-unsafe-reenable; fi
+restored;no_mutations;not_on
+grep -q 'retired@example.test' "$TMP/stdout" || fail d3-missing-account-guidance
+printf '{"routing_db_error":true}' > "$TMP/fixture.json"
+if run apply -y; then fail d3-db-reenable; fi
+restored;no_mutations;not_on
+printf '{}' > "$TMP/fixture.json"
+run apply -y || fail d3-fixed-reenable
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" || fail d3-fixed-finish
+json_ready true
+# The ready=true publication gate also rechecks existing ON accounts.
+printf '{"routing_error":true}' > "$TMP/fixture.json"
+if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR"; then fail d3-finish-unsafe; fi
+not_on
+pass '11: OFF/revert invalidation precedes mutation; stored ON routes gate activation and readiness'
 echo "1..$N"

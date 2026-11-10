@@ -52,4 +52,22 @@ await test('AF05 accounts, guarded edits and lifecycle flows',async t=>{
   }
  });
 
+ for(const phase of ['preview','run'])await t.test(`F1 alreadyRetired ${phase} response retains guidance`,async()=>{
+  for(const width of [1280,375]){const{page,context,errors}=await open('flow/leave/person%40example.com',width);
+   try{if(phase==='run'){await preview(page);await page.getByLabel('변경 내용과 정리될 연결을 확인했습니다').check();}
+    await page.route('**/api/admin/flows/leave',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({result:'unchanged',alreadyRetired:true,unchanged:true})}));
+    await page.getByRole('button',{name:phase==='run'?'퇴사 처리 실행':'변경 미리보기',exact:true}).click();await expect(page.locator('dialog[open] h2')).toHaveText('이미 퇴사 처리된 계정입니다');await expect(page.locator('dialog[open]')).not.toContainText('변경 내용을 저장했습니다.');await page.screenshot({path:`${captures}/f1-already-${phase}-${width}.png`,fullPage:true});await page.getByRole('button',{name:'계정 설정으로',exact:true}).click();await expect(page).toHaveURL(/#accounts\/person%40example.com$/);assert.deepEqual(errors,[]);
+   }finally{await context.close();}
+  }
+ });
+ await t.test('F1 partial result survives failed detail reload and explicit retry',async()=>{
+  for(const width of [1280,375]){const{page,context,errors}=await open('accounts/person%40example.com',width,state=>{const row=state.accounts.items.find(row=>row.address==='person@example.com');row.active=2;row.retirement={retired:true,receiveBlocked:true,forwarding:[],recordedAt:'2026-11-01T00:00:00.000Z'};});
+   try{await page.getByLabel('새 메일 수신 차단',{exact:true}).uncheck();await page.getByRole('button',{name:'변경 미리보기',exact:true}).click();await page.getByLabel('변경 내용과 정리될 연결을 확인했습니다').check();let partial=false,failRead=true;
+    await page.route('**/api/admin/mailboxes/person%40example.com/retirement',route=>{partial=true;return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({result:'partial',retirement:null,reloadRequired:true,steps:[{stage:'receive-off',status:'ok'},{stage:'complete',status:'failed',code:'RETIREMENT_BLOCK_UNAVAILABLE'}],recovery:[{message:'현재 퇴사·수신 상태와 남은 연결을 다시 미리보기로 확인해 주세요.'}]})});});
+    await page.route('**/api/admin/mailboxes/person%40example.com',route=>partial&&failRead?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'조회 실패'}})}):route.continue());
+    await page.getByRole('button',{name:'수신 허용',exact:true}).click();await expect(page.getByRole('button',{name:'다시 시도',exact:true})).toBeVisible();await expect(page.locator('main')).toContainText('일부 변경만 적용');await expect(page.locator('main')).toContainText('receive-off · 완료');await expect(page.locator('main')).toContainText('complete · 실패 RETIREMENT_BLOCK_UNAVAILABLE');await expect(page.locator('main')).toContainText('현재 퇴사·수신 상태와 남은 연결');await expect(page.locator('main')).toContainText('현재 계정 상태는 아직 확인하지 못했습니다');await expect(page.locator('#receive-block')).toHaveCount(0);await page.screenshot({path:`${captures}/f1-partial-get503-${width}.png`,fullPage:true});failRead=false;await page.getByRole('button',{name:'다시 시도',exact:true}).click();await expect(page.locator('#retirement-settings')).toBeVisible();await expect(page.locator('main')).toContainText('receive-off · 완료');assert.deepEqual(errors,[]);
+   }finally{await context.close();}
+  }
+ });
+
 });

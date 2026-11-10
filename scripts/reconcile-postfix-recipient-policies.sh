@@ -29,6 +29,8 @@ check_failure() {
     exit "$rc"
 }
 trap check_failure EXIT
+# Invalidate before any owned policy mutation, including the legacy OFF path.
+if [ "$MODE" != --check ] || [ "$FLAG" = false ]; then webmail_retirement_invalidate "$WEBMAIL_DIR" || exit 1; fi
 CONF="$MAILCOW_DIR/data/conf/postfix"
 EXTRA="$CONF/extra.cf"
 post() { (cd "$MAILCOW_DIR" && timeout 15 docker compose exec -T postfix-mailcow "$@"); }
@@ -231,6 +233,7 @@ if [ "$MODE" = --check ]; then
     exit 0
 fi
 [ "$YES" = 1 ] || die 'use -y to authorize reconciliation reloads'
+if [ "$WANT_R" = true ]; then webmail_retirement_validate_routes "$WEBMAIL_DIR" || die 'stored ON routing verification failed; review listed accounts before retrying'; fi
 # Already correct layers retain their hooks; a resource check avoids a protection gap.
 R_READY=false
 if [ "$WANT_R" = true ] && [[ "$LAYERS" = *R* ]]; then

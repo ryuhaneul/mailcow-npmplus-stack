@@ -671,9 +671,18 @@ webmail_reconcile_recipient_policies() {
     fi
 }
 
+# Read-only validation uses the same inspect/assertReady implementation as account ON.
+webmail_retirement_validate_routes() (
+    set +x
+    cd "$1" || return 1
+    docker compose --profile admin exec -T webmail-admin node bin/check-retirement-routes.js
+)
+
 webmail_retirement_finish() {
+    webmail_retirement_invalidate "$2" || return 1
     webmail_reconcile_recipient_policies "$1" "$2" --check || return 1
     if [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
+        webmail_retirement_validate_routes "$2" || return 1
         webmail_retirement_readiness "$2" true || { webmail_retirement_invalidate "$2" || return 1; return 1; }
     else webmail_retirement_begin "$2"; fi
 }

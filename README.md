@@ -574,3 +574,47 @@ possible during a DB outage; a DB failure at the initial forwarding check return
 503 before the first change. XML checks before folder creation, then rejects a changed final target set.
 A blocked recovery retains its archives, reports `502 IMPORT_WRITE_FAILED` with
 `recoveryBlocked`, and asks for administrator review.
+
+The standalone `scripts/apply-postfix-retirement-access.sh [apply|--check|--check-resources|--revert]`
+prepares a direct MySQL recipient access map when retirement receive blocking is
+explicitly enabled. Run it with the existing stack configuration and root file
+ownership privileges; `apply -y` and `--revert -y` authorize the required Postfix
+reload. It refuses existing bounce ownership, recipient/relay service overrides,
+unexpected owned-hook drift, delimiters other than `+`, or a missing MySQL map
+module. Bounce/retirement coexistence belongs to the recipient-policy reconciler. After
+checking both owned chains, that reconciler may use `--check-resources` to verify
+the private map, exact grants, current IP and Postfix-user lookup without changing
+credentials, files, hooks or reload state. This mode does not certify hook ordering.
+
+The private map is stored at
+`data/conf/postfix/mailstack-retirement/recipient-access.cf` under the mailcow
+project and appears as `/opt/postfix/conf/mailstack-retirement/recipient-access.cf`
+in Postfix. The directory is root:Postfix-group 0750 and the file is 0640. Its
+password is generated once and kept only in that runtime map, never in the server
+`.env`, command arguments, or output. The dedicated `mailstack_retirement_ro`
+account has only SELECT on `mailstack_webmail.retirement_recipient_keys`, limited
+to the verified Postfix container IPv4. Check detects address/group changes and
+requests reapplication; apply reuses the password and removes the recorded old
+host account only after the new lookup and hook have been verified.
+
+A match returns one fixed `550 5.7.1 MAILSTACK_RETIRED_RECIPIENT` response; a missing
+key returns zero rows. SQL lookup errors must temporarily defer every RCPT that
+reaches this hook, including normal incoming mail and authenticated outgoing
+recipients. They must not turn into an allow result. Delayed mail can eventually
+expire in the sender's queue and generate a delivery status notification. Actual
+Postfix SQL escaping, delimiter fallback and SMTP fail-closed behavior still
+require the isolated integration tests.
+
+`--revert` restores the preceding recipient chain and verifies/reloads it without
+requiring the database. It intentionally retains the inactive map and dedicated
+account. After confirming the retirement hook is absent from both persistent and
+live configuration, an operator may explicitly drop only the dedicated account at
+the map's recorded Postfix IP, then remove that private map and its empty directory.
+Do not remove credentials or tables while a live hook still uses them; inspect any
+unexpected account hosts rather than dropping them automatically. Account retirement
+records and recipient keys remain untouched by these scripts.
+
+If restoring the original map also fails, the command returns failure and retains
+a root-owned emergency snapshot (directory 0700, files 0600), printing only its
+location. Complete manual recovery, then shred the snapshot files and remove that
+directory. Normal runs and successful rollbacks remove their temporary snapshots.

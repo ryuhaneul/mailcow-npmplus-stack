@@ -95,7 +95,10 @@ test('settings and approved monitoring pages compile with existing admin compone
   const Cards=(await server.ssrLoadModule('/src/admin/components/MonitoringStatusCards.jsx')).default;assert.equal(Cards({resource:{loading:true}}).props['aria-label'],'감시 상태');const disabled=Cards({resource:{data:{enabled:false}}});assert.ok(disabled);
   const settings=(await server.ssrLoadModule('/src/admin/pages/Settings.jsx')).default({parts:['bounces']});assert.equal(settings.props.children.at(-1).type.name,'Bounces');
   const overview=await readFile(new URL('../../web/src/admin/pages/Overview.jsx',import.meta.url),'utf8');assert.equal((overview.match(/<MonitoringStatusCards /g)||[]).length,1);assert.ok(overview.indexOf('<StatusCards ')<overview.indexOf('<MonitoringStatusCards '));assert.ok(overview.indexOf('<MonitoringStatusCards ')<overview.indexOf('<h2>인증서'));
-  for(const section of ['메일 큐','메일 저장소','호환 사용량','mailcow 관리자','메일 자동 비움'])assert.ok(overview.includes(section));
+  for(const section of ['메일 큐','메일 저장소','호환 사용량','메일 자동 비움'])assert.ok(overview.includes(section));
+  assert.ok(overview.includes('<AdminAccounts resource={admins}/>'));
+  const admins=await readFile(new URL('../../web/src/admin/components/AdminAccounts.jsx',import.meta.url),'utf8');assert.ok(admins.includes('mailcow 관리자'));
+  assert.ok(overview.indexOf('<AdminAccounts ')>overview.indexOf('호환 사용량'));assert.ok(overview.indexOf('<AdminAccounts ')<overview.indexOf('메일 자동 비움'));
   const css=await readFile(new URL('../../web/src/admin/pages/monitor.css',import.meta.url),'utf8');assert.ok(css.includes('white-space:normal'));assert.ok(css.includes('border:1px solid var(--line-2)'));assert.ok(!css.includes('border-color:var(--ink-3)'));
  }finally{await server.close();}
 });

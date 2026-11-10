@@ -578,7 +578,7 @@ fi
 check "Retirement schema when admin or recipient blocking is enabled" webmail_prepare_retirement_schema "$SCRIPT_DIR" --check
 check "Recipient policy ownership/resources and disabled state" webmail_reconcile_recipient_policies "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
 if [ "$FAIL" -eq 0 ] && [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
-    if webmail_retirement_readiness "$WEBMAIL_DIR" true; then
+    if webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR"; then
         check "Publish verified retirement readiness" true
     else
         webmail_retirement_invalidate "$WEBMAIL_DIR" || echo 'Retirement readiness publication failed; review the preceding recovery error' >&2

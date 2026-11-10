@@ -233,7 +233,7 @@ if [ "$MODE" = --check ]; then
     exit 0
 fi
 [ "$YES" = 1 ] || die 'use -y to authorize reconciliation reloads'
-if [ "$WANT_R" = true ]; then webmail_retirement_validate_routes "$WEBMAIL_DIR" || die 'stored ON routing verification failed; review listed accounts before retrying'; fi
+# Route verification and ready=true publication wait for the final deployment finish.
 # Already correct layers retain their hooks; a resource check avoids a protection gap.
 R_READY=false
 if [ "$WANT_R" = true ] && [[ "$LAYERS" = *R* ]]; then

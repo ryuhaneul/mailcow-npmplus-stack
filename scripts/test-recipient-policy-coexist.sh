@@ -90,7 +90,11 @@ if service=='webmail-admin':
     assert args[0]=='node'
     if args[1:] == ['bin/check-retirement-routes.js']:
         with (p/'route-checks').open('a') as f:f.write('check\n')
-        failed=settings.get('routing_error') or settings.get('routing_db_error')
+        if (p/'require-new-admin').exists() and not (p/'admin-deployed').exists():
+            (p/'premature-route-check').write_text('attempted')
+            print('synthetic admin image not available yet',file=sys.stderr)
+            sys.exit(125 if (p/'require-new-admin').read_text()=='fresh' else 1)
+        failed=settings.get('routing_error') or settings.get('routing_changes') or settings.get('routing_db_error')
         print(json.dumps({'ready':not failed,'checked':2,'failures':[{'address':'retired@example.test','code':'RETIREMENT_ROUTES_REMAIN'}] if failed else []}))
         sys.exit(2 if failed else 0)
     result={'bind':'192.0.2.241','peer':settings.get('postfix',{'mailcow-network':{'IPAddress':'192.0.2.253'}})['mailcow-network']['IPAddress'],'port':'10040'}
@@ -239,6 +243,7 @@ pass(){ N=$((N+1)); printf 'ok %s - %s\n' "$N" "$*"; }
 fail(){ echo "not ok - $*" >&2; sed -E 's/[a-f0-9]{64}/[redacted]/g;s/synthetic-root/[redacted]/g' "$TMP/stdout" "$TMP/stderr" >&2; exit 1; }
 flags(){ printf 'DOMAIN=example.test\nWEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=%s\nWEBMAIL_ADMIN_ENABLE=true\nWEBMAIL_ADMIN_DB_IPV4=192.0.2.241\nLOG_ARCHIVE_ENABLE=%s\n' "$1" "$2" > "$WEBMAIL_ENV_FILE"; }
 reset(){
+    rm -f "$TMP/require-new-admin" "$TMP/admin-deployed" "$TMP/app-deployment-reached" "$TMP/premature-route-check"
     rm -rf "$CONF/mailstack-retirement" "$TMP/work/"*; rm -f "$CONF/"*.bak-* "$TMP/backup-count"; rm -f "$TMP/"fail-* "$CONF/.recipient-policy-reconcile.lock"
     printf 'myhostname = mail.example.test\n' > "$CONF/extra.cf"
     cp "$CONF/extra.cf" "$TMP/base.extra"
@@ -712,12 +717,15 @@ rm "$TMP/fail-publication" "$TMP/fail-publication-unlink"
 flags false false;run apply -y || fail d3-off-again
 flags true false
 printf '{"routing_error":true}' > "$TMP/fixture.json"
+run apply -y || fail d3-unverified-policy-prepare
+not_on
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
 snapshot;: > "$TMP/calls"
-if run apply -y; then fail d3-unsafe-reenable; fi
+if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" > "$TMP/stdout" 2> "$TMP/stderr"; then fail d3-unsafe-reenable; fi
 restored;no_mutations;not_on
 grep -q 'retired@example.test' "$TMP/stdout" || fail d3-missing-account-guidance
 printf '{"routing_db_error":true}' > "$TMP/fixture.json"
-if run apply -y; then fail d3-db-reenable; fi
+if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" > "$TMP/stdout" 2> "$TMP/stderr"; then fail d3-db-reenable; fi
 restored;no_mutations;not_on
 printf '{}' > "$TMP/fixture.json"
 run apply -y || fail d3-fixed-reenable
@@ -729,4 +737,75 @@ printf '{"routing_error":true}' > "$TMP/fixture.json"
 if webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR"; then fail d3-finish-unsafe; fi
 not_on
 pass '11: OFF/revert invalidation precedes mutation; stored ON routes gate activation and readiness'
+# D3-2: execute the actual verify publication tail after failed routing checks.
+reset;flags true false
+run apply -y || fail verify-route-install
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+for fault in routing_error routing_changes routing_db_error; do
+    webmail_retirement_begin "$WEBMAIL_DIR" || fail verify-route-begin
+    printf '{"%s":true}' "$fault" > "$TMP/fixture.json"
+    : > "$TMP/route-checks"
+    FAIL=0 SCRIPT_DIR="$ROOT/scripts"
+    source "$TMP/verify-final.sh"
+    [ "$FAIL" -gt 0 ] || fail verify-route-accepted
+    [ "$(wc -l < "$TMP/route-checks")" -eq 1 ] || fail verify-route-not-checked
+    not_on
+ done
+printf '{}' > "$TMP/fixture.json"
+: > "$TMP/route-checks"
+FAIL=0
+source "$TMP/verify-final.sh"
+[ "$FAIL" -eq 0 ] || fail verify-route-fixed
+[ "$(wc -l < "$TMP/route-checks")" -eq 1 ] || fail verify-fixed-route-not-checked
+json_ready true
+python3 - "$ROOT" <<'PYSINGLETRUE' || fail duplicate-production-true-publication
+from pathlib import Path
+import re,sys
+root=Path(sys.argv[1]);hits=[]
+for path in (root/'scripts').rglob('*.sh'):
+    if path.name.startswith('test-'):continue
+    for line in path.read_text().splitlines():
+        if re.search(r'webmail_retirement_readiness\s+"[^"\n]+"\s+true',line):hits.append(path.relative_to(root).as_posix())
+assert hits==['scripts/lib/webmail-env.sh'],hits
+PYSINGLETRUE
+pass '12: verify routes all true publications through final stored ON validation'
+# F2-01: new/old admin image cannot provide the new CLI before app deployment.
+python3 - "$TMP/update-phase.sh" "$TMP/preboot-update.sh" "$TMP/preboot-setup.sh" "$ROOT/scripts/setup.sh" <<'PYPREBOOT'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text()
+text=text.replace('edge_up_apps(){ :; }','edge_up_apps(){ touch "$RETIREMENT_TEST_TMP/app-deployment-reached"; }')
+text=text.replace('edge_archive_apply(){ :; }','edge_archive_apply(){ touch "$RETIREMENT_TEST_TMP/admin-deployed"; }')
+Path(sys.argv[2]).write_text(text)
+# Run setup's real pre-deployment block through edge_up_apps only; its eventual finish is the common helper.
+setup=Path(sys.argv[4]).read_text()
+start=setup.index('# Remove callbacks before changing apps when policy prerequisites were disabled.')
+end=setup.index('\n',setup.index('edge_up_apps "$WEBMAIL_DIR"',start))
+preamble=text.split('webmail_retirement_begin "$WEBMAIL_DIR"',1)[0]
+Path(sys.argv[3]).write_text(preamble+'webmail_retirement_begin "$WEBMAIL_DIR"\n'+setup[start:end]+'\n')
+PYPREBOOT
+for image in fresh old; do
+    for fault in none routing_error routing_db_error; do
+        reset;flags true false
+        printf '%s' "$image" > "$TMP/require-new-admin"
+        [ "$fault" = none ] || printf '{"%s":true}' "$fault" > "$TMP/fixture.json"
+        : > "$TMP/route-checks"
+        rc=0;bash "$TMP/preboot-update.sh" > "$TMP/stdout" 2> "$TMP/stderr" || rc=$?
+        [ -f "$TMP/app-deployment-reached" ] && [ -f "$TMP/admin-deployed" ] || fail preboot-admin-not-reached
+        [ ! -e "$TMP/premature-route-check" ] || fail preboot-new-cli-required
+        [ "$(wc -l < "$TMP/route-checks")" -eq 1 ] || fail preboot-final-route-check-missing
+        if [ "$fault" = none ]; then [ "$rc" -eq 0 ] || fail preboot-safe-update;json_ready true
+        else [ "$rc" -ne 0 ] || fail preboot-unsafe-ready;not_on;fi
+        no_secrets || fail preboot-update-secret
+    done
+    reset;flags true false
+    printf '%s' "$image" > "$TMP/require-new-admin"
+    : > "$TMP/route-checks"
+    bash "$TMP/preboot-setup.sh" > "$TMP/stdout" 2> "$TMP/stderr" || fail preboot-setup
+    [ -f "$TMP/app-deployment-reached" ] || fail preboot-setup-not-reached
+    [ ! -e "$TMP/premature-route-check" ] && [ ! -s "$TMP/route-checks" ] || fail preboot-setup-new-cli-required
+    not_on
+    no_secrets || fail preboot-setup-secret
+ done
+pass '13: fresh/old image setup/update reaches app deployment; final routing checks alone publish readiness'
 echo "1..$N"

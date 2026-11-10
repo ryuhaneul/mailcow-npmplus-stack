@@ -1,3 +1,4 @@
+import { emptyRetirementFixture } from '../fixtures/retirement.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
@@ -49,7 +50,7 @@ async function fixture(t, { configured = true, state = 'ready', audit, logger = 
     auditDir: join(directory, 'audit'), logoDir: logo ? join(directory, 'brand') : '', relayFiles: [], logLevel: 'info',
     ftsNightly: { enabled: false, start: '03:00', end: '06:00', stateDir: join(directory, 'fts') },
   };
-  const app = await createAdminApp({ config, logger, staticDir: '/nonexistent-synthetic-admin', auth: { client, now: () => clock }, audit });
+  const app = await createAdminApp({ retirement: emptyRetirementFixture(), config, logger, staticDir: '/nonexistent-synthetic-admin', auth: { client, now: () => clock }, audit });
   t.after(() => app.close());
   const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin }, payload: { username: 'human-admin', password: 'synthetic-password' } });
   assert.equal(login.statusCode, 200, login.body);

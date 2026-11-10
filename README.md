@@ -618,3 +618,70 @@ If restoring the original map also fails, the command returns failure and retain
 a root-owned emergency snapshot (directory 0700, files 0600), printing only its
 location. Complete manual recovery, then shred the snapshot files and remove that
 directory. Normal runs and successful rollbacks remove their temporary snapshots.
+
+### Deploying retirement receive blocking
+
+The server `.env` option `WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE` defaults to
+false when missing or empty. Choose `true` explicitly to prepare receive blocking;
+setup/update never create or change this selection. Existing `active=2` mailboxes
+are not automatically declared retired or blocked. The migration above imports
+only reviewed, approved addresses and always leaves blocking OFF.
+
+Setup/update prepare the two application tables before grants and reconcile the
+recipient policies through one entry point. The canonical chain is **B(R(base))**:
+bounce first, retirement SQL access next, then the original recipient restrictions.
+Use the reconciler instead of running the standalone installers against each other:
+
+```sh
+sudo bash scripts/reconcile-postfix-recipient-policies.sh --check
+# Only for an explicitly reviewed IP/group resource change:
+sudo bash scripts/reconcile-postfix-recipient-policies.sh apply --repair-resources -y
+sudo bash scripts/verify.sh
+```
+
+Normal updates stop with a nonzero result if resource preparation or verification
+fails; they never choose resource repair automatically. Resolve DB connection or
+authentication errors first. A base recipient assignment outside owned blocks in
+`extra.cf` is unsupported for coexistence and R-only to B-only transitions: have an
+operator preserve and review that base policy before retrying. Unknown drift and
+recipient/relay service overrides are also refused, rather than silently adopted.
+
+Deployment readiness is published in
+`$WEBMAIL_DIR/retirement-readiness/state.json` and mounted read-only as a directory
+at `/run/retirement-readiness` in admin. Only `ready`, `checkedAt` and the owned-hook
+SHA256 `hookHash` are stored; no credentials. Setup/update start with false and
+publish true only after the final check with the server feature enabled. Verify
+publishes true only if its whole result succeeds. A direct reconciler `--check`
+failure publishes false; success alone does not publish true. Admin reads the file
+on each request, without a restart for publication changes. There is **no TTL**;
+a timestamp more than 300 seconds in the future, a missing/invalid file, or the
+disabled feature is unverified. This records the last deployment verification,
+not live SMTP health. Failed false publication removes only the verified owned
+regular file, so missing means false. If removal also fails, stop and manually
+recover that exact runtime publication after checking its path and ownership.
+
+To disable blocking, set the server option to false and run the normal update or
+recipient reconcile, preserving B. Check the resulting hook/runtime before any
+credential cleanup. `--revert -y` removes **both** layers. Maps/accounts and account
+retirement records are retained; removing a live map's credentials or tables can
+defer all matching SMTP traffic. OFF does not restore previously removed routing.
+
+Retirement keeps existing shares by default. `cleanRefs=true` now cleans routing
+references without implicitly setting `cleanShares`; select share cleanup
+separately. Owners with active=1/2 can share to active=1 recipients, including from
+the account detail. Permanent deletion still removes every reference. Receive
+blocking and forwarding are mutually exclusive, with preview consent for removal
+of existing managed forwards. A partial leave must resume its saved leave request;
+repeat clicks do not create a second completed retirement.
+
+Application Sieve guards have a SELECT-to-write race window on public webmail;
+mailcow UI/API and direct ManageSieve writes are outside these guards. SQL map
+errors temporarily defer **all RCPT that reach R**, including normal inbound and
+authenticated outbound recipients; callers see 4xx, not an automatic allow. B can
+finish an RCPT before it reaches R. Prolonged failures can expire queues and cause
+DSNs, including for previously accepted forwarding. Real delimiter/alias-domain/
+Sieve reinjection, container permissions and official mailcow update behavior need
+isolated integration verification; local fixtures do not certify delivery.
+
+See the [operator procedure](docs/guide.md#계정-퇴사와-새-메일-수신-차단) for preparation,
+reviewed migration, failure handling and rollback boundaries.

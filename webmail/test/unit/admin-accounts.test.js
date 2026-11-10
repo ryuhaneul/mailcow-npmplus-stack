@@ -1,3 +1,4 @@
+import { emptyRetirementFixture } from '../fixtures/retirement.js';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -234,7 +235,7 @@ test('accounts: missing audit directory permissions prevent mailcow mutation', a
 async function http(t, f) {
   const lines = []; const stream = new Writable({ write(chunk, _encoding, done) { lines.push(chunk.toString()); done(); } });
   const client = { ...f.mailcow, createApiContext() { return {}; }, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
-  const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { apiKeyDir: join(f.dir, 'keys'), mailcowApiKey: 'synthetic-server-key', adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir, logLevel: 'info' },
+  const app = await createAdminApp({ retirement: emptyRetirementFixture(), protocolNetlimit: { store: f.netlimit }, config: { apiKeyDir: join(f.dir, 'keys'), mailcowApiKey: 'synthetic-server-key', adminHostname: 'mailadmin.example.com', sessionIdleMin: 60, sessionMaxHours: 8, trustProxy: ['192.0.2.0/24'], auditDir: f.dir, logLevel: 'info' },
     logger: { ...logOptions('info'), stream }, auth: { client }, dockerapi: f.dockerapi }); t.after(() => app.close());
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: secret } });
   assert.equal(logged.statusCode, 200, logged.body);

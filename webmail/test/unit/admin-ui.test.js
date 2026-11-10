@@ -84,6 +84,8 @@ test('shared ACL loading guidance follows pending detail, preview and run reques
  const { createServer } = await import('vite'), { fileURLToPath } = await import('node:url');
  const { h, render } = await import('preact'), { act } = await import('preact/test-utils');
  const dom = new JSDOM('<div id="root"></div>', { url: 'https://admin.example.com/' });
+ dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+ dom.window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
  const keys = ['window', 'document', 'location', 'addEventListener', 'removeEventListener', 'fetch'];
  const previous = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
  const root = dom.window.document.getElementById('root');
@@ -128,9 +130,10 @@ test('shared ACL loading guidance follows pending detail, preview and run reques
    if (mode === 'toAlias') {
     act(() => { const select = root.querySelector('#transition-targets'); select.options[0].selected = true; select.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }); await settle();
    }
-   assert.equal(root.querySelector('button[type="submit"]').disabled, false);
+   const primary = () => mode === 'leave' ? root.querySelector('dialog form button.pri') : root.querySelector('button[type="submit"]');
+   assert.equal(primary().disabled, false);
    assert.ok(!root.textContent.includes(message));
-   await submit(); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+   await submit(); await waitLoading(); if (mode === 'leave') assert.equal(primary().textContent, '처리 중…'); else assert.equal(root.querySelector('[role="status"]').textContent, message);
    assert.equal(pending[0].options.method, 'POST');
    const refs = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
    const plan = lifecycle ? { address, mode: mode === 'delete' ? 'delete' : 'disable', cleanRefs: true, refs, etag: 'synthetic', confirmAddress: address, confirmation: '합성 확인', messages: 0, usedBytes: 0 } : {
@@ -142,8 +145,8 @@ test('shared ACL loading guidance follows pending detail, preview and run reques
    await submit(); assert.equal(pending.length, 0); assert.ok(!root.textContent.includes(message));
    if (mode !== 'leave') await input('#confirm-address', address);
    act(() => { const checkbox = root.querySelector('input[type="checkbox"]:not([disabled])'); checkbox.checked = true; checkbox.dispatchEvent(new dom.window.Event('change', { bubbles: true })); }); await settle();
-   assert.equal(root.querySelector('button[type="submit"]').disabled, false);
-   await submit(); await waitLoading(); assert.equal(root.querySelector('[role="status"]').textContent, message);
+   assert.equal(primary().disabled, false);
+   await submit(); await waitLoading(); if (mode === 'leave') assert.equal(primary().textContent, '처리 중…'); else assert.equal(root.querySelector('[role="status"]').textContent, message);
    assert.equal(pending[0].options.method, mode === 'delete' ? 'DELETE' : 'POST');
    await finish({ address, result: 'ok', steps: [], warnings: [] });
   });

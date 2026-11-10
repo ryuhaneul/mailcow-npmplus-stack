@@ -180,7 +180,7 @@ if (
 printf '[{"Containers":{}}]\n' > "$TMP/network.json"
 pass 'update rejects occupied address before upstream or archive container changes'
 for stage in setup update; do
-    for error in none schema otp-key grants address; do
+    for error in none retirement-schema schema otp-key grants address; do
         (
             events="$TMP/$stage-$error.events"
             : > "$events"
@@ -195,8 +195,10 @@ for stage in setup update; do
             webmail_ensure_admin_key() { :; }
             webmail_reconcile_admin_api() { :; }
             webmail_reconcile_trusted_sender() { :; }
+            webmail_reconcile_recipient_policies() { :; }
             bash() {
                 case "$1" in
+                    */apply-webmail-retirement-db.sh) echo retirement-schema >> "$events"; [ "$error" != retirement-schema ] ;;
                     */apply-webmail-notices-db.sh) echo schema >> "$events"; [ "$error" != schema ] ;;
                     */apply-webmail-dbuser.sh) echo grants >> "$events"; [ "$error" != grants ] ;;
                     *) fail unexpected-script ;;
@@ -208,7 +210,7 @@ for stage in setup update; do
         ) > "$TMP/result" 2>&1 && result=0 || result=$?
         if [ "$error" = none ]; then
             [ "$result" = 0 ] || fail "$stage success"
-            [ "$(paste -sd, "$TMP/$stage-$error.events")" = load,address,password,admin-password,schema,otp-key,grants,env,up ] || fail "$stage order"
+            [ "$(paste -sd, "$TMP/$stage-$error.events")" = load,address,retirement-schema,password,admin-password,schema,otp-key,grants,env,up ] || fail "$stage order"
         else
             [ "$result" != 0 ] || fail "$stage ignored $error failure"
             ! grep -q '^up$' "$TMP/$stage-$error.events" || fail "$stage started after $error failure"

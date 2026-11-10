@@ -366,7 +366,7 @@ export function createFakeAdminApi() {
       if (previewing) {
         const plan=retirementPlan(row,body);
         return send({ address, mode, cleanRefs: leaving ? body.cleanRefs : true, cleanShares: leaving ? body.cleanShares??false : true, forwardTo: body.forwardTo??null, etag, messages:row.messages,usedBytes:row.usedBytes,
-          refs:Object.fromEntries(Object.entries(state.accountRefs).map(([kind,rows])=>[kind,rows.map(ref=>({...ref,effect:kind==='shares'?body.cleanShares||!leaving?'deleted':'kept':body.cleanRefs===false?'kept':kind==='aliases'&&mode==='disable'?'kept':'removed'}))])),
+          refs:Object.fromEntries(Object.entries(state.accountRefs).map(([kind,rows])=>[kind,rows.map(ref=>({...ref,effect:kind==='shares'?body.cleanShares||!leaving?'deleted':'kept':body.cleanRefs===false?'kept':kind==='aliases'?(mode==='disable'?'kept':'deleted'):'removed'}))])),
           sharesScope:'all',irreversible:mode==='delete',confirmAddress:mode==='delete'?address:null,confirmation:mode==='delete'?'메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.':'로그인을 막고 메일은 보존해요.',
           ...(leaving?{...plan,receiveChanges:plan.changes,receiveBlocked:body.receiveBlocked??false,pendingOperation:row.retirement?.pendingOperation??null}:{}),warnings:[...(leaving?leaveWarnings:[]),...(state.accounts.warnings||[])] });
       }

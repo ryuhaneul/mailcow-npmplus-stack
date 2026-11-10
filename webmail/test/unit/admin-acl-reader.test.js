@@ -1,3 +1,4 @@
+import { emptyRetirementFixture } from '../fixtures/retirement.js';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -172,7 +173,7 @@ for (const on of [true, false]) test(`admin app: shares/accounts use ${on ? 'dov
     if (args.mailbox === 'Shared') throw new AppError(502, 'DOVEADM_REJECTED', "Can't open mailbox Shared");
     return grants.has(args.user) ? [{ id: `user=${grantee}`, global: '', rights: 'lookup read' }] : [];
   } };
-  const app = await createAdminApp({ protocolNetlimit: { store: createFakeProtocolNetlimitStore() }, config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: dir }, logger: false, auth: { client: { ...mailcowFixture(), async login({ username }) { return { username, state: 'ready' }; } } }, dockerapi, doveadm });
+  const app = await createAdminApp({ retirement: emptyRetirementFixture(), protocolNetlimit: { store: createFakeProtocolNetlimitStore() }, config: { ...(on ? enabled : {}), adminHostname: 'mailadmin.example.com', trustProxy: [], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: dir }, logger: false, auth: { client: { ...mailcowFixture(), async login({ username }) { return { username, state: 'ready' }; } } }, dockerapi, doveadm });
   t.after(() => app.close());
   assert.equal((await app.inject('/healthz')).statusCode, 200);
   const denied = await app.inject('/api/admin/shares'); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);

@@ -1,3 +1,4 @@
+import { emptyRetirementFixture } from '../fixtures/retirement.js';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -252,7 +253,7 @@ test('convert: missing etag and concurrent duplicate flows cannot issue two dest
 });
 
 test('convert HTTP: both routes use existing authentication/CSRF guard and JSON partial contract', async t => {
-  const f = await fixture(t, 'alias-to-mailbox'); const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t, 'alias-to-mailbox'); const app = await createAdminApp({ retirement: emptyRetirementFixture(), protocolNetlimit: { store: f.netlimit }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = '/api/admin/convert/alias-to-mailbox';
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });

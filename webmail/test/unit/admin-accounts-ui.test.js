@@ -80,7 +80,7 @@ test('retirement approved UI states and existing share APIs operate through actu
     await change('input[type=checkbox]',true);assert.equal(button('퇴사 처리 실행').disabled,true);
   });
   await t.test('already retired dialog does not call leave and moves focus to settings',async()=>{
-    setup();await mount(AccountDetail,{address,changed(){}});await click('퇴사 처리');assert.match(root.textContent,/이미 퇴사 처리된 계정입니다/);await click('계정 설정으로');assert.equal(document.activeElement.id,'retirement-settings');assert.equal(fake.state.accounts.retirementBodies.length,0);
+    setup();await mount(AccountDetail,{address,changed(){}});await click('퇴사 처리');assert.match(root.textContent,/이미 퇴사 처리된 계정입니다/);await click('계정 설정으로');await new Promise(resolve=>dom.window.requestAnimationFrame(resolve));await tick();assert.equal(root.querySelector('dialog'),null);assert.equal(document.activeElement.id,'retirement-settings');assert.equal(fake.state.accounts.retirementBodies.length,0);
   });
   await t.test('block OFF confirmation warns about refs and actual PATCH immediately refreshes current state',async()=>{
     setup(true,true);await mount(AccountDetail,{address,changed(){}});await change('#receive-block',false);await click('변경 미리보기');assert.match(root.textContent,/자동 복원되지 않습니다/);await change('dialog input[type=checkbox]',true);await click('수신 허용');await tick();assert.match(root.querySelector('#retirement-settings').textContent,/허용 중/);assert.equal(fake.state.accounts.retirementBodies.at(-1).method,'PATCH');assert.equal(fake.state.accounts.retirementBodies.at(-1).body.receiveBlocked,false);

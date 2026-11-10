@@ -1,3 +1,4 @@
+import { emptyRetirementFixture } from '../fixtures/retirement.js';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
@@ -219,7 +220,7 @@ test('rename: stale etag, missing etag and concurrent duplicate flows produce no
 });
 
 test('rename HTTP: guard protects preview/run and permits successful rename without challenge headers', async t => {
-  const f = await fixture(t, false); const app = await createAdminApp({ protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
+  const f = await fixture(t, false); const app = await createAdminApp({ retirement: emptyRetirementFixture(), protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore }, config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir }, logger: false,
     dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } }); t.after(() => app.close());
   const url = `/api/admin/mailboxes/${old}/rename`, payload = { action: 'preview', newLocal: 'new', keepOldAsAlias: true };
   const logged = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });

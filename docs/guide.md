@@ -1727,3 +1727,110 @@ JS
 않습니다. version이 달라졌거나 mailbox 조회가403/503이면 정리하지 않습니다. 계정이 존재하면
 현재 etag를 사용한 관리 API 수정으로 의도한 ON/OFF를 복원합니다. 공개 저장소/보고서에 실제 주소·
 version·credential을 넣지 말고, 정리 결과와 감사 참조만 남기세요.
+
+## 계정 퇴사와 새 메일 수신 차단
+
+계정 상세의 퇴사 기록, 로그인 상태, 새 메일 수신 상태를 구분해서 확인합니다.
+`active=2`는 받기 전용/로그인 제한 상태이며 퇴사의 증거가 아닙니다. 기존 계정을 자동
+차단하지 않습니다. 퇴사 창은 로그인을 제한하고 메일을 보존하며, 영구 삭제는 별도
+삭제 흐름에서만 실행합니다. 이미 퇴사한 계정은 다시 퇴사시키지 않고 설정으로 안내합니다.
+
+### 서버 준비와 확인
+
+서버 `.env`에서 `WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=true`를 직접 선택한 뒤
+정상 setup/update를 실행합니다. 누락·빈값·false는 꺼짐이며 update가 이 선택값을 새로
+쓰거나 바꾸지 않습니다. 기존 설치를 처음 올리면 두 표와 admin CRUD 권한이 추가될 수
+있지만, 기능 OFF에서 public recipient SELECT나 SMTP 전용 계정을 새로 만들지 않습니다.
+두 번째 update부터 표·grants·Postfix hook의 상태가 유지돼야 합니다.
+
+```sh
+sudo bash scripts/update.sh
+sudo bash scripts/reconcile-postfix-recipient-policies.sh --check
+sudo bash scripts/verify.sh
+```
+
+setup/update는 schema를 grants보다 먼저 준비하고 단일 reconcile로 **B(R(base))** 순서를
+구성합니다. B는 기존 bounce 정책, R은 새 수신 차단 SQL access 검사입니다. 별도 access
+설치기를 B 위에 직접 실행하지 않습니다. 기본 update가 IP/GID 자원 복구를 자동 실행하지
+않으며 검사 실패는 nonzero로 멈춥니다. DB 연결·인증·조회 오류를 먼저 해결하세요.
+검토한 컨테이너 IP/GID 변경일 때만 아래 명시 복구를 실행합니다.
+
+```sh
+sudo bash scripts/reconcile-postfix-recipient-policies.sh apply --repair-resources -y
+sudo bash scripts/verify.sh
+```
+
+원본 `extra.cf`의 owned block 밖에 `smtpd_recipient_restrictions`를 명시한 비표준 구성은
+공존 및 R-only→B-only 전환 전에 거부합니다. 원래 제한을 보존하는 방법을 운영자가
+검토해 먼저 정리해야 합니다. 손상·중복 block/helper, 외부 변경, recipient/relay 서비스
+override, `+` 이외 delimiter 등을 자동 채택하지 않습니다.
+
+### 기존 퇴사 기록 이관
+
+관리 컨테이너의 기존 DB/API 접근 환경과 감사 기록을 사용합니다. 보고서/승인 파일은
+admin 전용 `/data/private` 같은 디렉터리(0700)에 두고 공개 저장소에 넣지 않습니다.
+CLI는 파일을 0600으로 배타 생성하며 기존 출력 파일을 덮지 않습니다.
+
+```sh
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --dry-run --output /data/private/retirement-candidates.json
+# 보고서를 검토하고 승인 주소를 canonical 주소 한 줄씩 retirement-approved.txt에 준비합니다.
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --apply --manifest /data/private/retirement-candidates.json --approved /data/private/retirement-approved.txt --output /data/private/retirement-receipt.json
+```
+
+Dry-run은 지정 보고서만 만들고 서비스 상태는 바꾸지 않습니다. 성공 감사와 현재 계정의
+세대를 대조하며 증거가 불명확하거나 이후 lifecycle이 있으면 보류합니다. 시간대 없는
+생성 시각에는 보수적인 24시간 여유를 둡니다. 이름이나 `active=2`만으로 추정하지 않습니다.
+승인된 이관도 수신 차단 OFF·recipient key 0건으로 기록합니다. 이관 뒤 관리자가 변경한
+version은 rollback이 지우지 않습니다. partial receipt는 완료된 변경을 포함하므로 먼저 검토합니다.
+
+```sh
+docker exec webmail-admin node bin/migrate-webmail-retirement.js --rollback --manifest /data/private/retirement-receipt.json --approved /data/private/retirement-approved.txt --output /data/private/retirement-rollback.json
+```
+
+### 공유·전달·남은 정리
+
+기존 읽기 공유는 기본 유지합니다. `cleanRefs=true`만으로 공유를 지우지 않으며
+`cleanShares`를 별도로 선택해야 합니다. 영구 삭제는 모든 연결을 정리합니다. 퇴사 계정도
+active=2 소유자로 공유 메뉴에 표시되고, 계정 상세의 **이 메일함의 읽기 공유**에서 기존
+공유 API로 추가·해제할 수 있습니다. 새 수혜자는 active=1만 허용하며 하위 폴더 권한은
+실제 ACL 확인 결과를 따릅니다.
+
+수신 차단과 전달은 함께 사용할 수 없습니다. 차단 선택 시 현재 관리 전달을 끄는 변경을
+미리보기에서 확인·동의합니다. 개인 활성 Sieve·관리자 postfilter·global 필터나 안전하게
+해석할 수 없는 전달은 임의 수정하지 않고 해결할 위치를 안내합니다. 혼합 alias/팀은
+정상 수신자를 보존하며 불명확하거나 마지막 구성원인 경우 차단을 거부합니다.
+퇴사 뒤 공유를 추가할 수 있으며 차단 OFF가 이전 팀·별칭 연결을 자동 복원하지 않습니다.
+partial은 완료된 단계가 이미 반영된 상태입니다. 저장된 퇴사 요청으로 남은 정리를 재시도하고
+계정 상태·감사를 확인하세요. 새 퇴사 처리를 중복 실행하지 않습니다.
+
+### readiness와 장애·중지 절차
+
+`$WEBMAIL_DIR/retirement-readiness/state.json`에는 ready bool, 검사 시각 checkedAt,
+검사한 owned hook의 SHA256 hookHash만 있습니다. 비밀값은 없으며 디렉터리 0755/파일 0644로
+준비해 admin에 `/run/retirement-readiness:ro` 디렉터리로 연결합니다. 파일을 통째 atomic
+교체하므로 앱은 재시작 없이 다음 요청에서 반영합니다. READY 값을 server/admin env에
+따로 저장하지 않습니다.
+
+setup/update 시작과 검사 실패는 false, 최종 hook/resource 확인과 R enabled가 모두 맞을
+때만 true입니다. verify는 전체 검사가 성공해야 true이고 직접 reconcile `--check`는
+실패 시 false만 쓰며 성공 자체는 true를 쓰지 않습니다. **TTL은 없습니다.** 파일 누락·잘못된
+형식·300초 초과 미래 시각·기능 OFF는 false로 봅니다. false 쓰기 실패 시 검증한 자체
+일반 파일만 지워 missing=false로 만들고 nonzero를 반환합니다. 삭제도 실패하면 수동 복구
+오류가 나오므로 경로/소유권을 확인한 뒤 정확한 runtime 파일만 복구하세요. symlink나 다른
+소유자의 파일은 자동 삭제하지 않습니다.
+
+readiness는 마지막 배포 준비 검증이며 실시간 SMTP 가용성 검사가 아닙니다. 다음 한계가 있습니다.
+
+- public Sieve guard는 SELECT와 저장 사이에 경합 창이 남습니다. admin 관련 쓰기는 공통 named lock을 사용합니다.
+- mailcow UI/API·직접 ManageSieve 변경은 앱 쓰기 guard의 통제 밖입니다. 배포 밖 수동 변경도 지속 감시하지 않습니다.
+- R의 DB map 오류는 R까지 도달한 **모든 RCPT**를 4xx로 지연시킵니다. 정상 외부 수신과 인증 사용자의 외부 발송도 포함합니다. B에서 먼저 끝난 RCPT까지 R이 검사했다는 뜻은 아닙니다.
+- 지속 장애는 송신 측 또는 이미 접수된 전달 큐의 만료·DSN을 일으킬 수 있습니다. 이미 접수한 메일을 취소하거나 반송이 없다고 보장하지 않습니다.
+- alias/alias-domain/plus fallback·Sieve 재주입·실제 uid/gid/SELinux·공식 update 후 보존은 격리 VM 통합 시험이 필요합니다. 로컬 fixture는 실배달 증거가 아닙니다.
+
+기능을 끄려면 서버 선택을 false로 바꾸고 정상 update/reconcile로 R만 제거·B를 보존한 뒤
+hook/runtime을 확인합니다. `--revert -y`는 **B와 R을 모두 제거**하므로 구분해서 사용하세요.
+map/전용 계정은 자동 삭제하지 않으며 퇴사 기록·선택·key도 보존됩니다. live R이 남은 상태에서
+DB 표·credential을 먼저 없애면 전체 RCPT가 지연될 수 있습니다. 제거를 확인한 뒤에만 map에
+기록된 정확한 Postfix host의 전용 계정과 private map을 별도 회수합니다. 장애 복원 실패의
+backup/private snapshot은 운영자가 복구한 뒤 안전하게 삭제합니다. 임의 전체 계정/표 삭제로
+정리하지 마세요. 구버전 앱으로 돌아가기 전에도 hook·guard·schema 호환을 먼저 확인합니다.

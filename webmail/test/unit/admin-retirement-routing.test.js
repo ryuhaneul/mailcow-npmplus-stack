@@ -246,12 +246,15 @@ test('retirement writes: DB failure propagates and healthy removal does not requ
   await assert.rejects(f.routing.assertAdminScript({}, `redirect :copy "${healthy}";`, team), { statusCode: 503 });
 });
 
-test('retirement writes: unresolved literal compatibility does not change the ON inspection blockers', async () => {
+test('F5a retirement writes and ON inspection: unrelated unresolved literal preserves compatibility', async () => {
   const f = fixture();
   await f.routing.assertMutation({}, { kind: 'alias', address: 'future@example.test', after: alias('future@example.test', 'not-created@example.test') });
   await f.routing.assertAdminScript({}, 'redirect :copy "not-created@example.test";', healthy);
   f.filters.push(filter('redirect :copy "not-created@example.test";'));
-  assert.ok(codes(await inspect(f)).includes('FILTER_ROUTE_UNKNOWN'));
+  const plan = await inspect(f);
+  assert.equal(plan.canPrepare, true); assert.equal(plan.ready, true);
+  assert.deepEqual(f.routing.assertReady(plan), [owner]);
+  assert.deepEqual(plan.blockers, []); assert.deepEqual(plan.changes, []);
   f.store.blockedRecipients = async values => values.filter(value => value === 'not-created@example.test');
   await assert.rejects(f.routing.assertMutation({}, { kind: 'alias', address: 'future@example.test', after: alias('future@example.test', 'not-created@example.test') }), { code: 'RETIREMENT_ROUTE_PROTECTED' });
 });
@@ -273,4 +276,34 @@ test('D3-2 deployment checks every stored ON account with existing inspect/asser
   f.scripts.clear();f.names.clear();result=await run();assert.deepEqual(result,{ready:true,checked:2,failures:[]});
   f.options.failUser=team;result=await run();assert.equal(result.ready,false);assert.equal(result.failures.length,2);
   db.execute=async()=>{throw new Error('synthetic DB secret');};await assert.rejects(run(),/synthetic DB secret/);
+});
+
+test('F5b ON inspection: unresolved literal matching a rejection key or its plus equivalent remains blocked', async () => {
+  for (const target of [owner, 'RETIRED+tag@example.test', 'retired@alternate.test', 'retired+tag@alternate.test']) {
+    const f = fixture();
+    // A dangling canonical alias makes resolution unknown while canonical and
+    // alias-domain addresses remain the proposed rejection keys.
+    f.facts.aliases[0].goto = 'missing@example.test';
+    f.facts.aliasDomains.push({ alias_domain: 'alternate.test', target_domain: 'example.test', active: 1 });
+    f.filters.push(filter(`require ["copy"]; redirect :copy "${target}";`));
+    const plan = await inspect(f);
+    assert.ok(plan.blockers.some(row => row.code === 'FILTER_ROUTE_UNKNOWN' && row.target === target.toLowerCase()), target);
+    assert.equal(plan.canPrepare, false); assert.equal(plan.ready, false);
+    assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
+  }
+  const f = fixture(), aliasKey = 'protected-alias@example.test';
+  f.facts.aliases.push(alias(aliasKey, owner));
+  f.filters.push(filter(`require ["copy"]; redirect :copy "${aliasKey}";`));
+  const plan = await inspect(f);
+  assert.ok(plan.keys.includes(aliasKey)); assert.ok(codes(plan).includes('LAST_TEAM_MEMBER'));
+  assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
+});
+test('F5c ON inspection: dynamic targets and include still fail closed', async () => {
+  for (const source of ['require ["variables"]; redirect "${destination}";', 'include "opaque";']) {
+    const f = fixture(); f.filters.push(filter(source));
+    const plan = await inspect(f);
+    assert.ok(codes(plan).includes('FILTER_UNINSPECTABLE'));
+    assert.equal(plan.canPrepare, false); assert.equal(plan.ready, false);
+    assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
+  }
 });

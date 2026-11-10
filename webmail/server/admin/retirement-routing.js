@@ -128,6 +128,10 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
       versions.push({ source: 'admin', address, id: String(filter.id), active: String(filter.active), type: filter.filter_type, hash: sourceHash(filter.script_data) });
       if (String(filter.active) === '1' && active.has(address)) selected.push({ ...filter, username: address });
     }
+    const matchesRecipientKey = value => {
+      const full = value.trim().toLowerCase(), [local, name] = full.split('@');
+      return plan.keys.includes(full) || local.includes('+') && plan.keys.includes(`${local.split('+')[0]}@${name}`);
+    };
     function examine(source, location, filter) {
       const hash = sourceHash(source); inspected.push({ ...location, hash });
       let redirects;
@@ -144,7 +148,13 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
       }
       const involved = [];
       for (const { redirect, result } of resolved) {
-        if (result.problems.length) { blockers.push(issue('FILTER_ROUTE_UNKNOWN', location.address, { ...location, target: redirect.target })); continue; }
+        if (result.problems.length) {
+          if (result.problems.some(problem => problem.code !== 'UNRESOLVED_INTERNAL') ||
+            [redirect.target, ...result.problems.map(problem => problem.address)].some(matchesRecipientKey)) {
+            blockers.push(issue('FILTER_ROUTE_UNKNOWN', location.address, { ...location, target: redirect.target }));
+          }
+          continue;
+        }
         if (result.targets.includes(owner)) involved.push(redirect);
       }
       if (!involved.length) return;

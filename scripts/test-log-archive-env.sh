@@ -405,7 +405,7 @@ for index, (changes, name, mode, expected, payload) in enumerate(cases):
     if payload:
         import json
         saved = json.loads((backup_root/'hosts-before.json').read_text())
-        assert len(saved) == 3 and saved[-1] == host
+        assert len(saved) == 2 and saved[-1] == host
     assert host['advanced_config'] == base['advanced_config']
 PY
 pass 'NPM admin upstream migrates only the legacy target, preserves ACL/config, backs up and verifies the new target'

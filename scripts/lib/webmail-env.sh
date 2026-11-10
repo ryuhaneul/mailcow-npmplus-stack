@@ -19,6 +19,11 @@ webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 
 # Options can be loaded before mailcow exists (fresh setup Phase 0).
 webmail_options() {
+    MAILCOW_WEB_PUBLIC_ENABLE="${MAILCOW_WEB_PUBLIC_ENABLE-false}"
+    case "$MAILCOW_WEB_PUBLIC_ENABLE" in
+        true|false) ;;
+        *) webmail_error "MAILCOW_WEB_PUBLIC_ENABLE must be true or false"; return 1 ;;
+    esac
     WEBMAIL_ADMIN_DOVEADM_ENABLE="${WEBMAIL_ADMIN_DOVEADM_ENABLE:-false}"
     WEBMAIL_ADMIN_RELAY_ENABLE="${WEBMAIL_ADMIN_RELAY_ENABLE:-false}"
     WEBMAIL_OTP_KEY="${WEBMAIL_OTP_KEY:-}"
@@ -119,6 +124,7 @@ webmail_load_config() {
     MAILCOW_DIR="$2"
     [ -f "$WEBMAIL_STACK_ENV" ] || { webmail_error "stack .env not found"; return 1; }
     [ -f "$MAILCOW_DIR/mailcow.conf" ] || { webmail_error "mailcow.conf not found"; return 1; }
+    MAILCOW_WEB_PUBLIC_ENABLE=false
     LOG_ARCHIVE_ENABLE=false
     LOG_ARCHIVE_KEY=
     LOG_ARCHIVE_REQUIRED_SOURCES=

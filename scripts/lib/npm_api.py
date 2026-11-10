@@ -146,7 +146,7 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
     selected = []
     changes = {}
     failed = False
-    hostnames = [f'mailcow.{domain}', f'mail-npm.{domain}']
+    hostnames = [f'mail-npm.{domain}']
     if admin_hostname:
         hostnames.append(admin_hostname)
     for hostname in hostnames:
@@ -211,6 +211,128 @@ def admin_main(mode, work, api, name, domain, admin_hostname=""):
             client.request('PUT', f'/nginx/proxy-hosts/{host["id"]}', payload)
             print(f'INFO {",".join(host["domain_names"])}: 적용')
     return 1 if failed else 0
+
+
+def select_mailcow_web_host(hosts, domain):
+    if not isinstance(hosts, list):
+        raise RuntimeError('invalid mailcow proxy-host inventory')
+    matches = []
+    for host in hosts:
+        if (not isinstance(host, dict) or not isinstance(host.get('domain_names'), list)
+                or not all(isinstance(name, str) for name in host['domain_names'])):
+            raise RuntimeError('invalid mailcow proxy-host inventory')
+        if f'mailcow.{domain}' in host['domain_names']:
+            matches.append(host)
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise RuntimeError('multiple mailcow proxy hosts; stopped')
+    host = matches[0]
+    if (host['domain_names'] != [f'mailcow.{domain}']
+            or host.get('forward_host') != 'nginx-mailcow'
+            or type(host.get('forward_port')) is not int or host['forward_port'] != 8443
+            or host.get('forward_scheme') != 'https'
+            or type(host.get('id')) is not int or host['id'] < 1
+            or host.get('is_deleted', False) not in (False, 0)
+            or type(host.get('enabled')) not in (bool, int) or host['enabled'] not in (0, 1)):
+        raise RuntimeError('unexpected mailcow proxy host; stopped')
+    return host
+
+
+def mailcow_web_snapshot(host):
+    # List/detail representations may have different expanded metadata.
+    fields = ('id', 'domain_names', 'forward_host', 'forward_port', 'forward_scheme',
+              'enabled', 'is_deleted', 'access_list_id', 'npmplus_access_list_ids',
+              'npmplus_access_list_type', 'locations', 'certificate_id', 'advanced_config')
+    return {key: host[key] for key in fields if key in host}
+
+
+def mailcow_web_detail(client, host, domain):
+    detail = client.request('GET', f'/nginx/proxy-hosts/{host["id"]}')
+    checked = select_mailcow_web_host([detail], domain)
+    if checked is None or checked['id'] != host['id']:
+        raise RuntimeError('mailcow proxy-host detail differs')
+    return checked
+
+
+def mailcow_web_acl(host, identity):
+    locations = host.get('locations', [])
+    if not isinstance(locations, list) or any(not isinstance(item, dict) for item in locations):
+        raise RuntimeError('invalid mailcow Custom Locations')
+    if any(item.get('npmplus_enabled') is not False and item.get('npmplus_access_list_type') != 'global'
+           for item in locations):
+        raise RuntimeError('mailcow Custom Location has its own access settings; no enable sent')
+    state = access_state(host, identity)
+    if state == 'other':
+        raise RuntimeError('mailcow has another access restriction; preserved, no enable sent')
+    return state
+
+
+def mailcow_web_backup(host):
+    root = pathlib.Path('/root/mailcow-web-public-backup-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex)
+    root.mkdir(mode=0o700, parents=True)
+    backup = root / 'host-before.json'
+    with backup.open('x') as stream:
+        os.chmod(backup, 0o600)
+        json.dump(host, stream, ensure_ascii=False, indent=2)
+        stream.write('\n')
+    print(f'INFO mailcow web policy backup: {backup}')
+
+
+def mailcow_web_main(mode, work, api, domain, desired, acl_name, context):
+    if (mode not in ('mcweb-preflight', 'mcweb-apply', 'mcweb-verify')
+            or context not in ('setup', 'update', 'verify') or desired not in ('true', 'false')):
+        raise RuntimeError('invalid mailcow web policy arguments')
+    client = NpmApi(api, work)
+    client.login(work / 'login.json', retry_seconds=90)
+    host = select_mailcow_web_host(client.hosts(), domain)
+    identity = select_admin_access(client, acl_name) if desired == 'true' and acl_name else 0
+    if type(identity) is not int or identity < 0:
+        raise RuntimeError('invalid mailcow admin access-list ID')
+    if host is None:
+        if desired == 'true' and not (mode == 'mcweb-preflight' and context == 'setup'):
+            raise RuntimeError('mailcow proxy host absent; set MAILCOW_WEB_PUBLIC_ENABLE=true and run setup.sh')
+        print(('PASS' if mode == 'mcweb-verify' else 'INFO') + ' mailcow web policy: host absent')
+        return 0
+    acl_state = mailcow_web_acl(host, identity) if identity else None
+    detail = mailcow_web_detail(client, host, domain)
+    if mailcow_web_snapshot(host) != mailcow_web_snapshot(detail):
+        raise RuntimeError('mailcow proxy host changed concurrently; stopped')
+    host = detail
+    enabled = bool(host['enabled'])
+    target = desired == 'true'
+    if mode == 'mcweb-preflight':
+        print('INFO mailcow web policy: preflight passed')
+        return 0
+    if mode == 'mcweb-verify':
+        if enabled != target or (identity and acl_state != 'same'):
+            raise RuntimeError('mailcow web policy does not match enabled state or ADMIN_ACCESS_LIST')
+        print(f'PASS mailcow web policy: enabled={desired}')
+        return 0
+    if enabled != target or (identity and acl_state != 'same'):
+        mailcow_web_backup(host)
+    if identity and acl_state != 'same':
+        payload = proxy_access_fields([host], identity)
+        client.request('PUT', f'/nginx/proxy-hosts/{host["id"]}', payload)
+        after = mailcow_web_detail(client, host, domain)
+        expected = mailcow_web_snapshot(host)
+        expected.update(payload)
+        if mailcow_web_snapshot(after) != expected or mailcow_web_acl(after, identity) != 'same':
+            raise RuntimeError('mailcow ACL confirmation failed; no enable sent')
+        host = after
+    if enabled != target:
+        action = 'enable' if target else 'disable'
+        client.request('POST', f'/nginx/proxy-hosts/{host["id"]}/{action}', {})
+        after = mailcow_web_detail(client, host, domain)
+        expected = mailcow_web_snapshot(host)
+        expected['enabled'] = target
+        if mailcow_web_snapshot(after) != expected:
+            raise RuntimeError('mailcow enabled-state confirmation failed')
+        host = after
+    if identity and mailcow_web_acl(host, identity) != 'same':
+        raise RuntimeError('mailcow final ADMIN_ACCESS_LIST confirmation failed')
+    print(f'INFO mailcow web policy: enabled={desired}')
+    return 0
 
 
 # Literal generated Nginx text: one backslash before the dot (not a regex here).
@@ -409,6 +531,10 @@ if __name__ == '__main__':
     os.umask(0o077)
     mode = sys.argv[1]
     try:
+        if mode in ('mcweb-preflight', 'mcweb-apply', 'mcweb-verify'):
+            if len(sys.argv) != 9:
+                raise ValueError('invalid mailcow web policy arguments')
+            sys.exit(mailcow_web_main(mode, pathlib.Path(sys.argv[2]), *sys.argv[3:]))
         if mode in ('acme-resave', 'acme-verify', 'acme-restore'):
             if len(sys.argv) != 5:
                 raise ValueError('invalid ACME arguments')
@@ -422,6 +548,9 @@ if __name__ == '__main__':
         sys.exit(admin_main(mode, pathlib.Path(work), api, name, domain, sys.argv[6] if len(sys.argv) == 7 else ""))
     except (RuntimeError, http.client.HTTPException, OSError, ValueError, KeyError, TypeError) as error:
         message = str(error) if isinstance(error, RuntimeError) else 'operation failed; check NPM configuration'
+        if mode.startswith('mcweb-'):
+            print('FAIL mailcow web policy: ' + message)
+            sys.exit(1)
         if mode == 'verify':
             print(('FAIL' if sys.argv[4] else 'SKIP') + ' admin access check: ' + message)
             sys.exit(1 if sys.argv[4] else 0)

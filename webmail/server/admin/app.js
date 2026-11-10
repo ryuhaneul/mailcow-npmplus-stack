@@ -1,3 +1,4 @@
+import { createRetirementReadiness } from './retirement-readiness.js';
 import { createRetirementStore } from '../security/retirement-store.js';
 import { createRetirementRouting } from './retirement-routing.js';
 import { createAuthPolicyListener } from './auth-policy.js';
@@ -160,9 +161,10 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   await app.register(sharesRoutes, { service: shares });
   const retirementStore = retirement.store ?? createRetirementStore({ config, mode: 'admin' });
   const retirementRouting = retirement.routing ?? createRetirementRouting({ mailcow: app.mailcow, dockerapi: sharesDockerapi, store: retirementStore });
+  const deploymentReadiness = createRetirementReadiness({ enabled: config.retirementReceiveBlockEnabled, file: config.retirementReadinessFile });
   const retirementOptions = { store: retirementStore, routing: retirementRouting,
     featureEnabled: retirement.featureEnabled ?? config.retirementReceiveBlockEnabled ?? false,
-    ready: retirement.ready ?? false }; // P6: replace the false fallback only with verified deployment readiness.
+    get ready() { return retirement.ready ?? deploymentReadiness(); } };
   app.addHook('onClose', async () => { await retirementStore.close?.(); });
   const teams = createTeamsService({ retirement: retirementRouting, mailcow: app.mailcow, audit, lock: adminLock, history, auditDir: config.auditDir });
   app.decorate('teams', teams);

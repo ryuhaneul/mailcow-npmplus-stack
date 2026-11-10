@@ -56,6 +56,14 @@ if args[:2]==['-e','MYSQL_PWD']:
     if settings.get('db_error'):
         print(os.environ['MYSQL_PWD'],file=sys.stderr);sys.exit(1)
     import re
+    if sql.startswith('CREATE DATABASE'):
+        assert 'CREATE TABLE IF NOT EXISTS mailstack_webmail.account_retirement' in sql
+        assert 'CREATE TABLE IF NOT EXISTS mailstack_webmail.retirement_recipient_keys' in sql
+        assert not any(line.startswith(('DROP','DELETE','UPDATE','TRUNCATE','REPLACE')) for line in sql.splitlines())
+        if not (p/'schema.json').exists():(p/'schema.json').write_text(json.dumps(['account_retirement','retirement_recipient_keys']))
+        sys.exit(0)
+    if sql.startswith('SELECT JSON_OBJECT'):
+        assert (p/'schema.json').exists();print((p/'schema.metadata').read_text(),end='');sys.exit(0)
     if sql.startswith('SELECT Host FROM mysql.user'):
         if users:print('\n'.join(sorted(users)))
         sys.exit(0)
@@ -147,6 +155,7 @@ from pathlib import Path
 import json,os
 original=Path.stat
 root=Path(os.environ['RETIREMENT_TEST_TMP']);prefix=str(Path(os.environ['MAILCOW_DIR'])/'data/conf/postfix/mailstack-retirement')
+runtime=str(Path(os.environ['WEBMAIL_DIR'])/'retirement-readiness')
 def fixture_stat(self,*args,**kwargs):
     value=original(self,*args,**kwargs)
     if str(self).startswith(prefix):
@@ -154,8 +163,20 @@ def fixture_stat(self,*args,**kwargs):
         file=root/'ownership.json';data=json.loads(file.read_text()) if file.exists() else {}
         fields[5]=data.get(prefix,101)
         return os.stat_result(fields)
+    if str(self)==runtime+'/state.json' and os.path.exists(str(root/'foreign-publication-owner')):
+        fields=list(value);fields[4]=os.geteuid()+1;return os.stat_result(fields)
     return value
 Path.stat=fixture_stat
+import tempfile
+real_mkstemp=tempfile.mkstemp;real_unlink=os.unlink
+runtime=str(Path(os.environ['WEBMAIL_DIR'])/'retirement-readiness')
+def fail_publication(*args,**kwargs):
+    if str(kwargs.get('dir',''))==runtime and (root/'fail-publication').exists():raise OSError('synthetic allocation failure')
+    return real_mkstemp(*args,**kwargs)
+def fail_unlink(path,*args,**kwargs):
+    if str(path)==runtime+'/state.json' and (root/'fail-publication-unlink').exists():raise PermissionError('synthetic unlink failure')
+    return real_unlink(path,*args,**kwargs)
+tempfile.mkstemp=fail_publication;os.unlink=fail_unlink
 PYSTAT
 export PYTHONPATH="$TMP/python${PYTHONPATH:+:$PYTHONPATH}"
 cat > "$TMP/bin/chown" <<'MOCKCHOWN'
@@ -173,6 +194,23 @@ if args[1]==prefix:
 values[args[1]]=int(args[0].split(':')[1]);p.write_text(json.dumps(values))
 MOCKCHOWN
 chmod +x "$TMP/bin/chown"
+python3 - "$TMP/schema.metadata" <<'PYSCHEMADATA'
+import json,sys
+rows=[]
+for table in ('account_retirement','retirement_recipient_keys'): rows.append(dict(kind='table',table=table,engine='InnoDB'))
+for name,typ,null,collation,default in [
+('email','varchar(254)','NO','ascii_bin',None),('retired','tinyint(1)','NO',None,'0'),('receive_blocked','tinyint(1)','NO',None,'0'),
+('recorded_at','datetime(6)','YES',None,'NULL'),('source',"enum('leave','legacy_import')",'NO','utf8mb4_unicode_ci',None),
+('source_audit_id','char(32)','YES','ascii_bin','NULL'),('updated_by','varchar(255)','NO','utf8mb4_unicode_ci',None),
+('updated_at','datetime(6)','NO',None,'current_timestamp(6)'),('version','binary(16)','NO',None,None),('pending_operation','longtext','YES','utf8mb4_bin','NULL')]:
+    rows.append(dict(kind='column',table='account_retirement',name=name,type=typ,nullable=null,collation=collation,default=default,extra='on update current_timestamp(6)' if name=='updated_at' else ''))
+for name in ('recipient','owner'): rows.append(dict(kind='column',table='retirement_recipient_keys',name=name,type='varchar(254)',nullable='NO',collation='ascii_bin',default=None,extra=''))
+for name,clause in [('account_retirement_retired','`retired` in (0,1)'),('account_retirement_receive_blocked','`receive_blocked` in (0,1)'),('account_retirement_block_requires_retired','`receive_blocked` = 0 or `retired` = 1'),('pending_operation','json_valid(`pending_operation`)')]: rows.append(dict(kind='check',table='account_retirement',name=name,clause=clause))
+for table,name,col,pos,unique in [('account_retirement','PRIMARY','email',1,0),('retirement_recipient_keys','PRIMARY','recipient',1,0),('retirement_recipient_keys','PRIMARY','owner',2,0),('retirement_recipient_keys','retirement_recipient_owner','owner',1,1)]: rows.append(dict(kind='index',table=table,name=name,column=col,position=pos,unique=unique))
+rows.append(dict(kind='fk',table='retirement_recipient_keys',name='retirement_recipient_owner_fk',column='owner',ref_schema='mailstack_webmail',ref_table='account_retirement',ref_column='email',delete='CASCADE'))
+with open(sys.argv[1],'w') as f:
+    for row in rows: f.write(json.dumps(row)+'\n')
+PYSCHEMADATA
 REAL_MKTEMP=$(command -v mktemp)
 export REAL_MKTEMP
 cat > "$TMP/bin/mktemp" <<'PYMKTEMP'
@@ -468,5 +506,165 @@ PYFAULT
 if run apply -y; then fail restore-failure-success; fi
 grep -q 'protection state UNKNOWN; manual recovery required' "$TMP/stderr" || fail restore-unknown
 [ -n "$(find "$TMP/work" -mindepth 1 -maxdepth 1 -type d -print -quit)" ] || fail recovery-snapshot
-pass '10: drift/DB/IP/GID fail without mutation; explicit IP repair; check/reload failure, retained resources/readiness false and failed recovery'
+# P6b-2: execute the real update app-deployment block, with unrelated infra stubbed.
+source "$ROOT/scripts/lib/webmail-env.sh"
+export DEPLOY_ROOT="$ROOT" DEPLOY_SCRIPTS="$TMP/deploy-scripts"
+mkdir -p "$DEPLOY_SCRIPTS"
+ln -s "$ROOT/scripts/lib" "$DEPLOY_SCRIPTS/lib"
+for name in reconcile-postfix-recipient-policies apply-postfix-bounce-policy apply-postfix-retirement-access apply-webmail-retirement-db; do ln -s "$ROOT/scripts/$name.sh" "$DEPLOY_SCRIPTS/$name.sh"; done
+for name in apply-webmail-notices-db admin-app-link; do printf '#!/bin/bash\nexit 0\n' > "$DEPLOY_SCRIPTS/$name.sh"; done
+cat > "$DEPLOY_SCRIPTS/apply-webmail-dbuser.sh" <<'SHGRANT'
+#!/bin/bash
+# The separate DB-user fixture executes real grants. Here enforce ordering only.
+[ -f "$RETIREMENT_TEST_TMP/schema.json" ] || exit 1
+printf 'grants-after-schema\n' >> "$RETIREMENT_TEST_TMP/deploy.calls"
+SHGRANT
+python3 - "$ROOT" "$TMP/update-phase.sh" <<'PYPHASE'
+from pathlib import Path
+import sys
+root,dest=Path(sys.argv[1]),Path(sys.argv[2]);source=(root/'scripts/update.sh').read_text()
+phase=source.split('# Phase 5b: Webmail edge migration',1)[1]
+phase=phase[phase.index('webmail_load_config'):].split('# Phase 6: Bring up remaining stacks',1)[0]
+begin=next(line for line in source.splitlines() if line.startswith('webmail_retirement_begin '))
+finish=next(line for line in source.splitlines() if line.startswith('webmail_retirement_finish '))
+assert '--repair-resources' not in phase
+preamble='#!/bin/bash\nset -euo pipefail\nsource "$DEPLOY_ROOT/scripts/lib/webmail-env.sh"\nSCRIPT_DIR="$DEPLOY_SCRIPTS" PROJECT_DIR="$DEPLOY_ROOT" ENV_FILE="$WEBMAIL_ENV_FILE"\nWEBMAIL_STACK_ENV="$ENV_FILE" NPMPLUS_DIR="$RETIREMENT_TEST_TMP/npm" LOGFILE="$RETIREMENT_TEST_TMP/deploy.log"\ndie(){ echo "$*" >&2; exit 1; }\nwarn(){ :; }\nedge_check_admin_db_address(){ :; }\nwebmail_ensure_db_password(){ :; }\nwebmail_ensure_admin_db_password(){ :; }\nwebmail_ensure_otp_key(){ :; }\nwebmail_ensure_admin_key(){ :; }\nwebmail_reconcile_admin_api(){ :; }\nwebmail_reconcile_trusted_sender(){ :; }\nwebmail_reconcile_auth_policy(){ :; }\nedge_prepare_apps(){ :; }\nedge_up_apps(){ :; }\nedge_reconcile_npmplus(){ :; }\nwebmail_generate_admin_env(){ :; }\nedge_archive_apply(){ :; }\nwebmail_load_config "$ENV_FILE" "$MAILCOW_DIR"\n'
+dest.write_text(preamble+begin+'\n'+phase+'\n'+finish+'\n')
+# Verify setup and verify are wired to the same helpers, and runtime sync preserves the directory.
+setup=(root/'scripts/setup.sh').read_text();verify=(root/'scripts/verify.sh').read_text();edge=(root/'scripts/lib/edge.sh').read_text()
+assert 'webmail_retirement_begin "$WEBMAIL_DIR"' in setup and 'webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR"' in setup
+assert setup.index('webmail_prepare_retirement_schema "$SCRIPT_DIR"') < setup.index('bash "$SCRIPT_DIR/apply-webmail-dbuser.sh" apply')
+assert 'webmail_reconcile_bounce_policy' not in setup+source+verify
+assert '--exclude=retirement-readiness/' in edge
+assert source.index('WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=false') < source.index('source \"$ENV_FILE\"')
+PYPHASE
+json_ready(){ python3 - "$WEBMAIL_DIR/retirement-readiness/state.json" "$1" "$CONF/extra.cf" <<'PYREADY' || fail readiness-publication
+import hashlib,json,re,sys
+from pathlib import Path
+p=Path(sys.argv[1]);value=json.loads(p.read_text());assert set(value)=={'ready','checkedAt','hookHash'}
+assert value['ready']==(sys.argv[2]=='true')
+raw=Path(sys.argv[3]).read_bytes();pattern=rb'\n# BEGIN mailstack-(bounce-policy|retirement-access) \([^\n]+\)\n.*?\n# END mailstack-\1\n'
+assert value['hookHash']==hashlib.sha256(b''.join(m[0] for m in re.finditer(pattern,raw,re.S))).hexdigest()
+assert p.stat().st_mode&0o777==0o644 and p.parent.stat().st_mode&0o777==0o755
+PYREADY
+}
+phase(){ local rc=0; bash "$TMP/update-phase.sh" > "$TMP/stdout" 2> "$TMP/stderr" || rc=$?; no_secrets || fail deployment-secret-output; return "$rc"; }
+for flag in missing empty false; do
+ reset
+ flags false true
+ case "$flag" in missing) sed -i '/RETIREMENT_RECEIVE_BLOCK_ENABLE/d' "$WEBMAIL_ENV_FILE" ;; empty) sed -i 's/RETIREMENT_RECEIVE_BLOCK_ENABLE=false/RETIREMENT_RECEIVE_BLOCK_ENABLE=/' "$WEBMAIL_ENV_FILE" ;; esac
+ bounce apply -y || fail off-deploy-initial-b
+ snapshot
+ cp "$WEBMAIL_ENV_FILE" "$TMP/deploy.source"
+ cp "$TMP/users.json" "$TMP/deploy.smtp-users"
+ rm -f "$TMP/schema.json" "$TMP/deploy.calls"
+ phase || fail off-first-update
+ restored;json_ready false
+ cmp -s "$WEBMAIL_ENV_FILE" "$TMP/deploy.source" && cmp -s "$TMP/users.json" "$TMP/deploy.smtp-users" || fail off-first-update-changed
+ python3 - "$TMP/schema.json" <<'PYTABLES' || fail off-schema-scope
+import json,sys
+assert json.load(open(sys.argv[1]))==['account_retirement','retirement_recipient_keys']
+PYTABLES
+ cp "$TMP/schema.json" "$TMP/deploy.schema"
+ phase || fail off-second-update
+ restored;json_ready false
+ cmp -s "$TMP/schema.json" "$TMP/deploy.schema" && cmp -s "$WEBMAIL_ENV_FILE" "$TMP/deploy.source" && cmp -s "$TMP/users.json" "$TMP/deploy.smtp-users" || fail off-second-update-changed
+ [ "$(wc -l < "$TMP/deploy.calls")" -eq 2 ] || fail grant-order
+ done
+# True setup/update clears stale readiness first and only publishes after checked success.
+reset
+flags true true
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+webmail_retirement_begin "$WEBMAIL_DIR" || fail begin
+json_ready false
+phase || fail true-update
+json_ready true
+cp "$WEBMAIL_DIR/retirement-readiness/state.json" "$TMP/published.json"
+run --check || fail direct-success-check
+cmp -s "$TMP/published.json" "$WEBMAIL_DIR/retirement-readiness/state.json" || fail direct-check-published
+# A direct check failure invalidates the published true even without helper integration.
+snapshot
+printf '{"db_error":true}' > "$TMP/fixture.json"
+: > "$TMP/calls"
+if run --check; then fail direct-db-check; fi
+restored;no_mutations;json_ready false
+# Simulate a stale prior publication before update; failure must clear it and stop nonzero.
+printf '{}' > "$TMP/fixture.json"
+webmail_retirement_finish "$ROOT/scripts" "$WEBMAIL_DIR" || fail republish
+json_ready true
+printf '{"db_error":true}' > "$TMP/fixture.json"
+: > "$TMP/calls"
+if phase; then fail db-update-succeeded; fi
+restored;no_mutations;json_ready false
+grep -Eq 'schema preparation failed before grants|automatic resource repair is disabled' "$TMP/stderr" || fail update-error-guidance
+# IP drift reaches the actual integrated R resource check and must never auto-repair.
+printf '{"postfix":{"mailcow-network":{"IPAddress":"192.0.2.252"}}}' > "$TMP/fixture.json"
+: > "$TMP/calls"
+if phase; then fail ip-update-succeeded; fi
+restored;no_mutations;json_ready false
+grep -q 'IP_MISMATCH' "$TMP/stderr" && grep -q 'automatic resource repair is disabled' "$TMP/stderr" || fail ip-update-guidance
+# Verify final publication uses the actual final script block, including overall failures.
+printf '{}' > "$TMP/fixture.json"
+python3 - "$ROOT/scripts/verify.sh" "$TMP/verify-final.sh" <<'PYVERIFY'
+from pathlib import Path
+import sys
+source=Path(sys.argv[1]).read_text();block=source.split('# Retirement deployment result is published only after all verification checks.\n',1)[1].split('\necho ""',1)[0]
+Path(sys.argv[2]).write_text(block)
+PYVERIFY
+check(){ local desc="$1"; shift; if "$@" >/dev/null 2>&1; then :; else FAIL=$((FAIL+1)); fi; }
+FAIL=0 SCRIPT_DIR="$ROOT/scripts"
+source "$TMP/verify-final.sh"
+[ "$FAIL" -eq 0 ] || fail verify-final
+json_ready true
+FAIL=1
+source "$TMP/verify-final.sh"
+json_ready false
+# The generated mount is directory-level and read-only; no READY env variable is emitted.
+edge_generate_override(){ printf '# Generated by scripts/lib/edge.sh\nservices:\n  webmail:\n    volumes:\nnetworks:\n' > "$2/docker-compose.override.yml"; }
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+webmail_generate_override "$WEBMAIL_DIR" || fail readiness-mount
+grep -q 'retirement-readiness:/run/retirement-readiness:ro,z' "$WEBMAIL_DIR/docker-compose.override.yml" || fail mount-read-only
+# Exercise the real runtime env renderer; auth networking is unrelated to this test.
+webmail_auth_policy_addresses(){ printf '%s\n' "$WEBMAIL_ADMIN_DB_IPV4" "$WEBMAIL_NETWORK.249" "$WEBMAIL_RELAY_IPV4" "$WEBMAIL_NETWORK.248"; }
+LOG_ARCHIVE_ENABLE=false
+cp "$WEBMAIL_ENV_FILE" "$TMP/env-render.source"
+webmail_generate_admin_env "$WEBMAIL_DIR" || fail runtime-env-render
+[ -f "$WEBMAIL_DIR/webmail-admin.env" ] || fail missing-runtime-env
+grep -qFx 'WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE="true"' "$WEBMAIL_DIR/webmail-admin.env" || fail runtime-feature-flag
+! grep -q 'RETIREMENT.*READY' "$WEBMAIL_DIR/webmail-admin.env" || fail ready-env-flag
+cmp -s "$WEBMAIL_ENV_FILE" "$TMP/env-render.source" || fail runtime-render-wrote-source
+# Failed false writes must remove only the verified owned publication; an unlink failure is explicit.
+webmail_retirement_readiness "$WEBMAIL_DIR" true || fail publication-fault-setup
+touch "$TMP/fail-publication"
+if webmail_retirement_readiness "$WEBMAIL_DIR" false > "$TMP/stdout" 2> "$TMP/stderr"; then fail allocation-failure-accepted; fi
+[ ! -e "$WEBMAIL_DIR/retirement-readiness/state.json" ] || fail allocation-left-stale-true
+rm "$TMP/fail-publication"
+webmail_retirement_readiness "$WEBMAIL_DIR" true || fail unlink-fault-setup
+touch "$TMP/fail-publication" "$TMP/fail-publication-unlink"
+if webmail_retirement_readiness "$WEBMAIL_DIR" false > "$TMP/stdout" 2> "$TMP/stderr"; then fail unlink-failure-accepted; fi
+grep -q 'invalidation failed; manually remove the verified owned' "$TMP/stderr" || fail invalidation-guidance
+[ -f "$WEBMAIL_DIR/retirement-readiness/state.json" ] || fail unexpected-unlink-success
+rm "$TMP/fail-publication" "$TMP/fail-publication-unlink"
+webmail_retirement_readiness "$WEBMAIL_DIR" false || fail publication-recovery
+# An existing publication owned by another uid is refused without alteration.
+cp "$WEBMAIL_DIR/retirement-readiness/state.json" "$TMP/owned-publication.before"
+touch "$TMP/foreign-publication-owner"
+if webmail_retirement_readiness "$WEBMAIL_DIR" false > "$TMP/stdout" 2> "$TMP/stderr"; then fail foreign-owner-accepted; fi
+cmp -s "$WEBMAIL_DIR/retirement-readiness/state.json" "$TMP/owned-publication.before" || fail foreign-owner-altered
+rm "$TMP/foreign-publication-owner"
+# A symlink is never overwritten or unlinked through the fail-safe.
+mv "$WEBMAIL_DIR/retirement-readiness/state.json" "$TMP/other-state.json"
+ln -s "$TMP/other-state.json" "$WEBMAIL_DIR/retirement-readiness/state.json"
+if webmail_retirement_readiness "$WEBMAIL_DIR" false > "$TMP/stdout" 2> "$TMP/stderr"; then fail symlink-publication-accepted; fi
+[ -L "$WEBMAIL_DIR/retirement-readiness/state.json" ] && [ -f "$TMP/other-state.json" ] || fail symlink-target-modified
+rm "$WEBMAIL_DIR/retirement-readiness/state.json"
+webmail_retirement_readiness "$WEBMAIL_DIR" false || fail publication-after-symlink
+# Secrets never occur in the publication itself.
+python3 - "$WEBMAIL_DIR/retirement-readiness/state.json" <<'PYNOPRIVATE'
+import json,sys
+s=json.load(open(sys.argv[1]));assert set(s)=={'ready','checkedAt','hookHash'}
+assert not any(x in str(s) for x in ('password','synthetic-root','synthetic-api-key'))
+PYNOPRIVATE
+
+pass '10: drift/resource/rollback failures; real update block OFF/ON and verify wiring; dynamic publication, ownership and I/O failure recovery'
 echo "1..$N"

@@ -1,3 +1,4 @@
+import { createRetirementReadiness } from '../../server/admin/retirement-readiness.js';
 import { createAliasesService } from '../../server/admin/services/aliases.js';
 import { emptyRetirementState, retirementVersion } from '../../server/security/retirement-store.js';
 import { createRetirementRouting } from '../../server/admin/retirement-routing.js';
@@ -587,4 +588,44 @@ test('retirement detail exposes current forwarding targets using preview inspect
   assert.deepEqual(preview.forwarding.flatMap(row => row.targets), [other]);
   f.filters.push({ id: 92, username: user, filter_type: 'prefilter', active: 1, script_data: 'include "opaque";' });
   assert.equal((await f.service.detail({}, user)).retirement.forwarding, null);
+});
+
+
+test('deployment readiness: strict JSON, 300-second future bound, no TTL, dynamic file replacement and OFF', async t => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'retirement-ready-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'state.json'), now = Date.parse('2026-11-10T00:00:00.000Z');
+  const read = createRetirementReadiness({ enabled: true, file, now: () => now });
+  const valid = { ready: true, checkedAt: new Date(now).toISOString(), hookHash: 'a'.repeat(64) };
+  assert.equal(read(), false);
+  for (const value of [null, [], {}, { ...valid, ready: 'true' }, { ...valid, hookHash: 'invalid' }, { ...valid, checkedAt: '2026-02-30T00:00:00.000Z' }, { ...valid, checkedAt: '2026-11-10' }, { ...valid, extra: 'not allowed' }, { ...valid, checkedAt: new Date(now + 300_001).toISOString() }]) {
+    await fs.writeFile(file, JSON.stringify(value)); assert.equal(read(), false, JSON.stringify(value));
+  }
+  await fs.writeFile(file, '{invalid'); assert.equal(read(), false);
+  await fs.writeFile(file, 'x'.repeat(1025)); assert.equal(read(), false);
+  await fs.writeFile(file, JSON.stringify({ ...valid, checkedAt: new Date(now + 300_000).toISOString() })); assert.equal(read(), true);
+  await fs.writeFile(file, JSON.stringify({ ...valid, checkedAt: '2000-01-01T00:00:00.000Z' })); assert.equal(read(), true, 'no TTL');
+  const off = createRetirementReadiness({ enabled: false, file, now: () => now }); assert.equal(off(), false);
+  const replacement = join(dir, 'next.json'); await fs.writeFile(replacement, JSON.stringify({ ...valid, ready: false })); await fs.rename(replacement, file); assert.equal(read(), false);
+  await fs.unlink(file); await fs.writeFile(replacement, JSON.stringify(valid)); await fs.symlink(replacement, file); assert.equal(read(), false);
+});
+
+test('admin deployment readiness: successive account requests reflect publication without restarting', async t => {
+  const f = await fixture(t); retired(f, { blocked: true });
+  const file = join(f.dir, 'ready.json');
+  const app = await createAdminApp({ retirement: { store: f.store, routing: f.routing }, protocolNetlimit: { store: f.netlimit }, otp: { store: f.otpStore },
+    config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8, auditDir: f.dir,
+      retirementReceiveBlockEnabled: true, retirementReadinessFile: file }, logger: false,
+    dockerapi: f.dockerapi, auth: { client: { ...f.mailcow, async login({ username }) { return { username, state: 'ready' }; }, async logout() {} } } });
+  t.after(() => app.close());
+  const origin = 'https://mailadmin.example.com', login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin }, payload: { username: 'admin', password: 'synthetic' } });
+  const headers = { cookie: login.headers['set-cookie'].split(';')[0], origin, 'x-mailadmin-csrf': login.json().csrf };
+  const get = async () => { const response = await app.inject({ url: `/api/admin/mailboxes/${user}`, headers }); assert.equal(response.statusCode, 200, response.body); return response.json(); };
+  const publication = { ready: true, checkedAt: new Date().toISOString(), hookHash: 'b'.repeat(64) };
+  assert.equal((await get()).retirement.effectiveReceiveBlock, 'unverified');
+  await fs.writeFile(file, JSON.stringify(publication)); assert.equal((await get()).retirement.effectiveReceiveBlock, 'on');
+  await fs.writeFile(file, JSON.stringify({ ...publication, ready: false })); assert.equal((await get()).retirement.effectiveReceiveBlock, 'unverified');
+  const denied = await app.inject({ method: 'PATCH', url: `/api/admin/mailboxes/${user}/retirement`, headers, payload: { receiveBlocked: true } });
+  assert.equal(denied.statusCode, 503, denied.body); assert.equal(denied.json().error.code, 'RETIREMENT_BLOCK_UNAVAILABLE'); assert.equal(denied.headers['www-authenticate'], undefined);
+  await fs.rm(file); assert.equal((await get()).retirement.effectiveReceiveBlock, 'unverified');
+  assert.equal(writes(f).length, 0);
 });

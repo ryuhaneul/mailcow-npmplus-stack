@@ -22,6 +22,13 @@ webmail_load_config "${WEBMAIL_ENV_FILE:-$(dirname "$SCRIPT_DIR")/.env}" "$MAILC
 FLAG=${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}
 case "$FLAG" in true|false) ;; *) echo 'invalid retirement feature flag' >&2; exit 1 ;; esac
 [ "$REPAIR" = false ] || [ "$FLAG" = true ] || { echo '--repair-resources requires retirement enabled' >&2; exit 2; }
+check_failure() {
+    local rc=$?
+    trap - EXIT
+    if [ "$MODE" = --check ] && [ "$rc" -ne 0 ]; then webmail_retirement_invalidate "$WEBMAIL_DIR" || echo 'retirement readiness publication failed; review the preceding recovery error' >&2; fi
+    exit "$rc"
+}
+trap check_failure EXIT
 CONF="$MAILCOW_DIR/data/conf/postfix"
 EXTRA="$CONF/extra.cf"
 post() { (cd "$MAILCOW_DIR" && timeout 15 docker compose exec -T postfix-mailcow "$@"); }
@@ -166,6 +173,7 @@ cleanup() {
         rc=1
     fi
     rm -rf "$WORK"
+    if [ "$MODE" = --check ] && [ "$rc" -ne 0 ]; then webmail_retirement_invalidate "$WEBMAIL_DIR" || echo 'retirement readiness publication failed; review the preceding recovery error' >&2; fi
     exit "$rc"
 }
 trap cleanup EXIT

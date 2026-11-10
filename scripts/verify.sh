@@ -16,6 +16,7 @@ WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
+WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=false
 MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a; source "$ENV_FILE"; set +a
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
@@ -313,7 +314,6 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
         check "$WEBMAIL_ADMIN_HOSTNAME /healthz HTTPS 200" test "$ADMIN_HEALTH_CODE" = 200
     fi
     check "Monitor storage permissions and unauthenticated APIs: 403" admin_monitor_storage_and_auth
-    check "Bounce policy hook/runtime peers or verified disabled state" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
     check "Authentication policy settings/runtime peers/DB probe" webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
     if [ "$LOG_ARCHIVE_ENABLE" = true ]; then
         check "Archive per-source successful collection field" admin_monitor_archive_contract
@@ -333,7 +333,6 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
 fi
 
 if [ "$WEBMAIL_ADMIN_ENABLE" != true ]; then
-    check "Disabled bounce policy hook absent" webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
     check "Disabled authentication policy hook absent" webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
 fi
 
@@ -573,6 +572,22 @@ if [ "$CERT_SNI_STATUS" -eq 0 ]; then
     check "Host-specific SNI certificate expiry matches cert.pem (or none)" true
 else
     check "$CERT_SNI_DETAILS" false
+fi
+
+# Retirement deployment result is published only after all verification checks.
+check "Retirement schema when admin or recipient blocking is enabled" webmail_prepare_retirement_schema "$SCRIPT_DIR" --check
+check "Recipient policy ownership/resources and disabled state" webmail_reconcile_recipient_policies "$SCRIPT_DIR" "$WEBMAIL_DIR" --check
+if [ "$FAIL" -eq 0 ] && [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
+    if webmail_retirement_readiness "$WEBMAIL_DIR" true; then
+        check "Publish verified retirement readiness" true
+    else
+        webmail_retirement_invalidate "$WEBMAIL_DIR" || echo 'Retirement readiness publication failed; review the preceding recovery error' >&2
+        check "Publish verified retirement readiness" false
+    fi
+else
+    if webmail_retirement_begin "$WEBMAIL_DIR"; then
+        check "Publish unverified/disabled retirement readiness" true
+    else check "Retirement readiness invalidation failed; manual runtime publication recovery required" false; fi
 fi
 
 echo ""

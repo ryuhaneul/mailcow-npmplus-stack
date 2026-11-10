@@ -599,6 +599,85 @@ except (ValueError,KeyError,TypeError,AttributeError):
 PYBOUNCE
 )
 
+# Non-secret deployment readiness. Directory mount keeps atomic replacements visible.
+webmail_retirement_readiness() (
+    set +x
+    umask 077
+    local dest="$1" ready="$2"
+    python3 - "$dest" "$MAILCOW_DIR" "$ready" <<'PYREADINESS'
+from pathlib import Path
+import datetime,hashlib,json,os,re,stat,sys,tempfile
+base,mailcow,ready=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3]
+directory=base/'retirement-readiness';target=directory/'state.json';safe=False
+def owned(path,directory=False):
+    info=path.lstat()
+    return info.st_uid==os.geteuid() and (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+try:
+    assert ready in ('true','false') and not base.is_symlink()
+    assert not directory.is_symlink() and (not directory.exists() or owned(directory,True))
+    assert not target.is_symlink() and (not target.exists() or owned(target))
+    directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o755);safe=True
+    extra=mailcow/'data/conf/postfix/extra.cf';raw=extra.read_bytes() if extra.is_file() else b''
+    # Hash complete matched bytes, in persistent order; never include other settings.
+    pattern=rb'\n# BEGIN mailstack-(bounce-policy|retirement-access) \([^\n]+\)\n.*?\n# END mailstack-\1\n'
+    digest=hashlib.sha256(b''.join(m[0] for m in re.finditer(pattern,raw,re.S))).hexdigest()
+    value={'ready':ready=='true','checkedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'),'hookHash':digest}
+    fd,temp=tempfile.mkstemp(prefix='.state-',dir=directory)
+    try:
+        with os.fdopen(fd,'w') as f:json.dump(value,f,separators=(',',':'));f.write('\n');f.flush();os.fsync(f.fileno())
+        os.chmod(temp,0o644);os.replace(temp,target)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
+except Exception:
+    if ready=='false' and safe:
+        try:
+            assert not base.is_symlink() and owned(directory,True)
+            if target.exists() or target.is_symlink():
+                assert owned(target)
+                target.unlink()
+        except Exception:sys.exit('retirement readiness invalidation failed; manually remove the verified owned retirement-readiness/state.json after path/ownership review')
+    sys.exit('retirement readiness publication failed; no readiness success published; inspect runtime path and permissions')
+PYREADINESS
+)
+
+webmail_retirement_begin() {
+    if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] || [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ] || [ -d "$1/retirement-readiness" ]; then
+        webmail_retirement_readiness "$1" false
+    fi
+}
+
+webmail_retirement_invalidate() {
+    if [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ] || [ -d "$1/retirement-readiness" ]; then
+        webmail_retirement_readiness "$1" false
+    fi
+}
+
+webmail_prepare_retirement_schema() {
+    if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ] || [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
+        MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="${WEBMAIL_STACK_ENV:-${ENV_FILE:-$(dirname "$1")/.env}}" \
+            bash "$1/apply-webmail-retirement-db.sh" "${2:-apply}"
+    fi
+}
+
+# Keep the legacy bounce helper below unchanged: the new wrapper delegates to it.
+webmail_reconcile_recipient_policies() {
+    local scripts="$1" dest="$2" mode="${3:-apply}" rc=0
+    MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$dest" WEBMAIL_ENV_FILE="${WEBMAIL_STACK_ENV:-${ENV_FILE:-$(dirname "$scripts")/.env}}" \
+        bash "$scripts/reconcile-postfix-recipient-policies.sh" "$mode" -y || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        webmail_retirement_invalidate "$dest" || return 1
+        echo '[webmail-env] ERROR: recipient policy verification failed; readiness=false; resolve resource errors before retrying (automatic resource repair is disabled)' >&2
+        return "$rc"
+    fi
+}
+
+webmail_retirement_finish() {
+    webmail_reconcile_recipient_policies "$1" "$2" --check || return 1
+    if [ "${WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE:-false}" = true ]; then
+        webmail_retirement_readiness "$2" true || { webmail_retirement_invalidate "$2" || return 1; return 1; }
+    else webmail_retirement_begin "$2"; fi
+}
+
 webmail_reconcile_bounce_policy() {
     set +x
     local scripts="$1" dest="$2" mode="${3:-apply}" api_key live_chain mismatch=false
@@ -818,7 +897,7 @@ if '  webmail:\n' in text:
     text = text.replace('  webmail:\n    volumes:\n', '  webmail:\n    volumes:\n' + brand, 1)
 else:
     text = text.replace('services:\n', 'services:\n  webmail:\n    volumes:\n' + brand, 1)
-mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z']
+mounts = [f'{mailcow}/data/conf/rspamd/custom:/rspamd_custom_maps:ro,z', f'{dest}/retirement-readiness:/run/retirement-readiness:ro,z']
 if relay_ready == 'true':
     mounts.extend([f'{mailcow}/data/conf/postfix/mailstack-relay:/run/relay/postfix:rw,z',
                    f'{mailcow}/data/conf/rspamd/mailstack-relay:/run/relay/rspamd:rw,z',

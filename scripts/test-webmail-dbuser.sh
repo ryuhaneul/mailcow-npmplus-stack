@@ -129,6 +129,38 @@ if run apply; then fail retirement-invalid-flag; fi
 cmp -s "$TMP/users.json" "$TMP/grants.before-invalid" || fail retirement-invalid-mutated
 cp "$TMP/env.before" "$WEBMAIL_ENV_FILE"
 pass 'invalid retirement flag fails before grant writes'
+# A pre-retirement installation may gain only the two admin CRUD grants on first upgrade.
+cp "$TMP/users.before" "$TMP/users.json"
+python3 - "$TMP/users.json" <<'PYPRE'
+from pathlib import Path
+import json,sys
+p=Path(sys.argv[1]);users=json.loads(p.read_text());admin=users['webmail_notices_admin@172.22.1.241']
+admin['grants']=[g for g in admin['grants'] if not any('mailstack_webmail.'+t+' TO ' in g for t in ('account_retirement','retirement_recipient_keys'))]
+p.write_text(json.dumps(users,sort_keys=True))
+PYPRE
+cp "$TMP/users.json" "$TMP/pre-retirement.users"
+cp "$WEBMAIL_ENV_FILE" "$TMP/pre-retirement.env"
+run apply && run --check || fail off-first-upgrade
+python3 - "$TMP/pre-retirement.users" "$TMP/users.json" <<'PYUPGRADE'
+import json,sys
+before,after=(json.load(open(p)) for p in sys.argv[1:])
+assert set(before)==set(after)=={'webmail_ro@172.22.1.240','webmail_notices_admin@172.22.1.241'}
+for account in before:
+ old,new=before[account],after[account]
+ assert old['password']==new['password']
+ added=set(new['grants'])-set(old['grants']);removed=set(old['grants'])-set(new['grants'])
+ assert not removed
+ if account.startswith('webmail_ro@'):assert not added
+ else:
+  assert len(added)==2
+  for table in ('account_retirement','retirement_recipient_keys'):assert any('GRANT SELECT, INSERT, UPDATE, DELETE ON mailstack_webmail.'+table+' TO ' in g for g in added)
+PYUPGRADE
+cmp -s "$TMP/pre-retirement.env" "$WEBMAIL_ENV_FILE" || fail off-upgrade-source-env
+cp "$TMP/users.json" "$TMP/off-upgraded.users"
+run apply && run --check || fail off-second-upgrade
+cmp -s "$TMP/users.json" "$TMP/off-upgraded.users" || fail off-second-upgrade-grants
+cmp -s "$TMP/pre-retirement.env" "$WEBMAIL_ENV_FILE" || fail off-second-source-env
+pass 'OFF pre-P1 upgrade adds only two admin CRUD grants; second upgrade is byte-identical with no public SELECT or SMTP account'
 # Every mutation starts from the exact accepted state; --check may never fix it.
 for error in schema-wide global grant-option reads-delete admin-reads admin-mailcow admin-schema admin-counter-insert missing-column template-write missing-template otp-admin-seed otp-public-delete otp-public-policy otp-broad-update otp-extra-column retirement-metadata retirement-public-write; do
     cp "$TMP/users.before" "$TMP/users.json"

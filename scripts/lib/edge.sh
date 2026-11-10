@@ -357,7 +357,7 @@ edge_prepare_apps() {
     if [ "$WEBMAIL_ENABLE" = true ]; then
         mkdir -p "$webdir" || return 1
         rsync -a --delete --exclude=node_modules --exclude=webmail.env --exclude=webmail-admin.env --exclude=mail-tls-pin.pem \
-            --exclude=.env --exclude=log-archiver/ --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
+            --exclude=.env --exclude=retirement-readiness/ --exclude=log-archiver/ --exclude=docker-compose.override.yml --exclude=haproxy.cfg "$project/webmail/" "$webdir/" || return 1
         if [ "$WEBMAIL_MAIL_TLS_MODE" = pin ]; then before=$(webmail_pin_fingerprint "$webdir/mail-tls-pin.pem") || true; fi
         webmail_ensure_db_password && webmail_ensure_admin_db_password && webmail_extract_tls_pin "$webdir" && webmail_generate_env "$webdir" && webmail_generate_admin_env "$webdir" \
             && edge_generate_relay webmail "$webdir" || return 1

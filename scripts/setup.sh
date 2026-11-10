@@ -118,6 +118,7 @@ WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
+WEBMAIL_ADMIN_RETIREMENT_RECEIVE_BLOCK_ENABLE=false
 TOOLKIT_ENABLE=true
 MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a; source "$ENV_FILE"; set +a
@@ -141,6 +142,7 @@ source "$SCRIPT_DIR/lib/webmail-env.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/waf.sh"
 webmail_options || die "Invalid Webmail/retention options"
+webmail_retirement_begin "$WEBMAIL_DIR" || die "Retirement readiness reset failed before deployment changes"
 case "$TOOLKIT_ENABLE" in true|false) ;; *) die "TOOLKIT_ENABLE must be true or false" ;; esac
 
 
@@ -181,7 +183,7 @@ setup_archive_finish() {
 setup_cleanup() {
     local status=$?
     trap - EXIT
-    if [ "$status" -ne 0 ]; then log_archive_restore || true; fi
+    if [ "$status" -ne 0 ]; then webmail_retirement_invalidate "$WEBMAIL_DIR" || true; log_archive_restore || true; fi
     [ -z "${COOKIE_JAR:-}" ] || rm -f "$COOKIE_JAR"
     [ -z "${LOGIN_PAYLOAD:-}" ] || rm -f "$LOGIN_PAYLOAD"
     exit "$status"
@@ -852,6 +854,7 @@ fi
 # Edge stages 1/2 run before NPMplus is attached to the app networks.
 webmail_load_config "$ENV_FILE" "$MAILCOW_DIR" || die "Edge configuration failed before app changes"
 edge_check_admin_db_address || die "Admin DB address preflight failed before app changes"
+webmail_prepare_retirement_schema "$SCRIPT_DIR" || die "Retirement schema preparation failed before grants"
 if [ "$WEBMAIL_ENABLE" = true ]; then
     webmail_ensure_db_password && webmail_ensure_admin_db_password || die "Webmail DB password preparation failed"
     MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-webmail-notices-db.sh" apply \
@@ -869,7 +872,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$WEBMAIL_ENABLE" != true ]; then
     webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Authentication policy disable reconciliation failed"
 fi
 if [ "$WEBMAIL_ADMIN_ENABLE" != true ] || [ "$LOG_ARCHIVE_ENABLE" != true ] || [ -z "$(webmail_mailcow_value API_KEY)" ]; then
-    webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy disable reconciliation failed"
+    webmail_reconcile_recipient_policies "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Recipient policy disable reconciliation failed"
 fi
 edge_prepare_apps "$PROJECT_DIR" "$WEBMAIL_DIR" || die "Edge step 1 failed; app files may have changed, containers not changed"
 edge_up_apps "$WEBMAIL_DIR" || die "Edge step 2 failed; app projects may be partially migrated; rerun after recovery"
@@ -929,7 +932,7 @@ if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     fi
 fi
 if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && { [ "$WEBMAIL_ADMIN_RELAY_READY" = true ] || [ -f "$MAILCOW_DIR/data/conf/postfix/mailstack-relay/conversion.json" ]; }; then MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-relay-file-mode.sh" apply -y || die "Relay file conversion failed"; fi
-webmail_reconcile_bounce_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Bounce policy application failed"
+webmail_reconcile_recipient_policies "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Recipient policy application failed"
 webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Authentication policy application failed"
 
 # ============================================================
@@ -1534,3 +1537,5 @@ echo ""
 if [ -x "${SCRIPT_DIR}/dns-records.sh" ]; then
     bash "${SCRIPT_DIR}/dns-records.sh"
 fi
+
+webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Final recipient policy verification failed; readiness remains false"

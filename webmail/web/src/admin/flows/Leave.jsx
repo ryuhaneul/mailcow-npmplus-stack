@@ -24,7 +24,7 @@ function OperationResult({ result, leave = false }) {
 }
 export function LeaveDialog({ row, close, saved = () => {}, settings = () => {} }) {
   const initial = row.retirement?.pendingOperation, [pending, setPending] = useState(initial), [draft, setDraft] = useState(() => choices(initial?.kind === 'leave' ? initial.request : {})), [preview, setPreview] = useState(null), [result, setResult] = useState(null), [error, setError] = useState(null), [busy, setBusy] = useState(false), [ack, setAck] = useState(false);
-  const already = !result && row.retirement?.retired && pending?.kind !== 'leave', locked = pending?.kind === 'leave';
+  const already = result?.alreadyRetired || !result && row.retirement?.retired && pending?.kind !== 'leave', locked = pending?.kind === 'leave';
   const finish = () => { if (busy) return; close(); if (result) saved(result); };
   const request = locked ? pending.request : { cleanRefs: draft.cleanRefs, cleanShares: draft.cleanShares, ...requestFor(draft) };
   const change = patch => { setDraft(value => ({ ...value, ...patch })); setPreview(null); setAck(false); setError(null); };
@@ -33,8 +33,8 @@ export function LeaveDialog({ row, close, saved = () => {}, settings = () => {} 
     setBusy(true); setError(null);
     try {
       const response = await adminApi('/api/admin/flows/leave', { method: 'POST', body: { address: row.address, mode: 'disable', ...request, action: preview ? 'run' : 'preview', ...(preview ? { etag: preview.etag, cleanupConfirmed: ack } : {}) } });
-      if (preview) { setResult(response); setPending(response.retirement?.pendingOperation || null); }
-      else if (response.alreadyRetired && !response.etag) { close(); saved(response); settings(); }
+      if (response.alreadyRetired) { setResult(response); setPreview(null); }
+      else if (preview) { setResult(response); setPending(response.retirement?.pendingOperation || null); }
       else { setPreview(response); setAck(false); }
     } catch (failure) { setError(failure); }
     finally { setBusy(false); }

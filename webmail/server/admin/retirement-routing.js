@@ -232,10 +232,10 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
     const [mailboxes, aliases, aliasDomains, domains] = await Promise.all(['mailbox/all', 'alias/all', 'alias-domain/all', 'domain/all'].map(path => rows(session, path)));
     return { mailboxes, aliases, aliasDomains, domains };
   }
-  async function assertAdminScript(session, source, owner) {
+  async function assertAdminScript(session, source, owner, projectedGraph) {
     const redirects = retirementRedirects(source).map(row => row.target).filter(target => target !== 'null@localhost');
     if (!redirects.length) return;
-    const graph = createRetirementGraph(await routingFacts(session)), keys = [...redirects];
+    const graph = projectedGraph ?? createRetirementGraph(await routingFacts(session)), keys = [...redirects];
     for (const target of redirects) {
       const result = graph.resolve(target);
       if (result.problems.some(issue => issue.code !== 'UNRESOLVED_INTERNAL')) throw refused();
@@ -275,6 +275,29 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
       protectedKeys.push(...destinations(changed.goto).filter(target => target !== 'null@localhost'), ...result.targets, ...result.problems.map(issue => issue.address));
     }
     if ((await store.blockedRecipients(unique(protectedKeys))).length) throw protectedRoute();
+    // Dormant scripts are excluded from ON inspection; guard them before activation.
+    if (kind === 'mailbox' && original && !enabled(original.active) && changed && enabled(changed.active)) {
+      let filters, payload, scripts;
+      try {
+        [filters, payload, scripts] = await Promise.all([
+          rows(session, 'filters/all'), get(session, `active-user-sieve/${encodeURIComponent(name)}`), dockerapi.listSieve(name),
+        ]);
+      } catch (error) { if (error instanceof MailcowAuthLost) throw error; throw unavailable(); }
+      const sources = [];
+      for (const filter of filters) {
+        let filterOwner;
+        try { filterOwner = retirementAddress(filter.username); } catch { throw unavailable(); }
+        if (filterOwner !== name) continue;
+        if (![0, 1, '0', '1'].includes(filter.active) || !['prefilter', 'postfilter'].includes(filter.filter_type) || typeof filter.script_data !== 'string') throw unavailable();
+        if (String(filter.active) === '1') sources.push(filter.script_data);
+      }
+      const source = Array.isArray(payload) && payload.length === 1 && typeof payload[0] === 'string' ? payload[0] :
+        payload && typeof payload === 'object' && !Array.isArray(payload) && !Object.keys(payload).length ? null : undefined;
+      if (!Array.isArray(scripts) || scripts.some(row => typeof row?.name !== 'string' || typeof row.active !== 'boolean') || scripts.filter(row => row.active).length > 1 || source === undefined) throw unavailable();
+      if (Boolean(scripts.find(row => row.active)?.name) !== (source !== null)) throw unavailable();
+      if (source !== null) sources.push(source);
+      for (const source of sources) await assertAdminScript(session, source, name, next);
+    }
   }
   return { inspect, assertReady, assertRecipients, assertScript, assertAdminScript, assertMutation, withRoutingLock: operation => store.withRoutingLock(operation) };
 }

@@ -40,7 +40,7 @@ async function fixture(t, populated = false) {
     if (method === 'POST' && options.failPath === path) throw options.failure ?? new AppError(422, 'MAILCOW_REJECTED', secret);
     if (path === '/api/v1/edit/alias') await options.beforeAliasWrite?.();
     if (path === '/api/v1/get/global_filters/all') return {};
-    if (path.startsWith('/api/v1/get/active-user-sieve/')) return options.userScript ? [options.userScript] : {};
+    if (path.startsWith('/api/v1/get/active-user-sieve/')) return options.userScript && (!options.userScriptOwner || options.userScriptOwner === decodeURIComponent(path.split('/').at(-1))) ? [options.userScript] : {};
     if (path === '/api/v1/get/domain/all') return [{ domain_name: 'example.com', active: 1 }];
     if (path === '/api/v1/get/alias-domain/all') return [];
     if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
@@ -77,7 +77,7 @@ async function fixture(t, populated = false) {
     return [{ type: 'success' }];
   } };
   const dockerapi = {
-    async listSieve() { return options.userScript ? [{ name: 'personal', active: true }] : []; },
+    async listSieve(address) { return options.userScript && (!options.userScriptOwner || options.userScriptOwner === address) ? [{ name: 'personal', active: true }] : []; },
     async getAcl(owner) { aclCalls.push(owner); if (options.aclFailure === owner || String(boxes.find(row => row.username === owner)?.active) === '0') throw new Error(secret); return structuredClone([...acl.values()].flat().filter(row => row.user === owner || row.id === owner)); },
     async deleteAcl(owner, grantee, mailbox = 'INBOX') { calls.push({ method: 'POST', path: 'dockerapi/delete_acl', body: { owner, grantee, mailbox } }); if (!options.ignoreAclWrites) acl.set(owner, (acl.get(owner) ?? []).filter(row => row.mailbox !== mailbox || row.id !== grantee)); },
   };
@@ -628,4 +628,41 @@ test('admin deployment readiness: successive account requests reflect publicatio
   assert.equal(denied.statusCode, 503, denied.body); assert.equal(denied.json().error.code, 'RETIREMENT_BLOCK_UNAVAILABLE'); assert.equal(denied.headers['www-authenticate'], undefined);
   await fs.rm(file); assert.equal((await get()).retirement.effectiveReceiveBlock, 'unverified');
   assert.equal(writes(f).length, 0);
+});
+
+
+test('D2-01 dormant Sieve activation and mailbox history guard all three layers before writes', async t => {
+  for (const mode of ['edit', 'history']) for (const layer of ['prefilter', 'postfilter', 'user']) {
+    await t.test(`${mode} ${layer}: protected redirect 409, unavailable 503, safe activation allowed`, async t => {
+      const f = await fixture(t);
+      let record;
+      if (mode === 'history') {
+        const p = await f.service.detail({}, other);
+        await f.service.edit({ ...context, addr: other, data: { etag: p.etag, active: false } });
+        record = (await f.history.list()).items.find(row => row.action === 'mailbox.edit');
+      } else f.boxes.find(row => row.username === other).active = 0;
+      f.boxes.find(row => row.username === user).active = 2;
+      const script = `redirect :copy "${user}";`;
+      if (layer === 'user') { f.options.userScript = script; f.options.userScriptOwner = other; }
+      else f.filters.push({ id: 99, username: other, filter_type: layer, active: 1, script_data: script });
+      // ON may exclude dormant owners, but activation must guard what will become executable.
+      assert.equal((await f.routing.inspect({}, user)).ready, true);
+      f.keyRows.set(user, [user]);
+      const editEtag = (await f.service.detail({}, other)).etag;
+      const activate = async () => mode === 'history'
+        ? f.history.revert(record.id, { ...context, confirm: true })
+        : f.service.edit({ ...context, addr: other, data: { etag: editEtag, active: true } });
+      const baseline = writes(f).length;
+      await assert.rejects(activate(), { statusCode: 409 });
+      assert.equal(writes(f).length, baseline); assert.equal(f.boxes.find(row => row.username === other).active, 0);
+      f.options.onCall = ({ path }) => { if (path === (layer === 'user' ? `/api/v1/get/active-user-sieve/${encodeURIComponent(other)}` : '/api/v1/get/filters/all')) throw new Error('synthetic lookup failure'); };
+      await assert.rejects(activate(), { statusCode: 503 });
+      assert.equal(writes(f).length, baseline); assert.equal(f.boxes.find(row => row.username === other).active, 0);
+      f.options.onCall = null;
+      if (layer === 'user') f.options.userScript = 'redirect "healthy@external.test";';
+      else f.filters.at(-1).script_data = 'redirect "healthy@external.test";';
+      await activate(); assert.equal(f.boxes.find(row => row.username === other).active, 1);
+      assert.equal(writes(f).length, baseline + 1);
+    });
+  }
 });

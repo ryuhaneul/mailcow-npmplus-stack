@@ -30,8 +30,9 @@ test('retirement approved UI states and existing share APIs operate through actu
   dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const {createFakeAdminApi}=await import('../../web/dev/fake-admin-api.js');
-  let fake;
+  let fake, intercept = null;
   globalThis.fetch=async(path,options={})=>{
+    if(intercept){const response=await intercept(path,options);if(response)return response;}
     let body='',status=200;const headers={};
     const response={setHeader(name,value){headers[name]=value;},set statusCode(value){status=value;},get statusCode(){return status;},end(value){body=value||'';}};
     await fake.middleware({url:path,method:options.method||'GET',headers:options.headers||{},async *[Symbol.asyncIterator](){if(options.body)yield options.body;}},response,()=>assert.fail('unexpected fake path '+path));
@@ -48,7 +49,7 @@ test('retirement approved UI states and existing share APIs operate through actu
   const button=text=>{const value=[...root.querySelectorAll('button')].find(node=>node.textContent===text);assert.ok(value,'button '+text);return value;};
   const click=async text=>{await act(async()=>button(text).click());await tick();};
   const change=async(selector,value)=>{const node=root.querySelector(selector);assert.ok(node,selector);await act(async()=>{if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new dom.window.Event('change',{bubbles:true}));});await tick();};
-  const setup=(retired=true,blocked=false)=>{fake=createFakeAdminApi();const row=fake.state.accounts.items.find(row=>row.address===address);row.active=retired?2:1;row.retirement={retired,receiveBlocked:blocked,forwarding:[],recordedAt:'2026-11-01T00:00:00Z'};return {...row,retirement:{...row.retirement,featureEnabled:true,effectiveReceiveBlock:blocked?'on':'off',pendingOperation:null,warnings:[]}};};
+  const setup=(retired=true,blocked=false)=>{intercept=null;fake=createFakeAdminApi();const row=fake.state.accounts.items.find(row=>row.address===address);row.active=retired?2:1;row.retirement={retired,receiveBlocked:blocked,forwarding:[],recordedAt:'2026-11-01T00:00:00Z'};return {...row,retirement:{...row.retirement,featureEnabled:true,effectiveReceiveBlock:blocked?'on':'off',pendingOperation:null,warnings:[]}};};
   await t.test('allowed/blocked detail states distinguish retirement, login, receive and actual forwarding',async()=>{
     let row=setup();row.retirement.forwarding=['team@example.com'];await mount(RetirementSettings,{row,saved(){}});
     assert.match(root.textContent,/처리됨/);assert.match(root.textContent,/차단됨/);assert.match(root.textContent,/허용 중/);assert.match(root.textContent,/전달: team@example.com/);
@@ -114,4 +115,27 @@ test('retirement approved UI states and existing share APIs operate through actu
   await t.test('stale preview prevents execution until explicitly reloaded',async()=>{
     const row=setup();await mount(RetirementSettings,{row,saved(){}});await change('#receive-block',true);await click('변경 미리보기');fake.state.accounts.version++;await change('dialog input[type=checkbox]',true);await click('수신 차단');assert.match(root.textContent,/현재 값으로 다시 미리보기/);assert.equal(button('수신 차단').disabled,true);
   });
+  for(const phase of ['preview','run']) await t.test(`D4-1 alreadyRetired ${phase} response shows guidance, never normal success`,async()=>{
+    const row=setup(false);let moved=0,closed=0;await mount(LeaveDialog,{row,close(){closed++;},settings(){moved++;}});
+    if(phase==='run'){await click('변경 미리보기');await change('dialog input[type=checkbox]',true);}
+    intercept=async(path,options)=>path==='/api/admin/flows/leave'?new Response(JSON.stringify({alreadyRetired:true,unchanged:true,result:'unchanged',etag:'optional-etag'}),{status:200,headers:{'Content-Type':'application/json'}}):null;
+    await click(phase==='run'?'퇴사 처리 실행':'변경 미리보기');
+    assert.match(root.textContent,/이미 퇴사 처리된 계정입니다/);assert.doesNotMatch(root.textContent,/변경 내용을 저장했습니다/);
+    await click('계정 설정으로');assert.equal(moved,1);assert.equal(closed,1);
+  });
+  await t.test('D4-2 known partial steps and recovery survive follow-up GET 503 until successful reload',async()=>{
+    setup(true,true);await mount(AccountDetail,{address,changed(){}});await change('#receive-block',false);await click('변경 미리보기');await change('dialog input[type=checkbox]',true);
+    let partial=false;
+    intercept=async(path,options)=>{
+      if(path===`/api/admin/mailboxes/${encodeURIComponent(address)}/retirement`&&options.method==='PATCH'){
+        partial=true;return new Response(JSON.stringify({result:'partial',retirement:null,reloadRequired:true,steps:[{stage:'receive-off',status:'ok'},{stage:'complete',status:'failed',code:'RETIREMENT_BLOCK_UNAVAILABLE'}],recovery:[{message:'현재 퇴사·수신 상태와 남은 연결을 다시 미리보기로 확인해 주세요.'}]}),{status:200,headers:{'Content-Type':'application/json'}});
+      }
+      if(partial&&path===`/api/admin/mailboxes/${encodeURIComponent(address)}`)return new Response(JSON.stringify({error:{code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'조회 실패'}}),{status:503,headers:{'Content-Type':'application/json'}});
+    };
+    await click('수신 허용');await tick();await tick();
+    assert.equal(partial,true);assert.match(root.textContent,/일부 변경만 적용/);assert.match(root.textContent,/receive-off · 완료/);assert.match(root.textContent,/complete · 실패 RETIREMENT_BLOCK_UNAVAILABLE/);assert.match(root.textContent,/현재 퇴사·수신 상태와 남은 연결/);assert.match(root.textContent,/현재 계정 상태.*확인/);
+    assert.equal(root.querySelector('#receive-block'),null);assert.doesNotMatch(root.textContent,/차단 중|허용 중/);
+    intercept=null;await click('다시 시도');await tick();await tick();assert.ok(root.querySelector('#retirement-settings'));assert.match(root.textContent,/receive-off · 완료/);assert.match(root.textContent,/현재 퇴사·수신 상태와 남은 연결/);
+  });
+
 });

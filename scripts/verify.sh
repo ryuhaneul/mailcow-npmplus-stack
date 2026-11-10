@@ -16,6 +16,7 @@ WEBMAIL_ENABLE=true
 MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
+MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a; source "$ENV_FILE"; set +a
 MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 WEBMAIL_DIR="${WEBMAIL_DIR:-/home/webmail}"
@@ -158,16 +159,31 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     done
 fi
 if [ -n "${ADMIN_ACCESS_LIST:-}" ]; then
-    echo "  SKIP  mailcow.${DOMAIN} HTTPS 200 (access list: $ADMIN_ACCESS_LIST)"
     echo "  SKIP  mail-npm.${DOMAIN} HTTPS 200 (access list: $ADMIN_ACCESS_LIST)"
 else
-check "mailcow.${DOMAIN} HTTPS 200"    check_http "https://mailcow.${DOMAIN}" "200"
 check "mail-npm.${DOMAIN} HTTPS 200"   check_http "https://mail-npm.${DOMAIN}" "200"
+fi
+# Mailcow web policy is checked independently of optional ACL/app checks.
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = false ]; then
+    echo "  SKIP  mailcow.${DOMAIN} HTTPS 200 (public web disabled)"
+elif [ -n "${ADMIN_ACCESS_LIST:-}" ]; then
+    echo "  SKIP  mailcow.${DOMAIN} HTTPS 200 (access list: $ADMIN_ACCESS_LIST)"
+else
+    check "mailcow.${DOMAIN} HTTPS 200" check_http "https://mailcow.${DOMAIN}" 200
 fi
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/admin-access.sh"
+MAILCOW_WEB_STATUS=0
+MAILCOW_WEB_RESULT=$(mailcow_web_public verify verify) || MAILCOW_WEB_STATUS=$?
+if [ "$MAILCOW_WEB_STATUS" -eq 0 ]; then
+    echo "  $MAILCOW_WEB_RESULT"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL mailcow web policy (exit $MAILCOW_WEB_STATUS): $MAILCOW_WEB_RESULT"
+    FAIL=$((FAIL + 1))
+fi
 ADMIN_ACCESS_STATUS=0
 ADMIN_ACCESS_FAILURES=0
 ADMIN_ACCESS_RESULT=$(admin_access verify) || ADMIN_ACCESS_STATUS=$?
@@ -193,7 +209,11 @@ echo "[SSL Certificates]"
 if [ "$WEBMAIL_ENABLE" = true ]; then
     check "mail.${DOMAIN}:443 valid cert"      check_ssl "mail.${DOMAIN}" 443
 fi
-check "mailcow.${DOMAIN}:443 valid cert"   check_ssl "mailcow.${DOMAIN}" 443
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    check "mailcow.${DOMAIN}:443 valid cert" check_ssl "mailcow.${DOMAIN}" 443
+else
+    echo "  SKIP  mailcow.${DOMAIN}:443 valid cert (public web disabled)"
+fi
 check "mail-npm.${DOMAIN}:443 valid cert"  check_ssl "mail-npm.${DOMAIN}" 443
 
 echo ""
@@ -405,7 +425,7 @@ sys.exit(0 if sum(v.get("parsed",0) for k,v in rows.items() if k.startswith("npm
             work=$(mktemp -d) || return 1
             trap 'rm -rf "$work"' EXIT
             NPM_LOGIN_EMAIL="${NPM_ADMIN_EMAIL:-}" NPM_LOGIN_SECRET="${NPM_ADMIN_PASSWORD:-}" \
-                python3 -B - "$SCRIPT_DIR/lib" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "$DOMAIN" "$WEBMAIL_HOSTNAMES" "$admin_host" <<'PYWAFHOSTS'
+                python3 -B - "$SCRIPT_DIR/lib" "$work" "${NPM_API:-https://127.0.0.1:81/api}" "$DOMAIN" "$WEBMAIL_HOSTNAMES" "$admin_host" "$MAILCOW_WEB_PUBLIC_ENABLE" <<'PYWAFHOSTS'
 import json,os,pathlib,sys
 sys.path.insert(0,sys.argv[1])
 from npm_api import NpmApi
@@ -415,7 +435,8 @@ try:
     if not identity or not secret: raise RuntimeError('NPM credentials missing')
     login=work/'login.json';login.write_text(json.dumps(dict(identity=identity,secret=secret)))
     client=NpmApi(sys.argv[3],work);client.login(login)
-    wanted={f'mailcow.{domain}',f'mail-npm.{domain}',f'mail.{domain}',*filter(None,sys.argv[5].split(','))}
+    wanted={f'mail-npm.{domain}',f'mail.{domain}',*filter(None,sys.argv[5].split(','))}
+    if sys.argv[7] == 'true': wanted.add(f'mailcow.{domain}')
     if sys.argv[6]: wanted.add(sys.argv[6])
     for host in client.hosts():
         if host.get('npmplus_crowdsec_appsec') is True:

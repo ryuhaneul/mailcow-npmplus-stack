@@ -10,7 +10,7 @@ Mailcow 메일서버 앞단에 NPMplus(리버스 프록시) + CrowdSec(WAF)를 �
     │
     ├── :80/443 ──→ [NPMplus + CrowdSec WAF]
     │                  ├── mail.DOMAIN      → Webmail (웹메일)
-    │                  ├── mailcow.DOMAIN   → Mailcow Admin UI
+    │                  ├── mailcow.DOMAIN   → Mailcow Admin UI (opt in)
     │                  │     └── /toolkit/  → Mailcow Toolkit
     │                  └── mail-npm.DOMAIN  → NPMplus Dashboard
     │
@@ -72,7 +72,7 @@ RHEL 계열(Alma, CentOS 9) 호환. Debian/Ubuntu 지원 포함되어 있으나 
 ## 사전 요구사항
 
 - Linux 서버, root 접근 권한
-- DNS A 레코드: `mail.DOMAIN`, `mailcow.DOMAIN`, `mail-npm.DOMAIN` → 서버 IP
+- DNS A 레코드: `mail.DOMAIN`, `mail-npm.DOMAIN` → 서버 IP. `mailcow.DOMAIN`은 공개 웹을 임시로 켤 때만 필요합니다.
 - **Docker, Mailcow 사전 설치 불필요** — `setup.sh`가 모두 설치
 
 ## 빠른 시작
@@ -159,8 +159,10 @@ sudo ./scripts/teardown.sh
 |--------|-----|------|
 | 웹메일 | `https://mail.DOMAIN` | Mailcow에서 생성한 메일 계정 |
 | 웹메일 관리자(선택) | `https://mailadmin.DOMAIN` | Mailcow 전체 관리자 |
-| Mailcow 관리 | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
+| Mailcow 관리(기본 꺼짐) | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
 | NPM 대시보드 | `https://mail-npm.DOMAIN` | (NPM_ADMIN_EMAIL) / (NPM_ADMIN_PASSWORD) |
+
+`MAILCOW_WEB_PUBLIC_ENABLE=false`가 기본이며 누락·빈 값도 false입니다. 기존 설치도 다음 update에서 `mailcow.DOMAIN` 프록시를 삭제 없이 끕니다. update는 이 설정값을 쓰거나 바꾸지 않습니다. 내부 nginx와 메일 서비스, 새 웹메일·관리 앱은 유지됩니다. 필요한 mailcow 초기 작업은 [임시 재개 절차](docs/guide.md#mailcow-웹-공개-설정과-임시-복구)를 따르세요. 앱의 기존 mailcow 복구 링크는 꺼진 동안 사용할 수 없습니다.
 
 NPM_ADMIN_PASSWORD를 `.env`에 지정하지 않은 경우, setup 완료 시 터미널에 출력됩니다.
 
@@ -280,7 +282,7 @@ CrowdSec request filtering and local log-based IP bans are enabled by default (`
     │
     ├── :80/443 ──→ [NPMplus + CrowdSec WAF]
     │                  ├── mail.DOMAIN      → Webmail (webmail)
-    │                  ├── mailcow.DOMAIN   → Mailcow Admin UI
+    │                  ├── mailcow.DOMAIN   → Mailcow Admin UI (opt in)
     │                  │     └── /toolkit/  → Mailcow Toolkit
     │                  └── mail-npm.DOMAIN  → NPMplus Dashboard
     │
@@ -313,7 +315,7 @@ Compatible with RHEL-based distros (Alma, CentOS 9). Debian/Ubuntu support is in
 ## Prerequisites
 
 - Linux server with root access
-- DNS A records: `mail.DOMAIN`, `mailcow.DOMAIN`, `mail-npm.DOMAIN` → server IP
+- DNS A records: `mail.DOMAIN`, `mail-npm.DOMAIN` → server IP. `mailcow.DOMAIN` is optional for public web access.
 - **Docker and Mailcow are NOT required** — `setup.sh` installs everything
 
 ## Quick Start
@@ -394,8 +396,10 @@ Removes all containers, volumes, and installation directories. Volumes are delet
 |---------|-----|-------------|
 | Webmail | `https://mail.DOMAIN` | Mail account created in Mailcow |
 | Webmail Admin (optional) | `https://mailadmin.DOMAIN` | Mailcow superadmin |
-| Mailcow Admin | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
+| Mailcow Admin (off by default) | `https://mailcow.DOMAIN` | admin / (NPM_ADMIN_PASSWORD) |
 | NPM Dashboard | `https://mail-npm.DOMAIN` | (NPM_ADMIN_EMAIL) / (NPM_ADMIN_PASSWORD) |
+
+`MAILCOW_WEB_PUBLIC_ENABLE=false` is the default; missing or empty also means false. The next update disables an existing `mailcow.DOMAIN` proxy without deleting it and never writes this selection to `.env`. Internal nginx, mail services, and the separate webmail/admin apps keep running. Follow the [temporary access procedure](docs/guide.md#mailcow-웹-공개-설정과-임시-복구) for initial password or two-factor tasks. Existing app recovery links are unavailable while the proxy is disabled.
 
 If NPM_ADMIN_PASSWORD is not set in `.env`, the generated password is printed at the end of setup.
 

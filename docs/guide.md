@@ -15,7 +15,7 @@
     ├── :80/443 ──→ [NPMplus + CrowdSec WAF]
     │                  │
     │                  ├── mail.DOMAIN ─────→ webmail:8080 (웹메일)
-    │                  ├── mailcow.DOMAIN ──→ nginx-mailcow:8443 (관리 UI)
+    │                  ├── mailcow.DOMAIN ──→ nginx-mailcow:8443 (관리 UI, 기본 꺼짐)
     │                  │     └── /toolkit/ ─→ toolkit-mailcow:5000
     │                  └── mail-npm.DOMAIN ─→ 127.0.0.1:81 (NPM 대시보드)
     │
@@ -41,11 +41,11 @@
 
 ```
 mail.DOMAIN         A    SERVER_IP
-mailcow.DOMAIN      A    SERVER_IP
+mailcow.DOMAIN      A    SERVER_IP  # 공개 웹 임시 재개용 선택 레코드
 mail-npm.DOMAIN     A    SERVER_IP
 ```
 
-`mail.DOMAIN`은 기존 MX 레코드와 동일. 나머지 2개 추가.
+`mail.DOMAIN`은 기존 MX 레코드와 동일합니다. `mail-npm.DOMAIN`을 추가하고, `mailcow.DOMAIN`은 공개 웹을 사용할 때만 준비합니다. 기존 mailcow DNS를 삭제할 필요는 없습니다.
 
 ### 디렉토리 구조
 
@@ -160,7 +160,7 @@ CrowdSec는 NPMplus의 `npmplus` 형식 접근 로그를 수집해 반복 공격
 setup·update는 이 세 키를 `.env`에 쓰거나 변경하지 않습니다. 운영 기본값은 `block`입니다. 기존 설치도 키가 없으면 다음 update부터 켜집니다. 튜닝 전 이를 막거나 필터를 해제하려면 서버 `.env`에 `WAF_ENABLE=false`를 직접 적고 update를 실행하세요. 스택이 관리하던 설정만 원복하고 기존 profiles를 복구합니다. 웹메일이 켜져 있으면 정규화한 웹메일 호스트에만 본문·검색·암호 필드 예외를 적용하며, 다른 호스트와 메서드에는 적용하지 않습니다. NPM 관리 `/api/nginx/`에는 필요한 규칙 두 개만 제외합니다. `appsec-default`와 `generic-rules`를 중복으로 싣지 않으며(중복 rule ID는 기동 실패), 403 반복을 다시 밴으로 키우지 않는 로컬 시나리오를 사용합니다. 설정이 같으면 파일 쓰기와 CrowdSec SIGHUP을 생략합니다. setup은 Phase7에서 설정을 적용하고 Phase10 마지막의 기존 NPMplus 재시작 한 번으로 읽힙니다. 그 사이 실패하면 파일만 적용된 상태일 수 있으며 다음 setup의 마지막 재시작이나 update 재시작에서 반영됩니다. update의 기존 NPMplus 재시작은 DNS 캐시 갱신을 위해 한 번 유지합니다.
 
 
-다음 메일 서비스 예외는 `mailcow.${DOMAIN}` 호스트에만 적용합니다. NPM 관리 API 예외는 표에 적은 두 Host에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
+공개 웹을 끈 동안에도 임시 복구를 위해 예외 설정은 유지됩니다. 다음 메일 서비스 예외는 `mailcow.${DOMAIN}` 호스트에만 적용합니다. NPM 관리 API 예외는 표에 적은 두 Host에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
 
 | 요청 | 예외 | 근거 |
 |---|---|---|
@@ -416,9 +416,10 @@ Mailcow를 먼저 기동한 후 NPMplus를 올리고, NPM 관리 UI에서 설정
 
 | 설정 | 기본값 | 동작 |
 |---|---|---|
-| `ADMIN_ACCESS_LIST` | 빈 값 | NPM에 있는 IP 접근 목록 이름. `mailcow.DOMAIN`·`mail-npm.DOMAIN`에만 적용 |
+| `MAILCOW_WEB_PUBLIC_ENABLE` | false | mailcow 관리 UI·SOGo·ActiveSync/DAV·Toolkit 외부 프록시 공개 여부. 누락·빈 값도 false |
+| `ADMIN_ACCESS_LIST` | 빈 값 | NPM의 IP 접근 목록 이름. 켜진 mailcow 웹·mail-npm 및 선택한 새 관리 앱에 적용 |
 
-NPM에서 인증 사용자 없이 IP `allow` 항목이 하나 이상 있는 목록을 먼저 만들고, 서버 `.env`에 `ADMIN_ACCESS_LIST=admin-ips`를 적으세요. setup은 관리 호스트 생성 전에, update는 변경을 시작하기 전에 목록을 검증하며 실패하면 중단합니다. 비우면 setup·update의 관리 목록 사전 점검·적용 경로는 NPM 요청을 하지 않고, 새 설치는 공개입니다. update 마지막의 verify는 별도로 읽기 조회를 하며 공개 관리 화면을 WARN으로 알려 줍니다. 같은 목록은 변경하지 않고, 공개 호스트에는 접근 필드만 적용하며, 다른 접근 제한은 경고하고 보존합니다. update는 없는 호스트를 만들지 않습니다.
+NPM에서 인증 사용자 없이 IP `allow` 항목이 하나 이상 있는 목록을 먼저 만들고, 서버 `.env`에 `ADMIN_ACCESS_LIST=admin-ips`를 적으세요. setup은 관리 호스트 생성 전에, update는 변경을 시작하기 전에 목록을 검증하며 실패하면 중단합니다. 목록 이름을 비우면 기존 접근 제한을 보존합니다. mailcow 공개 정책은 이 목록 및 관리 앱 활성 여부와 독립적으로 NPM API를 조회하며, 조회 불가는 실패입니다. mailcow 웹을 true로 켤 때는 지정한 IP 목록 적용·재조회 확인을 먼저 끝낸 뒤 enable합니다. 다른 기존 제한이나 자체 접근 설정 Custom Location은 자동으로 덮어쓰지 않고 재개를 중단합니다. mail-npm/새 관리 앱은 기존 ACL 처리 방식을 유지합니다. update는 없는 호스트를 만들지 않습니다.
 
 NPMplus 기본 신뢰 범위에 포함된 사설 IP 클라이언트가 스택에 직접 연결하면 X-Forwarded-For로 허용 IP를 사칭할 수 있습니다. 사내 적용 전 내부 직접 접근 경로를 확인하세요.
 
@@ -439,7 +440,26 @@ NPMplus 기본 신뢰 범위에 포함된 사설 IP 클라이언트가 스택에
 | Force SSL | Yes |
 | Advanced Config | `client_max_body_size 30m;` (첨부 기본 한도 25MiB + 5MiB) |
 
-#### mailcow.DOMAIN → Mailcow Admin + Toolkit
+### Mailcow 웹 공개 설정과 임시 복구
+
+기본 `MAILCOW_WEB_PUBLIC_ENABLE=false`는 `mailcow.DOMAIN` 공개 프록시만 끕니다. 신규 false setup은 호스트를 만들지 않고, 기존 호스트는 ID·인증서·ACL·사용자 설정을 보존한 채 disable합니다. 기존 설치의 설정 키가 없거나 비어 있어도 다음 update에서 끕니다. update·setup은 이 선택 키를 `.env`에 추가하거나 바꾸지 않습니다. 잘못된 값은 변경 전에 실패합니다.
+
+`nginx-mailcow`는 내부 PHP/API, 암호 변경 대행, 메일 설정 등에 필요하므로 끄지 마세요. 새 웹메일과 새 관리 앱, 내부 API, SMTP/IMAP 및 `mail.DOMAIN` 인증서 공유는 유지됩니다. 공개 Toolkit·SOGo·ActiveSync·CalDAV/CardDAV는 같은 호스트이므로 함께 접근할 수 없습니다. SOGo용 WAF 예외는 임시 재개를 위해 남겨 두며, 비활성 호스트는 ACME 템플릿 재저장·검증 대상에서 제외됩니다.
+
+필요한 초기 암호 변경·TOTP 등록·사용자 2FA 작업 때만 다음 순서로 잠깐 켜세요.
+
+1. 관리자가 서버 `.env`의 `MAILCOW_WEB_PUBLIC_ENABLE=true`를 직접 설정합니다. 지정 IP 목록이 있으면 현재 접속 IP가 포함되는지 먼저 확인합니다.
+2. 기존 호스트가 있으면 `sudo bash scripts/update.sh --non-interactive --skip-mailcow-update`를 실행합니다. ACL 적용과 재조회가 성공한 뒤 enable하고 상태를 다시 확인합니다. 신규 false 설치처럼 호스트가 없으면 update는 실패하며 setup 필요를 안내합니다. 이 경우 true 설정 뒤 `sudo bash scripts/setup.sh`를 실행해야 합니다. setup은 시스템 설치 작업도 수행하므로 안내를 먼저 확인하세요.
+3. `mailcow.DOMAIN` DNS와 유효한 인증서를 확인한 뒤 필요한 작업을 마칩니다. 장기 비활성 호스트의 인증서 자동 갱신 성공은 보장하지 않습니다. 만료됐다면 NPM에서 갱신/재발급을 확인하세요. 이는 `mail.DOMAIN`의 메일 TLS 인증서와 별개이며 메일용 인증서를 끄거나 삭제하면 안 됩니다.
+4. 관리자가 설정을 false로 돌리고 같은 update 명령으로 다시 disable한 뒤 `sudo bash scripts/verify.sh`로 확인합니다. 스크립트는 설정을 자동으로 되돌리지 않습니다.
+
+앱의 `ADMIN_PENDING_ACTION`, 암호 변경 오류·2FA fallback 링크와 문구는 그대로입니다. 공개 웹이 꺼져 있으면 해당 링크를 쓸 수 없으므로 운영자가 위 절차로 임시 재개해야 합니다. 일반 로그인·메일 흐름과 이러한 선행 작업을 구분하세요.
+
+verify는 false일 때 NPM API의 absent/disabled를 확인하고 공개 HTTP 200·443 인증서 검사는 건너뜁니다. 기본 페이지 200은 mailcow 공개 상태의 근거가 아닙니다. true일 때 enabled 및 지정 ACL 일치를 확인합니다. API 조회 실패/상태 불일치는 FAIL이며 전체 verify가 nonzero로 종료합니다. setup/update의 필수 정책 검사 실패도 warn-only 검증으로 완화되지 않습니다.
+
+대상은 정확한 단일 `mailcow.DOMAIN` 도메인과 `https://nginx-mailcow:8443` upstream인 호스트뿐입니다. 중복·복수 도메인·다른 대상은 변경 없이 중단합니다. 실패 시 현재 상태와 private 백업을 먼저 확인하고 재실행하세요. 호스트·DNS·인증서를 삭제하거나 실패 복구 명목으로 자동 enable하지 않습니다. 코드를 이전 버전으로 되돌려도 실제 enabled/ACL은 자동 복원되지 않습니다. 복구가 필요하면 설정 true로 명시적으로 재개하세요. NPM UI에서만 enable하면 false인 다음 update가 다시 끕니다.
+
+#### mailcow.DOMAIN → Mailcow Admin + Toolkit (true일 때만 생성/공개)
 
 | 항목 | 값 |
 |------|-----|
@@ -489,7 +509,7 @@ Advanced Config에 같은 location을 수동으로 추가하면 `duplicate locat
    └── 웹메일 전용 망과 mailcow TCP 중계, IMAP/SMTP/TLS 환경 생성
 
 5. NPM Proxy Host 생성 + SSL 인증서 발급
-   └── mail.DOMAIN, mailcow.DOMAIN, mail-npm.DOMAIN
+   └── mail.DOMAIN, mail-npm.DOMAIN (mailcow.DOMAIN은 공개 설정 true일 때만)
 
 6. SSL 심볼릭 링크 생성
    └── mail.DOMAIN 인증서의 cert ID 확인 후 symlink
@@ -630,8 +650,8 @@ MASQUERADE 규칙이 누락될 수 있다. Docker 데몬 재시작으로 해결.
 
 - [ ] `https://mail.DOMAIN` → 웹메일 로그인 페이지 (200)
 - [ ] `https://mailadmin.DOMAIN` → 선택한 웹메일 관리 화면 (IP 접근 제한)
-- [ ] `https://mailcow.DOMAIN` → Mailcow 관리 UI (200)
-- [ ] `https://mailcow.DOMAIN/toolkit/` → Toolkit (200)
+- [ ] false: NPM API에서 mailcow 호스트 없음 또는 disabled, 공개 HTTP/SSL 검사는 SKIP
+- [ ] true: mailcow 호스트 enabled 및 지정 ACL 일치; 허용 IP에서 관리 UI·Toolkit 접근 확인
 - [ ] `https://mail-npm.DOMAIN` → NPM 대시보드 (200)
 
 ### 메일 프로토콜
@@ -1028,7 +1048,7 @@ sudo env TOOLKIT_BACKUP_DIR="$TOOLKIT_BACKUP_DIR" bash scripts/toolkit-remove.sh
 sudo bash scripts/verify.sh
 ```
 
-remove는 백업을 다시 검증한 뒤 앱 링크·컨테이너·compose 조각·nginx 경로·PHP 인증 연결을 제거하고 nginx를 reload합니다. 앱 메뉴에서 Toolkit이 사라지고 관리 화면이 남았는지, 허용 IP에서 로그인한 뒤 `https://mailcow.example.com/toolkit/`이 404인지 확인합니다(`example.com`은 실제 도메인으로 바꿈). mailcow API 키는 변경하지 않으며 `/home/mailcow-toolkit` 설치·데이터 폴더와 백업 폴더를 남깁니다.
+remove는 백업을 다시 검증한 뒤 앱 링크·컨테이너·compose 조각·nginx 경로·PHP 인증 연결을 제거하고 nginx를 reload합니다. 공개 웹을 임시로 켠 경우에만 앱 메뉴에서 Toolkit이 사라지고 관리 화면이 남았는지, 허용 IP에서 로그인한 뒤 `https://mailcow.example.com/toolkit/`이 404인지 확인합니다(`example.com`은 실제 도메인으로 바꿈). mailcow API 키는 변경하지 않으며 `/home/mailcow-toolkit` 설치·데이터 폴더와 백업 폴더를 남깁니다.
 
 복구하려면 실제 백업 폴더를 위치 인자로 전달합니다. 아래 예의 경로를 보관한 경로로 바꿉니다.
 

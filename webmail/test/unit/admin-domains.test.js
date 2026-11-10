@@ -116,7 +116,7 @@ for (const hasKey of [true, false]) test(`DNS: exact source script calculation w
   const source = await fs.readFile(new URL('../../../scripts/dns-records.sh', import.meta.url), 'utf8');
   // Execute only the original printable record calculation; never load .env, Docker, dig or IP discovery.
   const block = source.slice(source.indexOf('# --- Copy-paste summary ---'));
-  const output = execFileSync('bash', ['-c', block], { env: { PATH: process.env.PATH, DOMAIN: name, SERVER_IP: '192.0.2.10', DKIM_SELECTOR: hasKey ? 'mail2026' : 'dkim', DKIM_RECORD: hasKey ? 'PUBLICEXAMPLE=' : '' }, encoding: 'utf8' });
+  const output = execFileSync('bash', ['-c', block], { env: { PATH: process.env.PATH, DOMAIN: name, SERVER_IP: '192.0.2.10', MAILCOW_WEB_PUBLIC_ENABLE: 'true', DKIM_SELECTOR: hasKey ? 'mail2026' : 'dkim', DKIM_RECORD: hasKey ? 'PUBLICEXAMPLE=' : '' }, encoding: 'utf8' });
   const expected = output.split('\n').map(line => /^([^\s]+)\s+(A|CNAME|MX|TXT)\s+(.+)$/.exec(line)).filter(Boolean).map(match => ({ name: match[1], type: match[2], value: match[3] }));
   const result = await f.service.dns({}, { serverIp: '192.0.2.10' }); assert.equal(result.items.length, 3);
   assert.deepEqual(result.items[0].records, expected); assert.equal(expected.length, 9); assert.ok(output.includes(`PTR (optional): 192.0.2.10 → mail.${name}`));

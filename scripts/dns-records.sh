@@ -14,7 +14,13 @@ MAILCOW_DIR="${MAILCOW_DIR:-/home/mailcow-dockerized}"
 
 ENV_FILE="${PROJECT_DIR}/.env"
 [ -f "$ENV_FILE" ] || { echo "[x] .env not found at $ENV_FILE"; exit 1; }
+MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a; source "$ENV_FILE"; set +a
+MAILCOW_WEB_PUBLIC_ENABLE="${MAILCOW_WEB_PUBLIC_ENABLE:-false}"
+case "$MAILCOW_WEB_PUBLIC_ENABLE" in
+    true|false) ;;
+    *) echo '[x] MAILCOW_WEB_PUBLIC_ENABLE must be true or false' >&2; exit 1 ;;
+esac
 
 # Auto-detect IP if not set
 if [ -z "${SERVER_IP:-}" ]; then
@@ -85,7 +91,11 @@ echo ""
 echo -e "${BOLD}[A Records]${NC}  (all → ${SERVER_IP})"
 echo ""
 printf "  %-38s %s\n" "mail.${DOMAIN}" "$(check_dns "mail.${DOMAIN}" A "$SERVER_IP")"
-printf "  %-38s %s\n" "mailcow.${DOMAIN}" "$(check_dns "mailcow.${DOMAIN}" A "$SERVER_IP")"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    printf "  %-38s %s\n" "mailcow.${DOMAIN}" "$(check_dns "mailcow.${DOMAIN}" A "$SERVER_IP")"
+else
+    echo "  Optional recovery DNS: mailcow.${DOMAIN} A ${SERVER_IP} (public web disabled)"
+fi
 printf "  %-38s %s\n" "mail-npm.${DOMAIN}" "$(check_dns "mail-npm.${DOMAIN}" A "$SERVER_IP")"
 if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
     WEBMAIL_ADMIN_HOSTNAME="${WEBMAIL_ADMIN_HOSTNAME:-mailadmin.${DOMAIN}}"
@@ -166,7 +176,11 @@ echo ""
 printf "%-40s %-6s %s\n" "Name" "Type" "Value"
 printf "%-40s %-6s %s\n" "$(printf '%.0s─' {1..40})" "──────" "$(printf '%.0s─' {1..50})"
 printf "%-40s %-6s %s\n" "mail.${DOMAIN}" "A" "${SERVER_IP}"
-printf "%-40s %-6s %s\n" "mailcow.${DOMAIN}" "A" "${SERVER_IP}"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    printf "%-40s %-6s %s\n" "mailcow.${DOMAIN}" "A" "${SERVER_IP}"
+else
+    echo "  Optional recovery DNS: mailcow.${DOMAIN} A ${SERVER_IP} (public web disabled)"
+fi
 printf "%-40s %-6s %s\n" "mail-npm.${DOMAIN}" "A" "${SERVER_IP}"
 if [ "${WEBMAIL_ADMIN_ENABLE:-false}" = true ]; then
     printf "%-40s %-6s %s\n" "$WEBMAIL_ADMIN_HOSTNAME" "A" "${SERVER_IP}"

@@ -119,6 +119,7 @@ MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
 TOOLKIT_ENABLE=true
+MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a; source "$ENV_FILE"; set +a
 chmod 600 "$ENV_FILE"
 
@@ -459,7 +460,11 @@ echo "  ┌───────────────────────
 echo "  │ Name                             │ Type │ Value                            │"
 echo "  ├──────────────────────────────────┼──────┼──────────────────────────────────┤"
 printf "  │ %-32s │ A    │ %-32s │\n" "mail.${DOMAIN}" "$SERVER_IP"
-printf "  │ %-32s │ A    │ %-32s │\n" "mailcow.${DOMAIN}" "$SERVER_IP"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    printf "  │ %-32s │ A    │ %-32s │\n" "mailcow.${DOMAIN}" "$SERVER_IP"
+else
+    echo "  Optional recovery DNS: mailcow.${DOMAIN} → ${SERVER_IP} (public web disabled)"
+fi
 printf "  │ %-32s │ A    │ %-32s │\n" "mail-npm.${DOMAIN}" "$SERVER_IP"
 echo "  ├──────────────────────────────────┼──────┼──────────────────────────────────┤"
 printf "  │ %-32s │ MX   │ %-32s │\n" "${DOMAIN}" "10 mail.${DOMAIN}"
@@ -1219,6 +1224,10 @@ print(identity,certificate)
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/admin-access.sh"
+mailcow_web_public preflight setup || die "Mailcow web policy preflight failed"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = false ]; then
+    mailcow_web_public apply setup || die "Mailcow web policy application failed"
+fi
 ADMIN_ACCESS_ID=$(admin_access preflight) || die "Invalid ADMIN_ACCESS_LIST; admin hosts not created"
 
 log "Creating proxy hosts..."
@@ -1284,7 +1293,10 @@ admin_access apply || die "Admin access-list application failed"
 
 # 2. mailcow.DOMAIN -> nginx-mailcow
 # Toolkit is proxied by Mailcow's internal nginx (site.toolkit.custom), not NPM
-create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    create_proxy_host "mailcow.${DOMAIN}" "nginx-mailcow" 8443 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || die "Mailcow proxy creation failed"
+fi
+mailcow_web_public apply setup || die "Mailcow web policy application failed"
 
 # 3. mail-npm.DOMAIN -> NPM dashboard
 create_proxy_host "mail-npm.${DOMAIN}" "127.0.0.1" 81 "https" "" "$ADMIN_ACCESS_ID" >/dev/null || true
@@ -1455,6 +1467,7 @@ if docker ps --format '{{.Names}}' | grep -qx "npmplus"; then
 fi
 
 npmplus_acme_wait && npmplus_acme_verify "$NPMPLUS_DIR" || die "ACME verification failed after final restart"
+mailcow_web_public verify setup || die "Mailcow web policy verification failed"
 
 # ============================================================
 # Done
@@ -1469,7 +1482,10 @@ fi
 header "Setup Complete"
 
 if [ -z "${ADMIN_ACCESS_LIST:-}" ]; then
-    warn "관리자 화면(NPMplus·Mailcow·메일어드민 등)이 IP 제한 없이 공개 상태 — ADMIN_ACCESS_LIST 설정 권장"
+    warn "NPMplus 관리 화면이 IP 제한 없이 공개 상태 — ADMIN_ACCESS_LIST 설정 권장"
+    if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+        warn "Mailcow 관리 화면도 IP 제한 없이 공개 상태 — ADMIN_ACCESS_LIST 설정 권장"
+    fi
 fi
 
 echo "  Services:"
@@ -1480,7 +1496,11 @@ if [ "$WEBMAIL_ENABLE" = true ]; then
     IFS=, read -r -a WEBMAIL_DISPLAY_HOSTS <<< "$WEBMAIL_HOSTNAMES"
     for webmail_host in "${WEBMAIL_DISPLAY_HOSTS[@]}"; do echo "    Webmail:       https://$webmail_host"; done
 fi
-echo "    Mailcow Admin: https://mailcow.${DOMAIN}"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = true ]; then
+    echo "    Mailcow Admin: https://mailcow.${DOMAIN}"
+else
+    echo "    Mailcow web:   disabled (temporary access: see docs/guide.md)"
+fi
 echo "    NPM Dashboard: https://mail-npm.${DOMAIN}"
 echo ""
 echo "  Admin Password (shared):"

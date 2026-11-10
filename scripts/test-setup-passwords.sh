@@ -86,10 +86,13 @@ done
 pass 'five failed/invalid Mailcow responses abort without exposing response body'
 if bash -c 'source "$TMP/common.sh"; MAILCOW_API_KEY=; source "$TMP/mailcow.sh"' > "$TMP/out" 2>&1; then fail missing-key; fi
 pass 'missing Mailcow API key aborts'
-ADMIN_ACCESS_LIST= bash "$TMP/run.sh" warning > "$TMP/out"
+ADMIN_ACCESS_LIST= MAILCOW_WEB_PUBLIC_ENABLE=false bash "$TMP/run.sh" warning > "$TMP/out"
 grep -q 'ADMIN_ACCESS_LIST 설정 권장' "$TMP/out" || fail warning
-pass 'empty admin IP list emits summary warning'
-ADMIN_ACCESS_LIST=synthetic-list bash "$TMP/run.sh" warning > "$TMP/out"
+! grep -q 'Mailcow 관리 화면도' "$TMP/out" || fail disabled-mailcow-warning
+ADMIN_ACCESS_LIST= MAILCOW_WEB_PUBLIC_ENABLE=true bash "$TMP/run.sh" warning > "$TMP/out"
+grep -q 'Mailcow 관리 화면도' "$TMP/out" || fail enabled-mailcow-warning
+pass 'summary warns for NPM and only warns for Mailcow when public web is enabled'
+ADMIN_ACCESS_LIST=synthetic-list MAILCOW_WEB_PUBLIC_ENABLE=true bash "$TMP/run.sh" warning > "$TMP/out"
 [ ! -s "$TMP/out" ] || fail nonempty-warning
 pass 'configured admin IP list emits no warning'
 # Persist/reload in fresh processes; preserve unrelated bytes and never print secrets.

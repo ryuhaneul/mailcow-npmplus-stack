@@ -19,7 +19,7 @@ webmail_error() { echo "[webmail-env] ERROR: $*" >&2; return 1; }
 
 # Options can be loaded before mailcow exists (fresh setup Phase 0).
 webmail_options() {
-    MAILCOW_WEB_PUBLIC_ENABLE="${MAILCOW_WEB_PUBLIC_ENABLE-false}"
+    MAILCOW_WEB_PUBLIC_ENABLE="${MAILCOW_WEB_PUBLIC_ENABLE:-false}"
     case "$MAILCOW_WEB_PUBLIC_ENABLE" in
         true|false) ;;
         *) webmail_error "MAILCOW_WEB_PUBLIC_ENABLE must be true or false"; return 1 ;;

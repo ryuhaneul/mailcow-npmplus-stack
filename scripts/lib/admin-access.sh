@@ -64,5 +64,5 @@ mailcow_web_public() (
         python3 -B -c 'import os,json; print(json.dumps({"identity":os.environ["NPM_LOGIN_EMAIL"],"secret":os.environ["NPM_LOGIN_SECRET"]}))' > "$work/login.json" || return 1
     export -n NPM_ADMIN_PASSWORD
     python3 -B "$SCRIPT_DIR/lib/npm_api.py" "mcweb-$mode" "$work" "${NPM_API:-https://127.0.0.1:81/api}" \
-        "$DOMAIN" "${MAILCOW_WEB_PUBLIC_ENABLE-false}" "${ADMIN_ACCESS_LIST:-}" "$context"
+        "$DOMAIN" "${MAILCOW_WEB_PUBLIC_ENABLE:-false}" "${ADMIN_ACCESS_LIST:-}" "$context"
 )

@@ -11,8 +11,8 @@ DOMAIN=example.test
 unset MAILCOW_WEB_PUBLIC_ENABLE
 webmail_options
 [ "$MAILCOW_WEB_PUBLIC_ENABLE" = false ]
-for flag in false true; do MAILCOW_WEB_PUBLIC_ENABLE=$flag webmail_options; done
-for flag in '' yes 0 TRUE; do
+for flag in false true ''; do MAILCOW_WEB_PUBLIC_ENABLE=$flag webmail_options; done
+for flag in yes 0 TRUE; do
     if (MAILCOW_WEB_PUBLIC_ENABLE=$flag; webmail_options) > "$TMP/options-error" 2>&1; then
         echo "FAIL L01 invalid option accepted" >&2; exit 1
     fi
@@ -264,3 +264,141 @@ for mode in ('acme-verify','acme-resave'):
 for label,n in sorted(counts.items()): print(f'PASS {label}: {n} synthetic cases')
 print(f'{sum(counts.values())} Python synthetic cases passed')
 PY
+
+# Exercise actual entrypoint sections with command-boundary spies.
+python3 -B - "$ROOT" "$TMP" <<'PYSECTIONS'
+from pathlib import Path
+import sys
+root,dest=map(Path,sys.argv[1:])
+setup=(root/'scripts/setup.sh').read_text()
+update=(root/'scripts/update.sh').read_text()
+verify=(root/'scripts/verify.sh').read_text()
+def section(name,text,start,end):
+    begin=text.index(start)
+    (dest/(name+'.sh')).write_text(text[begin:text.index(end,begin)])
+section('proxy-function',setup,'create_proxy_host() {','# shellcheck source-path=SCRIPTDIR')
+section('setup-start',setup,'mailcow_web_public preflight setup','log "Creating proxy hosts..."')
+section('setup-create',setup,'# 2. mailcow.DOMAIN','# 3. mail-npm.DOMAIN')
+section('setup-final',setup,'mailcow_web_public verify setup','\n# ============================================================')
+section('update-start',update,'mailcow_web_public preflight update','# Refuse an invalid/occupied')
+section('update-final',update,'admin_access apply || die','\n# shellcheck source-path=SCRIPTDIR')
+section('update-selection',update,'MAILCOW_WEB_PUBLIC_ENABLE=false','# shellcheck source-path=SCRIPTDIR')
+section('verify-http',verify,'if [ -n "${ADMIN_ACCESS_LIST:-}" ]; then\n    echo "  SKIP  mail-npm.','# shellcheck source-path=SCRIPTDIR')
+section('verify-policy',verify,'MAILCOW_WEB_STATUS=0','ADMIN_ACCESS_STATUS=0')
+section('verify-ssl',verify,'if [ "$WEBMAIL_ENABLE" = true ]; then\n    check "mail.${DOMAIN}:443','\necho ""')
+assert "if sys.argv[7] == 'true': wanted.add(f'mailcow.{domain}')" in verify
+PYSECTIONS
+(
+    DOMAIN=example.test WEBMAIL_ENABLE=false ADMIN_ACCESS_LIST= WEBMAIL_ADMIN_ENABLE=false
+    RED= GREEN= NC= PASS=0 FAIL=0
+    check() {
+        local desc="$1"; shift
+        if "$@" >/dev/null 2>&1; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+    }
+    check_http() { echo "http $1" >> "$TMP/probes"; return 0; }
+    check_ssl() { echo "ssl $1" >> "$TMP/probes"; [ "$1" != mailcow.example.test ]; }
+    mailcow_web_public() { echo 'PASS mailcow web policy: enabled=false'; return "${POLICY_FAIL:-0}"; }
+    for failed in 0 1; do
+        MAILCOW_WEB_PUBLIC_ENABLE=false POLICY_FAIL=$failed PASS=0 FAIL=0
+        : > "$TMP/probes"
+        source "$TMP/verify-http.sh" > "$TMP/verify-output"
+        source "$TMP/verify-policy.sh" >> "$TMP/verify-output"
+        source "$TMP/verify-ssl.sh" >> "$TMP/verify-output"
+        ! grep -q 'mailcow.example.test' "$TMP/probes"
+        [ "$FAIL" = "$failed" ]
+    done
+    MAILCOW_WEB_PUBLIC_ENABLE=true POLICY_FAIL=0 PASS=0 FAIL=0
+    : > "$TMP/probes"
+    source "$TMP/verify-http.sh" > "$TMP/verify-output"
+    source "$TMP/verify-policy.sh" >> "$TMP/verify-output"
+    source "$TMP/verify-ssl.sh" >> "$TMP/verify-output"
+    grep -q '^http https://mailcow.example.test$' "$TMP/probes"
+    grep -q '^ssl mailcow.example.test$' "$TMP/probes"
+    [ "$FAIL" = 1 ]
+)
+echo 'PASS L15: 3 entrypoint cases; off HTTP/SSL probes 0, API failure increments FAIL, on probes retained'
+(
+    die() { echo "$*" >&2; exit 1; }
+    admin_access() { echo "admin $1" >> "$TMP/policy-calls"; [ "$1" != preflight ] || echo 7; }
+    mailcow_web_public() {
+        echo "$*" >> "$TMP/policy-calls"
+        [ "${FAIL_MODE:-}" != "$1" ]
+    }
+    create_proxy_host() {
+        [ "$*" = 'mailcow.example.test nginx-mailcow 8443 https  7' ]
+        echo 'create acl=7' >> "$TMP/policy-calls"
+    }
+    for value in false true '' missing; do
+        printf 'DOMAIN=example.test
+' > "$TMP/update.env"
+        if [ "$value" != missing ]; then printf 'MAILCOW_WEB_PUBLIC_ENABLE=%s
+' "$value" >> "$TMP/update.env"; fi
+        cp "$TMP/update.env" "$TMP/selection-before"
+        ENV_FILE=$TMP/update.env
+        MAILCOW_WEB_PUBLIC_ENABLE=true
+        source "$TMP/update-selection.sh"
+        webmail_options
+        desired=true
+        [ "$value" = true ] || desired=false
+        [ "$MAILCOW_WEB_PUBLIC_ENABLE" = "$desired" ]
+        : > "$TMP/policy-calls"
+        source "$TMP/update-start.sh"
+        source "$TMP/update-final.sh"
+        cmp -s "$TMP/selection-before" "$TMP/update.env"
+        [ "$(grep -c '^preflight update$' "$TMP/policy-calls")" = 1 ]
+        [ "$(grep -c '^verify update$' "$TMP/policy-calls")" = 1 ]
+        expected=1; [ "$desired" = true ] || expected=2
+        [ "$(grep -c '^apply update$' "$TMP/policy-calls")" = "$expected" ]
+        : > "$TMP/policy-calls"
+        source "$TMP/setup-start.sh"
+        source "$TMP/setup-create.sh"
+        source "$TMP/setup-final.sh"
+        if [ "$desired" = true ]; then
+            grep -q '^create acl=7$' "$TMP/policy-calls"
+            [ "$(head -1 "$TMP/policy-calls")" = 'preflight setup' ]
+        else
+            ! grep -q '^create ' "$TMP/policy-calls"
+        fi
+    done
+    for context in setup update; do
+        for mode in preflight apply verify; do
+            MAILCOW_WEB_PUBLIC_ENABLE=false
+            case "$mode" in verify) segment=final ;; *) segment=start ;; esac
+            if (FAIL_MODE=$mode; source "$TMP/$context-$segment.sh") > "$TMP/fatal-output" 2>&1; then
+                echo 'FAIL L16 policy failure ignored' >&2; exit 1
+            fi
+        done
+    done
+)
+echo 'PASS L10/L16: 4 selection cases preserve .env bytes, conditional setup creation uses ACL; 6 fatal policy paths'
+
+(
+    source "$TMP/proxy-function.sh"
+    EXISTING_HOSTS= COOKIE_JAR=$TMP/unused-cookies SCRIPT_DIR=$ROOT/scripts
+    NPM_API=https://unused.invalid/api NPM_ADMIN_EMAIL=admin@example.test
+    log() { :; }
+    warn() { echo "$*" >&2; }
+    dig() { echo 192.0.2.1; }
+    curl() {
+        local payload= arg
+        while [ "$#" -gt 0 ]; do
+            arg=$1; shift
+            if [ "$arg" = -d ]; then payload=$1; shift; fi
+        done
+        if [ -z "$payload" ]; then
+            echo '[{"npmplus_access_list_ids":[],"npmplus_access_list_type":"public"}]'
+        else
+            printf '%s' "$payload" > "$TMP/create-payload.json"
+            echo '{"id":31,"certificate_id":41}'
+        fi
+    }
+    [ "$(create_proxy_host mailcow.example.test nginx-mailcow 8443 https '' 7)" = 41 ]
+    python3 -B - "$TMP/create-payload.json" <<'PYCREATE'
+import json,sys
+host=json.load(open(sys.argv[1]))
+assert host['domain_names']==['mailcow.example.test']
+assert (host['forward_host'],host['forward_port'],host['forward_scheme'])==('nginx-mailcow',8443,'https')
+assert host['npmplus_access_list_ids']==[7] and host['npmplus_access_list_type']=='custom'
+PYCREATE
+)
+echo 'PASS L10: actual setup creation payload includes configured IP ACL before publication'

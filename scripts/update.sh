@@ -109,6 +109,7 @@ MAIL_AUTOEXPUNGE_ENABLE=
 MAIL_SHARE_WHOLE_MAILBOX=false
 MAIL_TRUSTED_SENDER_ENABLE=false
 TOOLKIT_ENABLE=true
+MAILCOW_WEB_PUBLIC_ENABLE=false
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -134,7 +135,11 @@ export -n WAF_BOUNCER_KEY_RESOLVED CROWDSEC_BOUNCER_KEY
 # shellcheck source=lib/admin-access.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/admin-access.sh"
+mailcow_web_public preflight update || die "Mailcow web policy preflight failed"
 admin_access preflight >/dev/null || die "Invalid ADMIN_ACCESS_LIST; update stopped before changes"
+if [ "$MAILCOW_WEB_PUBLIC_ENABLE" = false ]; then
+    mailcow_web_public apply update || die "Mailcow web policy application failed"
+fi
 
 # Refuse an invalid/occupied admin DB address before the upstream updater or
 # log-archive preparation can recreate any containers. Recheck at app startup.
@@ -621,6 +626,8 @@ npmplus_acme_wait && npmplus_acme_verify "$NPMPLUS_DIR" || die "ACME verificatio
 
 # Maintain the certificate reload job before verification.
 admin_access apply || die "Admin access-list application failed"
+mailcow_web_public apply update || die "Mailcow web policy application failed"
+mailcow_web_public verify update || die "Mailcow web policy verification failed"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/cert-reload.sh
 # shellcheck disable=SC1091

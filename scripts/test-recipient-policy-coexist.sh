@@ -890,6 +890,7 @@ set -euo pipefail
 source "$DEPLOY_ROOT/scripts/lib/webmail-env.sh"
 webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
 printf 'verify\n' >> "$RETIREMENT_TEST_TMP/verify.calls"
+[ ! -e "$RETIREMENT_TEST_TMP/verify-abort" ] || exit 23
 rc=0
 webmail_reconcile_recipient_policies "$DEPLOY_SCRIPTS" "$WEBMAIL_DIR" --check || rc=$?
 printf '%s\n' "$rc" > "$RETIREMENT_TEST_TMP/verify.status"
@@ -931,5 +932,25 @@ final_phase || fail v1-unrelated-verify-warning-update
 [ "$(cat "$TMP/verify.status")" = 0 ] || fail v1-warning-policy-check
 json_ready false
 rm "$TMP/verify-fault"
-pass '15: update finalizes first ON before verify; ON/OFF and routing outcomes hold; unrelated verify failure leaves readiness false'
+# V1-01: premature nonzero and unavailable verification must not retain true.
+for verification in abort missing nonexecutable; do
+    reset;flags true true
+    activate || fail v2-on-setup
+    json_ready true;snapshot
+    : > "$TMP/activation-events"
+    case "$verification" in
+        abort) touch "$TMP/verify-abort" ;;
+        missing) mv "$DEPLOY_SCRIPTS/verify.sh" "$DEPLOY_SCRIPTS/verify.saved" ;;
+        nonexecutable) chmod -x "$DEPLOY_SCRIPTS/verify.sh" ;;
+    esac
+    final_phase || fail "v2-$verification-update-exit"
+    json_ready false;restored;layers BR
+    [ ! -s "$TMP/activation-events" ] || fail "v2-$verification-reinstalled-r"
+    case "$verification" in
+        abort) rm "$TMP/verify-abort" ;;
+        missing) mv "$DEPLOY_SCRIPTS/verify.saved" "$DEPLOY_SCRIPTS/verify.sh" ;;
+        nonexecutable) chmod +x "$DEPLOY_SCRIPTS/verify.sh" ;;
+    esac
+ done
+pass '15: update finishes before verify; ON/OFF and routing outcomes hold; failed, aborted or unavailable verify leaves readiness false'
 echo "1..$N"

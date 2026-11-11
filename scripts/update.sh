@@ -680,8 +680,12 @@ webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Final recipient p
 
 if [ -x "$SCRIPT_DIR/verify.sh" ]; then
     log "Running verify.sh..."
-    bash "$SCRIPT_DIR/verify.sh" 2>&1 | tee -a "$LOGFILE" || warn "verify.sh reported issues — review above"
+    if ! bash "$SCRIPT_DIR/verify.sh" 2>&1 | tee -a "$LOGFILE"; then
+        webmail_retirement_invalidate "$WEBMAIL_DIR" || warn "Retirement readiness invalidation failed — review recovery guidance above"
+        warn "verify.sh reported issues — review above"
+    fi
 else
+    webmail_retirement_invalidate "$WEBMAIL_DIR" || warn "Retirement readiness invalidation failed — review recovery guidance above"
     warn "verify.sh not found or not executable — skipping"
 fi
 

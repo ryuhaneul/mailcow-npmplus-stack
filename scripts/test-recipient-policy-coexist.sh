@@ -874,4 +874,62 @@ snapshot;: > "$TMP/calls"
 if activate; then fail f4-existing-r-unsafe; fi
 restored;no_mutations;layers R;not_on
 pass '14: deferred R cannot activate through public apply/env; final routing success precedes installation'
+# V1: run update's actual final ordering after its app-deployment block.
+python3 - "$ROOT/scripts/update.sh" "$TMP/update-phase.sh" "$TMP/update-final.sh" <<'PYUPDATEFINAL'
+from pathlib import Path
+import sys
+source=Path(sys.argv[1]).read_text()
+phase=Path(sys.argv[2]).read_text()
+phase=phase[:phase.index('webmail_retirement_finish "$SCRIPT_DIR"')]
+tail=source.split('header "Phase 7: verify"',1)[1].split('header "Update Complete"',1)[0]
+Path(sys.argv[3]).write_text(phase+'log(){ :; }\n'+tail)
+PYUPDATEFINAL
+cat > "$DEPLOY_SCRIPTS/verify.sh" <<'SHUPDATEVERIFY'
+#!/bin/bash
+set -euo pipefail
+source "$DEPLOY_ROOT/scripts/lib/webmail-env.sh"
+webmail_load_config "$WEBMAIL_ENV_FILE" "$MAILCOW_DIR"
+printf 'verify\n' >> "$RETIREMENT_TEST_TMP/verify.calls"
+rc=0
+webmail_reconcile_recipient_policies "$DEPLOY_SCRIPTS" "$WEBMAIL_DIR" --check || rc=$?
+printf '%s\n' "$rc" > "$RETIREMENT_TEST_TMP/verify.status"
+[ "$rc" -eq 0 ] || exit "$rc"
+# Execute verify's actual publication tail, including unrelated overall failure.
+FAIL=0 SCRIPT_DIR="$DEPLOY_SCRIPTS"
+[ ! -e "$RETIREMENT_TEST_TMP/verify-fault" ] || FAIL=1
+check(){ local desc="$1"; shift; if "$@" >/dev/null 2>&1; then :; else FAIL=$((FAIL+1)); fi; }
+source "$RETIREMENT_TEST_TMP/verify-final.sh"
+exit "$FAIL"
+SHUPDATEVERIFY
+chmod +x "$DEPLOY_SCRIPTS/verify.sh"
+final_phase(){ local rc=0; bash "$TMP/update-final.sh" > "$TMP/stdout" 2> "$TMP/stderr" || rc=$?; no_secrets || fail final-update-secret-output; return "$rc"; }
+reset;flags true true
+final_phase || fail v1-first-on-update
+[ "$(cat "$TMP/verify.status")" = 0 ] || fail v1-first-on-premature-verify
+json_ready true;layers BR;activation_after_routes
+: > "$TMP/activation-events"
+final_phase || fail v1-existing-on-update
+[ "$(cat "$TMP/verify.status")" = 0 ] || fail v1-existing-on-verify
+json_ready true;layers BR
+[ ! -s "$TMP/activation-events" ] || fail v1-existing-on-reinstalled
+reset;flags false true
+bounce apply -y || fail v1-off-setup
+snapshot
+final_phase || fail v1-off-update
+[ "$(cat "$TMP/verify.status")" = 0 ] || fail v1-off-verify
+restored;json_ready false
+reset;flags true true
+rm -f "$TMP/verify.calls" "$TMP/verify.status"
+printf '{"routing_error":true}' > "$TMP/fixture.json"
+if final_phase; then fail v1-routing-failure-update; fi
+[ ! -e "$TMP/verify.calls" ] || fail v1-verify-after-failed-finish
+no_r_activation;not_on
+grep -q 'Final recipient policy verification failed' "$TMP/stderr" || fail v1-routing-failure-guidance
+reset;flags true true
+touch "$TMP/verify-fault"
+final_phase || fail v1-unrelated-verify-warning-update
+[ "$(cat "$TMP/verify.status")" = 0 ] || fail v1-warning-policy-check
+json_ready false
+rm "$TMP/verify-fault"
+pass '15: update finalizes first ON before verify; ON/OFF and routing outcomes hold; unrelated verify failure leaves readiness false'
 echo "1..$N"

@@ -675,14 +675,15 @@ fi
 # ============================================================
 header "Phase 7: verify"
 
+# Complete deferred R activation before verify checks the desired recipient policy.
+webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Final recipient policy verification failed; readiness remains false"
+
 if [ -x "$SCRIPT_DIR/verify.sh" ]; then
     log "Running verify.sh..."
     bash "$SCRIPT_DIR/verify.sh" 2>&1 | tee -a "$LOGFILE" || warn "verify.sh reported issues — review above"
 else
     warn "verify.sh not found or not executable — skipping"
 fi
-
-webmail_retirement_finish "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Final recipient policy verification failed; readiness remains false"
 
 header "Update Complete"
 echo "  Log file: ${LOGFILE}"

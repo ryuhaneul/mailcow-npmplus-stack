@@ -223,4 +223,46 @@ test('retirement approved UI states and existing share APIs operate through actu
     await tick();await tick();assert.equal(root.querySelector('.detail-head h2').textContent,expected);assert.doesNotMatch(root.textContent,/late-a@example.test/);assert.ok(button('공유 추가'));assert.equal(countGet(refsPath(next)),1);
   });
 
+  const keptPath=value=>`/api/admin/mailboxes/${encodeURIComponent(value)}/refs?scope=all`;
+  await t.test('keeping shares defers the list until clicked and does not change consent or the execution payload',async()=>{
+    const row=setup(false);await mount(LeaveDialog,{row,close(){}});await click('변경 미리보기');
+    assert.equal(fake.state.accounts.retirementBodies.at(-1).body.cleanShares,false);assert.match(root.textContent,/기존 읽기 공유는 변경하지 않습니다/);assert.ok(button('공유 목록 보기'));assert.equal(countGet(keptPath(address)),0);
+    assert.equal(root.querySelector('table[aria-label="읽기 공유"]'),null);await change('dialog input[type=checkbox]',true);const expected=`synthetic-account-${fake.state.accounts.version}`;
+    await click('공유 목록 보기');await tick();assert.equal(countGet(keptPath(address)),1);assert.ok(root.querySelector('table[aria-label="유지할 읽기 공유"]'));assert.match(root.textContent,/공유 유지/);assert.equal(button('퇴사 처리 실행').disabled,false);
+    await click('퇴사 처리 실행');const body=fake.state.accounts.retirementBodies.at(-1).body;
+    assert.deepEqual(Object.keys(body).sort(),['address','mode','cleanRefs','cleanShares','receiveBlocked','forwardTo','action','etag','cleanupConfirmed'].sort());assert.equal(body.etag,expected);assert.equal(body.cleanShares,false);assert.equal(body.cleanupConfirmed,true);
+  });
+  await t.test('kept share read failure retries independently and does not block consent or execution',async()=>{
+    const row=setup(false);fake.state.accounts.refsError={status:503,code:'SYNTHETIC_REFS_UNAVAILABLE',message:'합성 공유 조회 실패'};
+    await mount(LeaveDialog,{row,close(){}});await click('변경 미리보기');await click('공유 목록 보기');
+    assert.match(root.textContent,/유지할 공유를 불러오지 못했습니다/);assert.equal(root.querySelector('table[aria-label="유지할 읽기 공유"]'),null);assert.equal(button('퇴사 처리 실행').disabled,true);
+    await change('dialog input[type=checkbox]',true);assert.equal(button('퇴사 처리 실행').disabled,false);
+    fake.state.accounts.refsError=null;await click('다시 시도');await tick();assert.ok(root.querySelector('table[aria-label="유지할 읽기 공유"]'));assert.equal(countGet(keptPath(address)),2);assert.equal(fake.state.accounts.retirementBodies.length,1);assert.equal(button('퇴사 처리 실행').disabled,false);
+  });
+  await t.test('changing share cleanup resets preview and consent, aborts old reads and discards late kept-share results',async()=>{
+    const row=setup(false);let release;const held=new Promise(resolve=>{release=resolve;});intercept=async path=>path===keptPath(address)?held:null;
+    await mount(LeaveDialog,{row,close(){}});await click('변경 미리보기');await change('dialog input[type=checkbox]',true);await click('공유 목록 보기');
+    const old=requests.find(row=>row.path===keptPath(address));assert.equal(old.signal.aborted,false);
+    await click('이전');await change('#leave-clean-shares',true);assert.equal(old.signal.aborted,true);assert.equal(root.querySelector('table[aria-label="유지할 읽기 공유"]'),null);await click('변경 미리보기');
+    assert.equal(fake.state.accounts.retirementBodies.at(-1).body.cleanShares,true);assert.equal(button('퇴사 처리 실행').disabled,true);assert.equal(root.querySelector('dialog input[type=checkbox]').checked,false);assert.ok(root.querySelector('table[aria-label="읽기 공유"]'));
+    release(new Response(JSON.stringify({address,refs:{shares:[{owner:'late-kept@example.test',grantee:address,mailbox:'INBOX',rights:['lookup','read']}]},warnings:[],sharesScope:'all'}),{status:200,headers:{'Content-Type':'application/json'}}));await tick();await tick();
+    assert.doesNotMatch(root.textContent,/late-kept@example.test/);assert.equal(button('퇴사 처리 실행').disabled,true);
+    await click('이전');await change('#leave-clean-shares',false);await click('변경 미리보기');assert.ok(button('공유 목록 보기'));assert.equal(countGet(keptPath(address)),1);assert.equal(button('퇴사 처리 실행').disabled,true);
+  });
+  await t.test('closing a leave dialog aborts a pending kept-share read and cannot revive its view',async()=>{
+    const row=setup(false);let release,closed=0;const held=new Promise(resolve=>{release=resolve;});intercept=async path=>path===keptPath(address)?held:null;
+    await mount(LeaveDialog,{row,close(){closed++;render(null,root);}});await click('변경 미리보기');await click('공유 목록 보기');const old=requests.find(row=>row.path===keptPath(address));
+    await act(async()=>root.querySelector('dialog').dispatchEvent(new dom.window.Event('cancel',{cancelable:true})));await tick();assert.equal(closed,1);assert.equal(old.signal.aborted,true);
+    release(new Response(JSON.stringify({address,refs:{shares:[]},warnings:[],sharesScope:'all'}),{status:200,headers:{'Content-Type':'application/json'}}));await tick();assert.equal(root.textContent,'');
+  });
+  await t.test('long execution errors retain a focusable footer and preserve 409 versus retryable failure policy',async()=>{
+    for(const status of [503,409]){
+      const row=setup(false);await mount(LeaveDialog,{row,close(){}});await click('변경 미리보기');await change('dialog input[type=checkbox]',true);
+      intercept=async(path,options)=>path==='/api/admin/flows/leave'&&JSON.parse(options.body).action==='run'?new Response(JSON.stringify({error:{code:status===409?'CHANGED_ELSEWHERE':'SYNTHETIC_UNAVAILABLE',message:'긴 오류 안내 '.repeat(80)}}),{status,headers:{'Content-Type':'application/json'}}):null;
+      await click('퇴사 처리 실행');const run=button('퇴사 처리 실행'),back=button('이전'),footer=run.closest('.footer-actions');
+      assert.ok(footer);assert.equal(footer.parentElement.tagName,'FORM');assert.equal(footer.closest('fieldset'),null);assert.equal(footer.parentElement.lastElementChild,footer);assert.equal(run.disabled,status===409);assert.equal(back.disabled,false);
+      back.focus();assert.equal(document.activeElement,back);if(status!==409){run.focus();assert.equal(document.activeElement,run);}
+    }
+  });
+
 });

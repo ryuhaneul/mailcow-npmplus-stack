@@ -193,10 +193,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     }) };
   }
   async function collectReferences(addr, row, boxes, aliases, filters, syncjobs, {
-    allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeOwnShare = false,
+    allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeOwnShare = false, includeShares = true,
   } = {}) {
     const groups = groupMailboxAddresses(filters), warnings = [], shares = new Map();
-    const owners = [...new Set([...(allShares ? boxes.map(box => normalize(box.username)) : groups), addr])];
+    const owners = includeShares ? [...new Set([...(allShares ? boxes.map(box => normalize(box.username)) : groups), addr])] : [];
     const activeByOwner = new Map(boxes.map(box => [normalize(box.username), box.active]));
     const skipped = [];
     let ownAcl;
@@ -222,7 +222,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     if (sharesPartial) warnings.push({ code: 'SHARES_PARTIAL', message: '공유 정보 일부를 읽지 못했어요. 공유 화면에서 다시 확인해 주세요.' });
     if (skipped.length) warnings.push({ code: 'SHARES_INACTIVE_SKIPPED', addresses: skipped.sort(),
       message: `꺼진 계정(${skipped.join(', ')})이 남에게 준 공유는 확인하지 못했어요. 처리 후 공유 화면에서 확인해 주세요.` });
-    warnings.push(...folderWarnings());
+    if (includeShares) warnings.push(...folderWarnings());
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
     const refs = {
@@ -231,10 +231,10 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
           const members = teamMembers(filter, aliases);
           return members.includes(addr) ? [{ mailbox: normalize(filter.username), filterId: filter.id, members }] : [];
         }),
-        senders, shares: [...shares.values()].sort((a, b) => `${a.owner} ${a.grantee} ${a.mailbox}`.localeCompare(`${b.owner} ${b.grantee} ${b.mailbox}`)),
+        senders, shares: includeShares ? [...shares.values()].sort((a, b) => `${a.owner} ${a.grantee} ${a.mailbox}`.localeCompare(`${b.owner} ${b.grantee} ${b.mailbox}`)) : null,
         syncjobs: syncjobs.filter(job => normalize(job.user2) === addr).map(job => ({ id: job.id, target: addr, active: Number(job.active) })),
       };
-    const result = { address: addr, refs, sharesScope: allShares ? 'all' : 'teams+own', warnings };
+    const result = { address: addr, refs, sharesScope: includeShares ? allShares ? 'all' : 'teams+own' : 'not-loaded', warnings };
     if (includeOwnShare) {
       result.ownShare = Number(row.active) === 0 ? { status: 'inactive', data: null } : ownAcl === undefined ? { status: 'unavailable', data: null } : {
         status: 'ready', data: shareService.fromOwnedAcl({ owner: addr, name: typeof row.name === 'string' ? row.name : '', ownerActive: Number(row.active) }, ownAcl),
@@ -260,13 +260,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null },
       ...netFields(net), appPasswordCount: appPasswords.length, etag: etag(editState(state, protocolNetlimitState(net))), refsState: 'deferred', warnings: [] };
   }
-  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true } = {}) {
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true, includeShares = true } = {}) {
     const addr = address(rawAddress), row = await box(session, addr);
     const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
       rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
       rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), rows(session, 'syncjobs/all/no_log'),
     ]);
-    const related = await collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares, aclSnapshot, ownerSnapshot, skipOwnShares });
+    const related = await collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares, aclSnapshot, ownerSnapshot, skipOwnShares, includeShares });
     const groups = groupMailboxAddresses(filters);
     const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
     const forwarding = inspectForwarding(filters, addr);
@@ -463,7 +463,8 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     }
     return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
   }
-  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares = mode === 'delete', forwardTo }) {
+  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares = mode === 'delete', forwardTo, skipSharedDisplay = false }) {
+    const inspectShares = !(skipSharedDisplay && mode === 'disable' && !cleanShares);
     const account = snapshot(await box(session, addr)), netlimit = await netState(addr);
     const filters = await rows(session, 'filters/all');
     const ownFilters = prefilters(filters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -472,17 +473,17 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const operation = { mode, cleanRefs, cleanShares, forwardTo };
     const retiredState = await retirementState(addr);
     if (mode === 'disable' && !cleanRefs && !cleanShares) return { state: { account, netlimit, ownFilters, operation, retiredState }, account, filters, forward,
-      refs: { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] }, sharesScope: 'none', teamsToClean: [] };
+      refs: { aliases: [], teams: [], senders: [], shares: inspectShares ? [] : null, syncjobs: [] }, sharesScope: inspectShares ? 'none' : 'not-loaded', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
     if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const teamsToClean = cleanRefs ? protectTeams(filters, aliases, addr) : [], aclByOwner = new Map(), ownerSnapshot = new Map();
-    const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot });
+    const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot, includeShares: inspectShares });
     if (cleanShares && info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
     const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(row => normalize(row.username) === addr && targets(row.sender_acl).length || targets(row.sender_acl).includes(addr)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    const refs = Object.fromEntries(Object.entries(info.refs).map(([kind, values]) => [kind, values.map(ref => ({ ...ref, effect: kind === 'shares' ? cleanShares ? 'deleted' : 'kept' : !cleanRefs || kind === 'aliases' && mode === 'disable' ? 'kept' : kind === 'aliases' ? ref.targets.every(target => target === addr) ? 'deleted' : 'target_removed' : 'removed' }))]));
+    const refs = Object.fromEntries(Object.entries(info.refs).map(([kind, values]) => [kind, kind === 'shares' && values === null ? null : values.map(ref => ({ ...ref, effect: kind === 'shares' ? cleanShares ? 'deleted' : 'kept' : !cleanRefs || kind === 'aliases' && mode === 'disable' ? 'kept' : kind === 'aliases' ? ref.targets.every(target => target === addr) ? 'deleted' : 'target_removed' : 'removed' }))]));
     const versions = {
       shareOwners: ownerVersions(ownerSnapshot),
       aliases: aliasRows.map(row => ({ address: normalize(row.address), sha256: etag(row) })),
@@ -491,26 +492,33 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
     };
-    return { state: { account, netlimit, ownFilters, operation, retiredState, refs, versions }, account, filters, forward, refs, sharesScope: 'all',
+    return { state: { account, netlimit, ownFilters, operation, retiredState, refs, versions }, account, filters, forward, refs, sharesScope: info.sharesScope,
       teamsToClean, aliasRows, senderRows, syncRows, aclByOwner, info };
   }
-  async function deletePreview(session, rawAddress, options = {}) {
+  function lifecycleVersion(state) {
+    if (state.operation.mode !== 'disable' || state.operation.cleanShares || !state.refs) return state;
+    const { shares, ...refs } = state.refs;
+    const { shares: shareVersions, shareOwners, ...versions } = state.versions;
+    return { ...state, refs, versions };
+  }
+  async function deletePreview(session, rawAddress, options = {}, { skipSharedDisplay = true } = {}) {
     const addr = address(rawAddress), mode = options.mode ?? 'delete', cleanRefs = options.cleanRefs ?? true;
     const forwardTo = options.forwardTo ? address(options.forwardTo) : null, cleanShares = options.cleanShares ?? (mode === 'delete');
     if (!['disable', 'delete'].includes(mode) || typeof cleanRefs !== 'boolean' || typeof cleanShares !== 'boolean' || mode === 'delete' && (!cleanRefs || !cleanShares || forwardTo)) throw invalid();
-    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo });
+    const skipShares = skipSharedDisplay && mode === 'disable' && !cleanShares;
+    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo, skipSharedDisplay: skipShares });
     const row = plan.info ?? await box(session, addr);
-    return { address: addr, mode, cleanRefs, cleanShares, forwardTo, etag: etag(plan.state), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
-      refs: plan.refs, sharesScope: plan.sharesScope, irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
+    return { address: addr, mode, cleanRefs, cleanShares, forwardTo, etag: etag(lifecycleVersion(plan.state)), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
+      refs: plan.refs, sharesScope: plan.sharesScope, ...(skipShares ? { sharesState: 'deferred-kept' } : {}), irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
       confirmation: mode === 'delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.',
-      warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? folderWarnings())] };
+      warnings: [...(mode === 'disable' ? leaveWarnings() : []), ...(plan.info?.warnings ?? (skipShares ? [] : folderWarnings()))] };
   }
   async function lifecycleRun({ session, actor, ip, addr: rawAddress, data, mode = 'delete', onRetired, onFinished, onStep, beforeWrite, skipForward = false }) {
     const addr = address(rawAddress), cleanRefs = data?.cleanRefs, cleanShares = mode === 'delete' ? true : data?.cleanShares ?? false, forwardTo = data?.forwardTo ? address(data.forwardTo) : null;
     if (typeof cleanShares !== 'boolean' || typeof cleanRefs !== 'boolean' || mode === 'delete' && (!cleanRefs || forwardTo) || mode === 'delete' && data.confirmAddress !== addr) throw invalid();
     return lock.run(`flow:${addr}`, async () => {
       const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo });
-      assertUnchanged(data.etag, plan.state);
+      assertUnchanged(data.etag, lifecycleVersion(plan.state));
       const steps = [], cleaned = { aliases: [], teams: [], senders: [], shares: [], syncjobs: [] };
       const expectedAccount = structuredClone(plan.account);
       const skipOwnShares = cleanShares && plan.account.active === 0;
@@ -523,7 +531,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         const success = async (name, target, auditId = null) => { touched = true; steps.push({ stage: name, target, status: 'ok', auditId }); await onStep?.({ stage: name, target }); };
         try {
           // Recheck the full preview once more after the durable intent and before the first write.
-          assertUnchanged(data.etag, (await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo })).state);
+          assertUnchanged(data.etag, lifecycleVersion((await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo })).state));
           await beforeWrite?.();
           if (mode === 'disable') {
             stage = 'active';
@@ -832,7 +840,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       ...(data.receiveBlocked ? { forwardTo: null } : Object.hasOwn(data, 'forwardTo') ? { forwardTo: data.forwardTo === null ? null : address(data.forwardTo) } : {}) };
     const request = retirementInput({ ...options, cleanupConfirmed: data.cleanupConfirmed ?? false }, { leave: true });
     const prepare = async () => {
-      const lifecycle = await deletePreview(session, addr, { ...options, mode: 'disable' });
+      const lifecycle = await deletePreview(session, addr, { ...options, mode: 'disable' }, { skipSharedDisplay: data.action === 'preview' });
       const settings = await retirementPlan(session, addr, request, { initialLeave: true });
       const version = { lifecycle: lifecycle.etag, settings: settings.etag };
       return { lifecycle, settings, version };

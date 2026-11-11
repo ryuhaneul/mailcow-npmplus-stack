@@ -165,7 +165,7 @@ for (const cleanRefs of [false, true]) for (const cleanShares of [false, true]) 
 test('retirement: omitted cleanShares preserves shares even with legacy cleanRefs=true', async t => {
   const f = await fixture(t, true), initial = structuredClone([...f.acl]);
   const preview = await leave(f, { action: 'preview', cleanRefs: true }); assert.equal(preview.cleanShares, false);
-  assert.ok(preview.refs.shares.every(row => row.effect === 'kept'));
+  assert.equal(preview.refs.shares, null); assert.equal(preview.sharesState, 'deferred-kept'); assert.equal(preview.sharesScope, 'not-loaded');
   const result = await leave(f, { action: 'run', cleanRefs: true, etag: preview.etag });
   assert.equal(result.result, 'ok'); assert.deepEqual([...f.acl], initial);
 });
@@ -682,4 +682,56 @@ test('F6 settings ON requires explicit removal of a pure owner prefilter with an
   assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
   const result = await settingsRun(f, { receiveBlocked: true, forwardTo: null, cleanupConfirmed: true, etag: removed.etag });
   assert.equal(result.result, 'ok'); assert.equal(result.retirement.receiveBlocked, true); assert.equal(f.filters.length, 0);
+});
+
+for (const phase of ['after-preview', 'after-intent']) test(`retirement: sharing-only changes ${phase} do not conflict when keeping shares; run still reads every owner`, async t => {
+  const f = await fixture(t, true);
+  const p = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: false });
+  assert.equal(p.sharesScope, 'not-loaded'); assert.equal(p.sharesState, 'deferred-kept'); assert.equal(p.refs.shares, null);
+  assert.deepEqual(f.aclCalls, []);
+  const mutate = () => f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup'] }]);
+  if (phase === 'after-preview') mutate();
+  else {
+    const run = f.audit.run;
+    f.audit.run = (entry, operation, options) => run(entry, async intent => { if (entry.action === 'mailbox.leave') mutate(); return operation(intent); }, options);
+  }
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: false, etag: p.etag });
+  assert.equal(result.result, 'ok', JSON.stringify(result));
+  assert.equal(f.aclCalls.length, 9, 'prepare, locked snapshot and durable-intent recheck all retain full ACL reads');
+  for (const owner of [user, team, other]) assert.equal(f.aclCalls.filter(value => value === owner).length, 3);
+  assert.deepEqual(f.acl.get(other), [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup'] }]);
+});
+
+const deferredMutations = {
+  account: f => { f.boxes[0].name = 'changed'; },
+  netlimit: f => { f.netlimit.rows.set(user, { enabled: true, version: 'b'.repeat(32) }); },
+  retirement: f => { f.states.set(user, { ...emptyRetirementState(), updatedBy: 'other-admin' }); },
+  alias: f => { f.aliases[0].goto = other; },
+  team: f => { f.filters[0].script_data += '# changed\n'; },
+  sender: f => { f.boxes[2].sender_acl.push('changed@example.com'); },
+  syncjob: f => { f.jobs[0].active = 0; },
+  ownFilter: f => { f.filters.push({ id: 99, username: user, filter_type: 'prefilter', active: 1, script_desc: 'changed', script_data: 'keep;' }); },
+};
+for (const [kind, mutate] of Object.entries(deferredMutations)) test(`retirement: keeping shares still rejects changed ${kind} before writes`, async t => {
+  const f = await fixture(t, true), p = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: false });
+  assert.deepEqual(f.aclCalls, []); mutate(f);
+  await assert.rejects(leave(f, { action: 'run', cleanRefs: true, cleanShares: false, etag: p.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+});
+
+test('retirement: cleaning shares keeps complete preview and conflicts on a changed ACL', async t => {
+  const f = await fixture(t, true), p = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: true });
+  assert.equal(p.sharesScope, 'all'); assert.equal(p.sharesState, undefined); assert.ok(Array.isArray(p.refs.shares)); assert.equal(f.aclCalls.length, 3);
+  f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup'] }]);
+  await assert.rejects(leave(f, { action: 'run', cleanRefs: true, cleanShares: true, etag: p.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+});
+
+test('retirement: display-only preview skips failing ACL readers but execution keeps their existing reads and warnings', async t => {
+  const f = await fixture(t, true); f.options.aclFailure = other;
+  const p = await leave(f, { action: 'preview', cleanRefs: true, cleanShares: false });
+  assert.deepEqual(f.aclCalls, []); assert.equal(p.refs.shares, null); assert.ok(!p.warnings.some(row => row.code === 'SHARES_PARTIAL'));
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: false, etag: p.etag });
+  assert.equal(result.result, 'ok', JSON.stringify(result)); assert.equal(f.aclCalls.length, 9);
+  assert.ok(result.warnings.some(row => row.code === 'SHARES_PARTIAL'));
 });

@@ -207,7 +207,7 @@ test('lifecycle: later auth loss is recorded partial then rethrown as original 4
 
 test('lifecycle: disable without cleanup blocks login, creates copy-only prefilter and keeps all references', async t => {
   const f = await fixture(t); const initial = await leave(f, { action: 'preview', forwardTo: other });
-  assert.equal(initial.sharesScope, 'none'); assert.equal(f.aclCalls.length, 0);
+  assert.equal(initial.sharesScope, 'not-loaded'); assert.equal(initial.sharesState, 'deferred-kept'); assert.equal(initial.refs.shares, null); assert.equal(f.aclCalls.length, 0);
   const result = await leave(f, { action: 'run', forwardTo: other, etag: initial.etag });
   assert.equal(result.result, 'ok'); assert.equal(f.boxes[0].active, 2);
   assert.deepEqual(writes(f).map(call => call.path), ['/api/v1/edit/mailbox', '/api/v1/add/filter']);
@@ -611,4 +611,21 @@ test('netlimit lifecycle: cleanup failure reports partial after confirmed mailbo
   const initial = await preview(f); f.netlimit.removeFailure = new AppError(503, 'PROTOCOL_NETLIMIT_UNAVAILABLE', '합성 장애');
   const result = await remove(f, confirmed(initial.etag)); assert.equal(result.result, 'partial'); assert.equal(result.steps.at(-1).stage, 'protocol-netlimit');
   assert.equal(f.boxes.some(row => row.username === user), false); assert.equal(f.netlimit.rows.has(user), true);
+});
+
+test('lifecycle: deferred sharing preview matches the full-read projection without changing run ACL reads', async t => {
+  const f = await fixture(t), options = { mode: 'disable', cleanRefs: true, cleanShares: false };
+  const fast = await f.service.deletePreview({}, user, options);
+  assert.equal(f.aclCalls.length, 0); assert.equal(fast.refs.shares, null); assert.equal(fast.sharesState, 'deferred-kept');
+  const full = await f.service.deletePreview({}, user, options, { skipSharedDisplay: false });
+  assert.equal(full.sharesScope, 'all'); assert.ok(full.refs.shares.length); assert.equal(full.sharesState, undefined);
+  assert.equal(full.etag, fast.etag);
+  const { shares: ignored, ...fastRefs } = fast.refs, { shares: kept, ...fullRefs } = full.refs;
+  assert.deepEqual(fastRefs, fullRefs); assert.ok(kept.every(row => row.effect === 'kept'));
+  f.aclCalls.length = 0;
+  f.acl.set(other, [{ user: other, id: user, mailbox: 'INBOX', rights: ['lookup'] }]);
+  const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: false, etag: fast.etag });
+  assert.equal(result.result, 'ok');
+  assert.deepEqual([...new Set(f.aclCalls)].sort(), [user, team, other].sort());
+  assert.equal(f.aclCalls.length, 6, 'legacy run retains both complete ACL snapshots');
 });

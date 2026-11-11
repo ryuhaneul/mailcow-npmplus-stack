@@ -388,10 +388,10 @@ export function createFakeAdminApi() {
         if (body.receiveBlocked && !state.accounts.retirementFeatureEnabled) return fail({status:503,code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'서버 수신 차단 기능을 먼저 켜 주세요.'});
       }
       if (previewing) {
-        const plan=retirementPlan(row,body);
+        const plan=retirementPlan(row,body),deferred=leaving&&mode==='disable'&&!body.cleanShares;
         return send({ address, mode, cleanRefs: leaving ? body.cleanRefs : true, cleanShares: leaving ? body.cleanShares??false : true, forwardTo: body.forwardTo??null, etag, messages:row.messages,usedBytes:row.usedBytes,
-          refs:Object.fromEntries(Object.entries(state.accountRefs).map(([kind,rows])=>[kind,rows.map(ref=>({...ref,effect:kind==='shares'?body.cleanShares||!leaving?'deleted':'kept':body.cleanRefs===false?'kept':kind==='aliases'?(mode==='disable'?'kept':'deleted'):'removed'}))])),
-          sharesScope:'all',irreversible:mode==='delete',confirmAddress:mode==='delete'?address:null,confirmation:mode==='delete'?'메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.':'로그인을 막고 메일은 보존해요.',
+          refs:Object.fromEntries(Object.entries(state.accountRefs).map(([kind,rows])=>[kind,kind==='shares'&&deferred?null:rows.map(ref=>({...ref,effect:kind==='shares'?body.cleanShares||!leaving?'deleted':'kept':body.cleanRefs===false?'kept':kind==='aliases'?(mode==='disable'?'kept':'deleted'):'removed'}))])),
+          sharesScope:deferred?'not-loaded':'all',...(deferred?{sharesState:'deferred-kept'}:{}),irreversible:mode==='delete',confirmAddress:mode==='delete'?address:null,confirmation:mode==='delete'?'메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.':'로그인을 막고 메일은 보존해요.',
           ...(leaving?{...plan,receiveChanges:plan.changes,receiveBlocked:body.receiveBlocked??false,pendingOperation:row.retirement?.pendingOperation??null}:{}),warnings:[...(leaving?leaveWarnings:[]),...(state.accounts.warnings||[])] });
       }
       if (body.etag !== etag) return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요.'});

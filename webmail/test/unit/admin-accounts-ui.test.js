@@ -31,7 +31,9 @@ test('retirement approved UI states and existing share APIs operate through actu
   dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const {createFakeAdminApi}=await import('../../web/dev/fake-admin-api.js');
   let fake, intercept = null;
+  const requests = [];
   globalThis.fetch=async(path,options={})=>{
+    requests.push({path,method:options.method||'GET',signal:options.signal});
     if(intercept){const response=await intercept(path,options);if(response)return response;}
     let body='',status=200;const headers={};
     const response={setHeader(name,value){headers[name]=value;},set statusCode(value){status=value;},get statusCode(){return status;},end(value){body=value||'';}};
@@ -49,7 +51,7 @@ test('retirement approved UI states and existing share APIs operate through actu
   const button=text=>{const value=[...root.querySelectorAll('button')].find(node=>node.textContent===text);assert.ok(value,'button '+text);return value;};
   const click=async text=>{await act(async()=>button(text).click());await tick();};
   const change=async(selector,value)=>{const node=root.querySelector(selector);assert.ok(node,selector);await act(async()=>{if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new dom.window.Event('change',{bubbles:true}));});await tick();};
-  const setup=(retired=true,blocked=false)=>{intercept=null;fake=createFakeAdminApi();const row=fake.state.accounts.items.find(row=>row.address===address);row.active=retired?2:1;row.retirement={retired,receiveBlocked:blocked,forwarding:[],recordedAt:'2026-11-01T00:00:00Z'};return {...row,retirement:{...row.retirement,featureEnabled:true,effectiveReceiveBlock:blocked?'on':'off',pendingOperation:null,warnings:[]}};};
+  const setup=(retired=true,blocked=false)=>{intercept=null;requests.length=0;fake=createFakeAdminApi();const row=fake.state.accounts.items.find(row=>row.address===address);row.active=retired?2:1;row.retirement={retired,receiveBlocked:blocked,forwarding:[],recordedAt:'2026-11-01T00:00:00Z'};return {...row,retirement:{...row.retirement,featureEnabled:true,effectiveReceiveBlock:blocked?'on':'off',pendingOperation:null,warnings:[]}};};
   await t.test('allowed/blocked detail states distinguish retirement, login, receive and actual forwarding',async()=>{
     let row=setup();row.retirement.forwarding=['team@example.com'];await mount(RetirementSettings,{row,saved(){}});
     assert.match(root.textContent,/처리됨/);assert.match(root.textContent,/차단됨/);assert.match(root.textContent,/허용 중/);assert.match(root.textContent,/전달: team@example.com/);
@@ -98,6 +100,8 @@ test('retirement approved UI states and existing share APIs operate through actu
   });
   await t.test('block OFF confirmation warns about refs and actual PATCH immediately refreshes current state',async()=>{
     setup(true,true);await mount(AccountDetail,{address,changed(){}});await change('#receive-block',false);await click('변경 미리보기');assert.match(root.textContent,/자동 복원되지 않습니다/);await change('dialog input[type=checkbox]',true);await click('수신 허용');await tick();assert.match(root.querySelector('#retirement-settings').textContent,/허용 중/);assert.equal(fake.state.accounts.retirementBodies.at(-1).method,'PATCH');assert.equal(fake.state.accounts.retirementBodies.at(-1).body.receiveBlocked,false);
+    assert.equal(requests.filter(row=>row.path===`/api/admin/mailboxes/${encodeURIComponent(address)}?view=summary`&&row.method==='GET').length,2);
+    assert.equal(requests.filter(row=>row.path===`/api/admin/mailboxes/${encodeURIComponent(address)}/refs`&&row.method==='GET').length,2);
   });
   await t.test('block ON explicitly removes existing managed forwarding before cleanup consent',async()=>{
     const row=setup();row.retirement.forwarding=['team@example.com'];await mount(RetirementSettings,{row,saved(){}});await change('#receive-block',true);assert.ok(root.querySelector('#retirement-mail-mode').disabled);await click('변경 미리보기');const body=fake.state.accounts.retirementBodies.at(-1).body;assert.equal(body.forwardTo,null);assert.equal(body.receiveBlocked,true);
@@ -143,12 +147,80 @@ test('retirement approved UI states and existing share APIs operate through actu
       if(path===`/api/admin/mailboxes/${encodeURIComponent(address)}/retirement`&&options.method==='PATCH'){
         partial=true;return new Response(JSON.stringify({result:'partial',retirement:null,reloadRequired:true,steps:[{stage:'receive-off',status:'ok'},{stage:'complete',status:'failed',code:'RETIREMENT_BLOCK_UNAVAILABLE'}],recovery:[{message:'현재 퇴사·수신 상태와 남은 연결을 다시 미리보기로 확인해 주세요.'}]}),{status:200,headers:{'Content-Type':'application/json'}});
       }
-      if(partial&&path===`/api/admin/mailboxes/${encodeURIComponent(address)}`)return new Response(JSON.stringify({error:{code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'조회 실패'}}),{status:503,headers:{'Content-Type':'application/json'}});
+      if(partial&&path===`/api/admin/mailboxes/${encodeURIComponent(address)}?view=summary`)return new Response(JSON.stringify({error:{code:'RETIREMENT_BLOCK_UNAVAILABLE',message:'조회 실패'}}),{status:503,headers:{'Content-Type':'application/json'}});
     };
     await click('수신 허용');await tick();await tick();
     assert.equal(partial,true);assert.match(root.textContent,/일부 변경만 적용/);assert.match(root.textContent,/receive-off · 완료/);assert.match(root.textContent,/complete · 실패 RETIREMENT_BLOCK_UNAVAILABLE/);assert.match(root.textContent,/현재 퇴사·수신 상태와 남은 연결/);assert.match(root.textContent,/현재 계정 상태.*확인/);
     assert.equal(root.querySelector('#receive-block'),null);assert.doesNotMatch(root.textContent,/차단 중|허용 중/);
     intercept=null;await click('다시 시도');await tick();await tick();assert.ok(root.querySelector('#retirement-settings'));assert.match(root.textContent,/receive-off · 완료/);assert.match(root.textContent,/현재 퇴사·수신 상태와 남은 연결/);
+  });
+
+  const summaryPath=value=>`/api/admin/mailboxes/${encodeURIComponent(value)}?view=summary`;
+  const refsPath=value=>`/api/admin/mailboxes/${encodeURIComponent(value)}/refs`;
+  const countGet=path=>requests.filter(row=>row.path===path&&row.method==='GET').length;
+  await t.test('summary and OTP display while refs remain pending, without duplicate standalone share reads',async()=>{
+    setup(false);let release;const held=new Promise(resolve=>{release=resolve;});
+    intercept=async path=>path===refsPath(address)?held:null;
+    await mount(AccountDetail,{address,changed(){}});
+    assert.ok(root.querySelector('.detail-head h2'));assert.ok(root.querySelector('[data-admin-otp="account"]'));assert.ok([...root.querySelectorAll('button')].some(node=>node.textContent==='수정'));
+    assert.equal(root.querySelector('[aria-label="공유 및 연결"]').getAttribute('aria-busy'),'true');
+    await act(async()=>{await new Promise(resolve=>setTimeout(resolve,320));});
+    assert.match(root.querySelector('[aria-label="공유 및 연결"]').textContent,/공유와 연결을 불러오는 중/);
+    assert.equal(countGet(summaryPath(address)),1);assert.equal(countGet(refsPath(address)),1);assert.equal(countGet(`/api/admin/shares/${encodeURIComponent(address)}`),0);
+    release(null);await tick();await tick();
+    assert.match(root.textContent,/이 메일함의 읽기 공유/);assert.equal(root.querySelector('[aria-label="공유 및 연결"]'),null);
+    assert.equal(countGet(refsPath(address)),1);
+  });
+  await t.test('refs failure and retry leave summary and OTP untouched and never render an empty reference list',async()=>{
+    setup(false);fake.state.accounts.refsError={status:503,code:'SYNTHETIC_REFS_UNAVAILABLE',message:'합성 조회 실패'};
+    await mount(AccountDetail,{address,changed(){}});
+    assert.match(root.textContent,/공유와 연결을 불러오지 못했습니다/);assert.ok(root.querySelector('.detail-head h2'));assert.ok(root.querySelector('[data-admin-otp="account"]'));
+    assert.equal(root.querySelector('.account-refs table'),null);assert.doesNotMatch(root.querySelector('[aria-label="공유 및 연결"]').textContent,/연결된 항목이 없어요/);
+    const otp=`/api/admin/otp/accounts/${encodeURIComponent(address)}`,before=countGet(otp);
+    fake.state.accounts.refsError=null;await click('다시 시도');await tick();await tick();
+    assert.match(root.textContent,/이 메일함의 읽기 공유/);assert.equal(countGet(refsPath(address)),2);assert.equal(countGet(summaryPath(address)),1);assert.equal(countGet(otp),before);
+  });
+  await t.test('own unavailable, inactive and partial other-owner results retain distinct warning and action states',async()=>{
+    setup(false);fake.state.accounts.ownShareUnavailable=true;await mount(AccountDetail,{address,changed(){}});
+    assert.match(root.textContent,/공유 정보 일부를 읽지 못했어요/);assert.match(root.textContent,/이 메일함의 공유를 불러오지 못했습니다/);assert.ok(![...root.querySelectorAll('button')].some(node=>node.textContent==='공유 추가'));
+    fake.state.accounts.ownShareUnavailable=false;await click('다시 시도');await tick();assert.ok(button('공유 추가'));
+    setup(false);fake.state.accounts.items.find(row=>row.address===address).active=0;await mount(AccountDetail,{address,changed(){}});
+    assert.match(root.textContent,/꺼진 메일함의 공유는 확인하지 않았습니다/);assert.ok(![...root.querySelectorAll('button')].some(node=>node.textContent==='공유 추가'));assert.doesNotMatch(root.textContent,/아직 공유한 사람이 없습니다/);
+    setup(false);fake.state.accounts.warnings=[{code:'SHARES_PARTIAL',message:'다른 계정의 공유를 확인하지 못했습니다.'}];await mount(AccountDetail,{address,changed(){}});
+    assert.match(root.textContent,/다른 계정의 공유를 확인하지 못했습니다/);assert.ok(button('공유 추가'));
+  });
+  await t.test('share writes refresh refs alone and the next mutation uses the fresh shared card etag',async()=>{
+    setup(false);const bodies=[];
+    intercept=async(path,options)=>{if(path===`/api/admin/shares/${encodeURIComponent(address)}`&&['POST','DELETE'].includes(options.method))bodies.push(JSON.parse(options.body));return null;};
+    await mount(AccountDetail,{address,changed(){}});
+    const original=fake.state.shares.items.find(row=>row.owner===address).etag,otp=`/api/admin/otp/accounts/${encodeURIComponent(address)}`,otpReads=countGet(otp);
+    await click('공유 추가');await change('#share-grantee','team@example.com');await click('읽기 공유 추가');await tick();await tick();
+    assert.match(root.textContent,/읽기 공유를 저장했습니다/);assert.equal(bodies[0].etag,original);assert.equal(countGet(refsPath(address)),2);assert.equal(countGet(summaryPath(address)),1);assert.equal(countGet(otp),otpReads);
+    const fresh=fake.state.shares.items.find(row=>row.owner===address).etag;assert.notEqual(fresh,original);
+    const own=root.querySelector('[aria-label="이 메일함의 읽기 공유"]'),grant=[...own.querySelectorAll('.mini-row')].find(node=>node.textContent.includes('team@example.com'));
+    await act(async()=>grant.querySelector('button').click());await tick();await click('공유 빼기');await tick();await tick();
+    assert.equal(bodies[1].etag,fresh);assert.equal(countGet(refsPath(address)),3);assert.equal(countGet(summaryPath(address)),1);assert.equal(countGet(`/api/admin/shares/${encodeURIComponent(address)}`),0);
+  });
+  await t.test('failed refresh after a share mutation removes stale card controls until refs succeed again',async()=>{
+    setup(false);intercept=async(path,options)=>{if(path===`/api/admin/shares/${encodeURIComponent(address)}`&&options.method==='POST')fake.state.accounts.refsError={status:503,code:'SYNTHETIC_REFS_UNAVAILABLE',message:'합성 조회 실패'};return null;};
+    await mount(AccountDetail,{address,changed(){}});await click('공유 추가');await change('#share-grantee','team@example.com');await click('읽기 공유 추가');await tick();await tick();
+    assert.match(root.textContent,/공유와 연결을 불러오지 못했습니다/);assert.ok(![...root.querySelectorAll('button')].some(node=>node.textContent==='공유 추가'));assert.equal(root.querySelector('dialog'),null);assert.equal(root.querySelector('.mini-row'),null);
+    fake.state.accounts.refsError=null;await click('다시 시도');await tick();assert.ok(button('공유 추가'));assert.equal(countGet(summaryPath(address)),1);
+  });
+  await t.test('account edit reloads summary and refs once with the new account data',async()=>{
+    setup(false);let changed=0;await mount(AccountDetail,{address,changed(){changed++;}});
+    await click('수정');const input=root.querySelector('#edit-name');await act(async()=>{input.value='새 이름';input.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+    await click('변경 저장');await tick();await tick();await tick();
+    assert.equal(changed,1);assert.equal(root.querySelector('.detail-head h2').textContent,'새 이름');assert.equal(countGet(summaryPath(address)),2);assert.equal(countGet(refsPath(address)),2);assert.equal(countGet(`/api/admin/shares/${encodeURIComponent(address)}`),0);
+  });
+  await t.test('switching accounts aborts delayed refs and ignores a late response even when fetch ignores its signal',async()=>{
+    setup(false);const next='team@example.com';let release;const held=new Promise(resolve=>{release=resolve;});
+    intercept=async path=>path===refsPath(address)?held:null;
+    await mount(AccountDetail,{address,changed(){}});const first=requests.find(row=>row.path===refsPath(address));assert.equal(first.signal.aborted,false);
+    await act(async()=>render(h(AccountDetail,{address:next,changed(){}}),root));await tick();await tick();await tick();
+    assert.equal(first.signal.aborted,true);const expected=fake.state.accounts.items.find(row=>row.address===next).name;assert.equal(root.querySelector('.detail-head h2').textContent,expected);assert.ok(button('공유 추가'));
+    release(new Response(JSON.stringify({address,refs:{aliases:[{address:'late-a@example.test',targets:[address],active:1}]},warnings:[],sharesScope:'teams+own',ownShare:{status:'unavailable',data:null}}),{status:200,headers:{'Content-Type':'application/json'}}));
+    await tick();await tick();assert.equal(root.querySelector('.detail-head h2').textContent,expected);assert.doesNotMatch(root.textContent,/late-a@example.test/);assert.ok(button('공유 추가'));assert.equal(countGet(refsPath(next)),1);
   });
 
 });

@@ -829,3 +829,58 @@ test('snapshot: later previews use new datasets and forwarding plans', async t =
   assert.equal(second.forwardingChange.effect, 'unchanged');
   assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
 });
+
+// Error contracts captured from the pre-snapshot-reuse implementation.
+const forwardErrorCases = {
+  "missing": {
+    "statusCode": 422,
+    "code": "INVALID_ADDRESS",
+    "message": "활성 내부 메일함과 구성원을 확인해 주세요."
+  },
+  "inactive": {
+    "statusCode": 422,
+    "code": "INVALID_ADDRESS",
+    "message": "활성 내부 메일함과 구성원을 확인해 주세요."
+  },
+  "self": {
+    "statusCode": 422,
+    "code": "INVALID_ADDRESS",
+    "message": "활성 내부 메일함과 구성원을 확인해 주세요."
+  },
+  "malformed": {
+    "statusCode": 422,
+    "code": "INVALID_INPUT",
+    "message": "계정 입력값을 확인해 주세요."
+  },
+  "blocked": {
+    "statusCode": 409,
+    "code": "RETIREMENT_RECIPIENT_BLOCKED",
+    "message": "수신 차단된 계정으로 전달할 수 없어요."
+  },
+  "blocked-missing": {
+    "statusCode": 422,
+    "code": "INVALID_ADDRESS",
+    "message": "활성 내부 메일함과 구성원을 확인해 주세요."
+  },
+  "multiple": {
+    "statusCode": 409,
+    "code": "MULTIPLE_PREFILTERS",
+    "message": "사전 필터가 여러 개예요. 필터 화면에서 먼저 정리해 주세요."
+  },
+  "blocked-multiple": {
+    "statusCode": 409,
+    "code": "MULTIPLE_PREFILTERS",
+    "message": "사전 필터가 여러 개예요. 필터 화면에서 먼저 정리해 주세요."
+  }
+};
+for (const [kind, expected] of Object.entries(forwardErrorCases)) test(`snapshot: invalid forwarding preserves the original error for ${kind}`, async t => {
+  const f = await fixture(t); let target = other;
+  if (kind.includes('missing')) target = 'missing@example.com';
+  if (kind === 'inactive') f.boxes[2].active = 0;
+  if (kind === 'self') target = user;
+  if (kind === 'malformed') target = 'invalid';
+  if (kind.includes('blocked')) f.keyRows.set(target, [target]);
+  if (kind.includes('multiple')) f.filters.push(...[1, 2].map(id => ({ id, username: user, filter_type: 'prefilter', active: 1, script_data: 'keep;' })));
+  await assert.rejects(leave(f, { action: 'preview', cleanRefs: true, forwardTo: target }), expected);
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+});

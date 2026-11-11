@@ -301,3 +301,100 @@ for (const blocked of [false, true]) test(`retirement filter compatibility: inac
   if (blocked) { await assert.rejects(edit(f, (await item(f)).etag, source), { code: 'RETIREMENT_ROUTE_PROTECTED' }); assert.equal(writes(f).length, 0); }
   else { assert.equal((await edit(f, (await item(f)).etag, source)).script, source); assert.equal(writes(f).length, 1); }
 });
+
+async function sieveReadServer(t) {
+  const calls = [], options = { id: 'abc123', identityFailure: false, execFailure: false };
+  const server = https.createServer({ cert, key }, async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : null;
+    calls.push({ method: req.method, path: req.url, body });
+    if (req.url === '/containers/json') {
+      if (options.identityFailure) { res.statusCode = 503; return res.end('synthetic unavailable'); }
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ [options.id]: { Id: options.id, Name: 'synthetic-dovecot', Config: {
+        Labels: { 'com.docker.compose.service': 'dovecot-mailcow' }, Env: ['SECRET=synthetic-private-env'],
+      } } }));
+    }
+    if (options.execFailure) { res.statusCode = 404; return res.end('synthetic replaced container'); }
+    assert.deepEqual(body, { cmd: 'sieve', task: 'list', username: body.username });
+    res.setHeader('content-type', 'text/plain');
+    res.end(options.names?.get(body.username) ?? '');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const client = createDockerApi({ config: { dockerapiUrl: `https://127.0.0.1:${server.address().port}` }, ca: cert });
+  return { client, calls, options };
+}
+
+test('dockerapi inspect reader: 99 owners share one identity with identical complete routing results', async t => {
+  const { client, calls, options } = await sieveReadServer(t);
+  const addresses = [owner, ...Array.from({ length: 98 }, (_, i) => `user${i}@example.com`)];
+  const scripts = new Map(addresses.filter((_, i) => i % 3 === 0).map((address, i) => [address, `# synthetic ${i}\nkeep;`]));
+  options.names = new Map([...scripts.keys()].map(address => [address, 'personal ACTIVE\ninactive\n']));
+  let scriptReads = 0;
+  const mailcow = { async call(_session, method, path) {
+    assert.equal(method, 'GET');
+    const facts = { 'mailbox/all': addresses.map(username => ({ username, active: username === owner ? 2 : 1 })),
+      'alias/all': [], 'alias-domain/all': [], 'domain/all': [{ domain_name: 'example.com', active: 1 }], 'filters/all': [], 'global_filters/all': {} };
+    const key = path.slice('/api/v1/get/'.length);
+    if (Object.hasOwn(facts, key)) return structuredClone(facts[key]);
+    assert.ok(key.startsWith('active-user-sieve/')); scriptReads++;
+    const address = decodeURIComponent(key.split('/').at(-1));
+    return scripts.has(address) ? [scripts.get(address)] : {};
+  } };
+  const store = {};
+  const legacy = createRetirementRouting({ mailcow, store, dockerapi: { listSieve: address => client.listSieve(address) } });
+  const start = performance.now(), baseline = await legacy.inspect({}, owner), legacyMs = performance.now() - start;
+  assert.equal(calls.filter(row => row.path === '/containers/json').length, 99);
+  assert.equal(calls.filter(row => row.path.endsWith('/exec')).length, 99);
+  assert.equal(scriptReads, 99); calls.length = 0; scriptReads = 0;
+  const routing = createRetirementRouting({ mailcow, store, dockerapi: client });
+  const optimizedStart = performance.now(), result = await routing.inspect({}, owner), optimizedMs = performance.now() - optimizedStart;
+  assert.deepEqual(result, baseline, 'keys, changes, blockers, inspected facts, mailbox counts and etag remain identical');
+  assert.equal(result.checkedMailboxes, 99); assert.equal(result.totalMailboxes, 99);
+  assert.equal(scriptReads, 99); assert.equal(calls.filter(row => row.path === '/containers/json').length, 1);
+  assert.equal(calls.filter(row => row.path.endsWith('/exec')).length, 99);
+  assert.equal(new Set(calls.filter(row => row.path.endsWith('/exec')).map(row => row.body.username)).size, 99);
+  assert.ok(!JSON.stringify(result).includes('synthetic-private-env'));
+  t.diagnostic(JSON.stringify({ syntheticOwners: 99, legacyMs, optimizedMs }));
+  calls.length = 0; options.id = 'def456';
+  assert.deepEqual(await routing.inspect({}, owner), baseline);
+  assert.equal(calls.filter(row => row.path === '/containers/json').length, 1, 'the next inspect resolves a new identity');
+  assert.ok(calls.filter(row => row.path.endsWith('/exec')).every(row => row.path === '/containers/def456/exec'));
+});
+
+test('dockerapi inspect reader: identity failure is shared without retry and the next inspect can recover', async t => {
+  const { client, calls, options } = await sieveReadServer(t); options.identityFailure = true;
+  const addresses = [owner, 'second@example.com', 'third@example.com'];
+  const mailcow = { async call(_session, _method, path) {
+    if (path.endsWith('/mailbox/all')) return addresses.map(username => ({ username, active: username === owner ? 2 : 1 }));
+    if (path.endsWith('/domain/all')) return [{ domain_name: 'example.com', active: 1 }];
+    if (path.includes('/active-user-sieve/') || path.endsWith('/global_filters/all')) return {};
+    return [];
+  } };
+  const routing = createRetirementRouting({ mailcow, dockerapi: client, store: {} });
+  const result = await routing.inspect({}, owner);
+  assert.equal(result.canPrepare, false); assert.equal(result.ready, false); assert.equal(result.checkedMailboxes, 0);
+  assert.deepEqual(result.blockers.map(row => row.address).sort(), [...addresses].sort());
+  assert.ok(result.blockers.every(row => row.code === 'USER_SCRIPT_UNAVAILABLE'));
+  assert.equal(calls.length, 1); assert.equal(calls[0].path, '/containers/json');
+  calls.length = 0; options.identityFailure = false;
+  const fresh = await routing.inspect({}, owner);
+  assert.equal(fresh.ready, true); assert.equal(fresh.checkedMailboxes, 3);
+  assert.equal(calls.filter(row => row.path === '/containers/json').length, 1);
+});
+
+test('dockerapi inspect reader: replaced container fails closed without identity refresh or exec retry', async t => {
+  const { client, calls, options } = await sieveReadServer(t);
+  const reader = client.createSieveReader();
+  await assert.rejects(reader.listSieve('invalid'), { statusCode: 422, code: 'INVALID_INPUT' });
+  assert.equal(calls.length, 0, 'invalid input never resolves an identity');
+  options.execFailure = true;
+  const results = await Promise.allSettled([owner, 'second@example.com'].map(address => reader.listSieve(address)));
+  assert.ok(results.every(row => row.status === 'rejected' && row.reason.code === 'DOCKERAPI_REJECTED'));
+  assert.equal(calls.filter(row => row.path === '/containers/json').length, 1);
+  assert.equal(calls.filter(row => row.path.endsWith('/exec')).length, 2);
+  options.execFailure = false; options.id = 'def456'; calls.length = 0;
+  assert.deepEqual(await client.createSieveReader().listSieve(owner), []);
+  assert.deepEqual(calls.map(row => row.path), ['/containers/json', '/containers/def456/exec']);
+});

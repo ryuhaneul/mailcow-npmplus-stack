@@ -210,12 +210,13 @@ export function createRetirementRouting({ mailcow, dockerapi, store }) {
       const source = global[type] ?? ''; versions.push({ source: 'global', type, hash: sourceHash(source) });
       examine(source, { source: 'global', address: null, type, order: type === 'prefilter' ? 1 : 5 });
     }
+    const sieve = dockerapi.createSieveReader?.() ?? dockerapi;
     const addresses = [...active].sort(); let cursor = 0, checkedMailboxes = 0, fatal;
     async function worker() {
       while (cursor < addresses.length && !fatal) {
         const address = addresses[cursor++];
         try {
-          const [payload, names] = await Promise.all([get(session, `active-user-sieve/${encodeURIComponent(address)}`), dockerapi.listSieve(address)]);
+          const [payload, names] = await Promise.all([get(session, `active-user-sieve/${encodeURIComponent(address)}`), sieve.listSieve(address)]);
           const script = Array.isArray(payload) && payload.length === 1 && typeof payload[0] === 'string' ? payload[0] :
             payload && typeof payload === 'object' && !Object.keys(payload).length ? null : undefined;
           if (!Array.isArray(names) || names.some(row => typeof row?.name !== 'string' || typeof row.active !== 'boolean') || names.filter(row => row.active).length > 1 || script === undefined) throw unavailable();

@@ -367,3 +367,31 @@ test('F7 unrelated alias loops and uninspectable alias targets still fail closed
     await assert.rejects(inspect(malformed), { statusCode: 503, code: 'RETIREMENT_ROUTING_UNAVAILABLE' });
   }
 });
+
+for (const kind of ['safe', 'name-mismatch', 'multiple-active', 'unavailable']) test(`retirement routes: inspect-scoped Sieve reader preserves ${kind} results and worker limit`, async () => {
+  const f = fixture();
+  for (let i = 0; i < 8; i++) f.facts.mailboxes.push(box(`extra${i}@example.test`));
+  if (kind === 'name-mismatch') f.names.set(healthy, [{ name: 'personal', active: true }]);
+  if (kind === 'multiple-active') f.names.set(healthy, [{ name: 'first', active: true }, { name: 'second', active: true }]);
+  const read = f.dockerapi.listSieve;
+  const list = async address => {
+    if (kind === 'unavailable' && address === healthy) throw new Error('synthetic failure');
+    return read(address);
+  };
+  f.dockerapi.listSieve = list;
+  const baseline = await inspect(f);
+  let readers = 0;
+  const seen = [];
+  f.dockerapi.createSieveReader = () => {
+    readers++;
+    return { async listSieve(address) { seen.push(address); return list(address); } };
+  };
+  f.dockerapi.listSieve = () => assert.fail('inspect must use its own reader');
+  assert.deepEqual(await inspect(f), baseline);
+  assert.equal(readers, 1); assert.equal(seen.length, 11); assert.equal(new Set(seen).size, 11);
+  assert.equal(f.peak, 4, 'the existing worker limit is preserved');
+  seen.length = 0;
+  assert.deepEqual(await inspect(f), baseline);
+  assert.equal(readers, 2); assert.equal(seen.length, 11, 'each inspect reads all active owners again');
+  if (kind !== 'safe') assert.equal(baseline.canPrepare, false);
+});

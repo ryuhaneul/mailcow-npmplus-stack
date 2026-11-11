@@ -68,11 +68,11 @@ export function createDockerApi({ config, ca }) {
     }
     throw rejected();
   }
-  async function call(task, owner, grantee, mailbox = 'INBOX') {
+  async function call(task, owner, grantee, mailbox = 'INBOX', identify = () => containerIdentity('dovecot-mailcow')) {
     if (!Object.hasOwn(tasks, task)) throw new AppError(422, 'DOCKERAPI_TASK_NOT_ALLOWED', '허용되지 않은 dockerapi 작업이에요.');
     if (!mailboxAddress(owner) || (!['get_acl', 'sieve_list'].includes(task) && (!mailboxAddress(grantee) || owner === grantee))) throw new AppError(422, 'INVALID_INPUT', '메일함 주소를 확인해 주세요.');
     if (['set_acl', 'delete_acl'].includes(task)) assertAclMailbox(mailbox);
-    const container = await containerIdentity('dovecot-mailcow');
+    const container = await identify();
     const data = await request('POST', `/containers/${container.id}/exec`, tasks[task](owner, grantee, mailbox), task === 'sieve_list' ? 'text' : 'json');
     if (task === 'sieve_list') return data.split(/\r\n|\n|\r/).filter(line => line.trim()).map(line => {
       const active = / ACTIVE$/i.test(line), name = (active ? line.slice(0, -7) : line).trim();
@@ -86,6 +86,12 @@ export function createDockerApi({ config, ca }) {
     if (!Array.isArray(data) || data.some(row => !row || typeof row.user !== 'string' || typeof row.id !== 'string' || typeof row.mailbox !== 'string' ||
       !Array.isArray(row.rights) || row.rights.some(right => typeof right !== 'string'))) throw rejected();
     return data.map(row => ({ user: row.user, id: row.id, mailbox: row.mailbox, rights: [...row.rights] }));
+  }
+  function createSieveReader() {
+    // One inspect owns this promise; rejected identities are shared without retry.
+    let identity;
+    const identify = () => identity ??= containerIdentity('dovecot-mailcow');
+    return { listSieve: owner => call('sieve_list', owner, undefined, 'INBOX', identify) };
   }
   async function restart(service) {
     if (!['postfix-mailcow', 'rspamd-mailcow'].includes(service)) throw new AppError(422, 'DOCKERAPI_TASK_NOT_ALLOWED', '허용되지 않은 dockerapi 작업이에요.');
@@ -101,5 +107,5 @@ export function createDockerApi({ config, ca }) {
     if (!data || data.type !== 'success') throw rejected();
     return { type: 'success' };
   }
-  return { call, restart, reload, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee, mailbox = 'INBOX') => call('set_acl', owner, grantee, mailbox), deleteAcl: (owner, grantee, mailbox = 'INBOX') => call('delete_acl', owner, grantee, mailbox) };
+  return { call, restart, reload, createSieveReader, listSieve: owner => call('sieve_list', owner), getAcl: owner => call('get_acl', owner), setAcl: (owner, grantee, mailbox = 'INBOX') => call('set_acl', owner, grantee, mailbox), deleteAcl: (owner, grantee, mailbox = 'INBOX') => call('delete_acl', owner, grantee, mailbox) };
 }

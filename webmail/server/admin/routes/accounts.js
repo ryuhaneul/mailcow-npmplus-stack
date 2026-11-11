@@ -1,7 +1,14 @@
+import { AppError } from '../../errors.js';
+
 export default async function accountsRoutes(app, { service }) {
   app.get('/api/admin/quota', { config: { adminMailcowApi: true } }, async request => service.quotaList(request.session.mailcow));
   app.get('/api/admin/mailboxes', { config: { adminMailcowApi: true } }, async request => service.list(request.session.mailcow, request.query));
-  app.get('/api/admin/mailboxes/:addr', async request => service.detail(request.session.mailcow, request.params.addr));
+  app.get('/api/admin/mailboxes/:addr', async request => {
+    if (request.query.view === undefined) return service.detail(request.session.mailcow, request.params.addr);
+    if (request.query.view !== 'summary') throw new AppError(422, 'INVALID_INPUT', '계정 입력값을 확인해 주세요.');
+    return service.summary(request.session.mailcow, request.params.addr);
+  });
+  app.get('/api/admin/mailboxes/:addr/refs', async request => service.refs(request.session.mailcow, request.params.addr, request.query));
   app.post('/api/admin/mailboxes', async request => service.create({ session: request.session.mailcow, actor: request.session.username, ip: request.ip, data: request.body }));
   app.post('/api/admin/mailboxes/:addr/delete-preview', async request => service.deletePreview(request.session.mailcow, request.params.addr));
   app.delete('/api/admin/mailboxes/:addr', async request => service.remove({ session: request.session.mailcow, actor: request.session.username, ip: request.ip, addr: request.params.addr, data: request.body }));

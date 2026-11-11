@@ -341,3 +341,13 @@ for (const state of [0, 2]) test(`shares retirement: subfolder history additions
   await assert.rejects(f.history.revert(removed.auditId, revertOptions), { statusCode: 422, code: 'INVALID_INPUT' });
   assert.equal(f.writes.length, writes); assert.deepEqual(f.rows, []);
 });
+
+for (const wholeMailbox of [false, true]) test(`shares: pure owned ACL projection equals GET including subfolders and etag, wholeMailbox=${wholeMailbox}`, async t => {
+  const f = await fixture(t, [row('Archive/2026'), row('INBOX'), row('Archive'), row('Archive', grantee, ['read', 'lookup', 'read']), row('Templates')], { wholeMailbox, ownerActive: 2 });
+  f.folders.add('Templates');
+  const expected = await f.item(), before = { lists: f.lists, reads: f.reads.length, writes: f.writes.length };
+  const value = f.service.fromOwnedAcl({ owner, name: expected.name, ownerActive: 2 }, [...f.rows, { ...row('INBOX'), user: other }]);
+  assert.deepEqual(value, expected);
+  assert.deepEqual({ lists: f.lists, reads: f.reads.length, writes: f.writes.length }, before);
+  assert.deepEqual(value.grants[0].folders.map(row => row.mailbox), ['Archive', 'Archive/2026', 'INBOX', 'Templates']);
+});

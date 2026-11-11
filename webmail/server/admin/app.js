@@ -179,7 +179,7 @@ export async function createAdminApp({ config = loadAdminConfig(), staticDir = f
   const authPolicy = createAuthPolicyListener({ config: config.authPolicy, store: protocolNetlimitStore, logger: app.log });
   app.addHook('onReady', async () => { await authPolicy.start(); });
   app.addHook('preClose', async () => { await authPolicy.stop(); });
-  const accounts = createAccountsService({ retirement: retirementOptions, mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
+  const accounts = createAccountsService({ shares, retirement: retirementOptions, mailcow: app.mailcow, dockerapi: sharesDockerapi, aclFolders, audit, lock: adminLock, history, teams, otp: otpService, protocolNetlimit: protocolNetlimitStore });
   app.decorate('accounts', accounts);
   await app.register(accountsRoutes, { service: accounts });
   const quotaNotifications = createQuotaNotificationsService({

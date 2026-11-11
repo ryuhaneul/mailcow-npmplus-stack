@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { createAccountsService } from '../../server/admin/services/accounts.js';
+import { createSharesService } from '../../server/admin/services/shares.js';
 import { createTeamsService } from '../../server/admin/services/teams.js';
 import { createAudit } from '../../server/admin/audit.js';
 import { createResourceLock } from '../../server/admin/lock.js';
@@ -64,8 +65,9 @@ async function fixture(t) {
   const audit = createAudit({ dir, logger: { info(data) { logs.push(data); } } }), lock = createResourceLock(), history = createHistoryService({ audit, lock });
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir });
   const netlimit = createFakeProtocolNetlimitStore();
-  const service = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams });
-  return { netlimit, dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, teams, service };
+  const shares = createSharesService({ mailcow, dockerapi, audit, lock, history });
+  const service = createAccountsService({ shares, protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams });
+  return { netlimit, dir, boxes, filters, domains, aliases, jobs, appPasswords, calls, acl, aclCalls, options, logs, mailcow, dockerapi, audit, history, teams, shares, service };
 }
 const context = { session: {}, actor: 'admin', ip: '198.51.100.17' };
 const writes = f => f.calls.filter(call => call.method === 'POST');
@@ -418,4 +420,148 @@ test('netlimit HTTP: anonymous/read key denied; human/full key can toggle and CS
     const result = await app.inject({ method: 'PATCH', url, headers: { 'x-mailadmin-api-key': issued.token }, payload: { etag: human.json().etag, protocolInternalOnly: false } });
     assert.equal(result.statusCode, permission === 'read' ? 403 : 200, result.body); assert.equal(result.headers['www-authenticate'], undefined);
   }
+});
+
+test('accounts summary: identical editable fields and etag without references or ACL/Sieve/global datasets', async t => {
+  const f = await fixture(t);
+  f.appPasswords.push({ secret });
+  f.filters.push({ id: 2, username: user, active: 1, filter_type: 'prefilter', script_data: 'require ["copy"]; redirect :copy "outside@example.net";' });
+  const full = await read(f);
+  assert.equal(full.refsState, undefined); assert.equal(full.ownShare, undefined);
+  f.calls.length = 0; f.aclCalls.length = 0;
+  let netReads = 0, retirementReads = 0;
+  const originalRead = f.netlimit.read;
+  f.netlimit.read = async addr => { netReads++; return originalRead(addr); };
+  const retirement = emptyRetirementFixture();
+  const originalRetirementRead = retirement.store.read;
+  retirement.store.read = async addr => { retirementReads++; return originalRetirementRead(addr); };
+  const service = createAccountsService({ shares: f.shares, mailcow: f.mailcow, dockerapi: f.dockerapi, history: f.history, protocolNetlimit: f.netlimit, retirement });
+  const value = await service.summary({}, user);
+  const { refs, sharesScope, warnings, ...base } = full;
+  assert.deepEqual(value, { ...base, refsState: 'deferred', warnings: [] });
+  assert.deepEqual(value.retirement.forwarding, ['outside@example.net']);
+  assert.deepEqual(f.calls.map(call => call.path).sort(), [`/api/v1/get/mailbox/${encodeURIComponent(user)}`, '/api/v1/get/filters/all', `/api/v1/get/app-passwd/all/${encodeURIComponent(user)}`].sort());
+  assert.equal(netReads, 1); assert.equal(retirementReads, 1); assert.deepEqual(f.aclCalls, []);
+  assert.ok(!JSON.stringify(value).includes(secret));
+});
+
+test('accounts refs: each dataset and owner once; own card reuses the ACL with the existing share etag', async t => {
+  const f = await fixture(t);
+  f.acl.set(user, [{ user, id: next, mailbox: 'INBOX', rights: ['read', 'lookup', 'read'], Env: [secret] }]);
+  f.acl.set(team, [{ user: team, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  f.aliases.push({ address: 'alias@example.com', goto: user, active: 1 });
+  f.jobs.push({ id: 1, user2: user, active: 1, password1: secret });
+  const full = await read(f), own = await f.shares.get({}, user);
+  f.calls.length = 0; f.aclCalls.length = 0;
+  const retirement = emptyRetirementFixture();
+  retirement.store.read = async () => assert.fail('refs must not read retirement');
+  f.netlimit.failure = new Error('refs must not read protocol netlimit');
+  const service = createAccountsService({ shares: f.shares, mailcow: f.mailcow, dockerapi: f.dockerapi, history: f.history, protocolNetlimit: f.netlimit, retirement });
+  const value = await service.refs({}, user);
+  assert.deepEqual(value, { address: user, refs: full.refs, sharesScope: full.sharesScope, warnings: full.warnings, ownShare: { status: 'ready', data: own } });
+  assert.deepEqual(f.aclCalls.sort(), [team, user].sort());
+  assert.deepEqual(f.calls.map(call => call.path).sort(), [`/api/v1/get/mailbox/${encodeURIComponent(user)}`, '/api/v1/get/mailbox/all', '/api/v1/get/alias/all', '/api/v1/get/filters/all', '/api/v1/get/syncjobs/all/no_log'].sort());
+  assert.ok(!JSON.stringify(value).includes(secret)); assert.equal(value.etag, undefined);
+});
+
+test('accounts refs: all scope preserves inactive warnings and receiving-only owners without duplicate own reads', async t => {
+  const f = await fixture(t), retired = 'left@example.com';
+  f.acl.set(retired, [{ user: retired, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  const value = await f.service.refs({}, user, { scope: 'all' });
+  assert.equal(value.sharesScope, 'all');
+  assert.ok(value.refs.shares.some(row => row.owner === retired));
+  assert.deepEqual(value.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, ['off@example.com']);
+  assert.equal(new Set(f.aclCalls).size, f.aclCalls.length); assert.equal(f.aclCalls.includes('off@example.com'), false);
+  assert.equal((await f.service.refs({}, retired)).ownShare.data.ownerActive, 2);
+});
+
+test('accounts refs: inactive, own failure and another owner failure never misreport an empty successful card', async t => {
+  const f = await fixture(t);
+  const inactive = await f.service.refs({}, 'off@example.com');
+  assert.deepEqual(inactive.ownShare, { status: 'inactive', data: null });
+  assert.equal(f.aclCalls.includes('off@example.com'), false);
+  f.options.aclFailure = user;
+  const ownFailure = await f.service.refs({}, user);
+  assert.deepEqual(ownFailure.ownShare, { status: 'unavailable', data: null });
+  assert.ok(ownFailure.warnings.some(row => row.code === 'SHARES_PARTIAL'));
+  assert.ok(!JSON.stringify(ownFailure).includes(secret));
+  f.options.aclFailure = team;
+  const otherFailure = await f.service.refs({}, user);
+  assert.equal(otherFailure.ownShare.status, 'ready');
+  assert.ok(otherFailure.warnings.some(row => row.code === 'SHARES_PARTIAL'));
+});
+
+test('accounts read APIs: invalid scope/address and missing mailbox reject before global reads', async t => {
+  const f = await fixture(t);
+  for (const scope of ['', 'other', ['all', 'all']]) await assert.rejects(f.service.refs({}, user, { scope }), { statusCode: 422 });
+  for (const method of ['summary', 'refs']) {
+    await assert.rejects(f.service[method]({}, 'invalid'), { statusCode: 422 });
+    await assert.rejects(f.service[method]({}, 'missing@example.com'), { statusCode: 404 });
+  }
+  assert.equal(f.calls.length, 2); assert.deepEqual(f.aclCalls, []);
+});
+
+test('accounts HTTP: new reads keep auth, no-store, query validation and the legacy full contract', async t => {
+  const f = await fixture(t), { app, headers } = await http(t, f), base = `/api/admin/mailboxes/${encodeURIComponent(user)}`;
+  for (const path of [`${base}?view=summary`, `${base}/refs`]) {
+    const denied = await app.inject(path); assert.equal(denied.statusCode, 403); assert.equal(denied.headers['www-authenticate'], undefined);
+    const value = await app.inject({ url: path, headers }); assert.equal(value.statusCode, 200, value.body); assert.equal(value.headers['cache-control'], 'no-store');
+  }
+  for (const suffix of ['?view=full', '?view=summary&view=summary', '/refs?scope=other', '/refs?scope=all&scope=all']) {
+    const response = await app.inject({ url: base + suffix, headers }); assert.equal(response.statusCode, 422, response.body);
+  }
+  const full = (await app.inject({ url: base, headers })).json();
+  assert.equal(full.sharesScope, 'teams+own'); assert.equal(full.refsState, undefined); assert.equal(full.ownShare, undefined);
+  const light = (await app.inject({ url: `${base}?view=summary`, headers })).json();
+  assert.equal(light.etag, full.etag); assert.equal(light.refsState, 'deferred'); assert.equal(light.refs, undefined);
+  for (const permission of ['read', 'full']) {
+    const key = await app.apiKeys.create({ name: `synthetic ${permission}`, permission }, 'human', { id: app.apiKeys.allocateId() });
+    for (const path of [`${base}?view=summary`, `${base}/refs?scope=all`]) {
+      const value = await app.inject({ url: path, headers: { 'x-mailadmin-api-key': key.token } });
+      assert.equal(value.statusCode, 200, value.body); assert.equal(value.headers['www-authenticate'], undefined);
+    }
+  }
+});
+
+test('fake account read APIs match summary/refs/card and partial failure contracts', async () => {
+  const { createFakeAdminApi } = await import('../../web/dev/fake-admin-api.js');
+  const fake = createFakeAdminApi();
+  async function get(url) {
+    let body = '', status = 200;
+    const response = { setHeader() {}, set statusCode(value) { status = value; }, get statusCode() { return status; }, end(value) { body = value; } };
+    await fake.middleware({ url, method: 'GET', headers: {} }, response, () => assert.fail('unknown fake route'));
+    return { status, body: JSON.parse(body) };
+  }
+  // The fake session uses the same login flow as its current consumers.
+  fake.state.session = { ...fake.state.session, step: 'done' };
+  const base = '/api/admin/mailboxes/person%40example.com';
+  const full = await get(base), light = await get(base + '?view=summary');
+  assert.equal(light.status, 200); assert.equal(light.body.refsState, 'deferred'); assert.equal(light.body.refs, undefined); assert.equal(light.body.etag, full.body.etag);
+  const refs = await get(base + '/refs'), share = await get('/api/admin/shares/person%40example.com');
+  assert.deepEqual(refs.body.ownShare, { status: 'ready', data: share.body }); assert.deepEqual(refs.body.refs, full.body.refs);
+  assert.equal((await get(base + '/refs?scope=all')).body.sharesScope, 'all');
+  assert.equal((await get(base + '?view=other')).status, 422); assert.equal((await get(base + '/refs?scope=other')).status, 422);
+  fake.state.accounts.ownShareUnavailable = true;
+  assert.deepEqual((await get(base + '/refs')).body.ownShare, { status: 'unavailable', data: null });
+  fake.state.accounts.items.find(row => row.address === 'person@example.com').active = 0;
+  assert.deepEqual((await get(base + '/refs')).body.ownShare, { status: 'inactive', data: null });
+  fake.state.accounts.refsError = { status: 503, code: 'SYNTHETIC_READ_FAILED', message: '합성 읽기 실패' };
+  assert.equal((await get(base + '/refs')).status, 503);
+});
+
+
+test('accounts full detail: lifecycle ACL snapshots, own skip and legacy netlimit-free etag stay intact', async t => {
+  const f = await fixture(t), aclSnapshot = new Map(), ownerSnapshot = new Map();
+  f.acl.set(team, [{ user: team, id: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  const value = await f.service.detail({}, user, { allShares: true, includeProtocolNetlimit: false, skipOwnShares: true, aclSnapshot, ownerSnapshot });
+  assert.equal(value.sharesScope, 'all'); assert.equal(value.protocolInternalVersion, undefined);
+  assert.equal(value.ownShare, undefined); assert.equal(value.refsState, undefined);
+  assert.equal(aclSnapshot.has(user), false); assert.equal(ownerSnapshot.get(user), 1);
+  assert.equal(ownerSnapshot.get('off@example.com'), 0); assert.equal(ownerSnapshot.get('left@example.com'), 2);
+  assert.deepEqual(aclSnapshot.get(team), f.acl.get(team));
+  assert.deepEqual(value.refs.shares, [{ owner: team, grantee: user, mailbox: 'INBOX', rights: ['lookup', 'read'] }]);
+  assert.deepEqual(value.warnings.find(row => row.code === 'SHARES_INACTIVE_SKIPPED').addresses, ['off@example.com', user].sort());
+  const { etag } = await import('../../server/admin/lock.js');
+  const { kind, usedBytes, messages, retirement, appPasswordCount, etag: revision, sharesScope, warnings, refs, ...editable } = value;
+  assert.equal(revision, etag(editable));
 });

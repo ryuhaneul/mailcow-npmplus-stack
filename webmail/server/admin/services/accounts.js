@@ -49,7 +49,7 @@ function snapshot(row) {
 }
 const kindOf = (row, groups) => groups.has(normalize(row.username)) ? 'team' : Number(row.quota) === 3 * GB ? 'admin' : 'personal';
 const summary = (row, groups) => ({ ...snapshot(row), kind: kindOf(row, groups), usedBytes: Number(row.quota_used ?? 0), messages: Number(row.messages ?? 0) });
-export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, retirement = null, protocolNetlimit = createProtocolNetlimitStore(), aclFolders = {
+export function createAccountsService({ mailcow, dockerapi, audit, lock, history, teams, otp, shares: shareService, retirement = null, protocolNetlimit = createProtocolNetlimitStore(), aclFolders = {
   enabled: false,
   readOwned: async owner => (await dockerapi.getAcl(owner)).filter(row => normalize(row.user) === owner && row.mailbox === 'INBOX'),
   assertExist: async () => {},
@@ -192,16 +192,14 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return { address: item.address, name: item.name, kind: item.kind, usedBytes: item.usedBytes, quotaGb: item.quotaGb, etag: etag(snapshot(row)) };
     }) };
   }
-  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true } = {}) {
-    const addr = address(rawAddress), row = await box(session, addr);
-    const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
-      rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
-      rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), rows(session, 'syncjobs/all/no_log'),
-    ]);
+  async function collectReferences(addr, row, boxes, aliases, filters, syncjobs, {
+    allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeOwnShare = false,
+  } = {}) {
     const groups = groupMailboxAddresses(filters), warnings = [], shares = new Map();
     const owners = [...new Set([...(allShares ? boxes.map(box => normalize(box.username)) : groups), addr])];
     const activeByOwner = new Map(boxes.map(box => [normalize(box.username), box.active]));
     const skipped = [];
+    let ownAcl;
     let cursor = 0, sharesPartial = false;
     await Promise.all(Array.from({ length: Math.min(4, owners.length) }, async () => {
       while (cursor < owners.length) {
@@ -213,6 +211,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         try {
           const ownerAcl = await aclFolders.readOwned(owner);
           aclSnapshot?.set(owner, ownerAcl);
+          if (owner === addr) ownAcl = ownerAcl;
           for (const acl of ownerAcl) {
             const grantee = normalize(acl.id);
             if (normalize(acl.user) === owner && (owner === addr || grantee === addr)) shares.set(`${owner} ${grantee} ${acl.mailbox}`, { owner, grantee, mailbox: acl.mailbox, rights: [...acl.rights] });
@@ -226,10 +225,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     warnings.push(...folderWarnings());
     const senders = snapshot(row).senderAcl.map(sendAs => ({ mailbox: addr, sendAs, direction: 'received' }));
     for (const other of boxes) if (normalize(other.username) !== addr && targets(other.sender_acl).includes(addr)) senders.push({ mailbox: normalize(other.username), sendAs: addr, direction: 'granted' });
-    const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
-    const forwarding = inspectForwarding(filters, addr);
-    return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null }, ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: allShares ? 'all' : 'teams+own', warnings,
-      refs: {
+    const refs = {
         aliases: aliases.filter(alias => !isMemberAlias(alias) && targets(alias.goto).includes(addr)).map(alias => ({ address: normalize(alias.address), targets: targets(alias.goto), active: Number(alias.active), senderAllowed: String(alias.sender_allowed) === '1' })),
         teams: filters.filter(filter => filter.filter_type === 'prefilter' && String(filter.active) === '1').flatMap(filter => {
           const members = teamMembers(filter, aliases);
@@ -237,7 +233,45 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
         }),
         senders, shares: [...shares.values()].sort((a, b) => `${a.owner} ${a.grantee} ${a.mailbox}`.localeCompare(`${b.owner} ${b.grantee} ${b.mailbox}`)),
         syncjobs: syncjobs.filter(job => normalize(job.user2) === addr).map(job => ({ id: job.id, target: addr, active: Number(job.active) })),
-      } };
+      };
+    const result = { address: addr, refs, sharesScope: allShares ? 'all' : 'teams+own', warnings };
+    if (includeOwnShare) {
+      result.ownShare = Number(row.active) === 0 ? { status: 'inactive', data: null } : ownAcl === undefined ? { status: 'unavailable', data: null } : {
+        status: 'ready', data: shareService.fromOwnedAcl({ owner: addr, name: typeof row.name === 'string' ? row.name : '', ownerActive: Number(row.active) }, ownAcl),
+      };
+    }
+    return result;
+  }
+  async function references(session, rawAddress, { scope = 'teams+own' } = {}) {
+    if (!['teams+own', 'all'].includes(scope)) throw invalid();
+    const addr = address(rawAddress), row = await box(session, addr);
+    const [boxes, aliases, filters, syncjobs] = await Promise.all([
+      rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'syncjobs/all/no_log'),
+    ]);
+    return collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares: scope === 'all', includeOwnShare: true });
+  }
+  async function detailSummary(session, rawAddress) {
+    const addr = address(rawAddress), row = await box(session, addr);
+    const [filters, appPasswords] = await Promise.all([
+      rows(session, 'filters/all'), rows(session, `app-passwd/all/${encodeURIComponent(addr)}`),
+    ]);
+    const groups = groupMailboxAddresses(filters), state = snapshot(row), net = await protocolNetlimit.read(addr);
+    const forwarding = inspectForwarding(filters, addr);
+    return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null },
+      ...netFields(net), appPasswordCount: appPasswords.length, etag: etag(editState(state, protocolNetlimitState(net))), refsState: 'deferred', warnings: [] };
+  }
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true } = {}) {
+    const addr = address(rawAddress), row = await box(session, addr);
+    const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
+      rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
+      rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), rows(session, 'syncjobs/all/no_log'),
+    ]);
+    const related = await collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares, aclSnapshot, ownerSnapshot, skipOwnShares });
+    const groups = groupMailboxAddresses(filters);
+    const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
+    const forwarding = inspectForwarding(filters, addr);
+    return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null }, ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: related.sharesScope, warnings: related.warnings,
+      refs: related.refs };
   }
   function attrs(before, after) {
     const result = {};
@@ -1315,7 +1349,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       });
     } finally { password?.fill(0); }
   }
-  return { list, quotaList, detail, create: args => routingLock(() => create(args)), edit: args => routingLock(() => edit(args)), deletePreview,
+  return { list, quotaList, detail, summary: detailSummary, refs: references, create: args => routingLock(() => create(args)), edit: args => routingLock(() => edit(args)), deletePreview,
     remove: args => routingLock(() => lifecycleRun(args)), leave: args => args.data?.action === 'preview' ? leave(args) : routingLock(() => leave(args)),
     rename: args => args.data?.action === 'preview' ? rename(args) : routingLock(() => rename(args)),
     convert: args => args.data?.action === 'preview' ? convert(args) : routingLock(() => convert(args)), retirementPreview, retirementUpdate };

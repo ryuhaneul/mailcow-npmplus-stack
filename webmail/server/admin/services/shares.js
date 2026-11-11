@@ -36,9 +36,9 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     const granteesActive = new Set(boxes.filter(row => row.ownerActive === 1).map(row => row.owner));
     if (!owners.has(owner) || grantees.some(grantee => !granteesActive.has(grantee) || grantee === owner)) throw invalid();
   }
-  async function snapshot(owner) {
+  function ownedState(owner, acl) {
     const grants = new Map();
-    for (const row of await aclFolders.readOwned(owner)) {
+    for (const row of acl) {
       if (row.user.toLowerCase() !== owner) continue;
       const grantee = row.id.toLowerCase();
       if (!grants.has(grantee)) grants.set(grantee, new Map());
@@ -46,6 +46,10 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
       folders.set(row.mailbox, [...new Set([...(folders.get(row.mailbox) ?? []), ...row.rights])].sort());
     }
     return normalized([...grants].map(([grantee, folders]) => ({ grantee, folders: [...folders].map(([mailbox, rights]) => ({ mailbox, rights })) })));
+  }
+  async function snapshot(owner) { return ownedState(owner, await aclFolders.readOwned(owner)); }
+  function fromOwnedAcl(mailbox, acl) {
+    return { ...mailbox, ...describe(ownedState(mailbox.owner, acl)) };
   }
   async function list(session, { q = '', page = '1' } = {}) {
     if (typeof q !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
@@ -65,7 +69,7 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
     if (!owner) throw invalid();
     const box = (await mailboxes(session)).find(row => row.owner === owner);
     if (!box) throw new AppError(404, 'NOT_FOUND', '메일함을 찾을 수 없어요.');
-    return { ...box, ...describe(await snapshot(owner)) };
+    return fromOwnedAcl(box, await aclFolders.readOwned(owner));
   }
   async function change({ session, actor, ip, owner: rawOwner, grantee: rawGrantee, etag: expected, grant }) {
     const owner = address(rawOwner), grantee = address(rawGrantee);
@@ -140,5 +144,5 @@ export function createSharesService({ mailcow, dockerapi, audit, lock, history, 
   };
   history.register('share.grant', adapter);
   history.register('share.revoke', adapter);
-  return { list, get, change };
+  return { list, get, change, fromOwnedAcl };
 }

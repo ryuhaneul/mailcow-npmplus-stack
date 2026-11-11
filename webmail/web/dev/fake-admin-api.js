@@ -73,6 +73,12 @@ export function createFakeAdminApi() {
   state.senders={senderAcl:['team@example.com','contact@example.com'],duplicates:['contact@example.com'],receiveOnlyAliases:[{address:'contact@example.com',active:'1'}],effective:{addresses:['person@example.com','team@example.com'],domainPatterns:[{pattern:'@example.com',except:['except@example.com']}],all:false},limits:['외부 주소 보내기 권한(external)은 API 로 읽을 수 없어 계산에서 빠짐','본인 주소 별칭(모든 메일함)은 메일함 값으로 되살려 계산(sender_allowed=1 가정)'],etag:'senders-1'};
   state.operations={readError:null,shareError:null,syncError:null,banError:null,version:1,syncCalls:[],revertible:false};
   state.shares={wholeMailbox:false,warnings:[],items:[{owner:'team@example.com',name:'합성 팀',group:true,grantees:[],grants:[],etag:'share-1'},{owner:'person@example.com',name:'합성 구성원',group:false,grantees:['other@example.com'],grants:[{grantee:'other@example.com',folders:[{mailbox:'INBOX',rights:['lookup','read']}],shared:true,residualFolders:0,readOnly:true},{grantee:'residual@example.com',folders:[{mailbox:'프로젝트',rights:['lookup','read']},{mailbox:'프로젝트/2026',rights:['lookup','read']}],shared:false,residualFolders:2,readOnly:true}],etag:'share-person-1'}]};
+  function shareDto(account) {
+    let row=state.shares.items.find(row=>row.owner===account.address);
+    if(!row){row={owner:account.address,name:account.name,grants:[],grantees:[],etag:'share-'+(++state.operations.version)};state.shares.items.push(row);}
+    return {...row,ownerActive:account.active,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings};
+  }
+
   state.syncjobs={items:[1,2].map(id=>({id:String(id),user1:`old${id}@example.com`,host1:'imap.example.test',user2:id===1?'person@example.com':'other@example.com',active:'1',maxage:'0',mins_interval:'20',delete1:'0',delete2:'0',delete2duplicates:'1',custom_params:'--useuid',last_run:'2026-10-16 21:10',exit_status:'EXIT_OK',log:['서버 연결 완료','--password1 ***','대상 사용자 ****@mailcow.local','동기화 완료'],etag:`sync-${id}-1`}))};
   state.fail2ban={settings:{ban_time:600,max_ban_time:86400,max_attempts:10,retry_window:600,netban_ipv4:32,netban_ipv6:128,ban_time_increment:true,manage_external:true},activeBans:[{network:'192.0.2.81/32',ip:'192.0.2.81',self:true,affectsAllPorts:true,notice:'이 IP 에서는 웹메일·관리 화면을 포함한 모든 메일 포트가 막혀 있어요',queuedForUnban:false,bannedUntil:'2026-10-17T01:40:00+09:00'}],permanentBans:[{network:'198.51.100.92',self:false,affectsAllPorts:true,notice:'이 IP 에서는 웹메일·관리 화면을 포함한 모든 메일 포트가 막혀 있어요'}],whitelist:['203.0.113.24'],blacklist:['198.51.100.92'],etag:'ban-1'};
   state.trusted = { version: 1, readError: null, writeError: null, senders: [
@@ -283,7 +289,7 @@ export function createFakeAdminApi() {
     if(operationResource&&request.method==='GET'&&state.operations.readError)return fail(state.operations.readError);
     if(url.pathname==='/api/admin/shares'&&request.method==='GET'){const q=(url.searchParams.get('q')||'').toLowerCase(),page=Number(url.searchParams.get('page')||1),items=state.shares.items.filter(row=>state.accounts.items.some(account=>account.address===row.owner&&[1,2].includes(account.active))&&(row.owner+' '+row.name).toLowerCase().includes(q));return response.end(JSON.stringify({items:items.slice((page-1)*50,page*50).map(({owner,name,group})=>({owner,name,group,ownerActive:state.accounts.items.find(row=>row.address===owner)?.active??1})),total:items.length,page,pageSize:50,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings}));}
     const shareMatch=url.pathname.match(/^\/api\/admin\/shares\/(.+)$/);
-    if(shareMatch&&request.method==='GET'){const address=decodeURIComponent(shareMatch[1]),account=state.accounts.items.find(row=>row.address===address&&[1,2].includes(row.active));if(account&&!state.shares.items.some(row=>row.owner===address))state.shares.items.push({owner:address,name:account.name,grants:[],grantees:[],etag:'share-'+(++state.operations.version)});const row=state.shares.items.find(row=>row.owner===decodeURIComponent(shareMatch[1]));return row&&account?response.end(JSON.stringify({...row,ownerActive:state.accounts.items.find(value=>value.address===row.owner)?.active??1,wholeMailbox:state.shares.wholeMailbox,warnings:state.shares.warnings})):fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});}
+    if(shareMatch&&request.method==='GET'){const account=state.accounts.items.find(row=>row.address===decodeURIComponent(shareMatch[1])&&[1,2].includes(row.active));return account?response.end(JSON.stringify(shareDto(account))):fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});}
     if(shareMatch){let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw),row=state.shares.items.find(row=>row.owner===decodeURIComponent(shareMatch[1]));if(state.operations.shareError)return fail(state.operations.shareError);if(!row||body.grantee===row.owner)return fail({status:422,code:'INVALID_INPUT',message:'서로 다른 활성 메일함을 선택해 주세요.'});if(body.etag!==row.etag)return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요. 다시 읽고 확인해 주세요.'});if(request.method==='POST'){
       if(!state.accounts.items.some(value=>value.address===body.grantee&&value.active===1)||!state.accounts.items.some(value=>value.address===row.owner&&[1,2].includes(value.active)))return fail({status:422,code:'INVALID_INPUT',message:'활성 수혜 메일함을 선택해 주세요.'});
       let grant=row.grants.find(value=>value.grantee===body.grantee);
@@ -343,13 +349,31 @@ export function createFakeAdminApi() {
       state.accounts.version++;
       return response.end(JSON.stringify({result:'ok',retirement:retirementInfo(row),steps:[{stage:'receive',status:'ok'}]}));
     }
+    const accountRefsMatch=url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)\/refs$/);
+    if(accountRefsMatch&&request.method==='GET'){
+      const scopes=url.searchParams.getAll('scope'),scope=scopes[0]??'teams+own';
+      if(scopes.length>1||!['teams+own','all'].includes(scope))return fail({status:422,code:'INVALID_INPUT',message:'계정 입력값을 확인해 주세요.'});
+      const address=decodeURIComponent(accountRefsMatch[1]),row=state.accounts.items.find(row=>row.address===address);
+      if(!row)return fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});
+      if(state.accounts.refsError)return fail(state.accounts.refsError);
+      const warnings=[...(state.accounts.warnings||[])];
+      const ownShare=row.active===0?{status:'inactive',data:null}:state.accounts.ownShareUnavailable?{status:'unavailable',data:null}:{status:'ready',data:shareDto(row)};
+      if(ownShare.status==='unavailable')warnings.push({code:'SHARES_PARTIAL',message:'공유 정보 일부를 읽지 못했어요. 공유 화면에서 다시 확인해 주세요.'});
+      if(ownShare.status==='inactive')warnings.push({code:'SHARES_INACTIVE_SKIPPED',addresses:[address],message:'꺼진 계정의 공유는 확인하지 못했어요.'});
+      return response.end(JSON.stringify({address,refs:scope==='all'?(state.accounts.allRefs??state.accountRefs):state.accountRefs,sharesScope:scope,warnings,ownShare}));
+    }
     const accountMatch = url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)(\/delete-preview)?$/), leaving = url.pathname === '/api/admin/flows/leave';
     if (accountMatch || leaving) {
       let body = {}; if (request.method !== 'GET') { let raw=''; for await (const part of request) raw += part; body=JSON.parse(raw || '{}'); }
       const address = leaving ? body.address : decodeURIComponent(accountMatch[1]), row = state.accounts.items.find(row => row.address === address), etag = `synthetic-account-${state.accounts.version}`;
       if (!row) return fail({status:404,code:'NOT_FOUND',message:'메일함을 찾을 수 없어요.'});
       const send = value => response.end(JSON.stringify(value));
-      if (request.method === 'GET') return send({ protocolInternalOnly: false, protocolInternalVersion: null, protocolInternalAllowlistEmpty: Boolean(state.accounts.allowlistEmpty), ...row, retirement: retirementInfo(row), etag, refs: state.accountRefs, sharesScope: 'teams+own', appPasswordCount: 2, warnings: state.accounts.warnings || [] });
+      if (request.method === 'GET') {
+        const views=url.searchParams.getAll('view');
+        if(views.length>1||views.length&&views[0]!=='summary')return fail({status:422,code:'INVALID_INPUT',message:'계정 입력값을 확인해 주세요.'});
+        const value={protocolInternalOnly:false,protocolInternalVersion:null,protocolInternalAllowlistEmpty:Boolean(state.accounts.allowlistEmpty),...row,retirement:retirementInfo(row),etag,appPasswordCount:2};
+        return send(views.length?{...value,refsState:'deferred',warnings:[]}:{...value,refs:state.accountRefs,sharesScope:'teams+own',warnings:state.accounts.warnings||[]});
+      }
       if (request.method === 'PATCH') {
         if (state.accounts.patchError) return fail(state.accounts.patchError);
         if (body.etag !== etag) return fail({status:409,code:'CHANGED_ELSEWHERE',message:'다른 곳에서 값이 바뀌었어요.'});

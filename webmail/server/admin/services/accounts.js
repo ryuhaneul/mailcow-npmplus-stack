@@ -260,17 +260,17 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null },
       ...netFields(net), appPasswordCount: appPasswords.length, etag: etag(editState(state, protocolNetlimitState(net))), refsState: 'deferred', warnings: [] };
   }
-  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true, includeShares = true } = {}) {
-    const addr = address(rawAddress), row = await box(session, addr);
+  async function detail(session, rawAddress, { allShares = false, aclSnapshot, ownerSnapshot, skipOwnShares = false, includeProtocolNetlimit = true, includeShares = true, readSnapshot = {} } = {}) {
+    const addr = address(rawAddress), row = readSnapshot.row ?? await box(session, addr);
     const [boxes, aliases, filters, appPasswords, syncjobs] = await Promise.all([
-      rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'),
-      rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), rows(session, 'syncjobs/all/no_log'),
+      readSnapshot.boxes ?? rows(session, 'mailbox/all'), readSnapshot.aliases ?? rows(session, 'alias/all'), readSnapshot.filters ?? rows(session, 'filters/all'),
+      rows(session, `app-passwd/all/${encodeURIComponent(addr)}`), readSnapshot.jobs ?? rows(session, 'syncjobs/all/no_log'),
     ]);
     const related = await collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares, aclSnapshot, ownerSnapshot, skipOwnShares, includeShares });
     const groups = groupMailboxAddresses(filters);
     const state = snapshot(row), net = includeProtocolNetlimit ? await protocolNetlimit.read(addr) : null;
     const forwarding = inspectForwarding(filters, addr);
-    return { ...summary(row, groups), retirement: { ...retirementDto(await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null }, ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: related.sharesScope, warnings: related.warnings,
+    return { ...summary(row, groups), retirement: { ...retirementDto(readSnapshot.retiredState ?? await retirementState(addr), Number(row.active)), forwarding: forwarding.every(row => row.inspected) ? [...new Set(forwarding.flatMap(row => row.targets))].sort() : null }, ...(net ? netFields(net) : {}), appPasswordCount: appPasswords.length, etag: etag(net ? editState(state, protocolNetlimitState(net)) : state), sharesScope: related.sharesScope, warnings: related.warnings,
       refs: related.refs };
   }
   function attrs(before, after) {
@@ -463,23 +463,24 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     }
     return involved.sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
   }
-  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares = mode === 'delete', forwardTo, skipSharedDisplay = false }) {
+  async function lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares = mode === 'delete', forwardTo, skipSharedDisplay = false, readSnapshot = {} }) {
     const inspectShares = !(skipSharedDisplay && mode === 'disable' && !cleanShares);
-    const account = snapshot(await box(session, addr)), netlimit = await netState(addr);
-    const filters = await rows(session, 'filters/all');
+    const row = readSnapshot.row ?? await box(session, addr), account = snapshot(row), netlimit = await netState(addr);
+    const filters = readSnapshot.filters ?? await rows(session, 'filters/all');
     const ownFilters = prefilters(filters, addr).map(row => ({ id: row.id, sha256: scriptHash(row.script_data) })).sort((a, b) => String(a.id).localeCompare(String(b.id)));
     let forward;
-    if (forwardTo) forward = await teams.previewForward(session, addr, forwardTo);
+    if (forwardTo) forward = readSnapshot.forward ?? await teams.previewForward(session, addr, forwardTo);
     const operation = { mode, cleanRefs, cleanShares, forwardTo };
-    const retiredState = await retirementState(addr);
-    if (mode === 'disable' && !cleanRefs && !cleanShares) return { state: { account, netlimit, ownFilters, operation, retiredState }, account, filters, forward,
+    const retiredState = readSnapshot.retiredState ?? await retirementState(addr);
+    if (mode === 'disable' && !cleanRefs && !cleanShares) return { state: { account, netlimit, ownFilters, operation, retiredState }, row, account, filters, forward,
       refs: { aliases: [], teams: [], senders: [], shares: inspectShares ? [] : null, syncjobs: [] }, sharesScope: inspectShares ? 'none' : 'not-loaded', teamsToClean: [] };
     const aliases = await rows(session, 'alias/all');
     if (mode === 'delete' && prefilters(filters, addr).some(filter => memberAliases(filter, aliases).length)) throw new AppError(409, 'TEAM_ALIAS_MODE', '팀 분배를 먼저 원래 방식으로 되돌려 주세요.');
     const teamsToClean = cleanRefs ? protectTeams(filters, aliases, addr) : [], aclByOwner = new Map(), ownerSnapshot = new Map();
-    const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot, includeShares: inspectShares });
-    if (cleanShares && info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const [boxes, jobs] = await Promise.all([rows(session, 'mailbox/all'), rows(session, 'syncjobs/all/no_log')]);
+    const info = await detail(session, addr, { allShares: true, includeProtocolNetlimit: false, aclSnapshot: aclByOwner, ownerSnapshot, includeShares: inspectShares,
+      readSnapshot: { row, boxes, aliases, filters, jobs, retiredState } });
+    if (cleanShares && info.warnings.some(warning => warning.code === 'SHARES_PARTIAL')) throw new AppError(502, 'SHARES_UNAVAILABLE', '공유를 모두 확인하지 못했어요. 아무것도 바꾸지 않았으니 다시 시도해 주세요.');
     const aliasRows = aliases.filter(row => !isMemberAlias(row) && targets(row.goto).includes(addr)).sort((a, b) => normalize(a.address).localeCompare(normalize(b.address)));
     const senderRows = boxes.filter(row => normalize(row.username) === addr && targets(row.sender_acl).length || targets(row.sender_acl).includes(addr)).sort((a, b) => normalize(a.username).localeCompare(normalize(b.username)));
     const syncRows = jobs.filter(row => normalize(row.user2) === addr).sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -492,7 +493,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       shares: [...aclByOwner].sort(([a], [b]) => a.localeCompare(b)).map(([owner, acl]) => ({ owner, sha256: etag(acl) })),
       syncjobs: syncRows.map(row => ({ id: row.id, sha256: etag(row) })),
     };
-    return { state: { account, netlimit, ownFilters, operation, retiredState, refs, versions }, account, filters, forward, refs, sharesScope: info.sharesScope,
+    return { state: { account, netlimit, ownFilters, operation, retiredState, refs, versions }, row, account, filters, forward, refs, sharesScope: info.sharesScope,
       teamsToClean, aliasRows, senderRows, syncRows, aclByOwner, info };
   }
   function lifecycleVersion(state) {
@@ -501,13 +502,13 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const { shares: shareVersions, shareOwners, ...versions } = state.versions;
     return { ...state, refs, versions };
   }
-  async function deletePreview(session, rawAddress, options = {}, { skipSharedDisplay = true } = {}) {
+  async function deletePreview(session, rawAddress, options = {}, { skipSharedDisplay = true, readSnapshot = {} } = {}) {
     const addr = address(rawAddress), mode = options.mode ?? 'delete', cleanRefs = options.cleanRefs ?? true;
     const forwardTo = options.forwardTo ? address(options.forwardTo) : null, cleanShares = options.cleanShares ?? (mode === 'delete');
     if (!['disable', 'delete'].includes(mode) || typeof cleanRefs !== 'boolean' || typeof cleanShares !== 'boolean' || mode === 'delete' && (!cleanRefs || !cleanShares || forwardTo)) throw invalid();
     const skipShares = skipSharedDisplay && mode === 'disable' && !cleanShares;
-    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo, skipSharedDisplay: skipShares });
-    const row = plan.info ?? await box(session, addr);
+    const plan = await lifecycleSnapshot(session, addr, { mode, cleanRefs, cleanShares, forwardTo, skipSharedDisplay: skipShares, readSnapshot });
+    const row = plan.info ?? plan.row;
     return { address: addr, mode, cleanRefs, cleanShares, forwardTo, etag: etag(lifecycleVersion(plan.state)), messages: Number(row.messages ?? 0), usedBytes: Number(row.usedBytes ?? row.quota_used ?? 0),
       refs: plan.refs, sharesScope: plan.sharesScope, ...(skipShares ? { sharesState: 'deferred-kept' } : {}), irreversible: mode === 'delete', confirmAddress: mode === 'delete' ? addr : null,
       confirmation: mode === 'delete' ? '메일함과 메일을 복구할 수 없어요. 주소를 직접 입력해 주세요.' : '로그인을 막고 메일은 보존해요.',
@@ -680,14 +681,14 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       catch { return { ...location, targets: [], inspected: false }; }
     });
   }
-  async function retirementPlan(session, addr, request, { initialLeave = false, allowPendingLeave = initialLeave } = {}) {
+  async function retirementPlan(session, addr, request, { initialLeave = false, allowPendingLeave = initialLeave, readSnapshot = {} } = {}) {
     if (!retirement) throw blockUnavailable();
-    const state = await retirementState(addr), account = snapshot(await box(session, addr));
+    const state = readSnapshot.retiredState ?? await retirementState(addr), account = snapshot(readSnapshot.row ?? await box(session, addr));
     const ownerKeys = await retirement.store.keysForOwner(addr);
     if (state.pendingOperation?.kind === 'leave' && !allowPendingLeave) throw new AppError(409, 'RETIREMENT_OPERATION_PENDING', '퇴사 처리의 남은 정리를 기존 퇴사 미리보기에서 먼저 처리해 주세요.');
     if (!initialLeave && (!state.retired || account.active !== 2)) throw retirementConflict('RETIREMENT_STATE_CONFLICT');
     if (request.receiveBlocked && (!retirement.featureEnabled || !retirement.ready)) throw blockUnavailable(state.pendingOperation?.kind === 'leave');
-    const own = prefilters(await rows(session, 'filters/all'), addr), removeForward = [], blockers = [];
+    const own = prefilters(readSnapshot.filters ?? await rows(session, 'filters/all'), addr), removeForward = [], blockers = [];
     const forwarding = inspectForwarding(own, addr);
     const existingTargets = [...new Set(forwarding.flatMap(row => row.targets))].sort();
     const forwardingChange = request.forwardTo ? { effect: existingTargets.includes(request.forwardTo) ? 'unchanged' : 'add', target: request.forwardTo,
@@ -695,7 +696,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       request.forwardTo === null ? { effect: 'remove-managed', existingTargets, message: '미리보기에 표시된 관리 전달만 지워요.' } :
         { effect: 'kept', existingTargets, message: '기존 전달을 유지해요.' };
     let forward;
-    if (request.forwardTo) { await retirement.routing.assertRecipients([request.forwardTo]); forward = await teams.previewForward(session, addr, request.forwardTo); }
+    if (request.forwardTo) { await retirement.routing.assertRecipients([request.forwardTo]); forward = readSnapshot.forward ?? await teams.previewForward(session, addr, request.forwardTo); }
     if (request.forwardTo === null) for (const filter of own) {
       let redirects;
       try { redirects = retirementRedirects(filter.script_data); } catch { blockers.push({ code: 'OWNER_FORWARD_UNEDITABLE', ...forwarding.find(row => row.id === String(filter.id)) }); continue; }
@@ -828,7 +829,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       return { ...result, warnings: [...leaveWarnings(), ...result.warnings.filter(warning => !leaveWarnings().some(row => row.code === warning.code))] };
     }
     const current = await retirementState(addr);
-    const currentActive = Number((await box(session, addr)).active);
+    const currentRow = await box(session, addr), currentActive = Number(currentRow.active);
     if (current.retired && !current.pendingOperation) return { result: 'unchanged', alreadyRetired: true, unchanged: true,
       address: addr, accountActive: currentActive, message: '이미 퇴사 처리한 계정이에요. 계정 상세에서 수신 설정을 바꿔 주세요.', settingsPath: `/admin/accounts/${encodeURIComponent(addr)}`, retirement: retirementDto(current, currentActive), warnings: [] };
     if (current.pendingOperation && current.pendingOperation.kind !== 'leave') return { result: 'unchanged', alreadyRetired: true, address: addr,
@@ -839,13 +840,16 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const options = saved ?? { cleanRefs: data.cleanRefs, cleanShares: data.cleanShares ?? false, receiveBlocked: data.receiveBlocked ?? false,
       ...(data.receiveBlocked ? { forwardTo: null } : Object.hasOwn(data, 'forwardTo') ? { forwardTo: data.forwardTo === null ? null : address(data.forwardTo) } : {}) };
     const request = retirementInput({ ...options, cleanupConfirmed: data.cleanupConfirmed ?? false }, { leave: true });
-    const prepare = async () => {
-      const lifecycle = await deletePreview(session, addr, { ...options, mode: 'disable' }, { skipSharedDisplay: data.action === 'preview' });
-      const settings = await retirementPlan(session, addr, request, { initialLeave: true });
+    const prepare = async ({ row, retiredState } = {}) => {
+      // This snapshot belongs only to prepare; execution rechecks read independently.
+      const readSnapshot = { row: row ?? await box(session, addr), retiredState: retiredState ?? await retirementState(addr), filters: await rows(session, 'filters/all') };
+      if (options.forwardTo) readSnapshot.forward = await teams.previewForward(session, addr, options.forwardTo);
+      const lifecycle = await deletePreview(session, addr, { ...options, mode: 'disable' }, { skipSharedDisplay: data.action === 'preview', readSnapshot });
+      const settings = await retirementPlan(session, addr, request, { initialLeave: true, readSnapshot });
       const version = { lifecycle: lifecycle.etag, settings: settings.etag };
       return { lifecycle, settings, version };
     };
-    const plan = await prepare();
+    const plan = await prepare({ row: currentRow, retiredState: current });
     if (data.action === 'preview') return { ...plan.lifecycle, confirmation: !current.retired && plan.settings.account.active === 2 ? '받기 전용 계정이에요. 실행하면 퇴사 처리 기록을 명시적으로 남겨요.' : plan.lifecycle.confirmation, etag: etag(plan.version), receiveBlocked: options.receiveBlocked,
       retirement: plan.settings.retirement, forwarding: plan.settings.forwarding, forwardingChange: plan.settings.forwardingChange, receiveChanges: plan.settings.changes, blockers: plan.settings.blockers,
       cleanupRequired: plan.settings.changes.length > 0, canPrepare: !plan.settings.blockers.length, alreadyRetired: current.retired,

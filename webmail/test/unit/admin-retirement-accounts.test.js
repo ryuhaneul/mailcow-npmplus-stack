@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createRetirementReadiness } from '../../server/admin/retirement-readiness.js';
 import { createAliasesService } from '../../server/admin/services/aliases.js';
 import { emptyRetirementState, retirementVersion } from '../../server/security/retirement-store.js';
@@ -123,7 +124,7 @@ async function fixture(t, populated = false) {
   const retirement = { store, routing, featureEnabled: true, ready: true };
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir, retirement: routing });
   const service = createAccountsService({ retirement, protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams, aclFolders, otp });
-  return { states, keyRows, storeCalls, store, routing, retirement, lockDepth: () => lockDepth, netlimit, otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
+  return { teams, states, keyRows, storeCalls, store, routing, retirement, lockDepth: () => lockDepth, netlimit, otpRows, otpStore, dir, boxes, filters, aliases, jobs, acl, calls, aclCalls, options, mailcow, dockerapi, aclFolders, audit, lock, history, service };
 }
 const writes = f => f.calls.filter(row => row.method === 'POST');
 const preview = f => f.service.deletePreview({}, user);
@@ -734,4 +735,97 @@ test('retirement: display-only preview skips failing ACL readers but execution k
   const result = await leave(f, { action: 'run', cleanRefs: true, cleanShares: false, etag: p.etag });
   assert.equal(result.result, 'ok', JSON.stringify(result)); assert.equal(f.aclCalls.length, 9);
   assert.ok(result.warnings.some(row => row.code === 'SHARES_PARTIAL'));
+});
+
+// Complete preview DTO digests captured from the unchanged stage-3 fixture.
+const snapshotCases = [
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":false}, digest: "50d026461148344030449c57a3ef4994960d3c12cda1b933e1cbff9552ae5e30", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":true}, digest: "4f59d4a2e7b6c60bc956a6875abf29114299643b039c292bdc97e71ff4cfcbb1", aclReads: 3, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"delete","cleanRefs":true,"cleanShares":true}, digest: "baf28236a381ad0314519bee9e70256c162da8470b894125ad22fd9cd49d64e6", aclReads: 3, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"disable","cleanRefs":false,"cleanShares":false}, digest: "d37fae03c7bdf10ca552032c4fd1ccea51dded72da412e77763382a91e4a0bce", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1} },
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":false,"forwardTo":"other@example.com"}, digest: "8b4f05981ce766847044b0fc2a686c317dc908527e3cfec2124f70f2bef9d89f", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 2, "/api/v1/get/mailbox/all": 2, "/api/v1/get/alias/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+];
+for (const { options, digest, aclReads, counts } of snapshotCases) test(`snapshot: preview reuses one calculation ${JSON.stringify(options)}`, async t => {
+  const f = await fixture(t, true);
+  let retirementReads = 0, forwardPlans = 0;
+  const read = f.store.read, forward = f.teams.previewForward;
+  f.store.read = async (...args) => { retirementReads++; return read(...args); };
+  f.teams.previewForward = async (...args) => { forwardPlans++; return forward(...args); };
+  const result = await leave(f, { action: 'preview', ...options });
+  assert.equal(createHash('sha256').update(JSON.stringify(result)).digest('hex'), digest, 'complete DTO and etag match the stage-3 baseline');
+  const actual = {};
+  for (const row of f.calls.filter(row => row.method === 'GET')) actual[row.path] = (actual[row.path] ?? 0) + 1;
+  assert.deepEqual(actual, counts);
+  assert.equal(f.aclCalls.length, aclReads);
+  assert.equal(writes(f).length, 0);
+  if (options.mode === 'disable') {
+    assert.equal(retirementReads, 1);
+    assert.equal(forwardPlans, options.forwardTo ? 1 : 0);
+  }
+});
+
+for (const phase of ['before-locked-snapshot', 'after-intent']) for (const [kind, mutate] of Object.entries(deferredMutations)) test(`snapshot: ${kind} changes ${phase} are freshly checked before writes`, async t => {
+  const f = await fixture(t, true), options = { cleanRefs: true, cleanShares: false };
+  const preview = await leave(f, { action: 'preview', ...options });
+  if (phase === 'before-locked-snapshot') {
+    const run = f.lock.run;
+    let changed = false;
+    f.lock.run = (key, operation) => {
+      if (key === `flow:${user}` && !changed) { changed = true; mutate(f); }
+      return run(key, operation);
+    };
+  } else {
+    const run = f.audit.run;
+    f.audit.run = (entry, operation, options) => run(entry, async intent => {
+      if (entry.action === 'mailbox.leave') mutate(f);
+      return operation(intent);
+    }, options);
+  }
+  await assert.rejects(leave(f, { action: 'run', ...options, etag: preview.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  assert.equal(writes(f).length, 0);
+  assert.equal(f.storeCalls.length, 0);
+});
+
+for (const kind of ['account', 'retirement', 'ownFilter']) test(`snapshot: first-write settings check reloads ${kind} after the lifecycle recheck`, async t => {
+  const f = await fixture(t, true), options = { cleanRefs: true, cleanShares: false };
+  const preview = await leave(f, { action: 'preview', ...options });
+  const read = f.store.read;
+  let reads = 0;
+  f.store.read = async (...args) => {
+    // Prepare, locked lifecycle, durable-intent lifecycle, then first-write settings.
+    if (++reads === 4) deferredMutations[kind](f);
+    return read(...args);
+  };
+  await assert.rejects(leave(f, { action: 'run', ...options, etag: preview.etag }), { statusCode: 409, code: 'CHANGED_ELSEWHERE' });
+  assert.equal(reads, 4);
+  assert.equal(writes(f).length, 0);
+  assert.equal(f.storeCalls.length, 0);
+});
+
+test('snapshot: a shared forward preview preserves recipient guards and fresh execution validation', async t => {
+  const f = await fixture(t), options = { cleanRefs: true, cleanShares: false, forwardTo: other };
+  let guards = 0, plans = 0;
+  const recipients = f.routing.assertRecipients, forward = f.teams.previewForward;
+  f.routing.assertRecipients = async (...args) => { guards++; return recipients(...args); };
+  f.teams.previewForward = async (...args) => { plans++; return forward(...args); };
+  const p = await leave(f, { action: 'preview', ...options });
+  assert.equal(plans, 1); assert.equal(guards, 1);
+  // The recipient becomes protected after preview; prepare must check it again.
+  f.keyRows.set(other, [other]);
+  await assert.rejects(leave(f, { action: 'run', ...options, etag: p.etag }), { statusCode: 409 });
+  assert.equal(plans, 2); assert.equal(guards, 2);
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
+});
+
+test('snapshot: later previews use new datasets and forwarding plans', async t => {
+  const f = await fixture(t), options = { cleanRefs: true, cleanShares: false, forwardTo: other };
+  let plans = 0;
+  const forward = f.teams.previewForward;
+  f.teams.previewForward = async (...args) => { plans++; return forward(...args); };
+  const first = await leave(f, { action: 'preview', ...options });
+  f.filters.push({ id: 99, username: user, filter_type: 'prefilter', active: 1, script_data: `require ["copy"]; redirect :copy "${other}";` });
+  const second = await leave(f, { action: 'preview', ...options });
+  assert.equal(plans, 2); assert.notEqual(first.etag, second.etag);
+  assert.equal(second.forwardingChange.effect, 'unchanged');
+  assert.equal(writes(f).length, 0); assert.equal(f.storeCalls.length, 0);
 });

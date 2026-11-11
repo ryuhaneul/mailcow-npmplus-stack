@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createFakeProtocolNetlimitStore } from '../fixtures/protocol-netlimit.js';
 import { createOtpAdminService } from '../../server/admin/services/otp.js';
 import { test } from 'node:test';
@@ -628,4 +629,23 @@ test('lifecycle: deferred sharing preview matches the full-read projection witho
   assert.equal(result.result, 'ok');
   assert.deepEqual([...new Set(f.aclCalls)].sort(), [user, team, other].sort());
   assert.equal(f.aclCalls.length, 6, 'legacy run retains both complete ACL snapshots');
+});
+
+// Complete preview DTO digests captured from the unchanged stage-3 fixture.
+const snapshotCases = [
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":false}, digest: "8553fb848956057c29f54dbb66ee5dabb87a1f7fa0e15b9c18e21436772c52ef", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":true}, digest: "d774c01c081f786e61563307e1b81404b793aa0364cef46d2ffc36985c326fb4", aclReads: 3, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"delete","cleanRefs":true,"cleanShares":true}, digest: "baf28236a381ad0314519bee9e70256c162da8470b894125ad22fd9cd49d64e6", aclReads: 3, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1, "/api/v1/get/alias/all": 1, "/api/v1/get/mailbox/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+  { options: {"mode":"disable","cleanRefs":false,"cleanShares":false}, digest: "a1e73f20085a09542457070b1223652b719b907d1bb711a569c484c8c438364f", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 1} },
+  { options: {"mode":"disable","cleanRefs":true,"cleanShares":false,"forwardTo":"other@example.com"}, digest: "6858e8050624db207cc8cea30e6f914d7c97acdd5be14a5bd91286e6b026508d", aclReads: 0, counts: {"/api/v1/get/mailbox/user%40example.com": 1, "/api/v1/get/filters/all": 2, "/api/v1/get/mailbox/all": 2, "/api/v1/get/alias/all": 1, "/api/v1/get/app-passwd/all/user%40example.com": 1, "/api/v1/get/syncjobs/all/no_log": 1} },
+];
+for (const { options, digest, aclReads, counts } of snapshotCases) test(`snapshot: preview reuses one calculation ${JSON.stringify(options)}`, async t => {
+  const f = await fixture(t, true);
+  const result = await leave(f, { action: 'preview', ...options });
+  assert.equal(createHash('sha256').update(JSON.stringify(result)).digest('hex'), digest, 'complete DTO and etag match the stage-3 baseline');
+  const actual = {};
+  for (const row of f.calls.filter(row => row.method === 'GET')) actual[row.path] = (actual[row.path] ?? 0) + 1;
+  assert.deepEqual(actual, counts);
+  assert.equal(f.aclCalls.length, aclReads);
+  assert.equal(writes(f).length, 0);
 });

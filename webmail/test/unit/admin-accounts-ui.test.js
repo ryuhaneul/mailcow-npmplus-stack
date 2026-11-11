@@ -55,16 +55,29 @@ test('retirement approved UI states and existing share APIs operate through actu
     assert.match(root.textContent,/처리됨/);assert.match(root.textContent,/차단됨/);assert.match(root.textContent,/허용 중/);assert.match(root.textContent,/전달: team@example.com/);
     row=setup(true,true);await mount(RetirementSettings,{row,saved(){}});assert.match(root.textContent,/차단 중/);assert.equal(root.querySelector('#receive-block').checked,true);
   });
-  await t.test('server OFF and legacy disable blocking and show separate facts',async()=>{
-    let row=setup();row.retirement.featureEnabled=false;await mount(RetirementSettings,{row,saved(){}});assert.match(root.textContent,/서버 수신 차단 기능 꺼짐/);assert.ok(root.querySelector('#receive-block').matches(':disabled'));
-    row=setup(false);row.active=2;await mount(RetirementSettings,{row,saved(){}});assert.match(root.textContent,/퇴사 확인 필요/);assert.match(root.textContent,/받기 전용/);assert.ok(root.querySelector('#receive-block').matches(':disabled'));
+  await t.test('server OFF hides blocking and legacy hides its entire settings form',async()=>{
+    let row=setup();row.retirement.featureEnabled=false;await mount(RetirementSettings,{row,saved(){}});assert.match(root.textContent,/서버 기능 꺼짐/);assert.equal(root.querySelector('#receive-block'),null);assert.equal(root.querySelector('.ac-notice.warn'),null);
+    row=setup(false);row.active=2;let recorded=0;await mount(RetirementSettings,{row,saved(){},record(){recorded++;}});assert.match(root.textContent,/퇴사 확인 필요/);assert.equal(root.querySelector('form'),null);assert.equal(root.querySelector('#retirement-mail-mode'),null);await click('퇴사 기록 남기기');assert.equal(recorded,1);
   });
-  await t.test('server OFF disables only blocking; permitted receive forwarding remains editable',async()=>{
+  await t.test('server OFF keeps forwarding editable without showing an unchanged preview',async()=>{
     const row=setup();fake.state.accounts.retirementFeatureEnabled=false;row.retirement.featureEnabled=false;
-    await mount(RetirementSettings,{row,saved(){}});assert.ok(root.querySelector('#receive-block').disabled);assert.equal(root.querySelector('#retirement-mail-mode').matches(':disabled'),false);assert.equal(button('변경 미리보기').disabled,true);
-    await change('#retirement-mail-mode','forward');await change('#share-grantee','team@example.com');await click('변경 미리보기');assert.equal(fake.state.accounts.retirementBodies.at(-1).body.receiveBlocked,false);assert.equal(fake.state.accounts.retirementBodies.at(-1).body.forwardTo,'team@example.com');await change('dialog input[type=checkbox]',true);await click('수신 허용');
+    await mount(RetirementSettings,{row,saved(){}});assert.equal(root.querySelector('#receive-block'),null);assert.equal(root.querySelector('#retirement-mail-mode').matches(':disabled'),false);assert.equal([...root.querySelectorAll('button')].some(node=>node.textContent==='변경 미리보기'),false);
+    await change('#retirement-mail-mode','forward');assert.equal([...root.querySelectorAll('button')].some(node=>node.textContent==='변경 미리보기'),false);await change('#share-grantee','team@example.com');await click('변경 미리보기');assert.equal(fake.state.accounts.retirementBodies.at(-1).body.receiveBlocked,false);assert.equal(fake.state.accounts.retirementBodies.at(-1).body.forwardTo,'team@example.com');await change('dialog input[type=checkbox]',true);await click('수신 허용');
     assert.deepEqual(fake.state.accounts.items.find(row=>row.address===address).retirement.forwarding,['team@example.com']);
-    await change('#retirement-mail-mode','remove');await click('변경 미리보기');await change('dialog input[type=checkbox]',true);await click('수신 허용');assert.deepEqual(fake.state.accounts.items.find(row=>row.address===address).retirement.forwarding,[]);
+    row.retirement.forwarding=['team@example.com'];await mount(RetirementSettings,{row,saved(){}});await change('#retirement-mail-mode','remove');await click('변경 미리보기');await change('dialog input[type=checkbox]',true);await click('수신 허용');assert.deepEqual(fake.state.accounts.items.find(row=>row.address===address).retirement.forwarding,[]);
+  });
+  await t.test('OFF stored blocking hides forwarding and never silently clears the saved choice',async()=>{
+    const row=setup(true,true);row.retirement.featureEnabled=false;row.retirement.warnings=[{code:'RECEIVE_BLOCK_UNVERIFIED',message:'저장된 차단 선택의 실제 적용을 확인해야 해요.'}];await mount(RetirementSettings,{row,saved(){}});assert.equal(root.querySelector('form'),null);assert.match(root.textContent,/차단 선택 저장됨.*서버 기능 꺼짐/);assert.equal(root.querySelector('#retirement-mail-mode'),null);assert.equal(root.querySelector('.ac-notice.warn'),null);assert.equal(fake.state.accounts.retirementBodies.length,0);
+  });
+  await t.test('preview appears only for changed blocking or forwarding; settings recovery is explicit',async()=>{
+    const visible=()=>[...root.querySelectorAll('button')].some(node=>node.textContent==='변경 미리보기');
+    let row=setup();await mount(RetirementSettings,{row,saved(){}});assert.equal(visible(),false);await change('#receive-block',true);assert.equal(visible(),true);await change('#receive-block',false);assert.equal(visible(),false);await change('#retirement-mail-mode','remove');assert.equal(visible(),false);
+    row=setup();row.retirement.forwarding=['team@example.com'];await mount(RetirementSettings,{row,saved(){}});await change('#retirement-mail-mode','forward');await change('#share-grantee','team@example.com');assert.equal(visible(),false);await change('#retirement-mail-mode','remove');assert.equal(visible(),true);await change('#retirement-mail-mode','keep');assert.equal(visible(),false);
+    row=setup();row.retirement.pendingOperation={kind:'settings'};await mount(RetirementSettings,{row,saved(){}});assert.equal(visible(),false);await click('남은 정리 미리보기');assert.equal(fake.state.accounts.retirementBodies.at(-1).body.receiveBlocked,false);
+    row=setup();row.retirement.pendingOperation={kind:'leave'};await mount(RetirementSettings,{row,saved(){}});assert.equal(root.querySelector('form'),null);
+  });
+  await t.test('unclassified receive-only detail opens the existing explicit leave record dialog',async()=>{
+    setup(false);const row=fake.state.accounts.items.find(row=>row.address===address);row.active=2;delete row.retirement;await mount(AccountDetail,{address,changed(){}});assert.equal(root.querySelector('#retirement-settings form'),null);await click('퇴사 기록 남기기');assert.match(root.querySelector('dialog').textContent,/실행하면 퇴사 기록을 남깁니다/);assert.equal(fake.state.accounts.retirementBodies.length,0);
   });
   await t.test('leave defaults keep shares; exclusive mode and preview-back preserve all selections',async()=>{
     const row=setup(false);await mount(LeaveDialog,{row,close(){}});

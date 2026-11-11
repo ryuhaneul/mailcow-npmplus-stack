@@ -320,3 +320,50 @@ for (const layer of ['prefilter', 'postfilter', 'user']) test(`F6 owner unresolv
   assert.deepEqual(plan.changes, []);
   assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
 });
+
+
+test('F7 unrelated mixed alias unresolved literals in an inactive domain do not block ON', async () => {
+  const f = fixture(), address = 'master@legacy.test', missing = ['deleted@legacy.test', 'tracker@legacy.test'];
+  f.facts.domains.push({ domain_name: 'legacy.test', active: 0 });
+  f.facts.aliases.push(alias(address, [...missing, team].join(',')));
+  f.filters.push(filter(`require ["copy"]; redirect :copy "${healthy}";`));
+  const plan = await inspect(f);
+  assert.deepEqual(plan.blockers, []); assert.deepEqual(plan.changes, []);
+  assert.equal(plan.canPrepare, true); assert.equal(plan.ready, true);
+  assert.deepEqual(f.routing.assertReady(plan), [owner]);
+  assert.equal(f.calls.filter(row => row.method !== 'GET').length, 0);
+  for (const indirect of [false, true]) {
+    if (indirect) f.facts.aliases.push(alias('outer@legacy.test', address));
+    f.facts.aliases.find(row => row.address === address).goto = [...missing, team, owner].join(',');
+    const related = await inspect(f);
+    assert.equal(related.canPrepare, false); assert.equal(related.ready, false);
+    assert.deepEqual(related.blockers.filter(row => row.code === 'UNRESOLVED_INTERNAL').map(row => row.address).sort(), missing);
+    assert.deepEqual(related.changes.map(row => ({ address: row.address, remove: row.remove, keep: row.keep })),
+      [{ address, remove: [owner], keep: [...missing, team].sort() }]);
+    assert.throws(() => f.routing.assertReady(related), { statusCode: 409, code: 'RETIREMENT_ROUTES_REMAIN' });
+  }
+});
+
+test('F7 alias unresolved literals matching canonical and alias-domain rejection keys including plus stay blocked', async () => {
+  for (const target of [owner, 'retired+tag@example.test', 'retired@alternate.test', 'retired+tag@alternate.test']) {
+    const f = fixture();
+    f.facts.aliasDomains.push({ alias_domain: 'alternate.test', target_domain: 'example.test', active: 1 });
+    f.facts.aliases[0].goto = 'missing@example.test';
+    f.facts.aliases.push(alias('incoming@example.test', [target, healthy]));
+    const plan = await inspect(f);
+    assert.ok(codes(plan).includes('UNRESOLVED_INTERNAL'), target);
+    assert.equal(plan.ready, false); assert.equal(plan.canPrepare, false);
+    assert.throws(() => f.routing.assertReady(plan), { statusCode: 409 });
+  }
+});
+
+test('F7 unrelated alias loops and uninspectable alias targets still fail closed', async () => {
+  const f = fixture();
+  f.facts.aliases.push(alias('loop-a@example.test', 'loop-b@example.test'), alias('loop-b@example.test', 'loop-a@example.test'));
+  const plan = await inspect(f);
+  assert.ok(codes(plan).includes('ALIAS_LOOP')); assert.equal(plan.ready, false); assert.equal(plan.canPrepare, false);
+  for (const target of ['${destination}', 'not-an-address']) {
+    const malformed = fixture(); malformed.facts.aliases.push(alias('unknown@example.test', target));
+    await assert.rejects(inspect(malformed), { statusCode: 503, code: 'RETIREMENT_ROUTING_UNAVAILABLE' });
+  }
+});

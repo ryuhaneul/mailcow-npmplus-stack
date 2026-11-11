@@ -72,7 +72,7 @@ export function createRetirementGraph({ mailboxes, aliases, aliasDomains, domain
 function aliasPlan(facts, graph, owner) {
   const keys = [owner], changes = [], blockers = [];
   for (const node of graph.nodes.values()) {
-    const result = graph.resolveAlias(node.address); blockers.push(...result.problems);
+    const result = graph.resolveAlias(node.address);
     if (only(result, owner)) {
       if (node.address.startsWith('@')) blockers.push(issue('CATCH_ALL_TARGET', node.address));
       else keys.push(node.address);
@@ -89,6 +89,16 @@ function aliasPlan(facts, graph, owner) {
     return change ? { ...row, goto: change.keep.join(',') } : row;
   }) };
   const projected = createRetirementGraph(projectedFacts), normalizedKeys = unique(keys);
+  // Classify unresolved literals after all rejection keys have been collected.
+  const matchesRecipientKey = value => {
+    const [local, name] = value.split('@');
+    return normalizedKeys.includes(value) || local.includes('+') && normalizedKeys.includes(`${local.split('+')[0]}@${name}`);
+  };
+  for (const node of graph.nodes.values()) {
+    const result = graph.resolveAlias(node.address);
+    blockers.push(...result.problems.filter(problem => problem.code !== 'UNRESOLVED_INTERNAL' || result.targets.includes(owner) ||
+      [problem.address, ...node.targets].some(matchesRecipientKey)));
+  }
   for (const key of normalizedKeys) if (!only(projected.resolve(key), owner)) blockers.push(issue('RECIPIENT_KEY_CONFLICT', key));
   // An explicit tagged alias cannot override the base-address access rejection.
   for (const address of unique([...projected.nodes.keys(), ...[...projected.boxes.values()].filter(row => enabled(row.active)).map(row => row.address)])) {

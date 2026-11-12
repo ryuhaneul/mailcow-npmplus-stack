@@ -7,7 +7,7 @@ import preact from '@preact/preset-vite';
 import { chromium, expect } from '@playwright/test';
 import { createFakeApi } from '../../web/dev/fake-api.js';
 
-await test('reader header tooltips, responsive layout and forwarding match the replybox',async t=>{
+await test('reader header tooltips, responsive layout, reply-all and forwarding match the replybox',async t=>{
   const fake=createFakeApi({authenticated:true});
   const message=fake.state.mail.find(item=>item.folder==='INBOX'&&item.hasAttachment);
   const server=await createServer({configFile:false,root:fileURLToPath(new URL('../../web',import.meta.url)),logLevel:'error',plugins:[preact(),{name:'reader-actions-api',configureServer(server){server.middlewares.use(fake.middleware);}}],server:{host:'127.0.0.1',port:0}});
@@ -17,15 +17,17 @@ await test('reader header tooltips, responsive layout and forwarding match the r
   if(captures)await mkdir(captures,{recursive:true});
   for(const mode of ['light','dark'])for(const width of [1280,768,375]){
     fake.state.prefs.mode=mode;
-    const page=await browser.newPage({viewport:{width,height:900}}),errors=[];
+    const page=await browser.newPage({viewport:{width,height:900},deviceScaleFactor:2}),errors=[];
     page.on('pageerror',error=>errors.push(error.message));
     try{
       await page.goto(`${origin}/#read/${encodeURIComponent(message.ref)}`);
       await expect(page.locator('.reader h1')).toHaveText(message.subject);
       await expect(page.locator('html')).toHaveAttribute('data-mode',mode);
       const reply=page.locator('.when').getByRole('button',{name:'답장',exact:true});
+      const replyAll=page.locator('.when').getByRole('button',{name:'전체 답장',exact:true});
       const forward=page.locator('.when').getByRole('button',{name:'전달',exact:true});
       await expect(reply).toHaveAttribute('title','답장하기');await expect(forward).toHaveAttribute('title','전달하기');
+      await expect(replyAll).toHaveAttribute('title','전체 답장하기');await expect(replyAll).toBeVisible();
       await expect(forward).toBeVisible();await page.evaluate(()=>document.fonts.ready);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
       assert.equal(await page.locator('.when').evaluate(element=>{
@@ -35,6 +37,13 @@ await test('reader header tooltips, responsive layout and forwarding match the r
         return element.scrollWidth<=element.clientWidth+1&&box.left>=sender.left&&box.right<=sender.right+1&&new Set([...range.getClientRects()].map(rect=>rect.top)).size===1&&children.every(rect=>rect.top>=box.top&&rect.bottom<=box.bottom)&&children.every((rect,index)=>!index||rect.left>=children[index-1].right);
       }),true);
       if(captures)await page.screenshot({animations:'disabled',path:`${captures}/reader-${mode}-${width}.png`,fullPage:true});
+      await page.evaluate(async()=>{const {composeSeed}=await import('/src/state/compose.js');composeSeed.subscribe(seed=>{if(seed)window.__readerCompose={kind:seed.kind,ref:seed.message.ref};});});
+      await replyAll.click();
+      await expect(page.locator('#compose-subject')).toHaveValue(`Re: ${message.subject}`);
+      assert.deepEqual(await page.evaluate(()=>window.__readerCompose),{kind:'replyall',ref:message.ref});
+      await page.getByRole('button',{name:'쓰기 창 닫기',exact:true}).click();
+      await page.goto(`${origin}/#read/${encodeURIComponent(message.ref)}`);
+      await expect(page.locator('.reader h1')).toHaveText(message.subject);
       let previous;
       for(const trigger of [forward,page.locator('.replybox').getByRole('button',{name:'전달',exact:true})]){
         await trigger.click();

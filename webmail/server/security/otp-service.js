@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AppError } from '../errors.js';
-import { createResourceLock } from '../admin/lock.js';
+import { createResourceLock } from '../resource-lock.js';
 import { createOtpSeed, decryptOtpSeed, otpEnrollmentQr, otpUnavailable } from './otp.js';
 
 const pendingMs = 300_000;

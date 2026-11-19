@@ -52,6 +52,9 @@ cat > "$TMP/mailcow/update.sh" <<'MOCK'
 #!/bin/bash
 [ "$1" = -f ] || exit 99
 echo upstream >> "$TMP/calls"
+printf 'upstream-args %s\n' "$*" >> "$TMP/calls"
+if [ -f "$TMP/upstream-twice-two" ]; then exit 2; fi
+if [ -f "$TMP/upstream-first-two" ]; then rm "$TMP/upstream-first-two"; exit 2; fi
 if [ -f "$TMP/upstream-fail" ]; then touch "$TMP/deleted-ids"; exit 7; fi
 MOCK
 chmod +x "$TMP/mailcow/update.sh"
@@ -60,6 +63,7 @@ for service in "${services[@]}"; do printf 'synthetic\n' > "$TMP/logs/id-$servic
 printf 'synthetic access\n' > "$TMP/logs/access.log"
 reset_case() {
     rm -f "$TMP/"*-fail "$TMP/"signal-* "$TMP/deleted-ids" "$TMP/legacy" "$TMP/unknown-preview" "$TMP/no-change" "$TMP/new-create" "$TMP/mailcow-running"
+    rm -f "$TMP/upstream-first-two" "$TMP/upstream-twice-two"
     : > "$TMP/calls"
     LOG_ARCHIVE_ENABLE=true
     SKIP_MAILCOW_UPDATE=false
@@ -356,6 +360,32 @@ run_upstream
 assert_order prepare backfill 'docker stop id-postfix-mailcow' status upstream health
 ! grep -q '^docker start ' "$TMP/calls" || fail upstream-success-restore
 pass 'upstream is gated by preparation, all-source backfill, stop and confirmed drain'
+reset_case
+touch "$TMP/upstream-first-two"
+run_upstream
+[ "$(grep -c '^upstream$' "$TMP/calls")" = 2 ] || fail self-update-retry-count
+[ "$(grep -c '^upstream-args -f$' "$TMP/calls")" = 2 ] || fail self-update-retry-args
+[ "$(grep -c '^nat-start$' "$TMP/calls")" = 1 ] || fail retry-nat-start
+[ "$(grep -c '^nat-stop$' "$TMP/calls")" = 1 ] || fail retry-nat-stop
+! grep -q '^docker start ' "$TMP/calls" || fail self-update-success-restore
+assert_order upstream upstream health
+pass 'upstream exit 2 retries exactly once with identical args under the same NAT/drain transaction'
+for failure in upstream-twice-two upstream-fail; do
+    reset_case
+    touch "$TMP/$failure"
+    if run_upstream; then fail accepted-retry-failure; fi
+    expected=1
+    [ "$failure" != upstream-twice-two ] || expected=2
+    [ "$(grep -c '^upstream$' "$TMP/calls")" = "$expected" ] || fail retry-bound
+    assert_order upstream recovery health
+    pass "$failure stops at its allowed attempt count and recovers the original running set"
+done
+reset_case
+touch "$TMP/upstream-first-two" "$TMP/upstream-fail"
+if run_upstream; then fail accepted-second-error; fi
+[ "$(grep -c '^upstream$' "$TMP/calls")" = 2 ] || fail second-error-retry
+assert_order upstream upstream recovery health
+pass 'a different error on the second attempt fails without a third launch'
 for failure in prepare backfill drain api; do
     reset_case; touch "$TMP/$failure-fail"
     if run_upstream; then fail "accepted upstream $failure"; fi

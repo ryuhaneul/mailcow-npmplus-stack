@@ -4,10 +4,12 @@ set +x
 set -euo pipefail
 MODE=apply
 YES=false
+RESTORE_UPSTREAM_REFERENCE=false
 for arg in "$@"; do
     case "$arg" in
         apply) MODE=apply ;; --check) MODE=check ;; --revert) MODE=revert ;; -y) YES=true ;;
-        -h|--help) echo "Usage: $0 [apply|--check|--revert] [-y]"; exit 0 ;;
+        --restore-upstream-reference) RESTORE_UPSTREAM_REFERENCE=true ;;
+        -h|--help) echo "Usage: $0 [apply|--check|--revert] [-y] [--restore-upstream-reference]"; exit 0 ;;
         *) exit 2 ;;
     esac
 done
@@ -25,14 +27,24 @@ MARKER="$POSTFIX/conversion.json"
 log() { echo "[relay-file-mode] $*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 if [ "$MODE" != revert ] && [ -f "$MARKER" ]; then
-    python3 - "$CONF" "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" <<'PYCHECK'
+    REFERENCE_BACKUP=$(python3 - "$CONF" "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" "$MODE" "$RESTORE_UPSTREAM_REFERENCE" <<'PYCHECK'
 from pathlib import Path
-import ipaddress,json,re,sys
+import ipaddress,json,re,sys,tempfile,subprocess
 c=Path(sys.argv[1]); p=c/'postfix/mailstack-relay'; r=c/'rspamd/mailstack-relay'
 try:
     assert json.loads((p/'conversion.json').read_text())['version']==2
     assert re.search(r'^mynetworks\s*=.*?/opt/postfix/conf/mailstack-relay/mynetworks(?:[\s,]|$)', (c/'postfix/extra.cf').read_text(), re.M)
-    assert re.search(r'^\s*local_addrs\s*=\s*["\']?/etc/rspamd/mailstack-relay/local_addrs.map["\']?\s*;', (c/'rspamd/local.d/options.inc').read_text(), re.M)
+    options=c/'rspamd/local.d/options.inc'
+    assert options.is_file() and not options.is_symlink()
+    data=options.read_bytes().decode()
+    refs=list(re.finditer(r'^[ \t]*local_addrs[ \t]*=[ \t]*([^;\r\n]+);', data, re.M))
+    assert len(refs)==len(re.findall(r'^[ \t]*local_addrs[ \t]*=',data,re.M))==1
+    ref=refs[0]
+    parsed=re.fullmatch(r'''(["']?)(/etc/rspamd/(?:custom/mailcow_networks|mailstack-relay/local_addrs)\.map)\1''',ref[1].strip())
+    assert parsed
+    value=parsed[2]
+    repair=value=='/etc/rspamd/custom/mailcow_networks.map' and sys.argv[4:] == ['apply','true']
+    assert value=='/etc/rspamd/mailstack-relay/local_addrs.map' or repair
     def ips(path):
         assert path.is_file() and not path.is_symlink()
         result=set()
@@ -46,9 +58,54 @@ try:
     fixed=[ipaddress.ip_network(n) for n in ['127.0.0.0/8','::ffff:127.0.0.0/104','::1/128','fe80::/10',sys.argv[2]+'.0/24',*([sys.argv[3]] if sys.argv[3] else [])]]
     def users(values): return {n for n in values if not any(n.version==f.version and n.subnet_of(f) for f in fixed)}
     assert users(a)==users(b)
+    if repair:
+        # The image regenerates this map at every startup. Do not put mutable
+        # relay IPs there; ensure the dedicated map covers its fixed networks.
+        generated=ips(c/'rspamd/custom/mailcow_networks.map')
+        expected={ipaddress.ip_network(sys.argv[2]+'.0/24')}
+        if sys.argv[3]: expected.add(ipaddress.ip_network(sys.argv[3]))
+        assert generated==expected
+        assert all(any(n.version==v.version and n.subnet_of(v) for v in b) for n in generated)
+        backup=Path(tempfile.mkdtemp(prefix='.relay-reference-backup.',dir=p.parent))
+        subprocess.run(['cp','--preserve=all',str(options),str(backup/'options.inc')],check=True)
+        # Preserve every other byte, including new upstream options.
+        staged=backup/'new-options.inc'
+        subprocess.run(['cp','--preserve=all',str(options),str(staged)],check=True)
+        staged.write_bytes((data[:ref.start(1)]+'"/etc/rspamd/mailstack-relay/local_addrs.map"'+data[ref.end(1):]).encode())
+        assert options.read_bytes().decode()==data
+        staged.replace(options)
+        print(backup)
 except Exception:
     sys.exit('relay conversion marker conflicts with files/references; manual review required')
 PYCHECK
+    )
+    if [ -n "$REFERENCE_BACKUP" ]; then
+        reference_cleanup() {
+            local status=$?
+            trap - EXIT INT TERM HUP
+            if [ "$status" -ne 0 ]; then
+                cp --preserve=all "$REFERENCE_BACKUP/options.inc" "$CONF/rspamd/local.d/options.inc" || status=1
+                log_archive_restore || status=1
+                (cd "$MAILCOW_DIR" && docker compose restart rspamd-mailcow) || status=1
+                log "reference restoration interrupted/failed; original options backup: $REFERENCE_BACKUP"
+            fi
+            exit "$status"
+        }
+        trap reference_cleanup EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        trap 'exit 129' HUP
+        if (cd "$MAILCOW_DIR" && docker compose exec -T rspamd-mailcow rspamadm configtest) \
+            && log_archive_stop_and_drain "$MAILCOW_DIR" rspamd-mailcow \
+            && (cd "$MAILCOW_DIR" && docker compose restart rspamd-mailcow); then
+            log_archive_release
+            trap - EXIT INT TERM HUP
+            log "restored upstream local_addrs reference; backup: $REFERENCE_BACKUP"
+        else
+            die "Rspamd reference restoration failed; restoring original options.inc"
+        fi
+        exit 0
+    fi
     log 'already converted; no changes'; exit 0
 fi
 if [ "$MODE" = check ]; then die 'file conversion pending'; fi

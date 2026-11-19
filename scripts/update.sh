@@ -332,11 +332,18 @@ else
     # -f: force yes, skip interactive prompts inside mailcow update.sh.
     mailcow_nat_watch_start "$MAILCOW_NAT_NETWORK"
     MAILCOW_ARCHIVE_REPLACING=true
-    if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
-        :
-    else
-        MAILCOW_UPDATE_RC=$?
-    fi
+    # Older upstream scripts exit 2 after refreshing their own modules. Retry
+    # once with the same arguments; persistent exit 2 is still a failure.
+    for MAILCOW_UPDATE_ATTEMPT in 1 2; do
+        MAILCOW_UPDATE_RC=0
+        if (cd "$MAILCOW_DIR" && ./update.sh -f 2>&1 | tee -a "$LOGFILE" | tail -20); then
+            :
+        else
+            MAILCOW_UPDATE_RC=$?
+        fi
+        [ "$MAILCOW_UPDATE_RC" -eq 2 ] && [ "$MAILCOW_UPDATE_ATTEMPT" -eq 1 ] || break
+        warn "Mailcow updater returned 2; retrying once for a possible self-update"
+    done
     mailcow_nat_watch_stop
     if [ "$LOG_ARCHIVE_ENABLE" = true ] && [ "$MAILCOW_UPDATE_RC" -ne 0 ]; then
         die "Mailcow official update failed — recovering current services; see $LOGFILE"
@@ -571,7 +578,7 @@ edge_reconcile_npmplus "$NPMPLUS_DIR" || die "Edge step 3 failed; app projects a
 if [ "$WEBMAIL_ADMIN_ENABLE" = true ]; then
     webmail_generate_admin_env "$WEBMAIL_DIR" || die "Webmail admin environment generation failed"
     edge_archive_apply "$WEBMAIL_DIR" false edge_compose_up --profile admin up -d --wait --wait-timeout 180 webmail-admin || die "Webmail admin startup failed"
-    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && { [ "$WEBMAIL_ADMIN_RELAY_READY" = true ] || [ -f "$MAILCOW_DIR/data/conf/postfix/mailstack-relay/conversion.json" ]; }; then MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-relay-file-mode.sh" apply -y || die "Relay file conversion failed"; fi
+    if [ "$WEBMAIL_ADMIN_RELAY_ENABLE" = true ] && { [ "$WEBMAIL_ADMIN_RELAY_READY" = true ] || [ -f "$MAILCOW_DIR/data/conf/postfix/mailstack-relay/conversion.json" ]; }; then MAILCOW_DIR="$MAILCOW_DIR" WEBMAIL_DIR="$WEBMAIL_DIR" WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/apply-relay-file-mode.sh" apply -y --restore-upstream-reference || die "Relay file conversion failed"; fi
     webmail_reconcile_auth_policy "$SCRIPT_DIR" "$WEBMAIL_DIR" || die "Authentication policy application failed"
     WEBMAIL_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/admin-app-link.sh" add "$MAILCOW_DIR" || die "Webmail admin app link failed"
 elif docker inspect webmail-admin >/dev/null 2>&1; then

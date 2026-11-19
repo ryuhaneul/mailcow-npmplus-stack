@@ -31,7 +31,8 @@ elif args[:2]==['inspect','--format']: print('true')
 elif args[:3]==['compose','ps','-q']: print(args[3]+'-id')
 elif args[:3]==['compose','restart','postfix-mailcow']:
  if fault('fail-restart'): sys.exit(7)
-elif args[:3]==['compose','restart','rspamd-mailcow']: pass
+elif args[:3]==['compose','restart','rspamd-mailcow']:
+ if fault('fail-rspamd-restart'): sys.exit(12)
 elif args[:2]==['compose','up']:
  assert args[2:]==['-d','--no-deps','--force-recreate','--wait','--wait-timeout','60','rspamd-mailcow']
  assert './data/conf/rspamd/mailstack-relay:/etc/rspamd/mailstack-relay:ro,z' in (conf.parent.parent/'docker-compose.override.yml').read_text()
@@ -126,6 +127,61 @@ sed -i 's@/etc/rspamd/mailstack-relay/local_addrs.map@/etc/other.map@' "$CONF/rs
 if run apply -y; then fail 'reference drift accepted'; fi
 [ ! -s "$TMP/calls" ] || fail 'reference drift side effect'
 pass 'marker with altered static reference fails without writes/restart'
+# An upstream update may reset only this reference while retaining our marker/maps.
+reset_case
+run apply -y || fail 'upstream reference baseline'
+sed -i 's@"/etc/rspamd/mailstack-relay/local_addrs.map"@/etc/rspamd/custom/mailcow_networks.map@' "$CONF/rspamd/local.d/options.inc"
+printf '# new upstream option\nmax_message = 134217728;\n' >> "$CONF/rspamd/local.d/options.inc"
+cp "$CONF/rspamd/local.d/options.inc" "$TMP/upstream-options"
+before=$(sha256sum "$CONF/postfix/extra.cf" "$CONF/postfix/mailstack-relay/mynetworks" "$CONF/rspamd/mailstack-relay/local_addrs.map" "$CONF/postfix/mailstack-relay/conversion.json")
+: > "$TMP/calls"
+if run apply -y; then fail 'ordinary apply repaired reference without update opt-in'; fi
+if run --check --restore-upstream-reference; then fail 'read-only check repaired reference'; fi
+cmp "$CONF/rspamd/local.d/options.inc" "$TMP/upstream-options" || fail 'unrequested repair write'
+[ ! -s "$TMP/calls" ] || fail 'unrequested repair Docker call'
+run apply -y --restore-upstream-reference || fail 'upstream reference repair'
+python3 - "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc" <<'PYREFERENCE'
+from pathlib import Path
+import sys
+before,after=map(Path,sys.argv[1:])
+assert after.read_bytes()==before.read_bytes().replace(b'/etc/rspamd/custom/mailcow_networks.map',b'"/etc/rspamd/mailstack-relay/local_addrs.map"')
+PYREFERENCE
+after=$(sha256sum "$CONF/postfix/extra.cf" "$CONF/postfix/mailstack-relay/mynetworks" "$CONF/rspamd/mailstack-relay/local_addrs.map" "$CONF/postfix/mailstack-relay/conversion.json")
+[ "$before" = "$after" ] || fail 'reference repair altered maps/marker/Postfix'
+[ "$(grep -c 'compose restart rspamd-mailcow$' "$TMP/calls")" = 1 ] || fail 'repair restart count'
+grep -q 'compose exec -T rspamd-mailcow rspamadm configtest' "$TMP/calls" || fail 'repair syntax check'
+: > "$TMP/calls"
+run apply -y --restore-upstream-reference || fail 'repeat reference repair'
+[ ! -s "$TMP/calls" ] || fail 'repeat repair Docker calls'
+pass 'update opt-in repairs only the known upstream reference, retains new options/maps/marker and is idempotent'
+for fault in fail-configtest fail-rspamd-restart; do
+    cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
+    touch "$TMP/$fault"
+    if run apply -y --restore-upstream-reference; then fail 'reference repair failure accepted'; fi
+    cmp "$CONF/rspamd/local.d/options.inc" "$TMP/upstream-options" || fail 'repair did not restore prior options'
+    pass "$fault restores original options after failed reference repair"
+done
+for drift in unknown duplicate asymmetric generated fixed-coverage; do
+    cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
+    cp "$CONF/postfix/mailstack-relay/mynetworks" "$TMP/check-postfix"
+    cp "$CONF/rspamd/mailstack-relay/local_addrs.map" "$TMP/check-rspamd"
+    case "$drift" in
+        unknown) sed -i 's@custom/mailcow_networks.map@operator.map@' "$CONF/rspamd/local.d/options.inc" ;;
+        duplicate) printf 'local_addrs = /etc/rspamd/custom/mailcow_networks.map;\n' >> "$CONF/rspamd/local.d/options.inc" ;;
+        asymmetric) printf '203.0.113.99\n' >> "$CONF/rspamd/mailstack-relay/local_addrs.map" ;;
+        generated) printf '203.0.113.99\n' >> "$CONF/rspamd/custom/mailcow_networks.map" ;;
+        fixed-coverage) sed -i '/fd4d:/d' "$CONF/rspamd/mailstack-relay/local_addrs.map" ;;
+    esac
+    cp "$CONF/rspamd/local.d/options.inc" "$TMP/drift-options"
+    : > "$TMP/calls"
+    if run apply -y --restore-upstream-reference; then fail "accepted $drift repair"; fi
+    cmp "$CONF/rspamd/local.d/options.inc" "$TMP/drift-options" || fail 'unknown layout modified'
+    [ ! -s "$TMP/calls" ] || fail 'unsafe repair Docker call'
+    cp "$TMP/check-postfix" "$CONF/postfix/mailstack-relay/mynetworks"
+    cp "$TMP/check-rspamd" "$CONF/rspamd/mailstack-relay/local_addrs.map"
+    printf '172.22.1.0/24\nfd4d:6169:6c63:6f77::/64\n' > "$CONF/rspamd/custom/mailcow_networks.map"
+    pass "$drift state refuses reference repair without changing options or restarting"
+done
 reset_case
 run apply -y || fail 'missing legacy file baseline'
 rm "$CONF/postfix/extra.cf"

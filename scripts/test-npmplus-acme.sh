@@ -71,6 +71,41 @@ npmplus_acme_apply "$TMP/runtime"
 [ "${api_modes[*]}" = 'acme-resave acme-verify' ]
 [ "$state_before" = "$(sha256sum "$TMP/runtime/.acme80-state.json")" ]
 echo 'ok - template/state preparation is idempotent and second apply selects verify only'
+# A digest-only upgrade must work with PUT blocked, and update only the digest.
+cp "$TMP/runtime/.acme80-state.json" "$TMP/state-same"
+NPMPLUS_ACME_DIGEST=sha256:upgraded
+api_modes=()
+npmplus_acme_api() { api_modes+=("$1"); [ "$1" = acme-verify ]; }
+npmplus_acme_apply "$TMP/runtime"
+[ "${api_modes[*]}" = acme-verify ]
+python3 - "$TMP/state-same" "$TMP/runtime/.acme80-state.json" <<'PYSTATE'
+import json,pathlib,sys
+before,after=[json.loads(pathlib.Path(p).read_text()) for p in sys.argv[1:]]
+assert before['image_digest']!=after['image_digest']=='sha256:upgraded'
+assert before['template_sha256']==after['template_sha256']
+assert set(before)==set(after)
+PYSTATE
+echo 'ok - digest-only upgrade verifies without PUT and updates digest'
+# Failed verification falls back to re-save; a failed re-save preserves state.
+cp "$TMP/state-same" "$TMP/runtime/.acme80-state.json"
+api_modes=()
+npmplus_acme_api() { api_modes+=("$1"); [ "$1" = acme-resave ]; }
+npmplus_acme_apply "$TMP/runtime"
+[ "${api_modes[*]}" = 'acme-verify acme-resave' ]
+cp "$TMP/state-same" "$TMP/runtime/.acme80-state.json"
+api_modes=()
+npmplus_acme_api() { api_modes+=("$1"); return 1; }
+if npmplus_acme_apply "$TMP/runtime"; then echo 'FAIL: failed re-save accepted' >&2; exit 1; fi
+[ "${api_modes[*]}" = 'acme-verify acme-resave' ]
+cmp "$TMP/state-same" "$TMP/runtime/.acme80-state.json"
+echo 'ok - digest-only verification failure re-saves and preserves state on failure'
+# A changed template still takes the existing re-save path directly.
+printf '{"template_sha256":"changed","image_digest":"sha256:old"}' > "$TMP/runtime/.acme80-state.json"
+api_modes=()
+npmplus_acme_api() { api_modes+=("$1"); }
+npmplus_acme_apply "$TMP/runtime"
+[ "${api_modes[*]}" = acme-resave ]
+echo 'ok - template change still requires re-save'
 # Exercise the real rollback file restoration and archive/API ordering locally.
 NPMPLUS_ACME_BACKUP="$TMP/rollback"
 mkdir -p "$NPMPLUS_ACME_BACKUP/templates"

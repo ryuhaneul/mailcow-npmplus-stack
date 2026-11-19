@@ -741,6 +741,28 @@ _waf_current_manifest() {
     ' sh "$@"
 }
 
+# Official Hub default verified on 2026-11-19:
+# https://hub-data.crowdsec.net/appsec/crs/crs-setup.conf
+# Pin the bytes: a future Hub default requires review, never a network fetch.
+WAF_CRS_SETUP_DEFAULT_SHA256=7a80c9d46a00cd25b1071dfef7617f7aefc9ca2ce95603a0287a64b2ee072f48
+
+_waf_crs_default_reset() {
+    local id=$1 state=$2 current=$3 previous=$4
+    docker exec "$id" cat "$state/last-applied.sha256" > "$previous" || return 1
+    python3 - "$previous" "$current" "$WAF_CRS_SETUP_DEFAULT_SHA256" <<'PYCRS'
+import pathlib,re,sys
+previous,current=[pathlib.Path(p).read_text().splitlines() for p in sys.argv[1:3]]
+path='/var/lib/crowdsec/data/crs-setup.conf'
+# Exact ordered manifests, with one changed entry and no missing/extra files.
+if len(previous)!=len(current): sys.exit(1)
+differences=[(old,new) for old,new in zip(previous,current) if old!=new]
+if len(differences)!=1: sys.exit(1)
+old,new=differences[0]
+if not re.fullmatch(r'[0-9a-f]{64}  '+re.escape(path),old): sys.exit(1)
+sys.exit(new!=sys.argv[3]+'  '+path)
+PYCRS
+}
+
 _waf_reconcile() (
     set +x
     set -o pipefail
@@ -794,9 +816,15 @@ _waf_reconcile() (
             ! _waf_current_manifest "$npm" /data/crowdsec/crowdsec.conf > "$work/npm.manifest"; then
             waf_error 'managed WAF file state cannot be verified; preserved — 수동 정리 필요'; return 1
         fi
-        if ! _waf_matches "$cs" "$state/last-applied.sha256" < "$work/cs.manifest" ||
-            ! _waf_matches "$npm" "$npm_state/last-applied.sha256" < "$work/npm.manifest"; then
+        if ! _waf_matches "$npm" "$npm_state/last-applied.sha256" < "$work/npm.manifest"; then
             waf_error 'operator changed managed WAF files; preserved — 수동 정리 필요'; return 1
+        fi
+        if ! _waf_matches "$cs" "$state/last-applied.sha256" < "$work/cs.manifest"; then
+            if [ "$WAF_ENABLE" = true ] && _waf_crs_default_reset "$cs" "$state" "$work/cs.manifest" "$work/cs.previous"; then
+                _waf_log 'Hub default crs-setup.conf detected; reapplying managed WAF configuration'
+            else
+                waf_error 'operator changed managed WAF files; preserved — 수동 정리 필요'; return 1
+            fi
         fi
     fi
     if [ "$WAF_ENABLE" = true ]; then

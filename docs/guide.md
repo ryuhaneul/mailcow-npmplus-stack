@@ -160,6 +160,16 @@ CrowdSec는 NPMplus의 `npmplus` 형식 접근 로그를 수집해 반복 공격
 setup·update는 이 세 키를 `.env`에 쓰거나 변경하지 않습니다. 운영 기본값은 `block`입니다. 기존 설치도 키가 없으면 다음 update부터 켜집니다. 튜닝 전 이를 막거나 필터를 해제하려면 서버 `.env`에 `WAF_ENABLE=false`를 직접 적고 update를 실행하세요. 스택이 관리하던 설정만 원복하고 기존 profiles를 복구합니다. 웹메일이 켜져 있으면 정규화한 웹메일 호스트에만 본문·검색·암호 필드 예외를 적용하며, 다른 호스트와 메서드에는 적용하지 않습니다. NPM 관리 `/api/nginx/`에는 필요한 규칙 두 개만 제외합니다. `appsec-default`와 `generic-rules`를 중복으로 싣지 않으며(중복 rule ID는 기동 실패), 403 반복을 다시 밴으로 키우지 않는 로컬 시나리오를 사용합니다. 설정이 같으면 파일 쓰기와 CrowdSec SIGHUP을 생략합니다. setup은 Phase7에서 설정을 적용하고 Phase10 마지막의 기존 NPMplus 재시작 한 번으로 읽힙니다. 그 사이 실패하면 파일만 적용된 상태일 수 있으며 다음 setup의 마지막 재시작이나 update 재시작에서 반영됩니다. update의 기존 NPMplus 재시작은 DNS 캐시 갱신을 위해 한 번 유지합니다.
 
 
+관리 파일이 마지막 적용 해시와 다르면 setup·update는 파일을 보존하고 중단합니다.
+예외는 `WAF_ENABLE=true`이고 CrowdSec·NPMplus 관리 manifest 전체에서
+`/var/lib/crowdsec/data/crs-setup.conf` 하나만 달라졌으며, 현재 내용의 SHA-256이
+2026-11-19 확인한 공식 Hub 기본값
+`7a80c9d46a00cd25b1071dfef7617f7aefc9ca2ce95603a0287a64b2ee072f48`과 같을 때뿐입니다.
+컨테이너 재생성으로 이 기본값이 복원된 경우 기존 트랜잭션 경로에서 관리 설정을
+다시 렌더·적용하고 검사 후 CrowdSec를 reload합니다. 실행 중 외부 다운로드는 없습니다.
+다른 편집, 함께 바뀐 파일, 새 Hub 기본값은 자동 복구하지 않으므로 수동 검토하세요.
+
+
 공개 웹을 끈 동안에도 임시 복구를 위해 예외 설정은 유지됩니다. 다음 메일 서비스 예외는 `mailcow.${DOMAIN}` 호스트에만 적용합니다. NPM 관리 API 예외는 표에 적은 두 Host에만 적용합니다. AppSec 규칙 제거는 block의 in-band·detect의 out-of-band에서만 실행하며, 다른 호스트·메서드·경로에는 적용하지 않습니다.
 
 | 요청 | 예외 | 근거 |
@@ -1475,6 +1485,9 @@ ACL·locations·meta 차이나 nginx 검사 실패가 있으면 그 호스트를
 
 전체 성공 후 runtime의 `.acme80-state.json`을 기록합니다. 같은 템플릿/이미지의
 재실행은 GET과 conf 검사만 하며 PUT이나 추가 컨테이너 교체를 하지 않습니다.
+승인된 이미지의 원본 템플릿이 같고 state의 이미지 digest만 바뀐 경우에도 먼저
+GET/conf 검증을 수행합니다. 통과하면 PUT 없이 state의 digest만 갱신하며,
+실패하면 기존 동일 값 재저장·복구 경로를 사용합니다.
 파일 변경 때는 기존 archive drain/WAF compose 경로로 NPMplus를 재생성하므로
 짧은 웹 중단이 있습니다. 기존 update의 마지막 DNS 캐시 재시작은 별개입니다.
 `REGENERATE_ALL=true`나 env 해시 파일 삭제는 custom conf까지 지울 수 있어 사용하지

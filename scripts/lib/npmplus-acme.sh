@@ -209,18 +209,32 @@ npmplus_acme_apply() {
     local dir="$1" mode=acme-resave hash
     npmplus_acme_wait && npmplus_acme_mounted "$dir" || { npmplus_acme_failure "$dir" "NPM health or mounted template validation failed"; return 1; }
     hash=$(sha256sum "$dir/templates/_common.conf") || return 1
-    if python3 - "$dir/.acme80-state.json" "${hash%% *}" "$NPMPLUS_ACME_DIGEST" <<'PY'
+    mode=$(python3 - "$dir/.acme80-state.json" "${hash%% *}" "$NPMPLUS_ACME_DIGEST" <<'PY'
 import json,pathlib,sys
 try:
  state=json.loads(pathlib.Path(sys.argv[1]).read_text())
- assert state=={'template_sha256':sys.argv[2],'image_digest':sys.argv[3]}
-except (OSError,ValueError,AssertionError): sys.exit(1)
+ assert set(state)=={'template_sha256','image_digest'}
+ assert state['template_sha256']==sys.argv[2]
+ assert isinstance(state['image_digest'],str) and state['image_digest'].startswith('sha256:')
+ print('acme-verify' if state['image_digest']==sys.argv[3] else 'verify-digest')
+except (OSError,ValueError,TypeError,AssertionError): sys.exit(1)
 PY
-    then mode=acme-verify; fi
-    npmplus_acme_api "$mode" "$NPMPLUS_ACME_BACKUP" || {
-        npmplus_acme_failure "$dir" "partial apply stopped; review host recovery status before full rollback"
-        return 1
-    }
+    ) || mode=acme-resave
+    if [ "$mode" = verify-digest ]; then
+        # Preflight approved the image source. Avoid unnecessary PUTs, which
+        # AppSec can block, when existing host configs still verify.
+        if npmplus_acme_api acme-verify "$NPMPLUS_ACME_BACKUP"; then
+            mode=verified-digest
+        else
+            mode=acme-resave
+        fi
+    fi
+    if [ "$mode" != verified-digest ]; then
+        npmplus_acme_api "$mode" "$NPMPLUS_ACME_BACKUP" || {
+            npmplus_acme_failure "$dir" "partial apply stopped; review host recovery status before full rollback"
+            return 1
+        }
+    fi
     [ "$mode" != acme-verify ] || return 0
     python3 - "$dir/.acme80-state.json" "${hash%% *}" "$NPMPLUS_ACME_DIGEST" <<'PY'
 import json,os,pathlib,sys,tempfile

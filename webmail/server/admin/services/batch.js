@@ -79,27 +79,27 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
   }
   // Legacy migration: init_db.inc.php 1683-1692, 1742-1764 (mailcow 2026-11a).
   // Existing sources keep their certificate policy and sharing settings.
-  function sourceMatches(source, row, actor) {
+  function sourceMatches(source, row, sourceOwner) {
     return /^[1-9]\d*$/.test(String(source.id)) && normalize(source.host ?? source.host1) === row.host &&
       String(source.port ?? source.port1) === '993' && (source.enc ?? source.enc1) === 'SSL' &&
       source.auth_type === 'PLAIN' && String(source.active) === '1' &&
       (source.scope === 'all' || source.scope === 'domain' && source.domains?.some(domain => normalize(domain) === row.target.split('@')[1]) ||
-        source.scope === 'user' && (normalize(source.created_by) === normalize(actor) || source.users?.some(user => normalize(user) === row.target)));
+        source.scope === 'user' && (normalize(source.created_by) === normalize(sourceOwner) || source.users?.some(user => normalize(user) === row.target)));
   }
-  async function syncSource(session, row, actor) {
+  async function syncSource(session, row, sourceOwner) {
     const sources = await rows(session, 'syncjob_source/all');
-    const matches = sources.filter(source => sourceMatches(source, row, actor));
+    const matches = sources.filter(source => sourceMatches(source, row, sourceOwner));
     if (matches.length > 1) throw new AppError(409, 'SYNC_SOURCE_AMBIGUOUS', '조건에 맞는 가져올 서버가 여러 개예요. 원본 서버 설정을 정리한 뒤 이 줄만 다시 실행해 주세요.');
     if (matches.length === 1) return { id: String(matches[0].id), created: false };
     const domain = row.target.split('@')[1], base = [...`${row.host} (${domain})`].slice(0, 94).join('');
-    const names = new Set(sources.filter(source => normalize(source.created_by) === normalize(actor)).map(source => source.name));
+    const names = new Set(sources.filter(source => normalize(source.created_by) === normalize(sourceOwner)).map(source => source.name));
     let name = base;
     for (let i = 2; names.has(name) && i <= 1000; i++) name = `${base} ${i}`;
     if (names.has(name)) throw new AppError(409, 'SYNC_SOURCE_NAME_EXHAUSTED', '가져올 서버 이름이 이미 사용 중이에요. 원본 서버 이름을 정리해 주세요.');
     await mailcow.call(session, 'POST', '/api/v1/add/syncjob_source', { name, description: 'Migrated sync jobs',
       host: row.host, port: 993, enc: 'SSL', auth_type: 'PLAIN', verify_cert: 0, scope: 'domain', domains: [domain], active: 1 });
     const ids = new Set(sources.map(source => String(source.id)));
-    const added = (await rows(session, 'syncjob_source/all')).filter(source => !ids.has(String(source.id)) && source.name === name && normalize(source.created_by) === normalize(actor) && sourceMatches(source, row, actor) &&
+    const added = (await rows(session, 'syncjob_source/all')).filter(source => !ids.has(String(source.id)) && source.name === name && normalize(source.created_by) === normalize(sourceOwner) && sourceMatches(source, row, sourceOwner) &&
       source.scope === 'domain' && source.domains?.length === 1 && String(source.verify_cert) === '0');
     if (added.length !== 1) throw new AppError(502, 'WRITE_VERIFY_FAILED', '만든 원본 서버를 확인할 수 없어요. 원본 서버 설정을 확인해 주세요.');
     return { id: String(added[0].id), created: true };
@@ -196,7 +196,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     });
     return { kind, rows: result, normal: result.filter(row => row.valid).length, errors: result.filter(row => !row.valid).length };
   }
-  async function executeSync({ session, actor, ip, row, options, sourcePassword }) {
+  async function executeSync({ session, actor, sourceOwner, ip, row, options, sourcePassword }) {
     return routingLock(() => lock.run(`sync-create:${row.target}`, async () => {
       let mailboxCreated = false, sourceCleanupFailed = false;
       const identity = { source: row.source, host: row.host, target: row.target };
@@ -215,7 +215,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
           const latest = await rows(session, 'syncjobs/all/no_log');
           const existing = latest.find(job => sameJob(job, row));
           if (existing) throw new AppError(409, 'SYNC_EXISTS', `같은 작업이 이미 있어요(원본: ${existing.user1}).`);
-          const source = await syncSource(session, row, actor);
+          const source = await syncSource(session, row, sourceOwner);
           try {
             const body = { username: row.target, source_id: source.id, user1: row.source, password1: sourcePassword, ...syncDefaults };
             try { safe(await mailcow.call(session, 'POST', '/api/v1/add/syncjob', body)); }
@@ -249,10 +249,10 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
       }
     }));
   }
-  async function executeRow({ session, actor, ip, kind, row, options, sourcePassword }) {
+  async function executeRow({ session, actor, sourceOwner, ip, kind, row, options, sourcePassword }) {
     const steps = []; let initialPassword;
     try {
-      if (kind === 'syncjobs') return await executeSync({ session, actor, ip, row, options, sourcePassword });
+      if (kind === 'syncjobs') return await executeSync({ session, actor, sourceOwner, ip, row, options, sourcePassword });
       if (kind === 'aliases') return { line: row.line, result: 'ok', ...await aliases.create({ session, actor, ip, data: { address: row.address, targets: row.targets } }) };
       if (kind === 'mailboxes') {
         const [local, domain] = row.email.split('@');
@@ -274,7 +274,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
         steps, ...(steps.length ? { recovery: ['도메인은 만들어졌어요. 메일함 상태를 확인한 뒤 해당 줄만 다시 실행해 주세요.'] } : {}) };
     } finally { initialPassword = undefined; }
   }
-  async function run({ session, actor, ip, kind, data }) {
+  async function run({ session, actor, sourceOwner = session.username, ip, kind, data }) {
     if (!Object.hasOwn(columns, kind)) throw new AppError(404, 'NOT_FOUND', '지원하지 않는 일괄 작업이에요.');
     const credentials = new Map(), options = input(data, kind);
     let parsed;
@@ -293,7 +293,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     const response = await audit.run({ actor, ip, action: `batch.${kind}`, target: `batch:${kind}`, kind: 'config', revertible: false,
       before: {}, after: { lines: chosen.map(row => row.line) } }, async intent => {
       for (const row of chosen) {
-        try { results.push(await executeRow({ session, actor, ip, kind, row, options, sourcePassword: credentials.get(row.line) })); }
+        try { results.push(await executeRow({ session, actor, sourceOwner, ip, kind, row, options, sourcePassword: credentials.get(row.line) })); }
         catch (error) {
           if (!(error instanceof MailcowAuthLost)) throw error;
           lost = error; results.push(safe({ line: row.line, ...(kind === 'syncjobs' ? { source: row.source, host: row.host, target: row.target } : kind === 'aliases' ? { address: row.address } : { email: row.email }), result: 'failed', code: code(error) })); break;

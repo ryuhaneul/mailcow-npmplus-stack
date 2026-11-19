@@ -20,7 +20,7 @@ import { AppError } from '../../server/errors.js';
 import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
 
 const legacyRetirement = { store: { read: async () => emptyRetirementState(), keysForOwner: async () => [], blockedRecipients: async () => [] }, routing: { withRoutingLock: operation => operation(), assertMutation: async () => {}, assertAdminScript: async () => {} } };
-const GB = 1024 ** 3, ctx = { session: {}, actor: 'admin', ip: '198.51.100.9' };
+const GB = 1024 ** 3, ctx = { session: { username: 'admin' }, actor: 'admin', ip: '198.51.100.9' };
 const makeBox = (username, name = username.split('@')[0], quota = 20) => ({ username, name, quota: quota * GB, active: 1, quota_used: 0, messages: 0, sender_acl: [], attributes: {} });
 async function fixture(t) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'webmail-a09a-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -42,7 +42,7 @@ async function fixture(t) {
     if (path === '/api/v1/add/mailbox') { if (!options.ignoreWrites) boxes.push(makeBox(`${body.local_part}@${body.domain}`, body.name, +body.quota / 1024)); }
     else if (path === '/api/v1/add/alias') { aliases.push({ id: aliases.length + 1, ...body }); if (options.stripSenders) for (const box of boxes) box.sender_acl = box.sender_acl.filter(value => value !== body.address); }
     else if (path === '/api/v1/add/syncjob_source') {
-      if (!options.ignoreSource) sources.push({ id: Math.max(0, ...sources.map(source => +source.id)) + 1, created_by: 'admin', ...body });
+      if (!options.ignoreSource) sources.push({ id: Math.max(0, ...sources.map(source => +source.id)) + 1, created_by: options.sourceOwner ?? (_session.permission ? 'API' : _session.username ?? 'admin'), ...body });
     }
     else if (path === '/api/v1/delete/syncjob_source') {
       assert.ok(!jobs.some(job => body.includes(String(job.source_id))));
@@ -444,3 +444,56 @@ test('CSV sync 2026-11: concurrent different targets reuse one newly created sou
   const results = await Promise.all(['existing@example.com', 'plan@example.com'].map(target => sync(f, { csv: syncCsv('old@example.net', target), action: 'run', lines: [2] })));
   assert.ok(results.every(r => r.result === 'ok')); assert.equal(f.sources.length, 1); assert.equal(f.jobs.length, 2); assert.equal(new Set(f.jobs.map(job => job.source_id)).size, 1);
 });
+
+async function authenticatedBatch(t, keyMode) {
+  const f = await fixture(t);
+  const client = { ...f.mailcow, createApiContext: ({ permission }) => Object.freeze({ permission }),
+    async login({ username }) { return { username, state: 'ready' }; }, async logout() {} };
+  const app = await createAdminApp({ retirement: legacyRetirement, protocolNetlimit: { store: f.netlimit }, dockerapi: f.dockerapi, audit: f.audit,
+    config: { adminHostname: 'mailadmin.example.com', trustProxy: ['192.0.2.0/24'], sessionIdleMin: 60, sessionMaxHours: 8,
+      auditDir: f.dir, apiKeyDir: join(f.dir, 'credentials'), mailcowApiKey: 'SyntheticUpstreamBatchOnly' }, logger: false, auth: { client } });
+  t.after(() => app.close());
+  let headers;
+  if (keyMode) {
+    const key = await app.apiKeys.create({ name: 'batch automation', permission: 'full', allowedIps: [], expiresAt: null }, 'admin', { id: app.apiKeys.allocateId() });
+    headers = { 'x-mailadmin-api-key': key.token };
+  } else {
+    const login = await app.inject({ method: 'POST', url: '/api/admin/auth/login', headers: { origin: 'https://mailadmin.example.com' }, payload: { username: 'admin', password: 'synthetic' } });
+    assert.equal(login.statusCode, 200);
+    headers = { origin: 'https://mailadmin.example.com', cookie: login.headers['set-cookie'].split(';')[0], 'x-mailadmin-csrf': login.json().csrf };
+  }
+  return { ...f, send: async (csv = syncCsv('old@example.net', 'existing@example.com')) => {
+    const response = await app.inject({ method: 'POST', url: '/api/admin/batch/syncjobs', headers, payload: { action: 'run', csv, lines: [2], options: { autoCreate: false } } });
+    assert.equal(response.statusCode, 200); return response.json();
+  } };
+}
+for (const keyMode of [true, false]) {
+  const label = keyMode ? 'full API key' : 'human session', owner = keyMode ? 'API' : 'admin';
+  test(`D-1 ${label}: first normal HTTP CSV creates exactly one source/job; audit actor stays separate`, async t => {
+    const f = await authenticatedBatch(t, keyMode), r = await f.send();
+    assert.equal(r.result, 'ok'); assert.equal(r.results[0].result, 'ok'); assert.equal(f.sources.length, 1); assert.equal(f.jobs.length, 1);
+    assert.equal(f.sources[0].created_by, owner); assert.equal(f.jobs[0].source_id, String(f.sources[0].id));
+    const records = await f.audit.read(); const intent = records.rows.find(row => row.phase === 'intent' && row.action === 'sync.create');
+    assert.equal(intent.actor, keyMode ? 'API 키: batch automation' : 'admin');
+  });
+  test(`D-1 ${label}: owner-specific name collision keeps existing source unchanged`, async t => {
+    const f = await authenticatedBatch(t, keyMode), name = 'imap.example.net (example.com)';
+    const existing = sourceRow({ created_by: owner, name, active: 0 }); f.sources.push(structuredClone(existing));
+    const r = await f.send(); assert.equal(r.result, 'ok'); assert.equal(f.sources.length, 2); assert.equal(f.sources[1].name, name + ' 2'); assert.equal(f.sources[1].created_by, owner); assert.deepEqual(f.sources[0], existing);
+  });
+  test(`D-1 ${label}: private eligible upstream-owned source reused without editing`, async t => {
+    const f = await authenticatedBatch(t, keyMode), existing = sourceRow({ created_by: owner, scope: 'user', domains: [], users: [] });
+    f.sources.push(structuredClone(existing)); const r = await f.send(); assert.equal(r.result, 'ok'); assert.deepEqual(f.sources, [existing]); assert.equal(f.jobs[0].source_id, '7'); assert.equal(writes(f).filter(row => row.path.includes('syncjob_source')).length, 0);
+  });
+  test(`D-1 ${label}: failed job deletes only the newly created unused source`, async t => {
+    const f = await authenticatedBatch(t, keyMode), existing = sourceRow({ id: 4, created_by: owner, active: 0 });
+    f.sources.push(structuredClone(existing)); f.options.ignoreSync = true;
+    const r = await f.send(); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.deepEqual(f.sources, [existing]);
+    assert.deepEqual(writes(f).filter(row => row.path.endsWith('/delete/syncjob_source')).map(row => row.body), [['5']]);
+  });
+  test(`D-1 ${label}: readback never claims or deletes a new source owned by another principal`, async t => {
+    const f = await authenticatedBatch(t, keyMode); f.options.sourceOwner = 'another-admin';
+    const r = await f.send(); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.equal(f.jobs.length, 0); assert.equal(f.sources.length, 1);
+    assert.equal(writes(f).filter(row => row.path.endsWith('/delete/syncjob_source')).length, 0);
+  });
+}

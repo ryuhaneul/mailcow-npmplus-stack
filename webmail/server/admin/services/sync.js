@@ -9,19 +9,52 @@ const invalid = () => new AppError(422, 'INVALID_INPUT', '동기화 설정과 �
 const missing = () => new AppError(404, 'NOT_FOUND', '동기화 작업을 찾을 수 없어요.');
 const failed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 동기화 설정이 예상과 달라요. 다시 확인해 주세요.');
 const fields = ['maxage', 'delete1', 'delete2', 'delete2duplicates', 'custom_params', 'mins_interval'];
-// functions.mailbox.inc.php 2336–2367, vars.inc.php 288–414: upstream option names.
+// App-level option policy; upstream also validates structured option values.
 const allowedParams = new Set('abort authmd51 authmd52 authmech1 authmech2 authuser1 authuser2 debug debugcontent debugcrossduplicates debugflags debugfolders debugimap debugimap1 debugimap2 debugmemory debugssl delete1emptyfolders delete2folders disarmreadreceipts domain1 domain2 domino1 domino2 dry errorsmax exchange1 exchange2 exitwhenover expunge1 f1f2 filterbuggyflags folder folderfirst folderlast folderrec gmail1 gmail2 idatefromheader include inet4 inet6 justconnect justfolders justfoldersizes justlogin keepalive1 keepalive2 log logdir logfile maxbytesafter maxlinelength maxmessagespersecond maxsize maxsleep minage minsize noabletosearch noabletosearch1 noabletosearch2 noexpunge1 noexpunge2 nofoldersizesatend noid nolog nomixfolders noresyncflags nossl1 nossl2 nosyncacls notls1 notls2 nouidexpunge2 nousecache oauthaccesstoken1 oauthaccesstoken2 oauthdirect1 oauthdirect2 office1 office2 pidfile pidfilelocking prefix1 prefix2 proxyauth1 proxyauth2 resyncflags resynclabels search search1 search2 sep1 sep2 showpasswords skipemptyfolders ssl2 sslargs1 sslargs2 subfolder1 subscribe subscribed syncacls syncduplicates syncinternaldates synclabels tests testslive testslive6 tls2 truncmess usecache useheader useuid'.split(' '));
 const destructive = ['delete', 'delete1', 'delete2', 'delete2duplicates', 'delete1emptyfolders', 'delete2folders', 'delete2foldersonly', 'delete2foldersbutnot', 'expunge', 'expunge1', 'expunge2', 'expungeaftereach', 'uidexpunge2'];
 const hiddenReason = '추가 인자에 showpasswords 가 있어 로그에 원본 암호가 찍힐 수 있음 — 인자에서 빼면 로그를 볼 수 있음';
+// Keep the app's argument text while using the structured 2026-11 API on writes.
+function parameterPairs(value) {
+  if (typeof value !== 'string') throw invalid();
+  let text = value.trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    let pairs;
+    try { pairs = JSON.parse(text); } catch { throw invalid(); }
+    if (!Array.isArray(pairs) || pairs.some(pair => !pair || typeof pair !== 'object' || Array.isArray(pair) || Object.keys(pair).some(key => !['o', 'v'].includes(key)) || typeof pair.o !== 'string' || typeof pair.v !== 'string' || !/^[a-z][a-z0-9]*$/i.test(pair.o))) throw invalid();
+    return pairs.map(({ o, v }) => ({ o: o.toLowerCase(), v }));
+  }
+  const pairs = [];
+  while (text) {
+    const match = /^--?([a-z][a-z0-9]*)(?:=("(?:[^"\\]|\\.)*"|'[^']*'|[^\s]+))?(?=\s|$)/i.exec(text);
+    if (!match) throw invalid();
+    let value = match[2] ?? '';
+    if (value.startsWith('"')) { try { value = JSON.parse(value); } catch { throw invalid(); } }
+    else if (value.startsWith("'")) { if (!/^'[^']*'$/.test(value)) throw invalid(); value = value.slice(1, -1); }
+    else if (/["']/.test(value)) throw invalid();
+    pairs.push({ o: match[1].toLowerCase(), v: value });
+    text = text.slice(match[0].length).trimStart();
+  }
+  return pairs;
+}
+const parameterText = pairs => pairs.map(({ o, v }) => `--${o}${v === '' ? '' : `=${/^[^\s"'\\]+$/.test(v) ? v : JSON.stringify(v)}`}`).join(' ');
+const responseParams = value => typeof value === 'string' && value.trimStart().startsWith('[') ? parameterText(parameterPairs(value)) : String(value ?? '');
 const paramNames = value => String(value ?? '').split('-').filter(Boolean).map(part => part.split('=')[0].trimEnd().toLowerCase());
 const exposesPassword = value => paramNames(value).some(name => name === 'showpasswords' || 'showpasswords'.startsWith(name));
 function customParams(value) {
-  if (typeof value !== 'string') throw invalid();
-  for (const name of paramNames(value)) {
+  const pairs = parameterPairs(value);
+  if (pairs.length > 100) throw invalid();
+  for (const { o: name, v } of pairs) {
     // Exact allowlist also rejects abbreviated option names accepted by Getopt::Long.
+    if (!allowedParams.has(name) || destructive.some(option => option.startsWith(name)) || name === 'showpasswords' || secretParams.includes(name) || /[\x00-\x1f\x7f]/.test(v) || /(?:^|\s)-[a-z0-9-]/i.test(v) || Buffer.byteLength(v, 'utf8') > 1000) throw invalid();
+  }
+  const text = parameterText(pairs);
+  // Preserve the existing refusal of hidden/abbreviated options in argument
+  // text, including destructive or credential flags embedded in values.
+  for (const name of paramNames(text)) {
     if (!allowedParams.has(name) || /\s/.test(name) || destructive.some(option => option.startsWith(name)) || name === 'showpasswords' || secretParams.includes(name)) throw invalid();
   }
-  return value;
+  return text;
 }
 const hasSecretParams = value => [...String(value).matchAll(/(?:^|\s)--?([a-z0-9]+)/gi)].some(([, name]) => secretParams.some(option => option.startsWith(name.toLowerCase())));
 function id(value) {
@@ -41,7 +74,12 @@ function snapshot(row) {
 function dto(row) { return { ...row, etag: etag(snapshot(row)) }; }
 export function createSyncService({ mailcow, audit, lock, history }) {
   async function call(session, method, path, body) {
-    try { return sanitizeSyncResponse(await mailcow.call(session, method, path, body)); }
+    try {
+      const result = await mailcow.call(session, method, path, body);
+      // Convert before sanitizing so credential arguments in {o,v} are masked
+      // by the same exact-option rules as the existing text representation.
+      return sanitizeSyncResponse(Array.isArray(result) ? result.map(row => row && Object.hasOwn(row, 'custom_params') ? { ...row, custom_params: responseParams(row.custom_params) } : row) : result);
+    }
     catch (error) { error.message = sanitizeSyncResponse(error.message); throw error; }
   }
   async function rows(session, path) {
@@ -87,13 +125,13 @@ export function createSyncService({ mailcow, audit, lock, history }) {
   function attrs(before, after) {
     const attr = {};
     if (before.active !== after.active) attr.active = Number(after.active);
-    for (const key of fields) if (before.options[key] !== after.options[key]) attr[key] = typeof after.options[key] === 'boolean' ? Number(after.options[key]) : after.options[key];
+    for (const key of fields) if (before.options[key] !== after.options[key]) attr[key] = key === 'custom_params' ? parameterPairs(after.options[key]) : typeof after.options[key] === 'boolean' ? Number(after.options[key]) : after.options[key];
     return attr;
   }
   function multiSource(before, after, rows, confirmed = false) {
     if (before.options.delete2 || !after.options.delete2) return [];
     const jobs = rows.filter(row => String(row.id) !== before.id && String(row.user2).trim().toLowerCase() === String(before.user2).trim().toLowerCase())
-      .map(row => ({ id: String(row.id), user1: String(row.user1 ?? ''), host1: String(row.host1 ?? ''), active: String(row.active) === '1', delete2: String(row.delete2) === '1' }));
+      .map(row => ({ id: String(row.id), user1: String(row.user1 ?? ''), host1: String(row.source_host ?? row.host1 ?? ''), active: String(row.active) === '1', delete2: String(row.delete2) === '1' }));
     if (jobs.length && confirmed !== true) {
       const error = new AppError(409, 'DELETE2_MULTI_SOURCE', '같은 대상 메일함에 다른 동기화 작업이 있어요. 동기화 화면에서 목록을 확인하고 설정을 새로 바꿔 주세요.');
       error.jobs = jobs; throw error;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { syncOptions } from '../../web/src/admin/pages/sync-options.js';
 import { createSyncService, sanitizeSyncResponse } from '../../server/admin/services/sync.js';
 import { createAudit } from '../../server/admin/audit.js';
 import { createResourceLock } from '../../server/admin/lock.js';
@@ -14,14 +15,14 @@ import { MailcowAuthLost } from '../../server/admin/mailcow-client.js';
 const ctx = { session: {}, actor: 'admin', ip: '198.51.100.58', id: '1' };
 async function fixture(t) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'webmail-a14-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const jobs = [{ id: 1, user2: 'owner@example.com', user1: 'source@example.net', host1: 'imap.example.net', active: '1', maxage: '0', delete1: '0', delete2: '0', delete2duplicates: '0', custom_params: '', mins_interval: '20', last_run: '2026-10-16 10:00:00', log: '' }];
+  const jobs = [{ id: 1, user2: 'owner@example.com', user1: 'source@example.net', source_id: 7, source_host: 'imap.example.net', active: '1', maxage: '0', delete1: '0', delete2: '0', delete2duplicates: '0', custom_params: '[]', mins_interval: '20', last_run: '2026-10-16 10:00:00', log: '' }];
   const calls = [], options = {};
   const mailcow = { async call(_session, method, path, body) {
     calls.push({ method, path, body: structuredClone(body) }); await options.onCall?.({ method, path, body });
-    if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
+    if (path === '/api/v1/get/status/version') return { version: '2026-11a' };
     if (path === '/api/v1/get/syncjobs/all/no_log') return jobs.map(row => { const { log, ...safe } = row; return structuredClone(safe); });
     if (path === '/api/v1/get/syncjobs/owner%40example.com') return structuredClone(jobs.filter(row => row.user2 === 'owner@example.com'));
-    if (path === '/api/v1/edit/syncjob') { if (!options.ignoreWrites) Object.assign(jobs.find(row => String(row.id) === body.items[0]), body.attr); return [{ type: 'success', log: ['edit', { password1: 'synthetic-password-marker' }] }]; }
+    if (path === '/api/v1/edit/syncjob') { if (!options.ignoreWrites) { const attr = structuredClone(body.attr); if (Object.hasOwn(attr, 'custom_params')) { assert.ok(Array.isArray(attr.custom_params), '2026-11 accepts only structured option writes'); attr.custom_params = JSON.stringify(attr.custom_params); } Object.assign(jobs.find(row => String(row.id) === body.items[0]), attr); } return [{ type: 'success', log: ['edit', { password1: 'synthetic-password-marker' }] }]; }
     if (path === '/api/v1/delete/syncjob') { if (!options.ignoreWrites) jobs.splice(jobs.findIndex(row => String(row.id) === body[0]), 1); return [{ type: 'success' }]; }
     assert.fail(path);
   } };
@@ -51,7 +52,7 @@ for (const flag of ['--password1 test-secret', '--password1=test-secret', '-pass
 test('sync: changed attrs only, reversible config including re-enabling deletes on confirmed undo', async t => {
   const f = await fixture(t), original = await get(f);
   const changed = await patch(f, { active: false, options: { maxage: 300, mins_interval: 60, delete1: true, delete2: true, delete2duplicates: true, custom_params: '--maxsize=100 --dry' }, confirmDelete1: true, confirmDelete2: true });
-  assert.deepEqual(writes(f)[0].body, { items: ['1'], attr: { active: 0, maxage: 300, delete1: 1, delete2: 1, delete2duplicates: 1, custom_params: '--maxsize=100 --dry', mins_interval: 60 } });
+  assert.deepEqual(writes(f)[0].body, { items: ['1'], attr: { active: 0, maxage: 300, delete1: 1, delete2: 1, delete2duplicates: 1, custom_params: [{ o: 'maxsize', v: '100' }, { o: 'dry', v: '' }], mins_interval: 60 } });
   const record = await f.history.detail(changed.auditId); assert.equal(record.kind, 'config'); assert.equal(record.canRevert, true); for (const key of ['user1', 'last_run', 'log', 'password1']) assert.equal(record.before[key], undefined);
   await revert(f, changed.auditId); assert.equal((await get(f)).etag, original.etag);
   await patch(f, { options: { delete1: true, delete2: true }, confirmDelete1: true, confirmDelete2: true }); const disabled = await patch(f, { options: { delete1: false, delete2: false } }); await revert(f, disabled.auditId); assert.equal(f.jobs[0].delete1, 1); assert.equal(f.jobs[0].delete2, 1);
@@ -134,7 +135,7 @@ test('sync: empty upstream object is empty list; malformed result is502', async 
 });
 
 test('sync multi-source: inactive source blocks delete2, projects safe list, basic confirmation422 comes first', async t => {
-  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, user1: 'other@example.net', host1: 'other.example.net', active: '0', password1: 'synthetic-other-password', log: 'synthetic-other-log' });
+  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, user1: 'other@example.net', source_host: 'other.example.net', active: '0', password1: 'synthetic-other-password', log: 'synthetic-other-log' });
   await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }), error => {
     assert.equal(error.statusCode, 409); assert.equal(error.code, 'DELETE2_MULTI_SOURCE'); assert.deepEqual(error.jobs, [{ id: '2', user1: 'other@example.net', host1: 'other.example.net', active: false, delete2: false }]); assert.ok(!JSON.stringify(error.jobs).includes('password')); assert.ok(!JSON.stringify(error.jobs).includes('log')); return true;
   });
@@ -210,7 +211,7 @@ for (const name of ['password1', 'password2', 'passfile1', 'passfile2', 'oauthac
     const record = await f.history.detail(changed.auditId);
     assert.equal(record.before.options.custom_params, `--${name}=*** --dry`); assert.equal(record.after.options.custom_params, '--dry');
     assert.equal(record.canRevert, false); assert.ok(!JSON.stringify(await f.audit.read()).includes(secret));
-    assert.equal(f.jobs[0].custom_params, '--dry');
+    assert.deepEqual(JSON.parse(f.jobs[0].custom_params), [{ o: 'dry', v: '' }]);
   });
 }
 test('sync sanitizer: short secrets preserve structural values while masking human text and argument values', () => {
@@ -233,7 +234,7 @@ for (const params of ['--folder="token inbox"', '--folder "INBOX/secret"', '--in
 test('sync: folder containing token saves and verifies unchanged argument text', async t => {
   const f = await fixture(t), params = '--folder="token inbox"';
   const result = await patch(f, { options: { custom_params: params } });
-  assert.equal(result.custom_params, params); assert.equal(f.jobs[0].custom_params, params);
+  assert.equal(result.custom_params, params); assert.deepEqual(JSON.parse(f.jobs[0].custom_params), [{ o: 'folder', v: 'token inbox' }]);
 });
 for (const field of ['log', 'returned_text']) test(`sync: ${field} hides option forms only`, async t => {
   const f = await fixture(t);
@@ -253,4 +254,54 @@ for (const name of ['password1', 'password2', 'passfile1', 'passfile2', 'oauthac
 test('sync sanitizer: generic words and non-exact option names are untouched', () => {
   const text = 'password1: normal passwd=normal token inbox secret api_key=normal --password1extra=normal --token=normal';
   assert.equal(sanitizeSyncResponse(text), text);
+});
+
+
+test('sync 2026-11: full UI options from a JSON-empty job save without treating [] as an argument', async t => {
+  const f = await fixture(t), detail = await get(f);
+  assert.equal(detail.custom_params, '');
+  const options = { ...syncOptions(detail), maxage: 7 };
+  const result = await patch(f, { options, confirmDelete1: false, confirmDelete2: false, confirmMultiSource: false });
+  assert.equal(result.maxage, 7); assert.equal(result.custom_params, '');
+  assert.deepEqual(writes(f)[0].body.attr, { maxage: 7 });
+  assert.equal((await patch(f, { options: { ...options, custom_params: '[]' } })).unchanged, true);
+});
+test('sync 2026-11: structured extras round-trip quoted values and repeated options; history restores arrays', async t => {
+  const f = await fixture(t);
+  const result = await patch(f, { options: { custom_params: '--folder="INBOX/with spaces" --folder=Sent --dry' } });
+  assert.deepEqual(writes(f)[0].body.attr.custom_params, [{ o: 'folder', v: 'INBOX/with spaces' }, { o: 'folder', v: 'Sent' }, { o: 'dry', v: '' }]);
+  assert.equal(result.custom_params, '--folder="INBOX/with spaces" --folder=Sent --dry');
+  await revert(f, result.auditId);
+  assert.deepEqual(writes(f).at(-1).body.attr.custom_params, []);
+  assert.equal((await get(f)).custom_params, '');
+});
+test('sync 2026-11: clearing extras sends [] and verifies the upstream JSON string [] as empty', async t => {
+  const f = await fixture(t); f.jobs[0].custom_params = '[{"o":"dry","v":""}]';
+  const before = await get(f); assert.equal(before.custom_params, '--dry');
+  const cleared = await patch(f, { options: { custom_params: '' } });
+  assert.deepEqual(writes(f)[0].body.attr, { custom_params: [] });
+  assert.equal(f.jobs[0].custom_params, '[]'); assert.equal(cleared.custom_params, '');
+});
+test('sync 2026-11: structured credential values are masked and removable without reversible history', async t => {
+  const f = await fixture(t), secret = 'SyntheticJsonCredential984';
+  f.jobs[0].custom_params = JSON.stringify([{ o: 'authuser1', v: secret }, { o: 'dry', v: '' }]);
+  assert.equal((await get(f)).custom_params, '--authuser1=*** --dry');
+  assert.ok(!JSON.stringify(await f.service.list({})).includes(secret));
+  await assert.rejects(patch(f, { active: false }), { statusCode: 422 });
+  const result = await patch(f, { options: { custom_params: '' } });
+  assert.equal((await f.history.detail(result.auditId)).canRevert, false);
+  assert.ok(!JSON.stringify(await f.audit.read()).includes(secret));
+});
+test('sync 2026-11: showpasswords in structured stored options still hides the entire log', async t => {
+  const f = await fixture(t); f.jobs[0].custom_params = '[{"o":"showpasswords","v":""}]'; f.jobs[0].log = 'synthetic-hidden-log';
+  assert.equal((await get(f)).logHidden, true); assert.equal((await get(f)).log, undefined);
+});
+for (const params of ['[{"o":"delete2","v":""}]', '[{"o":"authuser1","v":"synthetic"}]', '[{"o":"showpasswords","v":""}]', '--folder="unclosed', "--folder='unclosed", '--folder="INBOX"trailing', '--folder=--delete1', '[{"o":"folder","v":"--delete1"}]', '--folder=--authuser1', '[{"o":"dry","v":"","extra":"bad"}]']) test(`sync 2026-11: invalid/unsafe encoded input is rejected: ${params}`, async t => {
+  const f = await fixture(t); await assert.rejects(patch(f, { options: { custom_params: params } }), { statusCode: 422 }); assert.equal(writes(f).length, 0);
+});
+test('sync 2026-11: multi-source confirmation uses source_host with old host1 fallback', async t => {
+  const f = await fixture(t); f.jobs.push({ ...f.jobs[0], id: 2, source_host: 'new.example.net', host1: 'old.example.net' });
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }), error => error.jobs[0].host1 === 'new.example.net');
+  delete f.jobs[1].source_host;
+  await assert.rejects(patch(f, { options: { delete2: true }, confirmDelete2: true }), error => error.jobs[0].host1 === 'old.example.net');
 });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFakeAdminApi } from '../../web/dev/fake-admin-api.js';
-import { syncBoolean,syncOptions,syncOptionRows,selectedSyncIds } from '../../web/src/admin/pages/sync-options.js';
+import { syncHost,syncBoolean,syncOptions,syncOptionRows,selectedSyncIds } from '../../web/src/admin/pages/sync-options.js';
 test('sync string flags become JSON booleans',()=>{for(const value of[true,1,'1'])assert.equal(syncBoolean(value),true);for(const value of[false,0,'0',null,undefined,'false'])assert.equal(syncBoolean(value),false);});
 test('sync editable options are projected without log or source credential fields',()=>{const options=syncOptions({maxage:'0',mins_interval:'20',delete1:'0',delete2:'1',delete2duplicates:'1',custom_params:'--useuid',log:'***',password1:'synthetic'});assert.deepEqual(options,{maxage:0,mins_interval:20,delete2duplicates:true,delete1:false,delete2:true,custom_params:'--useuid'});});
 test('sync options before/after comparison covers every selected job',()=>{const jobs=[{user2:'a@example.com',maxage:0,mins_interval:20},{user2:'b@example.com',maxage:30,mins_interval:40}];const rows=syncOptionRows(jobs,syncOptions(jobs[0]));assert.equal(rows.length,12);assert.equal(rows[6][1],'30');assert.equal(rows[6][2],'0');assert.ok(rows.every(row=>row.length===3));});
@@ -118,4 +118,39 @@ test('bounce collection gap warning supports legacy responses and shows retained
  assert.equal(bounceGapWarning({gapCount:20}),'보관 로그 빈 구간 20개 — 그 사이 반송은 빠졌을 수 있음');
  const {readFile}=await import('node:fs/promises');const page=await readFile(new URL('../../web/src/admin/pages/Bounces.jsx',import.meta.url),'utf8');
  assert.ok(page.includes('bounceGapWarning(resource.data?.collection)'));assert.ok(page.includes('{gapWarning&&<span>{gapWarning}</span>}'));
+});
+
+
+test('sync server text prefers source_host and retains old host1 fallback',()=>{
+ assert.equal(syncHost({source_host:'source.example.net',host1:'legacy.example.net'}),'source.example.net');
+ assert.equal(syncHost({host1:'legacy.example.net'}),'legacy.example.net');
+ assert.equal(syncHost({source_host:null,host1:'legacy.example.net'}),'legacy.example.net');
+ assert.equal(syncHost({}),'');
+});
+test('Sync JSX shows the new source in list/detail and submits the unchanged argument-text form',async()=>{
+ const {JSDOM}=await import('jsdom');const {h,render}=await import('preact');const {act}=await import('preact/test-utils');
+ const {createServer}=await import('vite');const {fileURLToPath}=await import('node:url');
+ const dom=new JSDOM('<div id="sync-root"></div>',{url:'https://admin.example.test/#sync/1'});
+ const keys=['window','document','location','fetch'],previous=Object.fromEntries(keys.map(key=>[key,globalThis[key]]));
+ Object.assign(globalThis,{window:dom.window,document:dom.window.document,location:dom.window.location});
+ dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+ const root=document.querySelector('#sync-root'),calls=[];
+ let row={id:1,user1:'source@example.net',user2:'owner@example.com',source_host:'new-source.example.net',host1:'legacy.example.net',active:1,maxage:0,mins_interval:20,delete1:0,delete2:0,delete2duplicates:0,custom_params:'',etag:'synthetic-etag'};
+ globalThis.fetch=async(path,options)=>{calls.push({path,options});const body=options.method==='PATCH'?(row={...row,...JSON.parse(options.body).options,etag:'updated-etag'}):path==='/api/admin/syncjobs'?{items:[row]}:row;return{ok:true,status:200,json:async()=>body};};
+ const server=await createServer({root:fileURLToPath(new URL('../../web',import.meta.url)),configFile:fileURLToPath(new URL('../../web/vite.admin.config.js',import.meta.url)),server:{middlewareMode:true,watch:null,ws:false},appType:'custom',logLevel:'error'});
+ const settle=async()=>{for(let i=0;i<3;i++)await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});};
+ const click=async text=>{const button=[...root.querySelectorAll('button')].find(n=>n.textContent===text);assert.ok(button,text);act(()=>button.click());await settle();};
+ try{
+  const Sync=(await server.ssrLoadModule('/src/admin/pages/Sync.jsx')).default;
+  act(()=>render(h(Sync,{id:'1'}),root));await settle();
+  assert.match(root.querySelector('.list-pane').textContent,/new-source\.example\.net/);
+  assert.match(root.querySelector('.account-detail').textContent,/new-source\.example\.net/);
+  assert.ok(!root.textContent.includes('legacy.example.net'));
+  await click('옵션 바꾸기');assert.equal(root.querySelector('#sync-custom').value,'');
+  act(()=>{const node=root.querySelector('#sync-maxage');node.value='7';node.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});await settle();
+  await click('변경 미리보기');
+  act(()=>{const node=root.querySelector('dialog input[type=checkbox]');node.checked=true;node.dispatchEvent(new dom.window.Event('change',{bubbles:true}));});await settle();
+  await click('변경 저장');const request=calls.find(c=>c.options.method==='PATCH');assert.ok(request);
+  const body=JSON.parse(request.options.body);assert.equal(body.options.maxage,7);assert.equal(body.options.custom_params,'');assert.equal(body.etag,'synthetic-etag');
+ }finally{act(()=>render(null,root));await server.close();dom.window.close();Object.assign(globalThis,previous);}
 });

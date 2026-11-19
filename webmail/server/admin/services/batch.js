@@ -66,9 +66,9 @@ function input(data, kind) {
 }
 const validEmail = value => value.length <= 254 && addressPattern.test(value) && value.split('@')[1].length <= 253 && value.split('@')[1].includes('.') && value.split('@')[1].split('.').every(part => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/.test(part));
 const validHost = value => isIPv4(value) || !/^\d+(?:\.\d+){3}$/.test(value) && value.length <= 253 && value.includes('.') && value.split('.').every(part => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/.test(part));
-const sameJob = (job, row) => normalize(job.user1) === normalize(row.source) && normalize(job.host1) === row.host && normalize(job.user2) === row.target;
+const sameJob = (job, row) => normalize(job.user1) === normalize(row.source) && normalize(job.source_host ?? job.host1) === row.host && normalize(job.user2) === row.target;
 // toolkit/app/mailcow_api.py add_syncjob defaults with api_batch_create's basic inputs.
-const syncDefaults = { port1: '993', enc1: 'SSL', mins_interval: '20', subfolder2: '', maxage: '0', maxbytespersecond: '0', timeout1: '600', timeout2: '600', exclude: '', custom_params: '', delete2duplicates: '1', delete1: '0', delete2: '0', automap: '1', skipcrossduplicates: '0', subscribeall: '1', active: '1' };
+const syncDefaults = { mins_interval: '20', subfolder2: '', maxage: '0', maxbytespersecond: '0', timeout1: '600', timeout2: '600', exclude: '', custom_params: [], delete2duplicates: '1', delete1: '0', delete2: '0', automap: '1', skipcrossduplicates: '0', subscribeall: '1', active: '1' };
 export function createBatchService({ mailcow, accounts, domains, teams, aliases, audit, lock, retirement = null }) {
   const routingLock = operation => retirement ? retirement.withRoutingLock(operation) : operation();
   async function rows(session, path) {
@@ -76,6 +76,33 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
     if (Array.isArray(result)) return result;
     if (result && typeof result === 'object' && !Object.keys(result).length) return [];
     throw new AppError(502, 'MAILCOW_REJECTED', '일괄 작업에 필요한 목록을 읽을 수 없어요.');
+  }
+  // Legacy migration: init_db.inc.php 1683-1692, 1742-1764 (mailcow 2026-11a).
+  // Existing sources keep their certificate policy and sharing settings.
+  function sourceMatches(source, row, actor) {
+    return /^[1-9]\d*$/.test(String(source.id)) && normalize(source.host ?? source.host1) === row.host &&
+      String(source.port ?? source.port1) === '993' && (source.enc ?? source.enc1) === 'SSL' &&
+      source.auth_type === 'PLAIN' && String(source.active) === '1' &&
+      (source.scope === 'all' || source.scope === 'domain' && source.domains?.some(domain => normalize(domain) === row.target.split('@')[1]) ||
+        source.scope === 'user' && (normalize(source.created_by) === normalize(actor) || source.users?.some(user => normalize(user) === row.target)));
+  }
+  async function syncSource(session, row, actor) {
+    const sources = await rows(session, 'syncjob_source/all');
+    const matches = sources.filter(source => sourceMatches(source, row, actor));
+    if (matches.length > 1) throw new AppError(409, 'SYNC_SOURCE_AMBIGUOUS', '조건에 맞는 가져올 서버가 여러 개예요. 원본 서버 설정을 정리한 뒤 이 줄만 다시 실행해 주세요.');
+    if (matches.length === 1) return { id: String(matches[0].id), created: false };
+    const domain = row.target.split('@')[1], base = [...`${row.host} (${domain})`].slice(0, 94).join('');
+    const names = new Set(sources.filter(source => normalize(source.created_by) === normalize(actor)).map(source => source.name));
+    let name = base;
+    for (let i = 2; names.has(name) && i <= 1000; i++) name = `${base} ${i}`;
+    if (names.has(name)) throw new AppError(409, 'SYNC_SOURCE_NAME_EXHAUSTED', '가져올 서버 이름이 이미 사용 중이에요. 원본 서버 이름을 정리해 주세요.');
+    await mailcow.call(session, 'POST', '/api/v1/add/syncjob_source', { name, description: 'Migrated sync jobs',
+      host: row.host, port: 993, enc: 'SSL', auth_type: 'PLAIN', verify_cert: 0, scope: 'domain', domains: [domain], active: 1 });
+    const ids = new Set(sources.map(source => String(source.id)));
+    const added = (await rows(session, 'syncjob_source/all')).filter(source => !ids.has(String(source.id)) && source.name === name && normalize(source.created_by) === normalize(actor) && sourceMatches(source, row, actor) &&
+      source.scope === 'domain' && source.domains?.length === 1 && String(source.verify_cert) === '0');
+    if (added.length !== 1) throw new AppError(502, 'WRITE_VERIFY_FAILED', '만든 원본 서버를 확인할 수 없어요. 원본 서버 설정을 확인해 주세요.');
+    return { id: String(added[0].id), created: true };
   }
   async function context(session, kind) {
     const boxes = await rows(session, 'mailbox/all');
@@ -171,7 +198,7 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
   }
   async function executeSync({ session, actor, ip, row, options, sourcePassword }) {
     return routingLock(() => lock.run(`sync-create:${row.target}`, async () => {
-      let mailboxCreated = false;
+      let mailboxCreated = false, sourceCleanupFailed = false;
       const identity = { source: row.source, host: row.host, target: row.target };
       try {
         const original = await rows(session, 'syncjobs/all/no_log');
@@ -184,23 +211,41 @@ export function createBatchService({ mailcow, accounts, domains, teams, aliases,
           delete created.password; mailboxCreated = true;
         }
         const safe = value => sanitizeSyncResponse(value, [sourcePassword]);
-        const added = await audit.run({ actor, ip, action: 'sync.create', target: `sync-create:${row.target}`, kind: 'config', revertible: false, before: {}, after: safe(identity) }, async intent => {
+        const added = await audit.run({ actor, ip, action: 'sync.create', target: `sync-create:${row.target}`, kind: 'config', revertible: false, before: {}, after: safe(identity) }, async intent => lock.run('sync-source-create', async () => {
           const latest = await rows(session, 'syncjobs/all/no_log');
           const existing = latest.find(job => sameJob(job, row));
           if (existing) throw new AppError(409, 'SYNC_EXISTS', `같은 작업이 이미 있어요(원본: ${existing.user1}).`);
-          const body = { username: row.target, host1: row.host, user1: row.source, password1: sourcePassword, ...syncDefaults };
-          try { safe(await mailcow.call(session, 'POST', '/api/v1/add/syncjob', body)); }
-          finally { delete body.password1; }
-          const after = await rows(session, 'syncjobs/all/no_log'), ids = new Set(latest.map(job => String(job.id)));
-          const found = after.filter(job => !ids.has(String(job.id)) && sameJob(job, row));
-          if (found.length !== 1 || found[0].user1 !== row.source || !/^[1-9]\d*$/.test(String(found[0].id)) || String(found[0].port1) !== '993' || found[0].enc1 !== 'SSL' || String(found[0].delete1) !== '0' || String(found[0].delete2) !== '0') throw new AppError(502, 'WRITE_VERIFY_FAILED', '만든 동기화 작업이 예상과 달라요. 현재 작업을 확인해 주세요.');
-          return { id: String(found[0].id), auditId: intent.id, detail: safe({ ...identity, result: 'ok' }) };
-        });
+          const source = await syncSource(session, row, actor);
+          try {
+            const body = { username: row.target, source_id: source.id, user1: row.source, password1: sourcePassword, ...syncDefaults };
+            try { safe(await mailcow.call(session, 'POST', '/api/v1/add/syncjob', body)); }
+            finally { delete body.password1; }
+            const after = await rows(session, 'syncjobs/all/no_log'), ids = new Set(latest.map(job => String(job.id)));
+            const found = after.filter(job => !ids.has(String(job.id)) && sameJob(job, row));
+            if (found.length !== 1 || found[0].user1 !== row.source || !/^[1-9]\d*$/.test(String(found[0].id)) || String(found[0].source_id) !== source.id || String(found[0].source_port) !== '993' || found[0].source_enc !== 'SSL' || String(found[0].delete1) !== '0' || String(found[0].delete2) !== '0') throw new AppError(502, 'WRITE_VERIFY_FAILED', '만든 동기화 작업이 예상과 달라요. 현재 작업을 확인해 주세요.');
+            return { id: String(found[0].id), auditId: intent.id, detail: safe({ ...identity, result: 'ok' }) };
+          } catch (error) {
+            // Never delete a reused source, or a new source whose job write succeeded before a readback failure.
+            if (source.created && !(error instanceof MailcowAuthLost)) {
+              try {
+                const jobs = await rows(session, 'syncjobs/all/no_log');
+                if (!jobs.some(job => String(job.source_id) === source.id)) await mailcow.call(session, 'POST', '/api/v1/delete/syncjob_source', [source.id]);
+              } catch (cleanupError) {
+                if (cleanupError instanceof MailcowAuthLost) throw cleanupError;
+                sourceCleanupFailed = true;
+              }
+            }
+            throw error;
+          }
+        }));
         return safe({ line: row.line, ...identity, result: 'ok', jobId: added.id, mailboxCreated, auditId: added.auditId });
       } catch (error) {
         if (error instanceof MailcowAuthLost) throw error;
         return sanitizeSyncResponse({ line: row.line, ...identity, result: mailboxCreated ? 'partial' : 'failed', mailboxCreated, code: code(error), error: error instanceof AppError ? error.message : '동기화 작업을 만들지 못했어요.',
-          ...(mailboxCreated ? { recovery: ['대상 메일함은 만들어졌고 동기화 작업만 실패 — 이 줄만 다시 실행하면 메일함은 그대로 두고 작업만 만듦'] } : {}) }, [sourcePassword]);
+          ...((mailboxCreated || sourceCleanupFailed) ? { recovery: [
+            ...(mailboxCreated ? ['대상 메일함은 만들어졌고 동기화 작업만 실패 — 이 줄만 다시 실행하면 메일함은 그대로 두고 작업만 만듦'] : []),
+            ...(sourceCleanupFailed ? ['새 원본 서버를 정리하지 못했어요. 사용 중인 작업을 확인한 뒤 원본 서버 설정을 정리해 주세요.'] : []),
+          ] } : {}) }, [sourcePassword]);
       }
     }));
   }

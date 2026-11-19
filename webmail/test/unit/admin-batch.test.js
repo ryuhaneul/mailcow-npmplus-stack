@@ -27,11 +27,11 @@ async function fixture(t) {
   const boxes = [makeBox('existing@example.com'), makeBox('plan@example.com', '기획팀', 50), makeBox('ops@example.com', '운영팀', 50)];
   const filters = ['plan@example.com', 'ops@example.com'].map((username, i) => ({ id: i + 1, username, filter_type: 'prefilter', active: '1', script_data: 'require ["copy"];\nredirect :copy "existing@example.com";\n' }));
   const primary = [{ domain_name: 'example.com', active: '1' }, { domain_name: 'off.example.com', active: '0' }], aliasDomains = [{ alias_domain: 'alias.example.com', target_domain: 'example.com', active: '1' }];
-  const jobs = [], aliases = [{ id: 1, address: 'alias@example.com', goto: 'existing@example.com', active: '1' }], calls = [], logs = [], options = {};
+  const sources = [], jobs = [], aliases = [{ id: 1, address: 'alias@example.com', goto: 'existing@example.com', active: '1' }], calls = [], logs = [], options = {};
   const mailcow = { async call(_session, method, path, body) {
     calls.push({ method, path, body: structuredClone(body) }); await options.onCall?.({ method, path, body });
-    if (path === '/api/v1/get/status/version') return { version: '2026-09a' };
-    const tables = { 'mailbox/all': boxes, 'filters/all': filters, 'alias/all': aliases, 'domain/all': primary, 'alias-domain/all': aliasDomains, 'syncjobs/all/no_log': jobs };
+    if (path === '/api/v1/get/status/version') return { version: '2026-11a' };
+    const tables = { 'mailbox/all': boxes, 'filters/all': filters, 'alias/all': aliases, 'domain/all': primary, 'alias-domain/all': aliasDomains, 'syncjobs/all/no_log': jobs, 'syncjob_source/all': sources };
     if (path.startsWith('/api/v1/get/')) {
       const key = path.slice('/api/v1/get/'.length);
       if (tables[key]) return structuredClone(tables[key]);
@@ -41,8 +41,19 @@ async function fixture(t) {
     }
     if (path === '/api/v1/add/mailbox') { if (!options.ignoreWrites) boxes.push(makeBox(`${body.local_part}@${body.domain}`, body.name, +body.quota / 1024)); }
     else if (path === '/api/v1/add/alias') { aliases.push({ id: aliases.length + 1, ...body }); if (options.stripSenders) for (const box of boxes) box.sender_acl = box.sender_acl.filter(value => value !== body.address); }
+    else if (path === '/api/v1/add/syncjob_source') {
+      if (!options.ignoreSource) sources.push({ id: Math.max(0, ...sources.map(source => +source.id)) + 1, created_by: 'admin', ...body });
+    }
+    else if (path === '/api/v1/delete/syncjob_source') {
+      assert.ok(!jobs.some(job => body.includes(String(job.source_id))));
+      for (let i = sources.length - 1; i >= 0; i--) if (body.includes(String(sources[i].id))) sources.splice(i, 1);
+    }
     else if (path === '/api/v1/add/syncjob') {
-      if (!options.ignoreSync) jobs.push({ id: jobs.length + 1, user2: body.username, ...body, ...options.jobOverride });
+      assert.equal('host1' in body, false); assert.equal('port1' in body, false); assert.equal('enc1' in body, false);
+      assert.ok(Array.isArray(body.custom_params));
+      const source = sources.find(source => String(source.id) === String(body.source_id)); assert.ok(source);
+
+      if (!options.ignoreSync) jobs.push({ id: jobs.length + 1, user2: body.username, source_host: source.host ?? source.host1, source_port: source.port ?? source.port1, source_enc: source.enc ?? source.enc1, ...body, custom_params: JSON.stringify(body.custom_params), ...options.jobOverride });
       return [{ type: 'success', log: ['add', { password1: body.password1 }], msg: `created ${body.password1}` }];
     }
     else if (path === '/api/v1/edit/filter') Object.assign(filters.find(row => String(row.id) === body.items[0]), body.attr);
@@ -58,7 +69,7 @@ async function fixture(t) {
   const teams = createTeamsService({ mailcow, audit, lock, history, auditDir: dir }), accounts = createAccountsService({ protocolNetlimit: netlimit, mailcow, dockerapi, audit, lock, history, teams }), domains = createDomainsService({ mailcow, audit, lock, history });
   const aliasService = createAliasesService({ mailcow, audit, lock, history });
   const service = createBatchService({ mailcow, audit, accounts, domains, teams, aliases: aliasService, lock });
-  return { netlimit, dir, boxes, filters, primary, aliasDomains, aliases, jobs, calls, logs, options, mailcow, audit, lock, history, dockerapi, service };
+  return { netlimit, dir, boxes, filters, primary, aliasDomains, aliases, sources, jobs, calls, logs, options, mailcow, audit, lock, history, dockerapi, service };
 }
 const mailCsv = 'email,name,type,team\nfirst@example.com,첫째,개인,\nsecond@example.com,둘째,팀,기획팀\nthird@example.com,,관리,';
 const run = (f, data = {}, kind = 'mailboxes') => f.service.run({ ...ctx, kind, data: { action: 'parse', csv: mailCsv, ...data } });
@@ -175,7 +186,7 @@ const sourceSecret = 'Synthetic-A09b-Source-Password!';
 const syncCsv = (source = 'old@example.net', target = 'new@example.com', host = 'imap.example.net', secret = sourceSecret) => `source,password,target,host\n${source},${secret},${target},${host}`;
 const sync = (f, data = {}) => run(f, { csv: syncCsv(), ...data }, 'syncjobs');
 const aliasBatch = (f, csv, data = {}) => run(f, { csv, ...data }, 'aliases');
-const expectedDefaults = { port1: '993', enc1: 'SSL', mins_interval: '20', subfolder2: '', maxage: '0', maxbytespersecond: '0', timeout1: '600', timeout2: '600', exclude: '', custom_params: '', delete2duplicates: '1', delete1: '0', delete2: '0', automap: '1', skipcrossduplicates: '0', subscribeall: '1', active: '1' };
+const expectedDefaults = { mins_interval: '20', subfolder2: '', maxage: '0', maxbytespersecond: '0', timeout1: '600', timeout2: '600', exclude: '', custom_params: [], delete2duplicates: '1', delete1: '0', delete2: '0', automap: '1', skipcrossduplicates: '0', subscribeall: '1', active: '1' };
 
 test('batch aliases: reordered titles, semicolon/quoted comma targets, external/existing/duplicate/bad targets', async t => {
   const f = await fixture(t), csv = 'targets,address\n"existing@example.com;plan@example.com",new@example.com\n"existing@example.com,ops@example.com",new2@example.com\noutside@example.net,external@example.com\nexisting@example.com,alias@example.com\nexisting@example.com,NEW@example.com\nbad,wrong@example.com\nexisting@example.com,existing@example.com';
@@ -210,7 +221,7 @@ test('batch sync: exact Toolkit payload, A06 mailbox password equals source, no 
   const f = await fixture(t), preview = await sync(f), result = await sync(f, { action: 'run', lines: [2] }); assert.equal(preview.rows[0].createMailbox, true); assert.equal(result.result, 'ok'); assert.equal(result.results[0].jobId, '1'); assert.equal(result.results[0].mailboxCreated, true);
   const mailbox = writes(f).find(call => call.path === '/api/v1/add/mailbox').body, job = writes(f).find(call => call.path === '/api/v1/add/syncjob').body;
   assert.equal(mailbox.password, sourceSecret); assert.equal(mailbox.password2, sourceSecret); assert.equal(mailbox.quota, '20480'); assert.equal(mailbox.name, 'new');
-  assert.deepEqual(job, { username: 'new@example.com', host1: 'imap.example.net', user1: 'old@example.net', password1: sourceSecret, ...expectedDefaults });
+  assert.deepEqual(job, { username: 'new@example.com', source_id: '1', user1: 'old@example.net', password1: sourceSecret, ...expectedDefaults });
   assert.ok(!JSON.stringify(result).includes(sourceSecret)); assert.ok(!JSON.stringify(result).includes('password')); assert.ok(!JSON.stringify(result).includes('log'));
   const records = JSON.stringify(await f.audit.read()), disk = (await Promise.all((await fs.readdir(f.dir)).filter(name => name.endsWith('.jsonl')).map(name => fs.readFile(join(f.dir, name), 'utf8')))).join(''); assert.ok(!records.includes(sourceSecret)); assert.ok(!disk.includes(sourceSecret)); assert.ok(!JSON.stringify(f.logs).includes(sourceSecret));
   const parent = (await f.history.list()).items.find(row => row.action === 'batch.syncjobs'); assert.deepEqual(Object.keys(parent.detail.results[0]).sort(), ['host', 'result', 'source', 'target']);
@@ -224,7 +235,7 @@ test('batch sync: mailbox persists after job failure partial, source-redacted er
   const result = await sync(f, { action: 'run', lines: [2] }); assert.equal(result.results[0].result, 'partial'); assert.equal(result.results[0].mailboxCreated, true); assert.equal(result.results[0].error, 'remote password ***'); assert.deepEqual(result.results[0].recovery, ['대상 메일함은 만들어졌고 동기화 작업만 실패 — 이 줄만 다시 실행하면 메일함은 그대로 두고 작업만 만듦']);
   fail = false; const retried = await sync(f, { action: 'retry', lines: [2] }); assert.equal(retried.result, 'ok'); assert.equal(retried.results[0].mailboxCreated, false); assert.equal(writes(f).filter(row => row.path === '/api/v1/add/mailbox').length, 1); assert.ok(!JSON.stringify(await f.audit.read()).includes(sourceSecret));
 });
-for (const override of [{ port1: '143' }, { enc1: 'PLAIN' }, { delete1: '1' }, { delete2: '1' }, { id: null }, { user1: 'wrong@example.net' }, { user1: 'OLD@EXAMPLE.NET' }, { host1: 'wrong.example.net' }, { user2: 'wrong@example.com' }]) test(`batch sync: readback mismatch fails502 ${JSON.stringify(override)}`, async t => {
+for (const override of [{ source_port: '143' }, { source_enc: 'PLAIN' }, { delete1: '1' }, { delete2: '1' }, { id: null }, { user1: 'wrong@example.net' }, { user1: 'OLD@EXAMPLE.NET' }, { source_host: 'wrong.example.net' }, { user2: 'wrong@example.com' }]) test(`batch sync: readback mismatch fails502 ${JSON.stringify(override)}`, async t => {
   const f = await fixture(t); f.options.jobOverride = override; const result = await sync(f, { action: 'run', lines: [2] }); assert.equal(result.results[0].code, 'WRITE_VERIFY_FAILED'); assert.equal(result.results[0].result, 'partial');
 });
 test('batch sync: no new job readback causes502; current duplicate rechecked under target lock', async t => {
@@ -242,7 +253,7 @@ test('batch sync HTTP: parse/run/error/audit/logger redact raw secrets and key e
 
 test('batch sync: existing target with autoCreate false and IPv4 fallback creates job only', async t => {
   const f = await fixture(t), csv = `source,password,target\nold@example.net,${sourceSecret},existing@example.com`;
-  const result = await sync(f, { csv, options: { autoCreate: false, host: '192.0.2.24' }, action: 'run', lines: [2] }); assert.equal(result.result, 'ok'); assert.equal(result.results[0].mailboxCreated, false); assert.equal(writes(f).some(row => row.path === '/api/v1/add/mailbox'), false); assert.equal(f.jobs[0].host1, '192.0.2.24');
+  const result = await sync(f, { csv, options: { autoCreate: false, host: '192.0.2.24' }, action: 'run', lines: [2] }); assert.equal(result.result, 'ok'); assert.equal(result.results[0].mailboxCreated, false); assert.equal(writes(f).some(row => row.path === '/api/v1/add/mailbox'), false); assert.equal(f.jobs[0].source_host, '192.0.2.24');
 });
 test('batch sync: ambiguous newly created matching jobs fail readback502', async t => {
   const f = await fixture(t); let doubled = false; f.options.onCall = ({ path }) => { if (path.endsWith('/syncjobs/all/no_log') && f.jobs.length && !doubled) { doubled = true; f.jobs.push({ ...f.jobs[0], id: 2 }); } };
@@ -308,7 +319,7 @@ for (const target of ['new@example.com', 'existing@example.com']) test(`batch sy
   assert.equal(result.result, 'ok');
   const job = writes(f).find(row => row.path === '/api/v1/add/syncjob').body;
   assert.equal(job.password1.length, secret.length); assert.deepEqual(Buffer.from(job.password1), Buffer.from(secret));
-  assert.equal(job.user1, 'Old.Case@EXAMPLE.NET'); assert.equal(job.username, target); assert.equal(job.host1, 'imap.example.net');
+  assert.equal(job.user1, 'Old.Case@EXAMPLE.NET'); assert.equal(job.username, target); assert.equal(f.sources.find(source => String(source.id) === job.source_id).host, 'imap.example.net');
   const mailbox = writes(f).find(row => row.path === '/api/v1/add/mailbox');
   if (target === 'new@example.com') {
     assert.equal(mailbox.body.password.length, secret.length); assert.deepEqual(Buffer.from(mailbox.body.password), Buffer.from(secret));
@@ -319,7 +330,7 @@ test('batch sync: unquoted password and address padding remains trimmed', async 
   const f = await fixture(t), csv = 'source,password,target,host\n  old@example.net  ,  SyntheticBare984  ,  existing@example.com  ,  IMAP.EXAMPLE.NET  ';
   const result = await sync(f, { csv, action: 'run', lines: [2] }); assert.equal(result.result, 'ok');
   const job = writes(f).find(row => row.path === '/api/v1/add/syncjob').body;
-  assert.equal(job.password1, 'SyntheticBare984'); assert.equal(job.user1, 'old@example.net'); assert.equal(job.username, 'existing@example.com'); assert.equal(job.host1, 'imap.example.net');
+  assert.equal(job.password1, 'SyntheticBare984'); assert.equal(job.user1, 'old@example.net'); assert.equal(job.username, 'existing@example.com'); assert.equal(f.sources.find(source => String(source.id) === job.source_id).host, 'imap.example.net');
 });
 for (const [kind, csv, padded] of [
   ['mailboxes', 'email,name,type,team\nnew@example.com,이름,개인,기획팀', '" email "," name "," type "," team "\n" new@example.com "," 이름 "," 개인 "," 기획팀 "'],
@@ -360,4 +371,76 @@ test('retirement batch guard: sync lock failure keeps row identity and writes no
   f.service = createBatchService({ ...f, retirement: { withRoutingLock: async () => { throw new AppError(503, 'RETIREMENT_BLOCK_UNAVAILABLE', 'DB'); } } });
   const r = await run(f, { action: 'run', csv: 'source,password,target,host\nsource@example.net,synthetic-password,new@example.com,imap.example.net', lines: [2] }, 'syncjobs');
   assert.equal(r.result, 'partial'); assert.equal(r.results[0].code, 'RETIREMENT_BLOCK_UNAVAILABLE'); assert.equal(r.results[0].target, 'new@example.com'); assert.equal(r.results[0].source, 'source@example.net'); assert.equal(writes(f).length, 0);
+});
+
+const sourceRow = (overrides = {}) => ({ id: 7, name: 'imap.example.net (example.com)', description: 'Migrated sync jobs', created_by: '',
+  host1: 'IMAP.EXAMPLE.NET', port1: 993, enc1: 'SSL', auth_type: 'PLAIN', verify_cert: 0, active: 1, scope: 'domain', domains: ['example.com'], users: [], ...overrides });
+test('CSV sync 2026-11: creates migration-equivalent source and references its ID, no legacy server attrs', async t => {
+  const f = await fixture(t); const result = await sync(f, { action: 'run', lines: [2] });
+  assert.equal(result.result, 'ok');
+  assert.deepEqual(writes(f).find(row => row.path.endsWith('/add/syncjob_source')).body, {
+    name: 'imap.example.net (example.com)', description: 'Migrated sync jobs', host: 'imap.example.net', port: 993,
+    enc: 'SSL', auth_type: 'PLAIN', verify_cert: 0, active: 1, scope: 'domain', domains: ['example.com'],
+  });
+  const job = writes(f).find(row => row.path.endsWith('/add/syncjob')).body;
+  assert.equal(job.source_id, String(f.sources[0].id)); assert.deepEqual(job.custom_params, []);
+  assert.ok(!('host1' in job)); assert.ok(!('port1' in job)); assert.ok(!('enc1' in job));
+});
+for (const overrides of [{}, { verify_cert: 1 }, { scope: 'all', domains: [] }, { scope: 'user', domains: [], users: ['existing@example.com'] }, { scope: 'user', domains: [], users: [], created_by: 'admin' }]) test(`CSV sync 2026-11: unique eligible source reused unchanged ${JSON.stringify(overrides)}`, async t => {
+  const f = await fixture(t), original = sourceRow(overrides); f.sources.push(structuredClone(original));
+  const result = await sync(f, { csv: syncCsv('old@example.net', 'existing@example.com'), action: 'run', lines: [2] });
+  assert.equal(result.result, 'ok'); assert.equal(f.jobs[0].source_id, '7'); assert.deepEqual(f.sources, [original]);
+  assert.equal(writes(f).filter(row => row.path.includes('syncjob_source')).length, 0);
+});
+for (const overrides of [{ port1: 143 }, { enc1: 'TLS' }, { auth_type: 'LOGIN' }, { active: 0 }, { domains: ['other.example.com'] }, { scope: 'user', domains: [], users: [], created_by: 'otheradmin' }]) test(`CSV sync 2026-11: ineligible source excluded ${JSON.stringify(overrides)}`, async t => {
+  const f = await fixture(t), original = sourceRow(overrides); f.sources.push(structuredClone(original));
+  const result = await sync(f, { action: 'run', lines: [2] }); assert.equal(result.result, 'ok');
+  assert.notEqual(f.jobs[0].source_id, '7'); assert.deepEqual(f.sources[0], original);
+});
+test('CSV sync 2026-11: ambiguous sources fail only their CSV row; no edits or arbitrary selection', async t => {
+  const f = await fixture(t); f.sources.push(sourceRow(), sourceRow({ id: 8, name: 'another', verify_cert: 1 }));
+  const original = structuredClone(f.sources), csv = syncCsv('old@example.net', 'existing@example.com') + `\nother@example.net,${sourceSecret},existing@example.com,other.example.net`;
+  const r = await sync(f, { csv, action: 'run', lines: [2, 3] }); assert.deepEqual(r.results.map(row => row.result), ['failed', 'ok']);
+  assert.equal(r.results[0].code, 'SYNC_SOURCE_AMBIGUOUS'); assert.match(r.results[0].error, /여러 개/);
+  assert.deepEqual(f.sources.slice(0, 2), original); assert.equal(f.jobs.length, 1); assert.equal(f.jobs[0].source_host, 'other.example.net');
+});
+test('CSV sync 2026-11: names follow migration suffix and 94 character base truncation', async t => {
+  const f = await fixture(t), host = 'a'.repeat(60) + '.' + 'b'.repeat(60) + '.example.net', base = [...`${host} (example.com)`].slice(0, 94).join('');
+  f.sources.push(sourceRow({ created_by: 'admin', name: base, active: 0 }), sourceRow({ id: 8, created_by: 'admin', name: base + ' 2', active: 0 }));
+  const r = await sync(f, { csv: `source,password,target,host\nold@example.net,${sourceSecret},existing@example.com,${host}`, action: 'run', lines: [2] });
+  assert.equal(r.result, 'ok'); assert.equal(f.sources.at(-1).name, base + ' 3'); assert.ok(f.sources.at(-1).name.length <= 100);
+});
+test('CSV sync 2026-11: failed job deletes only the newly created unused source', async t => {
+  const f = await fixture(t); f.options.ignoreSync = true;
+  const r = await sync(f, { action: 'run', lines: [2] }); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.equal(f.sources.length, 0);
+  assert.deepEqual(writes(f).filter(row => row.path.endsWith('/delete/syncjob_source')).map(row => row.body), [['1']]);
+});
+test('CSV sync 2026-11: failed job never deletes a reused unused source', async t => {
+  const f = await fixture(t); f.sources.push(sourceRow()); f.options.ignoreSync = true;
+  const r = await sync(f, { action: 'run', lines: [2] }); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.equal(f.sources.length, 1);
+  assert.equal(writes(f).filter(row => row.path.endsWith('/delete/syncjob_source')).length, 0);
+});
+test('CSV sync 2026-11: failed readback keeps new source used by a written job', async t => {
+  const f = await fixture(t); f.options.jobOverride = { source_port: 143 };
+  const r = await sync(f, { action: 'run', lines: [2] }); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.equal(f.sources.length, 1); assert.equal(f.jobs.length, 1);
+  assert.equal(writes(f).filter(row => row.path.endsWith('/delete/syncjob_source')).length, 0);
+});
+test('CSV sync 2026-11: cleanup failure preserves original error and provides recovery without credentials', async t => {
+  const f = await fixture(t); f.options.ignoreSync = true; f.options.onCall = ({ path }) => { if (path.endsWith('/delete/syncjob_source')) throw new AppError(503, 'MAILCOW_UNAVAILABLE', 'synthetic'); };
+  const r = await sync(f, { csv: syncCsv('old@example.net', 'existing@example.com'), action: 'run', lines: [2] });
+  assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED'); assert.match(r.results[0].recovery[0], /정리하지 못/); assert.equal(f.sources.length, 1); assert.ok(!JSON.stringify(r).includes(sourceSecret));
+});
+test('CSV sync 2026-11: failed source readback never guesses ID or creates job', async t => {
+  const f = await fixture(t); f.options.ignoreSource = true;
+  const r = await sync(f, { action: 'run', lines: [2] }); assert.equal(r.results[0].code, 'WRITE_VERIFY_FAILED');
+  assert.equal(writes(f).filter(row => row.path.endsWith('/add/syncjob')).length, 0);
+});
+for (const fields of [{ source_host: 'IMAP.EXAMPLE.NET' }, { host1: 'IMAP.EXAMPLE.NET' }, { source_host: 'IMAP.EXAMPLE.NET', host1: 'obsolete.example.net' }]) test(`CSV duplicate identity: new host preferred, old fallback ${JSON.stringify(fields)}`, async t => {
+  const f = await fixture(t); f.jobs.push({ id: 1, user1: 'OLD@EXAMPLE.NET', user2: 'EXISTING@EXAMPLE.COM', ...fields });
+  const r = await sync(f, { csv: syncCsv('old@example.net', 'existing@example.com') }); assert.equal(r.rows[0].code, 'SYNC_EXISTS'); assert.equal(writes(f).length, 0);
+});
+test('CSV sync 2026-11: concurrent different targets reuse one newly created source', async t => {
+  const f = await fixture(t);
+  const results = await Promise.all(['existing@example.com', 'plan@example.com'].map(target => sync(f, { csv: syncCsv('old@example.net', target), action: 'run', lines: [2] })));
+  assert.ok(results.every(r => r.result === 'ok')); assert.equal(f.sources.length, 1); assert.equal(f.jobs.length, 2); assert.equal(new Set(f.jobs.map(job => job.source_id)).size, 1);
 });

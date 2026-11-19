@@ -27,6 +27,9 @@ MARKER="$POSTFIX/conversion.json"
 log() { echo "[relay-file-mode] $*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 if [ "$MODE" != revert ] && [ -f "$MARKER" ]; then
+    if [ "$MODE" = apply ] && [ "$RESTORE_UPSTREAM_REFERENCE" = true ] && [ "${LOG_ARCHIVE_ENABLE:-false}" = true ]; then
+        webmail_options || die "Invalid archive configuration for relay reference restoration"
+    fi
     REFERENCE_BACKUP=$(python3 - "$CONF" "$(webmail_mailcow_value IPV4_NETWORK)" "$(webmail_mailcow_value IPV6_NETWORK)" "$MODE" "$RESTORE_UPSTREAM_REFERENCE" <<'PYCHECK'
 from pathlib import Path
 import ipaddress,json,re,sys,tempfile,subprocess
@@ -80,8 +83,12 @@ except Exception:
 PYCHECK
     )
     if [ -n "$REFERENCE_BACKUP" ]; then
+        REFERENCE_OWNER_PID=$BASHPID
         reference_cleanup() {
             local status=$?
+            # EXIT traps are inherited by command substitutions and pipelines.
+            # Only the outer transaction may restore files or restart services.
+            [ "$BASHPID" = "$REFERENCE_OWNER_PID" ] || return "$status"
             trap - EXIT INT TERM HUP
             if [ "$status" -ne 0 ]; then
                 cp --preserve=all "$REFERENCE_BACKUP/options.inc" "$CONF/rspamd/local.d/options.inc" || status=1

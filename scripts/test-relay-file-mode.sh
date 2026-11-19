@@ -11,14 +11,26 @@ export PATH="$TMP/bin:$PATH"
 cat > "$TMP/bin/docker" <<'MOCK'
 #!/usr/bin/env python3
 from pathlib import Path
-import os,sys,subprocess
+import os,sys,subprocess,json
 p=Path(os.environ['RELAY_TEST_TMP']); args=sys.argv[1:]
 with (p/'calls').open('a') as f: f.write(' '.join(args)+'\n')
 conf=Path(os.environ['MAILCOW_DIR'])/'data/conf'
 def fault(name):
  if (p/name).exists(): (p/name).unlink(); return True
  return False
-if args[:3]==['exec','webmail-admin','id']: print('1000')
+if args[:3]==['exec','-i','log-archiver']:
+ size=(p/'rspamd-json.log').stat().st_size
+ sources='postfix dovecot rspamd php-fpm nginx npmplus'.split()
+ generations=[dict(source=s,instance='rspamd-id' if s=='rspamd' else s,visible=True,pendingBytes=0,offset=size,observedSize=size) for s in sources]
+ files=[dict(source='rspamd',instance='rspamd-id',basename='rspamd-json.log',offset=size,observedSize=size,closed=False)]
+ print(json.dumps(dict(backfillComplete=not (p/'fail-archive-status').exists(),issues=[],observedAt='2099-01-01T00:00:00Z',generations=generations,drainFiles=files)))
+elif args==['compose','--profile','admin','ps','-a','-q','rspamd-mailcow']: print('rspamd-id')
+elif args[:2]==['inspect','rspamd-id']:
+ if args[-1]=='{{.Id}}': print('rspamd-id')
+ elif args[-1]=='{{.State.Running}}': print('true')
+ elif args[-1]=='{{.LogPath}}': print(p/'rspamd-json.log')
+ else: raise AssertionError(args)
+elif args[:3]==['exec','webmail-admin','id']: print('1000')
 elif args[:3]==['exec','--user','1000:64250']:
  if fault('fail-app-access'): sys.exit(10)
  # Real read + same-directory replace as the unprivileged fixture user.
@@ -156,11 +168,46 @@ run apply -y --restore-upstream-reference || fail 'repeat reference repair'
 pass 'update opt-in repairs only the known upstream reference, retains new options/maps/marker and is idempotent'
 for fault in fail-configtest fail-rspamd-restart; do
     cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
+    : > "$TMP/calls"
     touch "$TMP/$fault"
     if run apply -y --restore-upstream-reference; then fail 'reference repair failure accepted'; fi
     cmp "$CONF/rspamd/local.d/options.inc" "$TMP/upstream-options" || fail 'repair did not restore prior options'
-    pass "$fault restores original options after failed reference repair"
+    [ "$(grep -c 'reference restoration interrupted/failed;' "$TMP/result")" = 1 ] || fail 'cleanup ran in a child and parent'
+    expected=1
+    [ "$fault" != fail-rspamd-restart ] || expected=2
+    [ "$(grep -c 'compose restart rspamd-mailcow$' "$TMP/calls")" = "$expected" ] || fail 'nested cleanup restarted Rspamd'
+    pass "$fault restores original options once in the outer process"
 done
+# Exercise the real archive helpers in the standalone child process, not a stub.
+# REQUIRED_SOURCES is intentionally absent from its environment and .env.
+printf 'DOMAIN=example.test\nLOG_ARCHIVE_ENABLE=true\nWEBMAIL_ENABLE=false\nWEBMAIL_ADMIN_ENABLE=false\n' > "$WEBMAIL_ENV_FILE"
+printf 'synthetic\n' > "$TMP/rspamd-json.log"
+cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
+: > "$TMP/calls"
+run apply -y --restore-upstream-reference || fail 'archive ON reference repair'
+python3 - "$TMP/calls" <<'PYARCHIVE'
+import sys
+calls=open(sys.argv[1]).read().splitlines()
+status='exec -i log-archiver node --input-type=module'
+stop=calls.index('stop rspamd-id');restart=calls.index('compose restart rspamd-mailcow')
+assert any(x==status for x in calls[:stop])
+assert any(x==status for x in calls[stop+1:restart])
+assert calls.count('compose restart rspamd-mailcow')==1
+assert not any(x.startswith('start ') for x in calls)
+PYARCHIVE
+! grep -q 'reference restoration interrupted/failed;' "$TMP/result" || fail 'success cleanup ran'
+pass 'archive ON standalone repair initializes required sources, backfills, stops, drains and restarts once'
+cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
+touch "$TMP/fail-archive-status"
+: > "$TMP/calls"
+if run apply -y --restore-upstream-reference; then fail 'archive failure accepted'; fi
+rm "$TMP/fail-archive-status"
+cmp "$CONF/rspamd/local.d/options.inc" "$TMP/upstream-options" || fail 'archive failure lost original options'
+[ "$(grep -c 'reference restoration interrupted/failed;' "$TMP/result")" = 1 ] || fail 'pipeline cleanup ran more than once'
+[ "$(grep -c 'compose restart rspamd-mailcow$' "$TMP/calls")" = 1 ] || fail 'pipeline restarted Rspamd more than once'
+! grep -q 'unbound variable' "$TMP/result" || fail 'archive setup missing'
+pass 'archive ON failing backfill pipelines restore and restart only once in the outer process'
+: > "$WEBMAIL_ENV_FILE"
 for drift in unknown duplicate asymmetric generated fixed-coverage; do
     cp "$TMP/upstream-options" "$CONF/rspamd/local.d/options.inc"
     cp "$CONF/postfix/mailstack-relay/mynetworks" "$TMP/check-postfix"

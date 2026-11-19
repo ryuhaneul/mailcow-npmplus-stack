@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verified common-template overlay; use the existing WAF/archive Compose runners.
 NPMPLUS_ACME_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-NPMPLUS_ACME_DIGEST=sha256:f7f6ca26082036ee6387a7da336267fe61f16b1eb8087dd964237238b59479ef
+NPMPLUS_ACME_DIGEST=sha256:de97158ec24f463ce2b7fe6bbac58afe0ee9f4e2eb6beed380b9af041b1abcf6
 NPMPLUS_ACME_SOURCE_SHA256=a97ffe67ff769df42fec6be915bf0dc0476492e57a33189b9b54388fec55c8e7
 
 npmplus_acme_error() { echo "[acme80] ERROR: $*" >&2; return 1; }

@@ -63,7 +63,7 @@ mail-npm.DOMAIN     A    SERVER_IP
 
 ### 외부 이미지 버전 고정·변경
 
-스택 외부 이미지는 태그와 다이제스트를 함께 고정합니다. 현재 고정판은 NPMplus `2026-07-24-r1`, CrowdSec `v1.7.8`이며, 정확한 다이제스트는 아래 예시와 레포의 `npmplus/docker-compose.yml`에 있습니다. `docker compose pull`은 이 다이제스트의 이미지만 받으므로 유지합니다.
+스택 외부 이미지는 태그와 다이제스트를 함께 고정합니다. 현재 고정판은 NPMplus `2026-11-18-r1`, CrowdSec `v1.7.8`이며, 정확한 다이제스트는 아래 예시와 레포의 `npmplus/docker-compose.yml`에 있습니다. `docker compose pull`은 이 다이제스트의 이미지만 받으므로 유지합니다.
 
 update는 pull 전에 런타임 compose의 대상 서비스 `image:`가 예전 기본 이미지의 `:latest` 또는 태그 없는 값일 때만 백업 후 레포 고정값으로 바꿉니다. 백업은 같은 폴더의 `docker-compose.yml.bak-<날짜시각>.<고유값>`이며 경로와 변경 내용을 로그에 남깁니다. 다른 설정·주석·들여쓰기는 보존합니다. 운영자가 다른 특정 태그나 다이제스트를 지정했다면 **“레포 고정값과 다름 — 그대로 둠, 맞추려면 docs 절차”** 경고만 남기고 그 값을 유지합니다.
 
@@ -85,7 +85,7 @@ rm /home/npmplus/.env.key
 # /home/npmplus/docker-compose.yml
 services:
   npmplus:
-    image: zoeyvid/npmplus:2026-07-24-r1@sha256:f7f6ca26082036ee6387a7da336267fe61f16b1eb8087dd964237238b59479ef
+    image: zoeyvid/npmplus:2026-11-18-r1@sha256:de97158ec24f463ce2b7fe6bbac58afe0ee9f4e2eb6beed380b9af041b1abcf6
     container_name: npmplus
     restart: always
     ports:

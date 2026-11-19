@@ -6,7 +6,7 @@ services:
         max-size: "20m"
         max-file: "5"
         compress: "false"
-    image: zoeyvid/npmplus:2026-07-24-r1@sha256:f7f6ca26082036ee6387a7da336267fe61f16b1eb8087dd964237238b59479ef
+    image: zoeyvid/npmplus:2026-11-18-r1@sha256:de97158ec24f463ce2b7fe6bbac58afe0ee9f4e2eb6beed380b9af041b1abcf6
     container_name: npmplus
     restart: always
     # NPMplus 는 fancyindex header/footer 를 전역 설정으로 열어두는데,

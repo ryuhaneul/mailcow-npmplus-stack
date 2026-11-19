@@ -16,7 +16,7 @@ cp "$ROOT/npmplus/templates/_common.conf" "$TMP/runtime/templates/_common.conf"
 docker() {
     printf '%s\n' "$*" >> "$TMP/docker-calls"
     case "$1" in
-        compose) printf '{"services":{"npmplus":{"image":"zoeyvid/npmplus:2026-07-24-r1@%s"}}}\n' "${SPY_DIGEST:-$NPMPLUS_ACME_DIGEST}" ;;
+        compose) printf '{"services":{"npmplus":{"image":"zoeyvid/npmplus:2026-11-18-r1@%s"}}}\n' "${SPY_DIGEST:-$NPMPLUS_ACME_DIGEST}" ;;
         image) return 0 ;;
         run) printf '%s  /app/templates/_common.conf\n' "${SPY_SHA:-$NPMPLUS_ACME_SOURCE_SHA256}" ;;
         *) echo 'unexpected Docker call' >&2; return 99 ;;

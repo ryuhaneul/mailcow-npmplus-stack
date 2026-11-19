@@ -86,6 +86,32 @@ await test('compose templates: approved A picker, save, variables and send guard
       if (process.env.TEMPLATES_CAPTURE_DIR) { await mkdir(process.env.TEMPLATES_CAPTURE_DIR, { recursive: true }); await c.page.screenshot({ path: `${process.env.TEMPLATES_CAPTURE_DIR}/compose-templates-${width}-${mode}.png` }); }
     } finally { await c.page.close(); }
   });
+  await t.test('picker stays in place while hover loads an image preview and attachments', async () => {
+    for (const [width, height] of [[1280, 900], [768, 900], [375, 900], [1280, 480]]) {
+      const c = await open({ width, withPublic: true });
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      try {
+        await c.page.setViewportSize({ width, height });
+        await c.page.route(`**/api/templates/${publicRef}`, async route => { await gate; await route.fulfill({ json: { ...publicDetail, html: detail.html } }); });
+        await c.templateButton.click();
+        const dialog = c.page.locator('dialog.tplA-pickdlg'), preview = c.page.locator('.tplA-pick-prev');
+        await expect(preview).toHaveAttribute('aria-busy', 'false');
+        await expect(preview.locator('iframe')).toHaveCount(1);
+        const before = await dialog.boundingBox();
+        await c.page.getByRole('option', { name: company.name, exact: true }).hover();
+        await expect(preview).toHaveAttribute('aria-busy', 'true');
+        assert.deepEqual(await dialog.boundingBox(), before, `loading at ${width}x${height}`);
+        release();
+        await expect(preview).toHaveAttribute('aria-busy', 'false');
+        await expect(preview.locator('.att')).toHaveText('company.txt3B');
+        await expect(preview.locator('iframe')).toHaveCount(1);
+        assert.deepEqual(await dialog.boundingBox(), before, `loaded at ${width}x${height}`);
+        await expect(c.page.getByRole('option', { name: company.name, exact: true })).toHaveAttribute('aria-selected', 'true');
+        assert.deepEqual(c.errors, []);
+      } finally { release(); await c.page.close(); }
+    }
+  });
   await t.test('T has no template action; picker button, search, arrows, Enter, Esc and focus return', async () => {
     const c = await open(); try {
       const subject = c.page.getByRole('textbox', { name: '제목', exact: true }); await subject.fill('typed'); await subject.press('t'); await expect(c.page.locator('dialog.tplA-pickdlg')).toHaveCount(0);

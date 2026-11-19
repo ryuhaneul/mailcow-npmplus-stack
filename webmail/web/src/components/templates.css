@@ -35,7 +35,7 @@
 
 /* 검색 팝업 */
 .tpl-dlg.tplA-pickdlg { width: 760px; padding: 0; overflow: hidden; display: flex; }
-.tplA-pick { display: flex; flex-direction: column; width: 100%; max-height: min(560px, calc(100vh - 40px)); }
+.tplA-pick { display: flex; flex-direction: column; width: 100%; height: min(560px, calc(100vh - 40px)); }
 .tplA-pick > .tpl-search { padding: 12px; border-bottom: 1px solid var(--line); }
 .tplA-pick > .tpl-search .i { left: 23px; }
 .tplA-pick > .tpl-search input { border: 0; height: 40px; font-size: 15px; }

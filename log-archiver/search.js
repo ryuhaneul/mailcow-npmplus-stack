@@ -6,6 +6,7 @@ import { DEFAULT_RETENTION } from './store.js';
 
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_SCAN_BYTES = 512 * 1024 * 1024;
 // Allow a margin over the observed archive tail lag of about four minutes.
 const RECENT_TAIL_MS = 5 * 60 * 1000;
 const sources = Object.keys(DEFAULT_RETENTION);
@@ -26,6 +27,13 @@ const advances = (position, previous) => {
   return false;
 };
 const searchable = value => value && typeof value === 'object' ? Object.values(value).map(searchable).join(' ') : String(value ?? '');
+
+// For these ASCII Docker payloads, sanitization deletes text at separators
+// or inserts separators outside the needle alphabet. The listed escapes also
+// decode to separators. Structured values, other escapes, Unicode payloads
+// and URLs (whose host may be normalized) require full projection.
+const plainDockerLines = /(?:\{(?:"time":"[0-9TZ:.,+-]+",)?"log":"(?! *[\[{])[^"\\\x00-\x1f\x7f-\xff]*(?:\\u00(?:26|3[cCeE])[^"\\\x00-\x1f\x7f-\xff]*)*(?:\\n)?","stream":"(?:stdout|stderr)"(?:,"time":"[0-9TZ:.,+-]+")?\}\n)+/y;
+const outsideNeedleAlphabet = /[^a-z0-9@._-]/;
 
 function utc(value) {
   if (typeof value !== 'string' || !rfc3339.test(value)) throw invalid();
@@ -121,8 +129,8 @@ function coverageOf(snapshot, retention, source) {
 }
 
 /** Bounded in-process snapshots; restart/expiry/eviction intentionally return 410. */
-export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutMs = 10000, maxResponseBytes = MAX_RESPONSE_BYTES, snapshotTtlMs = 600000, maxSnapshots = 32, maxSnapshotBytes = 16 * 1024 * 1024, now = Date.now } = {}) {
-  if (!store || !Number.isSafeInteger(maxScanBytes) || maxScanBytes < 1 || maxScanBytes > 256 * 1024 * 1024 || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 10000 || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1024 || maxResponseBytes > MAX_RESPONSE_BYTES || !Number.isSafeInteger(maxSnapshots) || maxSnapshots < 1 || !Number.isSafeInteger(maxSnapshotBytes) || maxSnapshotBytes < 1 || maxSnapshotBytes > 32 * 1024 * 1024 || snapshotTtlMs <= 0 || snapshotTtlMs > 600000) throw new TypeError('Invalid archive search options');
+export function createSearch({ store, maxScanBytes = MAX_SCAN_BYTES, timeoutMs = 10000, maxResponseBytes = MAX_RESPONSE_BYTES, snapshotTtlMs = 600000, maxSnapshots = 32, maxSnapshotBytes = 16 * 1024 * 1024, now = Date.now } = {}) {
+  if (!store || !Number.isSafeInteger(maxScanBytes) || maxScanBytes < 1 || maxScanBytes > MAX_SCAN_BYTES || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 10000 || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1024 || maxResponseBytes > MAX_RESPONSE_BYTES || !Number.isSafeInteger(maxSnapshots) || maxSnapshots < 1 || !Number.isSafeInteger(maxSnapshotBytes) || maxSnapshotBytes < 1 || maxSnapshotBytes > 32 * 1024 * 1024 || snapshotTtlMs <= 0 || snapshotTtlMs > 600000) throw new TypeError('Invalid archive search options');
   const snapshots = new Map(), signingKey = randomBytes(32);
   let cacheBytes = 0, active = 0, closed = false;
   const retention = { ...DEFAULT_RETENTION, ...store.retention };
@@ -168,8 +176,12 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
         Promise.resolve(promise).then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', onAbort));
       });
     }
-    let snapshot, position, initialPosition, scannedBytes = 0, progressed = false, reason = null;
+    let snapshot, position, initialPosition, retryCursor, scannedBytes = 0, progressed = false, reason = null;
     const lines = [];
+    const needle = query.q.toLowerCase();
+    const rawNeedle = needle.length > 0 && !outsideNeedleAlphabet.test(needle)
+      ? new RegExp(needle.replaceAll('.', '\\.'), 'gi')
+      : null;
     try {
       prune();
       if (query.cursor) ({ snapshot, position } = decode(query.cursor, query));
@@ -196,28 +208,37 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
       );
       const incomplete = !covered.oldest || !newest || start < timeKey(covered.oldest) || uncoveredEnd ||
         covered.gaps.some(gap => !gap.from || !gap.to || timeKey(gap.from) < end && timeKey(gap.to) > start);
-      const result = () => ({ source: query.source, requestedRange: { start: query.start, end: query.end }, coverage: covered, lines, returned: lines.length, nextCursor: position ? encode(snapshot, position) : null, complete: position === null, incomplete, partialReason: position ? reason : null, scannedBytes });
+      const result = () => {
+        // Report the range before the current archive hour as scanned.
+        const scannedThrough = !position ? query.end : timeKey(position.hour) > start ? position.hour : query.start;
+        return { source: query.source, requestedRange: { start: query.start, end: query.end }, coverage: covered, lines, returned: lines.length, nextCursor: retryCursor ?? (position ? encode(snapshot, position) : null), complete: position === null, incomplete, partialReason: position ? reason : null, scannedBytes, scannedThrough };
+      };
       if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) throw archiveError(503, 'LOG_RESPONSE_TOO_LARGE', '보관 범위 정보가 너무 커요.');
       const hours = snapshot.state.catalog.hours;
       const startHour = position ? hours.findIndex(entry => entry.source === position.source && entry.hour === position.hour) : hours.length;
       if (startHour < 0) throw invalid();
       outer: for (let h = startHour; h < hours.length; h++) {
         const entry = hours[h];
-        const index = await wait(store.readIndex(entry));
+        const index = await wait(store.readIndex(entry)).catch(error => {
+          if (controller.signal.aborted && error.name === 'AbortError') return null;
+          throw error;
+        });
+        if (!index) { reason = 'timeout'; break; }
         let first = h === startHour ? index.members.findIndex(member => member.start === position.memberStart) : 0;
         if (first < 0) throw invalid();
         for (let m = first; m < index.members.length; m++) {
+          if (controller.signal.aborted) { reason = 'timeout'; break outer; }
           const member = index.members[m];
           const resume = h === startHour && m === first ? { ...position } : { line: 0, byte: 0 };
           if (resume.line >= member.lineCount || resume.byte > member.uncompressedBytes) throw invalid();
           position = { source: entry.source, hour: entry.hour, memberStart: member.start, line: resume.line, byte: resume.byte };
           const nextMember = () => m + 1 < index.members.length ? { source: entry.source, hour: entry.hour, memberStart: index.members[m + 1].start, line: 0, byte: 0 } : h + 1 < hours.length ? { source: hours[h + 1].source, hour: hours[h + 1].hour, memberStart: 0, line: 0, byte: 0 } : null;
-          if (member.unknownTimeCount === 0 && (timeKey(member.maxTime) < timeKey(query.start) || timeKey(member.minTime) >= timeKey(query.end))) {
+          if (member.unknownTimeCount === 0 && (timeKey(member.maxTime) < start || timeKey(member.minTime) >= end)) {
             position = nextMember(); progressed = true;
             continue;
           }
-          const inputStream = createReadStream(store.file(entry.file), { start: member.start, end: member.end - 1, highWaterMark: 16384, signal: controller.signal });
-          const gzip = createGunzip({ chunkSize: 16384 });
+          const inputStream = createReadStream(store.file(entry.file), { start: member.start, end: member.end - 1, highWaterMark: 128 * 1024, signal: controller.signal });
+          const gzip = createGunzip({ chunkSize: 512 * 1024 });
           inputStream.on('error', error => gzip.destroy(error));
           inputStream.pipe(gzip);
           const abortRead = () => { inputStream.destroy(); gzip.destroy(Object.assign(new Error('Aborted'), { name: 'AbortError' })); };
@@ -230,7 +251,7 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
             position = { source: entry.source, hour: entry.hour, memberStart: member.start, line: resume.line, byte: resume.byte };
           };
           const drainBytes = length => {
-            // Default members are at most 1MiB, below the 256MiB scan budget.
+            // Default members are at most 1MiB, below the default scan budget.
             // Publish rows only after their member passes CRC/ISIZE and length.
             if (now() - started >= timeoutMs || controller.signal.aborted) { reason = 'timeout'; return false; }
             if (scannedBytes + length > maxScanBytes) { scannedBytes = maxScanBytes; reason = 'scan_bytes'; return false; }
@@ -244,6 +265,10 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
                 if (!drainBytes(chunk.length)) { rollbackMember(); break outer; }
                 continue;
               }
+              // Latin-1 keeps string offsets aligned with the underlying bytes.
+              const rawChunk = rawNeedle ? chunk.toString('latin1') : null;
+              let needleAt = rawChunk?.search(rawNeedle) ?? -1;
+              let urlAt = rawChunk?.indexOf('://') ?? -1;
               let offset = 0;
               while (offset < chunk.length) {
                 if (signal?.aborted) throw archiveError(499, 'LOG_QUERY_CANCELLED', '로그 검색을 취소했어요.');
@@ -252,12 +277,30 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
                   if (lines.length > initialLines) rollbackMember();
                   break outer;
                 }
+                if (rawChunk !== null && lineBytes === 0 && lineNumber >= resume.line) {
+                  if (needleAt >= 0 && needleAt < offset) {
+                    rawNeedle.lastIndex = offset;
+                    needleAt = rawNeedle.exec(rawChunk)?.index ?? -1;
+                  }
+                  if (urlAt >= 0 && urlAt < offset) urlAt = rawChunk.indexOf('://', offset);
+                  const stopAt = Math.min(chunk.length, offset + maxScanBytes - scannedBytes,
+                    needleAt < 0 ? chunk.length : needleAt, urlAt < 0 ? chunk.length : urlAt);
+                  const from = offset;
+                  plainDockerLines.lastIndex = offset;
+                  if (offset < stopAt && plainDockerLines.test(rawChunk.slice(0, stopAt))) {
+                    offset = plainDockerLines.lastIndex;
+                    for (let lineStart = from; lineStart < offset; lineStart = rawChunk.indexOf('\n', lineStart) + 1) lineNumber++;
+                    scannedBytes += offset - from; memberBytes += offset - from;
+                    progressed = true;
+                    position = lineNumber === member.lineCount ? nextMember() : { source: entry.source, hour: entry.hour, memberStart: member.start, line: lineNumber, byte: 0 };
+                    continue;
+                  }
+                }
                 const newline = chunk.indexOf(10, offset);
-                const end = newline < 0 ? chunk.length : newline + 1;
-                const length = Math.min(end - offset, maxScanBytes - scannedBytes);
-                const piece = chunk.subarray(offset, offset + length);
+                const lineEnd = newline < 0 ? chunk.length : newline + 1;
+                const length = Math.min(lineEnd - offset, maxScanBytes - scannedBytes);
                 scannedBytes += length; memberBytes += length; lineBytes += length;
-                if (lineNumber >= resume.line && lineBytes <= MAX_LINE_BYTES) parts.push(Buffer.from(piece));
+                if (lineNumber >= resume.line && lineBytes <= MAX_LINE_BYTES) parts.push(chunk.subarray(offset, offset + length));
                 if (lineBytes > MAX_LINE_BYTES) parts = [];
                 offset += length;
                 if (lineNumber > resume.line || lineNumber === resume.line && lineBytes > resume.byte) {
@@ -268,9 +311,12 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
                   if (lineNumber >= resume.line) {
                     const before = { source: entry.source, hour: entry.hour, memberStart: member.start, line: lineNumber, byte: 0 };
                     const id = `${entry.source}/${entry.hour}/${member.start}/${lineNumber}`;
-                    const line = projectLine(lineBytes > MAX_LINE_BYTES ? '' : Buffer.concat(parts).toString('utf8'), entry, id, lineBytes > MAX_LINE_BYTES);
-                    const matchesTime = !line.time || timeKey(line.time) >= cutoff && timeKey(line.time) >= timeKey(query.start) && timeKey(line.time) < timeKey(query.end);
-                    if (matchesTime && searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(query.q.toLowerCase())) {
+                    const oversized = lineBytes > MAX_LINE_BYTES;
+                    const raw = oversized ? '' : (parts.length === 1 ? parts[0] : Buffer.concat(parts)).toString('utf8');
+                    const line = projectLine(raw, entry, id, oversized);
+                    const stamp = line.time && timeKey(line.time);
+                    const matchesTime = !stamp || stamp >= cutoff && stamp >= start && stamp < end;
+                    if (matchesTime && searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(needle)) {
                       const display = { ...line, message: cut(line.message), program: cut(line.program), priority: cut(line.priority), ...(line.fields ? { fields: Object.fromEntries(Object.entries(line.fields).map(([key, value]) => [key, cut(value)])) } : {}) };
                       lines.push(display);
                       if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) {
@@ -293,8 +339,8 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
               // A replacement can land between readIndex and opening the gzip.
               // Old offsets against the new inode must expire the snapshot,
               // while corruption of the same file retains its original error.
-              const current = await wait(store.snapshot());
-              const actual = current.catalog.hours.find(item => item.source === entry.source && item.hour === entry.hour);
+              const current = store.searchCatalog ? store.searchCatalog() : (await wait(store.snapshot())).catalog.hours;
+              const actual = current.find(item => item.source === entry.source && item.hour === entry.hour);
               if (!actual || actual.fileId !== entry.fileId) throw expired();
             }
             if (timedOut && !signal?.aborted && error.name === 'AbortError') {
@@ -313,13 +359,15 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
         }
       }
       if (signal?.aborted) throw archiveError(499, 'LOG_QUERY_CANCELLED', '로그 검색을 취소했어요.');
-      if (position && (!progressed || !advances(position, initialPosition))) throw cannotAdvance();
+      if (position && (!progressed || !advances(position, initialPosition))) {
+        if (reason !== 'timeout' || !query.cursor) throw cannotAdvance();
+        retryCursor = query.cursor;
+      }
       // Revalidate every pinned file, including already visited ones, against
       // retention/replacement before publishing any part of this snapshot.
-      // snapshot() normally resolves from the store's in-memory publication.
-      // After the deadline, never wait behind a blocked writer to validate it.
-      const current = await (timedOut ? Promise.race([store.snapshot(), new Promise((_, reject) => setImmediate(() => reject(cannotAdvance())))]) : wait(store.snapshot()));
-      const identities = new Map(current.catalog.hours.map(entry => [`${entry.source}/${entry.hour}`, entry]));
+      // Read published identities without waiting behind the writer queue.
+      const current = store.searchCatalog ? store.searchCatalog() : (await wait(store.snapshot())).catalog.hours;
+      const identities = new Map(current.map(entry => [`${entry.source}/${entry.hour}`, entry]));
       for (const entry of hours) {
         const actual = identities.get(`${entry.source}/${entry.hour}`);
         if (!actual || actual.fileId !== entry.fileId || actual.compressedBytes < entry.compressedBytes) throw expired();

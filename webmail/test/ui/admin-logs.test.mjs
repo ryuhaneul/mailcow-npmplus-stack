@@ -11,7 +11,7 @@ const sourceNames = ['postfix', 'dovecot', 'rspamd', 'php-fpm', 'nginx', 'webmai
 const oldest = '2026-10-20T00:00:00Z', newest = '2026-10-21T09:00:00Z';
 const statusData = { enabled: true, sources: sourceNames.map(source => ({ source, oldest, newest, lagSeconds: 2, backfillComplete: true, issues: [] })) };
 const line = (message = '합성 로그 sender@example.test → recipient@example.test') => ({ time: '2026-10-21T08:30:00Z', source: 'postfix', program: 'postfix/smtp', message });
-const complete = { enabled: true, lines: [line()], cursor: null, partialReason: null, incomplete: false, coverage: { source: 'postfix', oldest, newest, gaps: [] } };
+const complete = { enabled: true, lines: [line()], cursor: null, partialReason: null, incomplete: false, scannedThrough: newest, coverage: { source: 'postfix', oldest, newest, gaps: [] } };
 const gaps = { ...complete, incomplete: true, coverage: { ...complete.coverage, gaps: [{ from: '2026-10-21T08:00:00Z', to: '2026-10-21T08:15:00Z', reason: 'synthetic-source-missing' }] } };
 const recent = { kind: 'postfix', range: { count: 25, oldest, newest }, lines: [{ ...line('최근 합성 로그'), priority: 'info' }] };
 await test('archive logs: KST, cursor, states and responsive UI with synthetic data', async t => {
@@ -30,7 +30,7 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     await page.route('**/api/admin/logs/archive?**', async route => {
       const params = new URL(route.request().url()).searchParams; requests.push(Object.fromEntries(params));
       if (handler) return handler(route, params, requests.length);
-      return route.fulfill({ json: response });
+      return route.fulfill({ json: { ...response, scannedThrough: params.get('to') } });
     });
     await page.route('**/api/admin/logs?**', route => route.fulfill({ json: recent }));
     await page.clock.setFixedTime(new Date('2026-10-21T09:00:00Z'));
@@ -38,7 +38,8 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     await expect(page.locator('[data-admin-page=logs]')).toBeVisible();
     return { page, context, errors, requests };
   }
-  async function archiveReady(page) { await expect(page.getByRole('region', { name: '기간 검색 결과' })).toContainText('이번 페이지'); }
+  const progress = page => page.locator('.archive-search [role=status]');
+  async function archiveReady(page) { await expect(progress(page)).toContainText('검색 완료'); }
   async function periodSearch(page) { await page.locator('form').getByRole('button', { name: '기간 검색', exact: true }).click(); }
   for (const [name, response, status] of [['results', complete, statusData], ['gaps', gaps, statusData], ['disabled', complete, { enabled: false, sources: [] }]]) for (const width of [1280, 768, 375]) await t.test(`${name} ${width}`, async () => {
     const { page, context, requests, errors } = await open({ width, response, status });
@@ -87,7 +88,7 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
       await archiveReady(page); await expect(page.locator('#archive-source option')).toHaveCount(1);
       await page.getByLabel('검색어 (주소·IP·문자열)', { exact: true }).focus(); await page.keyboard.type('keyboard@example.test');
       await page.keyboard.press('Tab'); await expect(page.locator('#archive-from')).toBeFocused();
-      await page.getByLabel('결과 상한 (1~1,000)', { exact: true }).focus(); await page.keyboard.press('Enter');
+      await page.getByLabel('요청당 조회 줄 수 (1~1,000)', { exact: true }).focus(); await page.keyboard.press('Enter');
       await archiveReady(page); assert.equal(requests.at(-1).q, 'keyboard@example.test');
     } finally { await context.close(); }
   });
@@ -117,7 +118,7 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
       return route.fulfill({ json: { ...complete, lines: [line(params.get('cursor') ? '두 번째 합성 로그' : '첫 번째 합성 로그')], cursor: count === 1 ? 'synthetic-cursor' : null, partialReason: count === 1 ? 'limit' : null } });
     } });
     try {
-      await archiveReady(page); await page.getByRole('button', { name: '더 보기', exact: true }).click();
+      await archiveReady(page);
       await expect(page.locator('tbody tr')).toHaveCount(2); assert.equal(requests[1].cursor, 'synthetic-cursor');
       await page.locator('#archive-q').fill('changed'); await expect(page.locator('tbody tr')).toHaveCount(0);
       await periodSearch(page); await expect.poll(() => requests.length).toBe(3);
@@ -130,9 +131,51 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
   for (const reason of ['limit', 'response_bytes', 'scan_bytes', 'timeout']) await t.test(`zero-match partial ${reason} advances to next cursor`, async () => {
     const { page, context, requests } = await open({ handler: (route, _params, count) => route.fulfill({ json: count === 1 ? { ...complete, lines: [], cursor: 'next-zero', partialReason: reason } : complete }) });
     try {
-      await archiveReady(page); await expect(page.getByRole('region', { name: '기간 검색 결과' })).toContainText('검색이 아직 끝나지 않았습니다.');
-      await page.getByRole('button', { name: '계속 검색', exact: true }).click(); await expect(page.locator('tbody tr')).toHaveCount(1);
+      await archiveReady(page); await expect(page.locator('tbody tr')).toHaveCount(1);
+      await expect(page.getByRole('button', { name: /계속 검색|더 보기/ })).toHaveCount(0);
+      await expect(page.getByText('전체 기간의 일치 건수를 뜻하지 않습니다.', { exact: false })).toHaveCount(0);
       assert.equal(requests.at(-1).cursor, 'next-zero');
+    } finally { await context.close(); }
+  });
+  await t.test('progress shows the scanned time and cancel preserves rows while aborting continuation', async () => {
+    let delayed;
+    const { page, context, requests } = await open({ handler: (route, _params, count) => {
+      if (count === 2) { delayed = route; return; }
+      return route.fulfill({ json: { ...complete, cursor: 'cancel-cursor', partialReason: 'limit', scannedThrough: '2026-10-21T08:30:00Z' } });
+    } });
+    try {
+      await expect(progress(page)).toContainText('검색 중 · 찾은 로그 1건 · 읽은 구간 50%');
+      await expect(progress(page)).toContainText('17:30 (KST)');
+      await expect.poll(() => requests.length).toBe(2);
+      await page.getByRole('button', { name: '검색 취소' }).click();
+      await expect(progress(page)).toContainText('검색 취소됨 · 찾은 로그 1건');
+      await delayed.fulfill({ json: { ...complete, lines: [line('취소 이후 응답')] } }).catch(() => {});
+      await expect(page.locator('tbody tr')).toHaveCount(1);
+      await expect(page.locator('tbody')).not.toContainText('취소 이후 응답');
+    } finally { await context.close(); }
+  });
+  await t.test('429 waits before retrying and timeout retries an unchanged cursor without duplicate rows', async () => {
+    const received = [];
+    const { page, context, requests } = await open({ handler: (route, params, count) => {
+      received.push(performance.now());
+      if (count === 2) return route.fulfill({ status: 429, json: { error: { code: 'LOG_QUERY_BUSY', retryAfter: 2, message: 'synthetic busy' } } });
+      if (count === 3) return route.fulfill({ json: { ...complete, lines: [], cursor: params.get('cursor'), partialReason: 'timeout' } });
+      return route.fulfill({ json: count === 1 ? { ...complete, cursor: 'retry-cursor', partialReason: 'timeout' } : { ...complete, lines: [line('마지막 합성 로그')] } });
+    } });
+    try {
+      await expect(progress(page)).toContainText('다른 검색이 끝나기를 기다리는 중');
+      await archiveReady(page); await expect(page.locator('tbody tr')).toHaveCount(2);
+      assert.deepEqual(requests.map(request => request.cursor), [undefined, 'retry-cursor', 'retry-cursor', 'retry-cursor']);
+      assert.ok(received[2] - received[1] >= 1900);
+      await expect(progress(page)).toContainText('읽은 구간 100%');
+    } finally { await context.close(); }
+  });
+  await t.test('an unchanged timeout cursor stops after five retries', async () => {
+    const { page, context, requests } = await open({ handler: (route, _params, count) => route.fulfill({ json: { ...complete, lines: count === 1 ? complete.lines : [], cursor: 'stalled', partialReason: 'timeout' } }) });
+    try {
+      await expect(page.locator('[data-error-code=ARCHIVE_SEARCH_STALLED]')).toBeVisible();
+      await expect(page.locator('tbody tr')).toHaveCount(1);
+      assert.equal(requests.length, 7);
     } finally { await context.close(); }
   });
   await t.test('expired cursor offers a fresh search, upstream error retries without false empty success', async () => {
@@ -143,7 +186,6 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
       return route.fulfill({ json: { ...complete, cursor: count === 1 ? 'expired-cursor' : null } });
     } });
     try {
-      await archiveReady(page); await page.getByRole('button', { name: '더 보기', exact: true }).click();
       await expect(page.locator('[data-error-code=ARCHIVE_SEARCH_RESTART]')).toContainText('다시 검색');
       await page.getByRole('button', { name: '다시 검색', exact: true }).click(); await archiveReady(page); assert.equal(requests.at(-1).cursor, undefined);
       mode = 'failed'; await periodSearch(page); await expect(page.locator('[data-error-code=ARCHIVE_UNAVAILABLE]')).toBeVisible();
@@ -166,15 +208,15 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     const collecting = await open({ status: { enabled: true, sources: [{ source: 'postfix', oldest: null, newest: null }] } });
     try { await expect(collecting.page.getByText('아직 보관된 로그가 없습니다.', { exact: false })).toBeVisible(); assert.equal(collecting.requests.length, 0); } finally { await collecting.context.close(); }
   });
-  await t.test('5000 row bound replaces visible page; stale status and runtime disabled retain recent logs', async () => {
-    const { page, context } = await open({ handler: (route, _params, count) => route.fulfill({ json: { ...complete, lines: Array.from({ length: 1000 }, (_, i) => line(`페이지${count} 행${i}`)), cursor: count < 7 ? `cursor-${count}` : null } }) });
+  await t.test('2000 row bound preserves the oldest results; stale status and runtime disabled retain recent logs', async () => {
+    const { page, context, requests } = await open({ handler: (route, _params, count) => route.fulfill({ json: { ...complete, lines: Array.from({ length: 750 }, (_, i) => line(`페이지${count} 행${i}`)), cursor: `cursor-${count}`, partialReason: 'limit' } }) });
     try {
-      await archiveReady(page);
-      for (let count = 2; count <= 7; count++) {
-        await page.getByRole('button', { name: '더 보기', exact: true }).click();
-        await expect(page.locator('tbody tr')).toHaveCount(count >= 6 ? 1000 : count * 1000);
-      }
-      await expect(page.getByText('화면 누적 5,000건 상한으로', { exact: false })).toBeVisible(); await expect(page.locator('tbody tr').first()).toContainText('페이지7');
+      await expect(progress(page)).toContainText('결과 상한 도달');
+      await expect(page.locator('tbody tr')).toHaveCount(2000);
+      await expect(page.getByText('결과가 표시 상한인 2,000건에 도달해', { exact: false })).toBeVisible();
+      await expect(page.locator('tbody tr').first()).toContainText('페이지1 행0');
+      await expect(page.locator('tbody tr').last()).toContainText('페이지3 행499');
+      assert.equal(requests.length, 3);
     } finally { await context.close(); }
     for (const options of [{ response: { enabled: false } }, { statusCode: 502, status: { error: { code: 'ARCHIVE_STATUS_UNAVAILABLE', message: 'synthetic status failure' } } }]) {
       const view = await open(options);

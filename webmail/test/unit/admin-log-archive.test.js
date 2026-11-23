@@ -24,7 +24,7 @@ const env = {
 };
 const query = { source: 'postfix', from: '2026-10-21T00:00:00+09:00', to: '2026-10-21T01:00:00+09:00' };
 const coverage = source => ({ source, oldest: '2026-10-20T15:00:00.000Z', newest: '2026-10-20T16:00:00.000Z', gaps: [] });
-const searchResult = () => ({ source: 'postfix', lines: [{ id: 'private-id', time: '2026-10-20T15:30:00.000Z', program: 'postfix/smtpd', priority: '', message: 'sender@example.com 2001:db8::7 [a+b].*', private: 'synthetic-excluded' }], nextCursor: null, partialReason: null, incomplete: false, coverage: coverage('postfix') });
+const searchResult = () => ({ source: 'postfix', lines: [{ id: 'private-id', time: '2026-10-20T15:30:00.000Z', program: 'postfix/smtpd', priority: '', message: 'sender@example.com 2001:db8::7 [a+b].*', private: 'synthetic-excluded' }], nextCursor: null, partialReason: null, incomplete: false, scannedThrough: '2026-10-20T16:00:00.000Z', coverage: coverage('postfix') });
 const statusResult = () => ({ generations: [{ source: 'postfix', pendingBytes: 0, path: '/synthetic-private-source', generation: 'private-generation' }], issues: [], collectionLagSeconds: 3, backfillComplete: true, drainFiles: [{ source: 'postfix', instance: 'private-instance', basename: 'private-json.log.1', offset: 3, observedSize: 3, closed: true }] });
 function fixture(overrides = {}) {
   const calls = [], data = { search: searchResult(), status: statusResult(), coverage: { sources: [coverage('postfix')] } };
@@ -119,10 +119,15 @@ test('archive service: from/to to start/end, safe projection and literal search'
   const f = fixture();
   const result = await f.service.archive({ ...query, q: '[a+b].*', limit: '1000', cursor: 'synthetic-cursor' });
   assert.deepEqual(f.calls, [['search', { source: 'postfix', start: query.from, end: query.to, q: '[a+b].*', limit: '1000', cursor: 'synthetic-cursor' }]]);
-  assert.deepEqual(result, { enabled: true, lines: [{ time: '2026-10-20T15:30:00.000Z', source: 'postfix', program: 'postfix/smtpd', priority: '', message: 'sender@example.com 2001:db8::7 [a+b].*' }], cursor: null, partialReason: null, incomplete: false, coverage: coverage('postfix') });
+  assert.deepEqual(result, { enabled: true, lines: [{ time: '2026-10-20T15:30:00.000Z', source: 'postfix', program: 'postfix/smtpd', priority: '', message: 'sender@example.com 2001:db8::7 [a+b].*' }], cursor: null, partialReason: null, incomplete: false, scannedThrough: '2026-10-20T16:00:00.000Z', coverage: coverage('postfix') });
   assert.equal((await f.service.archive({ ...query, q: 'SENDER@EXAMPLE.COM' })).lines.length, 1);
   assert.equal((await f.service.archive({ ...query, q: 'a+bZZ' })).lines.length, 0);
   assert.equal((await f.service.archive({ ...query, q: '2001:db8::7' })).lines.length, 1);
+});
+test('archive service accepts an older archive response without scan progress', async () => {
+  const f = fixture();
+  delete f.data.search.scannedThrough;
+  assert.equal((await f.service.archive(query)).scannedThrough, undefined);
 });
 test('archive service: RFC3339 nanoseconds and KST month boundary retain upstream semantics', async () => {
   const f = fixture();
@@ -142,7 +147,7 @@ test('archive service: preserves empty partial-page cursor, gap and incomplete d
   f.data.search.coverage.gaps = [{ from: query.from, to: query.to, reason: 'source-disappeared', private: 'synthetic-excluded' }];
   for (const partialReason of ['limit', 'response_bytes', 'scan_bytes', 'timeout']) {
     f.data.search.partialReason = partialReason; const result = await f.service.archive(query);
-    assert.equal(result.cursor, 'next-snapshot-position'); assert.equal(result.partialReason, partialReason); assert.equal(result.incomplete, true); assert.deepEqual(result.lines, []);
+    assert.equal(result.cursor, 'next-snapshot-position'); assert.equal(result.partialReason, partialReason); assert.equal(result.incomplete, true); assert.equal(result.scannedThrough, '2026-10-20T16:00:00.000Z'); assert.deepEqual(result.lines, []);
     assert.deepEqual(result.coverage.gaps, [{ from: query.from, to: query.to, reason: 'source-disappeared' }]);
   }
 });
@@ -181,7 +186,7 @@ test('archive status: fetches status and coverage in parallel', async () => {
   const f = fixture({ async status() { calls.push('status'); await gate; return statusResult(); }, async coverage() { calls.push('coverage'); release(); return { sources: [coverage('postfix')] }; } });
   await f.service.archiveStatus(); assert.deepEqual(calls, ['status', 'coverage']);
 });
-for (const mutate of [data => { data.search.lines = 'bad'; }, data => { data.search.lines[0].time = {}; }, data => { data.search.coverage.source = 'dovecot'; }, data => { data.search.nextCursor = 4; }, data => { data.search.partialReason = 'unknown'; }, data => { data.search.incomplete = 'false'; }, data => { data.search.coverage.gaps = null; }]) test('archive service: malformed upstream search is unavailable, never empty success', async () => {
+for (const mutate of [data => { data.search.lines = 'bad'; }, data => { data.search.lines[0].time = {}; }, data => { data.search.coverage.source = 'dovecot'; }, data => { data.search.nextCursor = 4; }, data => { data.search.partialReason = 'unknown'; }, data => { data.search.scannedThrough = 'bad'; }, data => { data.search.incomplete = 'false'; }, data => { data.search.coverage.gaps = null; }]) test('archive service: malformed upstream search is unavailable, never empty success', async () => {
   const f = fixture(); mutate(f.data); await assert.rejects(f.service.archive(query), { statusCode: 503 });
 });
 for (const mutate of [data => { data.status.generations = null; }, data => { data.status.generations[0].pendingBytes = -1; }, data => { data.status.collectionLagSeconds = -1; }, data => { data.status.issues = [{ source: 'postfix' }]; }, data => { data.coverage.sources = null; }]) test('archive service: malformed upstream status is unavailable', async () => {

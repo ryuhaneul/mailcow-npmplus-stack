@@ -74,6 +74,8 @@ const later = (a, b) => !a || timeKey(b) > timeKey(a) ? b : a;
  * Query position: {source,hour,memberStart,line}, zero-based next physical line.
  */
 export class ArchiveStore {
+  #replacingHour = null;
+
   constructor({ root, retention = DEFAULT_RETENTION, memberBytes = 1024 * 1024, fault = async () => {}, onDelete = (entry) => console.info(`archive expired source=${entry.source} hour=${entry.hour} recovered=${entry.recovered === true}`) } = {}) {
     if (!root || !Number.isSafeInteger(memberBytes) || memberBytes < 1) throw new TypeError('Invalid archive options');
     this.root = path.resolve(root);
@@ -170,6 +172,15 @@ export class ArchiveStore {
 
   snapshot() {
     return this.run(() => clone({ transactionId: this.checkpoint.transactionId, catalog: this.catalog, checkpoint: this.checkpoint }));
+  }
+
+  searchCatalog() {
+    if (this.closed || this.failed || !this.catalog) throw new Error('Archive store closed or requires recovery');
+    // Appends leave the pinned prefix intact. A compaction can replace the
+    // file before its new catalog entry is published, so hide that hour here.
+    return this.catalog.hours
+      .filter(entry => key(entry) !== this.#replacingHour)
+      .map(({ source, hour, fileId, compressedBytes }) => ({ source, hour, fileId, compressedBytes }));
   }
 
   readIndex(entry) {
@@ -407,6 +418,7 @@ export class ArchiveStore {
           pendingPublished = true;
           await atomicJson(this.file('state/pending.json'), pending);
           await this.fault('compactAfterPending');
+          this.#replacingHour = key(before);
           await fs.rename(this.file(temp), this.file(after.file));
           await syncDir(path.dirname(this.file(after.file)));
           await syncDir(this.file('state/staging'));
@@ -419,10 +431,15 @@ export class ArchiveStore {
           await atomicJson(this.file('state/checkpoint.json'), afterCheckpoint);
           this.catalog = afterCatalog;
           this.checkpoint = afterCheckpoint;
+          this.#replacingHour = null;
           await this.fault('compactAfterCheckpoint');
           await this.finishPending(pending);
           return { compacted: [clone(after)] };
-        } catch (error) { this.failed = true; throw error; }
+        } catch (error) {
+          this.failed = true;
+          this.#replacingHour = null;
+          throw error;
+        }
       });
     } finally {
       // Once pending may exist, only recovery may discard the old inode.

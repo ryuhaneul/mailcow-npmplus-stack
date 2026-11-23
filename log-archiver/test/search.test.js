@@ -136,6 +136,83 @@ test('zero-match partial pages advance inside a single hour and finish; rare mat
   assert.equal(rare.rows.length, 5);
 });
 
+test('empty partial pages report nondecreasing scan times across archive hours', async t => {
+  const store = await fixture(t);
+  const records = [
+    row('first ordinary line', '2026-10-21T08:20:00Z'),
+    row('second ordinary line', '2026-10-21T09:20:00Z'),
+    row('third ordinary line', '2026-10-21T10:20:00Z'),
+  ];
+  await store.commit({ records });
+  const maxScanBytes = Math.max(...records.map(record => record.raw.length)) + 1;
+  const engine = createSearch({ store, maxScanBytes, now: () => Date.parse('2026-10-21T11:00:00Z') });
+  const result = await pages(engine, params({ start: '2026-10-21T08:15:00Z', end: '2026-10-21T11:00:00Z', q: 'absent' }));
+  assert.deepEqual(result.rows, []);
+  assert.deepEqual(result.responses.map(response => response.scannedThrough), [
+    '2026-10-21T09:00:00.000Z', '2026-10-21T10:00:00.000Z', '2026-10-21T11:00:00.000Z',
+  ]);
+});
+
+test('raw prefilter agrees with full projection across escaping, fields, chunks and hour boundaries', async t => {
+  const store = await fixture(t, { memberBytes: 640 });
+  const start = '2026-10-21T08:00:00.123456788Z';
+  const end = '2026-10-21T09:00:00.000000002Z';
+  const go = row('postfix: to=<MiXeD@Example.test> & fast-Go', start);
+  go.raw = Buffer.from(go.raw.toString().replaceAll('<', '\u003c').replaceAll('>', '\u003E').replaceAll('&', '\u0026'));
+  const escaped = row('SyntheticAsciiEscape');
+  escaped.raw = Buffer.from(escaped.raw.toString().replace('SyntheticAsciiEscape', '\u006beyword'));
+  const records = [
+    row('MiXeD@Example.test before start', '2026-10-21T08:00:00.123456787Z'),
+    go,
+    row('plain FAST-go no address'),
+    row('quote "double" and backslash \\ and tab\t', stamp),
+    row('한글 가나다 and Keyword and İ and Straße', stamp),
+    escaped,
+    row('http://0x7f000001/path?token=hidden-value'),
+    row('http://invalid%host/'),
+    row('Cookie: hidden-value'),
+    row('  ' + JSON.stringify({ message: 'MiXeD@Example.test', path: '/a/path?token=hidden-value', remote: 'Field-Only', status: 201 })),
+    row('ordinary line'),
+    row(`${'x'.repeat(512 * 1024 - 60)}MiXeD@Example.test`),
+    row(`oversized ${'x'.repeat(1024 * 1024)} still hidden`),
+    row('MiXeD@Example.test in next hour', '2026-10-21T09:00:00.000000001Z'),
+    row('MiXeD@Example.test at exclusive end', end),
+    row(JSON.stringify({ message: 'request', code: 'Field-Only' }), stamp, 'webmail'),
+    { ...row('', stamp, 'npmplus'), raw: Buffer.from(`${JSON.stringify({ time: stamp, message: 'request', path: '/FIELD-only?token=hidden-value' })}\n`) },
+  ];
+  await store.commit({ records });
+  const { catalog } = await store.snapshot();
+  const timeKey = value => value.replace(/\.(\d+)Z$/, (_, fraction) => `.${fraction.padEnd(9, '0')}Z`);
+  const projected = new Map();
+  for (const entry of catalog.hours) {
+    const { members } = await store.readIndex(entry);
+    const hourRecords = records.filter(record => record.source === entry.source && record.eventTime.slice(0, 13) === entry.hour.slice(0, 13));
+    const lines = projected.get(entry.source) ?? [];
+    let offset = 0;
+    for (const member of members) {
+      for (let n = 0; n < member.lineCount; n++) {
+        const { raw } = hourRecords[offset++];
+        const id = `${entry.source}/${entry.hour}/${member.start}/${n}`;
+        lines.push(projectLine(raw.toString(), entry, id, raw.length > 1024 * 1024));
+      }
+    }
+    assert.equal(offset, hourRecords.length);
+    projected.set(entry.source, lines);
+  }
+
+  const engine = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') });
+  const terms = ['MiXeD@Example.test', 'fast-go', 'field-only', '201', '/a/path', '가나다', 'STRASSE', 'straße', 'KEYWORD', 'i', '127.0.0.1', 'URL', '[URL]', 'hidden-value', '<', '>', '&', '"', '\\', '\t', '***', '[긴 로그 줄 생략]', 'not-found', ''];
+  for (const [source, lines] of projected) {
+    for (const q of source === 'postfix' ? terms : ['field-only', 'hidden-value', '']) {
+      // Reference search projects every physical line before matching.
+      const expected = lines.filter(line => (!line.time || timeKey(line.time) >= start && timeKey(line.time) < end) &&
+        [line.message, Object.values(line.fields ?? {}).join(' ')].join(' ').toLowerCase().includes(q.toLowerCase()));
+      const { rows } = await pages(engine, { source, start, end, q, limit: '2' });
+      assert.deepEqual(rows.map(line => line.id), expected.map(line => line.id), `${source}: ${JSON.stringify(q)}`);
+    }
+  }
+});
+
 test('snapshot expiry, restart, eviction, deletion and replacement are 410; tamper/reuse is 422', async t => {
   const store = await fixture(t);
   await store.commit({ records: [row('a'), row('b')] });
@@ -432,6 +509,54 @@ test('time budget yields an advancing partial page and a blocked initial snapsho
   await assert.rejects(stuck.search(params()), { code: 'LOG_SCAN_CANNOT_ADVANCE' });
 });
 
+test('a blocked writer preserves an advancing timeout page and lets a stalled cursor retry', async t => {
+  let holdWriter = false, entered, release, writer;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const store = await fixture(t, { memberBytes: 70, async fault(point) {
+    if (holdWriter && point === 'beforePending') { entered(); await held; }
+  } });
+  await store.commit({ records: [row('needle-first'), row('ordinary'), row('needle-last', '2026-10-21T09:00:00Z')] });
+  const engine = createSearch({ store, timeoutMs: 500, now: () => Date.parse('2026-10-21T10:00:00Z') });
+  const query = params({ q: 'needle', limit: '1', end: '2026-10-21T10:00:00Z' });
+  const first = await engine.search(query);
+  assert.deepEqual(first.lines.map(line => line.message), ['needle-first']);
+  assert.equal(first.scannedThrough, '2026-10-21T08:00:00.000Z');
+
+  const readIndex = store.readIndex.bind(store);
+  store.readIndex = async entry => {
+    const index = await readIndex(entry);
+    if (!writer) {
+      holdWriter = true;
+      writer = store.commit({ records: [row('needle-appended')] });
+      await waiting;
+    }
+    return index;
+  };
+  let second;
+  try {
+    second = await engine.search({ ...query, cursor: first.nextCursor });
+    assert.equal(second.partialReason, 'timeout');
+    assert.equal(second.complete, false);
+    assert.ok(second.scannedBytes > 0);
+    assert.ok(greater(orderedPosition(second.nextCursor), orderedPosition(first.nextCursor)));
+    const stalled = await engine.search({ ...query, cursor: second.nextCursor });
+    assert.equal(stalled.partialReason, 'timeout');
+    assert.equal(stalled.complete, false);
+    assert.equal(stalled.scannedBytes, 0);
+    assert.deepEqual(stalled.lines, []);
+    assert.equal(stalled.nextCursor, second.nextCursor);
+    assert.equal(stalled.scannedThrough, second.scannedThrough);
+  } finally {
+    release();
+    await writer;
+  }
+  const last = await engine.search({ ...query, cursor: second.nextCursor });
+  assert.deepEqual(last.lines.map(line => line.message), ['needle-last']);
+  assert.equal(last.complete, true);
+  assert.equal(last.nextCursor, null);
+});
+
 test('in-flight HTTP disconnect propagates cancellation to query and releases capacity', async t => {
   const store = await fixture(t);
   let started, cancelled;
@@ -542,7 +667,7 @@ test('scan budget discards only the unverified member and resumes without duplic
   assert.equal(new Set(result.rows.map(line => line.id)).size, 400);
   assert.ok(result.responses.every(response => response.scannedBytes <= 100000));
   let tick = 0;
-  const timed = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') + (tick++ >= 4 ? 10000 : 0), timeoutMs: 10000 });
+  const timed = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') + (tick++ >= 3 ? 10000 : 0), timeoutMs: 10000 });
   await assert.rejects(timed.search(params({ limit: '1' })), { code: 'LOG_SCAN_CANNOT_ADVANCE' });
 });
 
@@ -581,4 +706,32 @@ test('compaction invalidates a previous pagination cursor and a fresh search kee
   await store.compact({ now: '2026-10-21T10:00:00Z' });
   await assert.rejects(engine.search(params({ limit: '1', cursor: first.nextCursor })), { status: 410, code: 'ARCHIVE_SNAPSHOT_EXPIRED' });
   assert.deepEqual((await pages(engine, params({ limit: '1' }))).rows.map(line => line.message), ['same', 'same', 'last']);
+});
+
+test('final search validation expires an already-read hour while its replacement is unpublished', async t => {
+  let entered, release, compaction;
+  const replacing = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const store = await fixture(t, { async fault(point) {
+    if (point === 'compactAfterReplace') { entered(); await held; }
+  } });
+  await store.commit({ records: [row('older'), row('newer', '2026-10-21T09:00:00Z')] });
+  const readIndex = store.readIndex.bind(store);
+  store.readIndex = async entry => {
+    const index = await readIndex(entry);
+    if (entry.hour === '2026-10-21T09:00:00.000Z' && !compaction) {
+      compaction = store.compact({ now: '2026-10-21T09:00:00Z' });
+      await replacing;
+    }
+    return index;
+  };
+  const engine = createSearch({ store, now: () => Date.parse('2026-10-21T10:00:00Z') });
+  const query = params({ end: '2026-10-21T10:00:00Z' });
+  try {
+    await assert.rejects(engine.search(query), { status: 410, code: 'ARCHIVE_SNAPSHOT_EXPIRED' });
+  } finally {
+    release();
+    await compaction;
+  }
+  assert.deepEqual((await engine.search(query)).lines.map(line => line.message), ['older', 'newer']);
 });

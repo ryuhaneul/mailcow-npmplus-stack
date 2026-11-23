@@ -84,14 +84,14 @@ export function createLogsService({ mailcow, config, logArchive }) {
   async function archive(query = {}, options = {}) {
     if (!logArchive?.enabled) return { enabled: false, lines: [], cursor: null, partialReason: null, incomplete: false, coverage: null };
     const upstreamQuery = archiveQuery(query), data = await logArchive.search(upstreamQuery, options);
-    if (!object(data) || !Array.isArray(data.lines) || data.lines.length > Number(upstreamQuery.limit) || !(data.nextCursor === null || typeof data.nextCursor === 'string' && data.nextCursor.length > 0 && data.nextCursor.length <= 4096) || ![null, 'limit', 'response_bytes', 'scan_bytes', 'timeout'].includes(data.partialReason) || typeof data.incomplete !== 'boolean') throw archiveUnavailable();
+    if (!object(data) || !Array.isArray(data.lines) || data.lines.length > Number(upstreamQuery.limit) || !(data.nextCursor === null || typeof data.nextCursor === 'string' && data.nextCursor.length > 0 && data.nextCursor.length <= 4096) || ![null, 'limit', 'response_bytes', 'scan_bytes', 'timeout'].includes(data.partialReason) || typeof data.incomplete !== 'boolean' || data.scannedThrough !== undefined && (typeof data.scannedThrough !== 'string' || !nullableTime(data.scannedThrough))) throw archiveUnavailable();
     const lines = data.lines.map(row => {
       if (!object(row) || !nullableTime(row.time) || typeof row.message !== 'string' || typeof row.program !== 'string' || typeof row.priority !== 'string') throw archiveUnavailable();
       const safe = sanitizeSyncResponse(row, [], ['program', 'priority', 'method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code']);
       const fields = Object.fromEntries(['method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code'].filter(key => ['string', 'number', 'boolean'].includes(typeof safe.fields?.[key])).map(key => [key, safe.fields[key]]));
       return { time: safe.time, source: upstreamQuery.source, program: safe.program, priority: safe.priority, message: safe.message, ...(Object.keys(fields).length ? { fields } : {}) };
     }).filter(line => searchable({ message: line.message, fields: line.fields }).toLowerCase().includes(upstreamQuery.q.toLowerCase())).map(trimValues);
-    return archiveBounded({ enabled: true, lines, cursor: data.nextCursor, partialReason: data.partialReason, incomplete: data.incomplete, coverage: archiveCoverage(data.coverage, upstreamQuery.source) });
+    return archiveBounded({ enabled: true, lines, cursor: data.nextCursor, partialReason: data.partialReason, incomplete: data.incomplete, ...(data.scannedThrough === undefined ? {} : { scannedThrough: data.scannedThrough }), coverage: archiveCoverage(data.coverage, upstreamQuery.source) });
   }
   async function archiveStatus(options = {}) {
     if (!logArchive?.enabled) return { enabled: false, sources: [] };

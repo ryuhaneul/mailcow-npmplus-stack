@@ -213,6 +213,30 @@ test('raw prefilter agrees with full projection across escaping, fields, chunks 
   }
 });
 
+test('payload-only prefilter preserves angle, IPv6, metadata word and field matches', async t => {
+  const store = await fixture(t);
+  const escaped = row('postfix to=<Mixed@Example.test> relay=[2001:DB8::7] a&b');
+  escaped.raw = Buffer.from(escaped.raw.toString()
+    .replaceAll('<', String.raw`\u003C`).replaceAll('>', String.raw`\u003e`).replaceAll('&', String.raw`\u0026`));
+  await store.commit({ records: [
+    escaped,
+    row('postfix to=<Mixed@Example.test> relay=[2001:db8::7] a&b'),
+    row('postfix address/mixed?token=query>'),
+    row('plain timestamp and stdout stream'),
+    row('only present in the Docker envelope'),
+    row(JSON.stringify({ message: 'structured event', remote: '2001:db8::7', service: 'stdout' })),
+  ] });
+  const engine = createSearch({ store });
+  const { lines } = await engine.search(params());
+  const terms = [['<mixed@example.test>', 2], ['2001:db8::7', 3], ['stdout', 2], ['stream', 1], ['time', 1], ['mixed>', 1], ['a&b', 2]];
+  for (const [q, matches] of terms) {
+    const projected = lines.filter(line => [line.message, Object.values(line.fields ?? {}).join(' ')].join(' ').toLowerCase().includes(q));
+    assert.equal(projected.length, matches, q);
+    const result = await engine.search(params({ q }));
+    assert.deepEqual(result.lines, projected, q);
+  }
+});
+
 test('snapshot expiry, restart, eviction, deletion and replacement are 410; tamper/reuse is 422', async t => {
   const store = await fixture(t);
   await store.commit({ records: [row('a'), row('b')] });

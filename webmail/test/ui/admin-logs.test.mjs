@@ -175,7 +175,7 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     try {
       await expect(page.locator('[data-error-code=ARCHIVE_SEARCH_STALLED]')).toBeVisible();
       await expect(page.locator('tbody tr')).toHaveCount(1);
-      assert.equal(requests.length, 7);
+      assert.equal(requests.length, 6);
     } finally { await context.close(); }
   });
   await t.test('expired cursor offers a fresh search, upstream error retries without false empty success', async () => {

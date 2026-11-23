@@ -201,7 +201,12 @@ test('open gaps, missing observation, cursor loops and collection caps preserve 
   const f=await fixture(t);await f.service.runOnce();const end=(await f.store.readBounces()).completedEnd;
   const normal=f.archive.search;f.archive.search=async q=>{const value=await normal(q);value.coverage.gaps=[{from:iso(T-300000),to:null,reason:'synthetic open gap'}];return value;};assert.equal((await f.service.runOnce()).reason,'ARCHIVE_GAP');
   f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:null}}});assert.equal((await f.service.runOnce()).reason,'COLLECTION_UNCONFIRMED');
-  f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:iso(T)}}});f.archive.search=async q=>({...await normal(q),nextCursor:'same',partialReason:'limit'});assert.equal((await f.service.runOnce()).reason,'ARCHIVE_CURSOR_LOOP');
+  f.archive.status=async()=>({sources:{postfix:{lastSuccessfulCollectionAt:iso(T)}}});
+  for(const [partialReason,reason] of [['timeout','LOG_ARCHIVE_UNAVAILABLE'],['limit','ARCHIVE_CURSOR_LOOP']]){
+    f.archive.search=async q=>({...await normal(q),nextCursor:'same',partialReason:q.cursor?partialReason:'limit'});
+    const result=await f.service.runOnce();assert.equal(result.complete,false);assert.equal(result.reason,reason);
+    assert.equal((await f.store.readBounces()).completedEnd,end);
+  }
   const limited=createBouncesService({store:f.store,policy:f.policy,mailcow:f.mailcow,logArchive:f.archive,audit:f.audit,lock:f.lock,now:()=>T,limits:{pages:1}});assert.equal((await limited.runOnce()).reason,'COLLECTION_LIMIT');assert.equal((await f.store.readBounces()).completedEnd,end);
 });
 test('durable state capacity rejects the whole commit and old active manual entries are retained',async t=>{

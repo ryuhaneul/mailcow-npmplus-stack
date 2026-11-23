@@ -83,6 +83,7 @@ export function createBouncesService({ store, mailcow, logArchive, policy, audit
           if (++pages>cap.pages || monotonicNow()-started>=cap.milliseconds) fail('COLLECTION_LIMIT');
           const result=await logArchive.search({source:'postfix',start:iso(start),end:iso(end),q:'',limit:'1000',...(cursor?{cursor}:{})},{signal});
           if (!object(result) || !Array.isArray(result.lines) || result.lines.length>1000 || !(result.nextCursor===null || typeof result.nextCursor==='string' && result.nextCursor.length>0 && result.nextCursor.length<=4096) || typeof result.incomplete!=='boolean' || ![null,'limit','response_bytes','scan_bytes','timeout'].includes(result.partialReason) || !Number.isSafeInteger(result.scannedBytes) || result.scannedBytes<0) fail('INVALID_ARCHIVE_RESPONSE');
+          if (cursor && result.nextCursor===cursor && result.partialReason==='timeout') fail('LOG_ARCHIVE_UNAVAILABLE');
           rows+=result.lines.length; bytes+=result.scannedBytes;
           if(rows>cap.rows || bytes>cap.bytes) fail('COLLECTION_LIMIT');
           const checked=archiveCoverage(result.coverage,'postfix');

@@ -51,6 +51,15 @@ test('twelve five-minute increments equal one old hourly scan including boundary
  const fifteen=await f.collector.collect(settings,{collection:d.collection});assert.deepEqual(window(fifteen,'relayReceived',15).targets,hourReference(lines,f.now(),15,'relayReceived'));assert.equal(f.queries.length,12);
  assert.ok(!JSON.stringify(d.collection).includes('client.example'));
 });
+test('monitor distinguishes an unchanged timeout from a cursor loop without advancing the watermark',async()=>{
+ const f=fixture(),d=durable(f);await d.collect();f.advance(300000);
+ const normal=f.archive.search;
+ for(const [partialReason,reason] of [['timeout','LOG_ARCHIVE_UNAVAILABLE'],['limit','ARCHIVE_CURSOR_LOOP']]){
+  f.archive.search=async q=>({...await normal(q),nextCursor:'same',complete:false,partialReason:q.cursor?partialReason:'limit'});
+  const result=await d.collect();assert.equal(window(result,'total').complete,false);assert.equal(window(result,'total').reason,reason);
+  assert.equal(d.collection.watermark,iso(base));assert.equal(d.collection.bins.length,0);
+ }
+});
 test('new/legacy collection begins warm-up without backfill and does not reread a completed bucket',async()=>{
  const f=fixture();f.advance(65*60000);let r=await f.collector.collect(defaultMonitorSettings());assert.equal(window(r,'total').reason,'WARMING_UP');assert.equal(f.queries.length,0);
  f.advance(300000);r=await f.collector.collect(defaultMonitorSettings());assert.equal(window(r,'total').value,0);assert.equal(window(r,'total',60).reason,'WARMING_UP');assert.equal(f.queries.length,1);

@@ -79,6 +79,7 @@ export function createMonitorCollector({ config, mailcow, logArchive, relayReade
               const data=await logArchive.search({source:'postfix',start:iso(from),end:iso(to),q:'',limit:'1000',...(cursor?{cursor}:{})},{signal});
               if(!object(data)||!Array.isArray(data.lines)||data.lines.length>1000||!(data.nextCursor===null||typeof data.nextCursor==='string'&&data.nextCursor.length>0&&data.nextCursor.length<=4096)||typeof data.incomplete!=='boolean'||![null,'limit','response_bytes','scan_bytes','timeout'].includes(data.partialReason)||!Number.isSafeInteger(data.scannedBytes)||data.scannedBytes<0)throw Object.assign(new Error(),{code:'INVALID_ARCHIVE_RESPONSE'});
               if(signal.aborted)throw Object.assign(new Error(),{code:'COLLECTION_ABORTED'});
+              if(cursor&&data.nextCursor===cursor&&data.partialReason==='timeout')throw Object.assign(new Error(),{code:'LOG_ARCHIVE_UNAVAILABLE'});
               bytes+=data.scannedBytes;rows+=data.lines.length;
               if(bytes>cap.bytes||rows>cap.rows)throw Object.assign(new Error(),{code:'COLLECTION_LIMIT'});
               const checked=archiveCoverage(data.coverage,'postfix');

@@ -28,12 +28,11 @@ const advances = (position, previous) => {
 };
 const searchable = value => value && typeof value === 'object' ? Object.values(value).map(searchable).join(' ') : String(value ?? '');
 
-// For these ASCII Docker payloads, sanitization deletes text at separators
-// or inserts separators outside the needle alphabet. The listed escapes also
-// decode to separators. Structured values, other escapes, Unicode payloads
-// and URLs (whose host may be normalized) require full projection.
+// Only the recognized ASCII Docker envelope and plain payload can be skipped.
+// Structured values, other escapes and Unicode payloads are projected in full.
 const plainDockerLines = /(?:\{(?:"time":"[0-9TZ:.,+-]+",)?"log":"(?! *[\[{])[^"\\\x00-\x1f\x7f-\xff]*(?:\\u00(?:26|3[cCeE])[^"\\\x00-\x1f\x7f-\xff]*)*(?:\\n)?","stream":"(?:stdout|stderr)"(?:,"time":"[0-9TZ:.,+-]+")?\}\n)+/y;
-const outsideNeedleAlphabet = /[^a-z0-9@._-]/;
+const outsideNeedleAlphabet = /[^a-z0-9@._:<>&-]/;
+const dockerNeedleChars = { '.': String.raw`\.`, '<': String.raw`(?:<|\\u003c)`, '>': String.raw`(?:>|\\u003e)`, '&': String.raw`(?:&|\\u0026)` };
 
 function utc(value) {
   if (typeof value !== 'string' || !rfc3339.test(value)) throw invalid();
@@ -179,9 +178,14 @@ export function createSearch({ store, maxScanBytes = MAX_SCAN_BYTES, timeoutMs =
     let snapshot, position, initialPosition, retryCursor, scannedBytes = 0, progressed = false, reason = null;
     const lines = [];
     const needle = query.q.toLowerCase();
+    // Ignore hits near wrapper quotes. A payload hit either precedes its own
+    // closing quote (followed by stream) or lies beyond the lookahead bound.
     const rawNeedle = needle.length > 0 && !outsideNeedleAlphabet.test(needle)
-      ? new RegExp(needle.replaceAll('.', '\\.'), 'gi')
+      ? new RegExp(String.raw`${needle.replace(/[.<>&]/g, char => dockerNeedleChars[char])}(?![^"\n]{0,64}"(?!,"stream":))`, 'gi')
       : null;
+    // URLs may normalize to new text, and removing a path query can make
+    // the path prefix adjacent to an angle bracket that was already present.
+    const projectionBoundary = /[<>]/.test(needle) ? /:\/\/|\?/g : /:\/\//g;
     try {
       prune();
       if (query.cursor) ({ snapshot, position } = decode(query.cursor, query));
@@ -268,7 +272,7 @@ export function createSearch({ store, maxScanBytes = MAX_SCAN_BYTES, timeoutMs =
               // Latin-1 keeps string offsets aligned with the underlying bytes.
               const rawChunk = rawNeedle ? chunk.toString('latin1') : null;
               let needleAt = rawChunk?.search(rawNeedle) ?? -1;
-              let urlAt = rawChunk?.indexOf('://') ?? -1;
+              let boundaryAt = rawChunk?.search(projectionBoundary) ?? -1;
               let offset = 0;
               while (offset < chunk.length) {
                 if (signal?.aborted) throw archiveError(499, 'LOG_QUERY_CANCELLED', '로그 검색을 취소했어요.');
@@ -282,9 +286,12 @@ export function createSearch({ store, maxScanBytes = MAX_SCAN_BYTES, timeoutMs =
                     rawNeedle.lastIndex = offset;
                     needleAt = rawNeedle.exec(rawChunk)?.index ?? -1;
                   }
-                  if (urlAt >= 0 && urlAt < offset) urlAt = rawChunk.indexOf('://', offset);
+                  if (boundaryAt >= 0 && boundaryAt < offset) {
+                    projectionBoundary.lastIndex = offset;
+                    boundaryAt = projectionBoundary.exec(rawChunk)?.index ?? -1;
+                  }
                   const stopAt = Math.min(chunk.length, offset + maxScanBytes - scannedBytes,
-                    needleAt < 0 ? chunk.length : needleAt, urlAt < 0 ? chunk.length : urlAt);
+                    needleAt < 0 ? chunk.length : needleAt, boundaryAt < 0 ? chunk.length : boundaryAt);
                   const from = offset;
                   plainDockerLines.lastIndex = offset;
                   if (offset < stopAt && plainDockerLines.test(rawChunk.slice(0, stopAt))) {

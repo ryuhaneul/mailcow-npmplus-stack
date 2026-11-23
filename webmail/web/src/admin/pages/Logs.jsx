@@ -72,7 +72,7 @@ function ArchiveSearch({ sources, onDisabled }) {
         } catch (error) {
           if (signal.aborted) return;
           if (error.status !== 429) throw error;
-          if (++stalled > archiveRetryLimit) throw retryError();
+          if (++stalled >= archiveRetryLimit) throw retryError();
           setResult(previous => ({ ...previous, waiting: true }));
           await waitForArchiveRetry(Number.isInteger(error.retryAfter) && error.retryAfter > 0 ? error.retryAfter : 1, signal);
           continue;
@@ -88,7 +88,7 @@ function ArchiveSearch({ sources, onDisabled }) {
         setResult({ ...emptyArchiveResult(loading), data, lines, capped });
         if (!loading) return;
         if (sameCursor) {
-          if (++stalled > archiveRetryLimit) throw retryError();
+          if (++stalled >= archiveRetryLimit) throw retryError();
         } else stalled = 0;
         params.set('cursor', data.cursor);
       }

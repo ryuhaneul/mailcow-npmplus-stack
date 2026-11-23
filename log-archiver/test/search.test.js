@@ -280,6 +280,38 @@ test('coverage includes all eight policies and collection gaps, with empty vs in
   assert.equal(empty.coverage.oldest, null); assert.equal(empty.incomplete, true);
 });
 
+test('a search ending now tolerates a recent archive tail but reports stale or entirely uncovered ranges', async t => {
+  const store = await fixture(t);
+  const engine = createSearch({ store, now: () => Date.parse(base.end) });
+  await store.commit({ records: [row('oldest', base.start), row('stale', '2026-10-21T08:54:59.999Z')] });
+  assert.equal((await engine.search(params())).incomplete, true);
+
+  const newest = '2026-10-21T08:56:00Z';
+  await store.commit({ records: [row('recent', newest)] });
+  const recent = await engine.search(params());
+  assert.equal(recent.coverage.newest, newest);
+  assert.equal(recent.incomplete, false);
+  assert.equal((await engine.search(params({ start: '2026-10-21T08:57:00Z' }))).incomplete, true);
+});
+
+test('a recent search still reports ranges before coverage and across collection gaps', async t => {
+  const store = await fixture(t);
+  const newest = '2026-10-21T08:59:59.999Z';
+  await store.commit({ records: [row('oldest', base.start), row('newest', newest)] });
+  const engine = createSearch({ store, now: () => Date.parse(base.end) });
+  const beforeCoverage = await engine.search(params({ start: '2026-10-21T07:59:00Z' }));
+  assert.equal(beforeCoverage.incomplete, true);
+
+  await store.commit({ checkpoints: {
+    old: { source: 'postfix', offset: 100, gaps: [
+      { source: 'postfix', start: '2026-10-21T08:20:00Z', end: '2026-10-21T08:21:00Z', reason: 'copytruncate' },
+    ] },
+  } });
+  const overlappingGap = await engine.search(params());
+  assert.equal(overlappingGap.coverage.gaps.length, 1);
+  assert.equal(overlappingGap.incomplete, true);
+});
+
 test('collector checkpoint gaps survive access truncation and appear in coverage and search by source', async t => {
   const store = await fixture(t);
   const npmplusRoot = path.join(store.root, 'synthetic-npmplus');

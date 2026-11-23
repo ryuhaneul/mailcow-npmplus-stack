@@ -6,6 +6,8 @@ import { DEFAULT_RETENTION } from './store.js';
 
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
+// Allow a margin over the observed archive tail lag of about four minutes.
+const RECENT_TAIL_MS = 5 * 60 * 1000;
 const sources = Object.keys(DEFAULT_RETENTION);
 const searchSources = ['postfix', 'dovecot', 'rspamd', 'webmail', 'webmail-admin', 'npmplus'];
 const allowedFields = ['method', 'path', 'status', 'remote', 'ip', 'service', 'event', 'code'];
@@ -178,13 +180,22 @@ export function createSearch({ store, maxScanBytes = 256 * 1024 * 1024, timeoutM
         const size = Buffer.byteLength(JSON.stringify(frozen));
         if (size > maxSnapshotBytes) throw archiveError(503, 'LOG_SNAPSHOT_TOO_LARGE', '검색 범위를 줄여 주세요.');
         while (snapshots.size >= maxSnapshots || cacheBytes + size > maxSnapshotBytes) drop(snapshots.keys().next().value);
-        snapshot = { id: randomUUID(), fingerprint: fingerprint(query), expires: now() + snapshotTtlMs, state: frozen, coverage: coverageOf(state, retention, query.source)[0], size };
+        const createdAt = now();
+        snapshot = { id: randomUUID(), fingerprint: fingerprint(query), createdAt, expires: createdAt + snapshotTtlMs, state: frozen, coverage: coverageOf(state, retention, query.source)[0], size };
         snapshots.set(snapshot.id, snapshot); cacheBytes += size;
         position = hours.length ? { source: query.source, hour: hours[0].hour, memberStart: 0, line: 0, byte: 0 } : null;
       }
       initialPosition = position ? { ...position } : null;
       const covered = snapshot.coverage;
-      const incomplete = !covered.oldest || timeKey(query.start) < timeKey(covered.oldest) || timeKey(query.end) > timeKey(covered.newest) || covered.gaps.some(gap => !gap.from || !gap.to || timeKey(gap.from) < timeKey(query.end) && timeKey(gap.to) > timeKey(query.start));
+      const start = timeKey(query.start), end = timeKey(query.end);
+      const newest = covered.newest && timeKey(covered.newest);
+      const uncoveredEnd = newest && end > newest && (
+        start > newest ||
+        end > timeKey(new Date(snapshot.createdAt).toISOString()) ||
+        newest < timeKey(new Date(snapshot.createdAt - RECENT_TAIL_MS).toISOString())
+      );
+      const incomplete = !covered.oldest || !newest || start < timeKey(covered.oldest) || uncoveredEnd ||
+        covered.gaps.some(gap => !gap.from || !gap.to || timeKey(gap.from) < end && timeKey(gap.to) > start);
       const result = () => ({ source: query.source, requestedRange: { start: query.start, end: query.end }, coverage: covered, lines, returned: lines.length, nextCursor: position ? encode(snapshot, position) : null, complete: position === null, incomplete, partialReason: position ? reason : null, scannedBytes });
       if (Buffer.byteLength(JSON.stringify(result())) + 1024 > maxResponseBytes) throw archiveError(503, 'LOG_RESPONSE_TOO_LARGE', '보관 범위 정보가 너무 커요.');
       const hours = snapshot.state.catalog.hours;

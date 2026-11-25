@@ -9,6 +9,7 @@ export default async function accountsRoutes(app, { service }) {
     return service.summary(request.session.mailcow, request.params.addr);
   });
   app.get('/api/admin/mailboxes/:addr/refs', async request => service.refs(request.session.mailcow, request.params.addr, request.query));
+  app.get('/api/admin/mailboxes/:addr/flow', async request => service.flow(request.session.mailcow, request.params.addr));
   app.post('/api/admin/mailboxes', async request => service.create({ session: request.session.mailcow, actor: request.session.username, ip: request.ip, data: request.body }));
   app.post('/api/admin/mailboxes/:addr/delete-preview', async request => service.deletePreview(request.session.mailcow, request.params.addr));
   app.delete('/api/admin/mailboxes/:addr', async request => service.remove({ session: request.session.mailcow, actor: request.session.username, ip: request.ip, addr: request.params.addr, data: request.body }));

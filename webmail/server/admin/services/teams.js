@@ -20,12 +20,52 @@ function refused(error) {
   throw new AppError(error.code === 'invalid_address' ? 422 : error.code === 'self_check_failed' ? 500 : 409,
     error.code.toUpperCase(), '이 팀 분배 필터는 안전하게 바꿀 수 없어요. 읽기 전용 사유를 확인해 주세요.');
 }
+export const isMemberAlias = row => row.private_comment === 'mailadmin:team-members';
 function memberAlias(filter, aliases) {
   const matches = analyze(filter.script_data).members.map(member => aliases.find(row =>
-    String(row.active) === '1' && row.private_comment === 'mailadmin:team-members' && normalize(row.address) === normalize(member.address))).filter(Boolean);
+    String(row.active) === '1' && isMemberAlias(row) && normalize(row.address) === normalize(member.address))).filter(Boolean);
   if (matches.length > 1) throw new Refused('multiple_member_aliases');
   return matches[0] ?? null;
 }
+const revision = filter => etag({ id: filter.id, source: filter.script_data });
+
+export function activePrefilterGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) if (typeof row.username === 'string' && row.filter_type === 'prefilter' && String(row.active) === '1') {
+    const team = normalize(row.username); groups.set(team, [...groups.get(team) ?? [], row]);
+  }
+  return groups;
+}
+
+export function teamEntry(team, entries, names, aliasRows, teams, domains) {
+  if (entries.length > 1) return groupMailboxAddresses(entries).size || entries.some(row => String(row.script_data ?? '').toLowerCase().includes('redirect')) ?
+    { mailbox: team, filterId: null, members: [], editable: false, reason: 'multiple_prefilters', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: etag(entries) } : null;
+  const filter = entries[0], a = analyze(filter.script_data);
+  if (!a.parsed) return String(filter.script_data ?? '').toLowerCase().includes('redirect') ?
+    { mailbox: team, filterId: filter.id, members: [], editable: false, reason: 'unparseable', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: revision(filter) } : null;
+  if (!a.members.length) return null;
+  let alias = null, reason = '';
+  try { alias = memberAlias(filter, aliasRows); } catch (error) {
+    if (!(error instanceof Refused)) throw error;
+    reason = error.code;
+  }
+  reason ||= a.stopperBeforeMember ? 'stopper_before_member' : !a.members.at(-1).simple ? 'line_not_simple' : '';
+  const unique = new Map();
+  const append = (address, via) => {
+    const key = normalize(address);
+    if (!unique.has(key)) unique.set(key, { address, name: names.get(key) ?? '', via });
+  };
+  if (alias) for (const address of String(alias.goto ?? '').split(/[\s,;]+/).map(normalize).filter(Boolean)) append(address, 'alias');
+  for (const row of a.members) if (!alias || normalize(row.address) !== normalize(alias.address)) append(row.address, 'sieve');
+  const members = [...unique.values()];
+  const eligible = !alias && !reason && members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).length >= 3;
+  const conversionReason = eligible && externalRedirectPreview(filter.script_data, domains).needsSpamGuard ? 'external_spam_guard' : '';
+  const convertible = eligible && !conversionReason;
+  return { mailbox: team, filterId: filter.id, members, editable: !reason, reason, conversionReason,
+    mode: alias ? 'alias' : 'sieve', memberAlias: alias ? normalize(alias.address) : null, convertible,
+    distribution: a.forwards.length ? 'mixed' : 'copy', etag: alias ? etag({ id: filter.id, source: filter.script_data, goto: alias.goto }) : revision(filter) };
+}
+
 export function createFilterBackups({ dir }) {
   const root = () => join(dir, 'filter-backups');
   const path = (id, phase) => {
@@ -79,7 +119,6 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir, re
     if (entries.length > 1) throw new AppError(409, 'MULTIPLE_PREFILTERS', '활성 사전 필터가 여러 개라 바꿀 수 없어요.');
     return entries[0];
   }
-  const revision = filter => etag({ id: filter.id, source: filter.script_data });
   async function internalDomains(session) {
     const rows = await Promise.all(['domain/all', 'alias-domain/all'].map(async path => {
       const value = await mailcow.call(session, 'GET', `/api/v1/get/${path}`);
@@ -102,42 +141,11 @@ export function createTeamsService({ mailcow, audit, lock, history, auditDir, re
     const checked = prefilters(await filters(session), team);
     if (checked.length !== 1 || checked[0].script_data !== next) throw verifyFailed();
   }
-  function teamEntry(team, entries, names, aliasRows, teams, domains) {
-    if (entries.length > 1) return groupMailboxAddresses(entries).size || entries.some(row => String(row.script_data ?? '').toLowerCase().includes('redirect')) ?
-      { mailbox: team, filterId: null, members: [], editable: false, reason: 'multiple_prefilters', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: etag(entries) } : null;
-    const filter = entries[0], a = analyze(filter.script_data);
-    if (!a.parsed) return String(filter.script_data ?? '').toLowerCase().includes('redirect') ?
-      { mailbox: team, filterId: filter.id, members: [], editable: false, reason: 'unparseable', distribution: 'unknown', mode: 'sieve', memberAlias: null, convertible: false, etag: revision(filter) } : null;
-    if (!a.members.length) return null;
-    let alias = null, reason = '';
-    try { alias = memberAlias(filter, aliasRows); } catch (error) {
-      if (!(error instanceof Refused)) throw error;
-      reason = error.code;
-    }
-    reason ||= a.stopperBeforeMember ? 'stopper_before_member' : !a.members.at(-1).simple ? 'line_not_simple' : '';
-    const unique = new Map();
-    const append = (address, via) => {
-      const key = normalize(address);
-      if (!unique.has(key)) unique.set(key, { address, name: names.get(key) ?? '', via });
-    };
-    if (alias) for (const address of String(alias.goto ?? '').split(/[\s,;]+/).map(normalize).filter(Boolean)) append(address, 'alias');
-    for (const row of a.members) if (!alias || normalize(row.address) !== normalize(alias.address)) append(row.address, 'sieve');
-    const members = [...unique.values()];
-    const eligible = !alias && !reason && members.filter(row => names.has(normalize(row.address)) && !teams.has(normalize(row.address))).length >= 3;
-    const conversionReason = eligible && externalRedirectPreview(filter.script_data, domains).needsSpamGuard ? 'external_spam_guard' : '';
-    const convertible = eligible && !conversionReason;
-    return { mailbox: team, filterId: filter.id, members, editable: !reason, reason, conversionReason,
-      mode: alias ? 'alias' : 'sieve', memberAlias: alias ? normalize(alias.address) : null, convertible,
-      distribution: a.forwards.length ? 'mixed' : 'copy', etag: alias ? etag({ id: filter.id, source: filter.script_data, goto: alias.goto }) : revision(filter) };
-  }
   async function list(session, { q = '', page = '1' } = {}) {
     if (typeof q !== 'string' || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
     const boxes = await mailboxes(session), rows = await filters(session), aliasRows = await aliases(session);
     const names = new Map(boxes.map(row => [row.address, row.name]));
-    const groups = new Map();
-    for (const row of rows) if (typeof row.username === 'string' && row.filter_type === 'prefilter' && String(row.active) === '1') {
-      const team = normalize(row.username); groups.set(team, [...groups.get(team) ?? [], row]);
-    }
+    const groups = activePrefilterGroups(rows);
     const items = [], forwards = [], teams = groupMailboxAddresses(rows), domains = await internalDomains(session);
     for (const [team, entries] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
       const item = teamEntry(team, entries, names, aliasRows, teams, domains);

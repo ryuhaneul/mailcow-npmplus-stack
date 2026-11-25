@@ -10,6 +10,9 @@ import { AppError } from '../../errors.js';
 import { MailcowAuthLost } from '../mailcow-client.js';
 import { etag, assertUnchanged } from '../lock.js';
 import { groupMailboxAddresses } from './shares.js';
+import { isMemberAlias } from './teams.js';
+import { internalDomainSet } from '../filter-script.js';
+import { aliasMatches, buildGraph, incomingTree, outgoingTree, targets } from '../mail-flow.js';
 import { aliasBackup, createAliasApi } from './aliases.js';
 import { analyze, removeMember, renameMember, Refused, addressPattern } from '../sieve-team.js';
 
@@ -17,14 +20,13 @@ const GB = 1024 ** 3;
 const scriptHash = source => createHash('sha256').update(String(source ?? '')).digest('hex');
 const protocols = ['imap', 'pop3', 'smtp', 'sieve', 'eas', 'dav'];
 const normalize = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+const mailboxNotFound = () => new AppError(404, 'NOT_FOUND', '메일함을 찾을 수 없어요.');
 const invalid = () => new AppError(422, 'INVALID_INPUT', '계정 입력값을 확인해 주세요.');
 const inactiveMailbox = () => new AppError(409, 'MAILBOX_INACTIVE', '계정을 켠 뒤 다시 해 주세요.');
 const ownerVersions = owners => [...owners].sort(([a], [b]) => a.localeCompare(b));
 const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 계정 설정이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
 const safeCode = error => error instanceof AppError && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'INTERNAL_ERROR';
 const sieveWarning = () => ({ ...sieveDisabledWarning });
-const targets = value => (Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/)).map(normalize).filter(Boolean);
-const isMemberAlias = row => row.private_comment === 'mailadmin:team-members';
 const memberAliases = (filter, aliases) => analyze(filter.script_data).members.map(member => aliases.find(row =>
   isMemberAlias(row) && String(row.active) === '1' && normalize(row.address) === normalize(member.address))).filter(Boolean);
 function teamMembers(filter, aliases) {
@@ -130,7 +132,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   }
   async function box(session, addr) {
     const row = await get(session, `mailbox/${encodeURIComponent(addr)}`);
-    if (!row || normalize(row.username) !== addr) throw new AppError(404, 'NOT_FOUND', '메일함을 찾을 수 없어요.');
+    if (!row || normalize(row.username) !== addr) throw mailboxNotFound();
     return row;
   }
   function relatedShares(aclByOwner, addr) {
@@ -176,13 +178,21 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   }
   async function list(session, { q = '', kind = 'all', page = '1' } = {}) {
     if (typeof q !== 'string' || !['all', 'personal', 'team', 'admin', 'off'].includes(kind) || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
-    const boxes = await rows(session, 'mailbox/all'), groups = groupMailboxAddresses(await rows(session, 'filters/all'));
     const search = q.trim().toLowerCase();
-    const found = boxes.filter(row => typeof row.username === 'string' && `${row.username} ${row.name ?? ''}`.toLowerCase().includes(search) &&
+    const [boxes, filters, aliases] = await Promise.all([
+      rows(session, 'mailbox/all'), rows(session, 'filters/all'), search ? rows(session, 'alias/all') : [],
+    ]);
+    const groups = groupMailboxAddresses(filters);
+    const matches = search ? aliasMatches(buildGraph({ boxes, aliases, filters: [], domains: [] }), search) : new Map();
+    const found = boxes.filter(row => typeof row.username === 'string' &&
+      (`${row.username} ${row.name ?? ''}`.toLowerCase().includes(search) || matches.has(normalize(row.username))) &&
       (kind === 'all' || (kind === 'off' ? String(row.active) !== '1' : kindOf(row, groups) === kind))).sort((a, b) => a.username.localeCompare(b.username));
     const items = [];
     // The retirement pool deliberately has two connections and no wait queue.
-    for (const row of found.slice((Number(page) - 1) * 50, Number(page) * 50)) items.push({ ...summary(row, groups), retirement: retirementDto(await retirementState(normalize(row.username)), Number(row.active)) });
+    for (const row of found.slice((Number(page) - 1) * 50, Number(page) * 50)) {
+      const addr = normalize(row.username);
+      items.push({ ...summary(row, groups), matchedAliases: matches.get(addr) ?? [], retirement: retirementDto(await retirementState(addr), Number(row.active)) });
+    }
     return { items, total: found.length, page: Number(page), pageSize: 50 };
   }
   async function quotaList(session) {
@@ -249,6 +259,19 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       rows(session, 'mailbox/all'), rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'syncjobs/all/no_log'),
     ]);
     return collectReferences(addr, row, boxes, aliases, filters, syncjobs, { allShares: scope === 'all', includeOwnShare: true });
+  }
+  async function flow(session, rawAddress) {
+    const addr = address(rawAddress);
+    const boxes = await rows(session, 'mailbox/all');
+    if (!boxes.some(row => normalize(row?.username) === addr)) throw mailboxNotFound();
+    const [aliases, filters, primaryDomains, aliasDomains] = await Promise.all([
+      rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'domain/all'), rows(session, 'alias-domain/all'),
+    ]);
+    const graph = buildGraph({ boxes, aliases, filters, domains: internalDomainSet(primaryDomains, aliasDomains) });
+    const incoming = incomingTree(graph, addr), outgoing = outgoingTree(graph, addr);
+    const moveTargets = [...graph.moveTargets.get(addr) ?? []];
+    return { address: addr, keepsMail: !moveTargets.length, moveTargets, incoming: incoming.root, outgoing: outgoing.root,
+      counts: { incoming: incoming.count, endMailboxes: outgoing.count }, warnings: [] };
   }
   async function detailSummary(session, rawAddress) {
     const addr = address(rawAddress), row = await box(session, addr);
@@ -1361,7 +1384,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
       });
     } finally { password?.fill(0); }
   }
-  return { list, quotaList, detail, summary: detailSummary, refs: references, create: args => routingLock(() => create(args)), edit: args => routingLock(() => edit(args)), deletePreview,
+  return { list, quotaList, detail, summary: detailSummary, refs: references, flow, create: args => routingLock(() => create(args)), edit: args => routingLock(() => edit(args)), deletePreview,
     remove: args => routingLock(() => lifecycleRun(args)), leave: args => args.data?.action === 'preview' ? leave(args) : routingLock(() => leave(args)),
     rename: args => args.data?.action === 'preview' ? rename(args) : routingLock(() => rename(args)),
     convert: args => args.data?.action === 'preview' ? convert(args) : routingLock(() => convert(args)), retirementPreview, retirementUpdate };

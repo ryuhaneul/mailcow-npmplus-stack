@@ -565,3 +565,72 @@ test('accounts full detail: lifecycle ACL snapshots, own skip and legacy netlimi
   const { kind, usedBytes, messages, retirement, appPasswordCount, etag: revision, sharesScope, warnings, refs, ...editable } = value;
   assert.equal(revision, etag(editable));
 });
+
+test('accounts: alias search adds all matching routes and respects the kind filter', async t => {
+  const f = await fixture(t);
+  f.boxes[0].name = 'Global account';
+  f.aliases.push({ address: 'global@example.com', goto: [user, team], active: 1 });
+  const direct = await f.service.list({}, { q: ' GLOBAL ' });
+  assert.deepEqual(direct.items.map(row => [row.address, row.matchedAliases]), [
+    [team, ['global@example.com']], [user, ['global@example.com']],
+  ]);
+  f.aliases.push({ address: 'global-chain@example.com', goto: 'global@example.com', active: '1' },
+    { address: 'global-off@example.com', goto: 'admin@example.com', active: 0 },
+    { address: 'global-members@example.com', goto: 'admin@example.com', active: 1, private_comment: 'mailadmin:team-members' });
+  const chained = await f.service.list({}, { q: 'global', kind: 'team' });
+  assert.equal(chained.total, 1);
+  assert.deepEqual(chained.items[0].matchedAliases, ['global-chain@example.com', 'global@example.com']);
+  assert.equal((await f.service.list({}, { q: 'global', kind: 'admin' })).total, 0);
+});
+
+test('accounts flow: reads each dataset once and reports delivery for inactive and missing mailboxes', async t => {
+  const f = await fixture(t), outside = 'outside@remote.example.com';
+  f.filters.push({ id: 2, username: user, active: 1, filter_type: 'postfilter', script_data: `redirect "${outside}";` });
+  const value = await f.service.flow({}, ' USER@EXAMPLE.COM ');
+  assert.deepEqual(value, {
+    address: user, keepsMail: false, moveTargets: [outside],
+    incoming: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warning: null, group: null, children: [
+      { address: team, type: 'mailbox', active: 1, team: true, kind: 'team', copy: null, cycle: false, warning: null, group: null, children: [] },
+    ] },
+    outgoing: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warning: null, group: null, children: [
+      { address: outside, type: 'external', active: null, team: false, kind: 'filter', copy: false, cycle: false, warning: null, group: null, children: [] },
+    ] },
+    counts: { incoming: 1, endMailboxes: 1 }, warnings: [],
+  });
+  assert.deepEqual(f.calls.map(call => call.path).sort(), ['alias-domain/all', 'alias/all', 'domain/all', 'filters/all', 'mailbox/all']
+    .map(path => `/api/v1/get/${path}`).sort());
+  assert.deepEqual(f.aclCalls, []);
+  const inactive = await f.service.flow({}, 'left@example.com');
+  assert.equal(inactive.keepsMail, true);
+  assert.deepEqual(inactive.moveTargets, []);
+  assert.equal(inactive.outgoing.active, 2);
+  assert.deepEqual(inactive.counts, { incoming: 0, endMailboxes: 0 });
+  await assert.rejects(f.service.flow({}, 'missing@example.com'), { statusCode: 404, code: 'NOT_FOUND' });
+  await assert.rejects(f.service.flow({}, 'invalid'), { statusCode: 422, code: 'INVALID_INPUT' });
+});
+
+test('accounts flow HTTP: same guard as refs and a read-only response', async t => {
+  const f = await fixture(t), { app, headers } = await http(t, f);
+  const path = `/api/admin/mailboxes/${encodeURIComponent(user)}/flow`;
+  assert.equal((await app.inject('/healthz')).statusCode, 200);
+  f.calls.length = 0;
+  const denied = await app.inject(path);
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.headers['www-authenticate'], undefined);
+  assert.deepEqual(f.calls, []);
+  const response = await app.inject({ url: path, headers });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  assert.equal(response.json().address, user);
+  assert.ok(f.calls.some(call => call.path === '/api/v1/get/status/version'));
+  assert.deepEqual(writes(f), []);
+  for (const permission of ['read', 'full']) {
+    const key = await app.apiKeys.create({ name: `synthetic ${permission}`, permission }, 'human', { id: app.apiKeys.allocateId() });
+    const result = await app.inject({ url: path, headers: { 'x-mailadmin-api-key': key.token } });
+    assert.equal(result.statusCode, 200, result.body);
+    assert.equal(result.headers['www-authenticate'], undefined);
+  }
+  const missing = await app.inject({ url: '/api/admin/mailboxes/missing%40example.com/flow', headers });
+  assert.equal(missing.statusCode, 404, missing.body);
+  assert.equal(missing.json().error.code, 'NOT_FOUND');
+});

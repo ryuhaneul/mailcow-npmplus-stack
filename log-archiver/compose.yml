@@ -31,7 +31,7 @@ services:
       - npmplus-data:/npmplus-data:ro
       - log-archive-data:/archive
     networks: [log-archive-internal]
-    cpus: 0.5
+    cpus: 2.0
     mem_limit: 256m
     logging:
       driver: json-file

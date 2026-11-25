@@ -349,6 +349,16 @@ export function createFakeAdminApi() {
       state.accounts.version++;
       return response.end(JSON.stringify({result:'ok',retirement:retirementInfo(row),steps:[{stage:'receive',status:'ok'}]}));
     }
+    const accountFlowMatch = url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)\/flow$/);
+    if (accountFlowMatch && request.method === 'GET') {
+      const address = decodeURIComponent(accountFlowMatch[1]);
+      const row = state.accounts.items.find(item => item.address === address);
+      if (!row) return fail({ status: 404, code: 'NOT_FOUND', message: '메일함을 찾을 수 없어요.' });
+      const root = { address, type: 'mailbox', active: row.active, team: row.kind === 'team', kind: null, copy: null,
+        cycle: false, warning: null, children: [], group: null };
+      return response.end(JSON.stringify({ address, keepsMail: true, moveTargets: [], incoming: root, outgoing: root,
+        counts: { incoming: 0, endMailboxes: 0 }, warnings: [] }));
+    }
     const accountRefsMatch=url.pathname.match(/^\/api\/admin\/mailboxes\/([^/]+)\/refs$/);
     if(accountRefsMatch&&request.method==='GET'){
       const scopes=url.searchParams.getAll('scope'),scope=scopes[0]??'teams+own';

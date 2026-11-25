@@ -28,9 +28,8 @@ function LogSearch() {
 }
 const archiveSources = ['postfix', 'dovecot', 'rspamd', 'webmail', 'webmail-admin', 'npmplus'];
 const retentionDays = source => source === 'rspamd' ? 7 : 90;
-const archiveResultLimit = 2000;
 const archiveRetryLimit = 5;
-const emptyArchiveResult = (loading = false) => ({ loading, data: null, error: null, lines: [], capped: false, cancelled: false, waiting: false });
+const emptyArchiveResult = (loading = false) => ({ loading, data: null, error: null, lines: [], cancelled: false, waiting: false });
 function waitForArchiveRetry(seconds, signal) {
   return new Promise(resolve => {
     const finish = () => {
@@ -81,11 +80,9 @@ function ArchiveSearch({ sources, onDisabled }) {
         if (data.enabled === false) { onDisabled(); return; }
         const sameCursor = data.cursor && data.cursor === params.get('cursor');
         if (sameCursor && data.partialReason !== 'timeout') throw retryError();
-        const remaining = archiveResultLimit - lines.length;
-        if (!sameCursor) lines = [...lines, ...data.lines.slice(0, remaining)];
-        const capped = lines.length === archiveResultLimit && (Boolean(data.cursor) || data.lines.length > remaining);
-        const loading = Boolean(data.cursor) && !capped;
-        setResult({ ...emptyArchiveResult(loading), data, lines, capped });
+        if (!sameCursor) lines = lines.concat(data.lines);
+        const loading = Boolean(data.cursor);
+        setResult({ ...emptyArchiveResult(loading), data, lines });
         if (!loading) return;
         if (sameCursor) {
           if (++stalled >= archiveRetryLimit) throw retryError();
@@ -135,12 +132,11 @@ function ArchiveSearch({ sources, onDisabled }) {
       <p class="hint">입력 시각은 KST로 해석합니다. 시작 포함·끝 제외, 최대 90일 범위로 검색합니다. 검색어는 대소문자 구분 없이 문자열 그대로 검색합니다.</p>
       <Notice><p>{source} · 보관 정책 {retentionDays(source)}일 · 실제 보관 범위 (KST): {kst(selected.oldest)} ~ {kst(selected.newest)}</p><p>수집 지연: {selected.lagSeconds == null ? '확인 불가' : `${selected.lagSeconds}초`} · 초기 수집: {selected.backfillComplete ? '완료' : '진행 중'}</p>{selected.issues?.length > 0 && <p>수집 확인 필요: {selected.issues.map(issue => typeof issue === 'string' ? issue : issue.reason || issue.code || '상태 확인 필요').join(' · ')}</p>}</Notice>
       {validation && <Notice tone="danger"><p role="alert">{validation}</p></Notice>}
-      {(result.loading || result.cancelled || data) && <p class="hint" role="status">{result.waiting ? '다른 검색이 끝나기를 기다리는 중' : result.loading ? '검색 중' : result.cancelled ? '검색 취소됨' : result.error ? '검색 중단됨' : result.capped ? '결과 상한 도달' : '검색 완료'} · 찾은 로그 {result.lines.length.toLocaleString('ko-KR')}건 · 읽은 구간 {progress}% · {kst(scannedThrough)} (KST)</p>}
+      {(result.loading || result.cancelled || data) && <p class="hint" role="status">{result.waiting ? '다른 검색이 끝나기를 기다리는 중' : result.loading ? '검색 중' : result.cancelled ? '검색 취소됨' : result.error ? '검색 중단됨' : '검색 완료'} · 찾은 로그 {result.lines.length.toLocaleString('ko-KR')}건 · 읽은 구간 {progress}% · {kst(scannedThrough)} (KST)</p>}
       <section aria-label="기간 검색 결과" aria-busy={result.loading}>
         {result.error && <Notice tone="danger"><p role="alert" data-error-code={result.error.code}>{restart ? '검색 기준이 바뀌었어요. 다시 검색해 주세요.' : `보관 로그를 불러오지 못했습니다. ${result.error.message}`}</p><button class="btn" type="button" onClick={search}>{restart ? '다시 검색' : '다시 읽기'}</button></Notice>}
         {data && <>
           <Notice><p>요청 기간 (KST): {kst(kstInput(range.from))} ~ {kst(kstInput(range.to))}</p><p>보관 범위 (KST): {kst(coverage?.oldest)} ~ {kst(coverage?.newest)}</p></Notice>
-          {result.capped && <Notice tone="warn">결과가 표시 상한인 2,000건에 도달해 검색을 멈췄어요. 기간이나 검색어를 좁혀 주세요.</Notice>}
           {expired && <Notice>보관 만료 구간을 포함합니다. 정책 기간이 지난 로그는 조회할 수 없습니다.</Notice>}
           {beforeCoverage && <Notice>수집 전 구간을 포함하거나 보관 범위를 벗어났습니다. 실제 보관 시작 전의 로그는 확인할 수 없습니다.</Notice>}
           {coverage?.gaps?.length > 0 && <Notice tone="warn"><b>수집 빈 구간</b><ul>{coverage.gaps.map((gap, index) => <li key={index}>{kst(gap.from)} ~ {kst(gap.to)} (KST) · {gap.reason || '사유 확인 필요'}</li>)}</ul><p>이 구간의 로그는 일부 또는 전부 확인할 수 없습니다.</p></Notice>}

@@ -208,15 +208,24 @@ await test('archive logs: KST, cursor, states and responsive UI with synthetic d
     const collecting = await open({ status: { enabled: true, sources: [{ source: 'postfix', oldest: null, newest: null }] } });
     try { await expect(collecting.page.getByText('아직 보관된 로그가 없습니다.', { exact: false })).toBeVisible(); assert.equal(collecting.requests.length, 0); } finally { await collecting.context.close(); }
   });
-  await t.test('2000 row bound preserves the oldest results; stale status and runtime disabled retain recent logs', async () => {
-    const { page, context, requests } = await open({ handler: (route, _params, count) => route.fulfill({ json: { ...complete, lines: Array.from({ length: 750 }, (_, i) => line(`페이지${count} 행${i}`)), cursor: `cursor-${count}`, partialReason: 'limit' } }) });
+  await t.test('all 2,303 matches are displayed; stale status and runtime disabled retain recent logs', async () => {
+    const matches = Array.from({ length: 2303 }, (_, index) => line(`합성 결과 ${index + 1}`));
+    const { page, context, requests } = await open({ handler: (route, params) => {
+      if (params.get('q') !== 'bulk') return route.fulfill({ json: complete });
+      const offset = Number(params.get('cursor') ?? 0), limit = Number(params.get('limit'));
+      const next = offset + limit < matches.length ? String(offset + limit) : null;
+      return route.fulfill({ json: { ...complete, lines: matches.slice(offset, offset + limit), cursor: next, partialReason: next ? 'limit' : null } });
+    } });
     try {
-      await expect(progress(page)).toContainText('결과 상한 도달');
-      await expect(page.locator('tbody tr')).toHaveCount(2000);
-      await expect(page.getByText('결과가 표시 상한인 2,000건에 도달해', { exact: false })).toBeVisible();
-      await expect(page.locator('tbody tr').first()).toContainText('페이지1 행0');
-      await expect(page.locator('tbody tr').last()).toContainText('페이지3 행499');
-      assert.equal(requests.length, 3);
+      await archiveReady(page);
+      await page.getByRole('button', { name: '최근 7일', exact: true }).click();
+      await page.locator('#archive-q').fill('bulk');
+      await page.locator('#archive-limit').fill('750');
+      await periodSearch(page);
+      await expect(progress(page)).toContainText('검색 완료 · 찾은 로그 2,303건');
+      await expect(page.locator('tbody tr')).toHaveCount(2303);
+      assert.deepEqual(await page.locator('tbody tr > td:last-child').allTextContents(), matches.map(row => row.message));
+      assert.deepEqual(requests.filter(request => request.q === 'bulk').map(request => request.cursor), [undefined, '750', '1500', '2250']);
     } finally { await context.close(); }
     for (const options of [{ response: { enabled: false } }, { statusCode: 502, status: { error: { code: 'ARCHIVE_STATUS_UNAVAILABLE', message: 'synthetic status failure' } } }]) {
       const view = await open(options);

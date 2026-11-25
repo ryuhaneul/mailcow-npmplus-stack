@@ -25,21 +25,27 @@ export function buildGraph({ boxes, aliases, filters, domains, aliasDomains = []
     const [local, domain] = target.split('@'), primary = domainMap.get(domain);
     if (!primary || !local) return target;
     const canonical = `${local}@${primary}`;
-    return ['alias', 'mailbox'].includes(nodes.get(canonical)?.type) ? canonical : target;
+    const mailbox = nodes.get(canonical);
+    return mailbox?.type === 'mailbox' && [1, 2].includes(mailbox.active) ? canonical : target;
   }
-  const edges = new Map();
+  const edges = new Map(), incomingKeys = new Set();
   function addEdge(from, displayTo, kind, copy = null, filterId) {
     const to = resolve(displayTo);
     node(from);
     node(to);
-    const key = JSON.stringify([from, to, kind, copy]);
+    const key = JSON.stringify([from, displayTo, kind, copy]);
     if (!edges.has(key)) {
       const edge = { from, to, displayTo, kind, copy, filterIds: [] };
       edges.set(key, edge);
       if (!outgoing.has(from)) outgoing.set(from, []);
-      if (!incoming.has(to)) incoming.set(to, []);
       outgoing.get(from).push(edge);
-      incoming.get(to).push(edge);
+      // The incoming tree displays one source per resolved destination and edge kind.
+      const incomingKey = JSON.stringify([from, to, kind, copy]);
+      if (!incomingKeys.has(incomingKey)) {
+        incomingKeys.add(incomingKey);
+        if (!incoming.has(to)) incoming.set(to, []);
+        incoming.get(to).push(edge);
+      }
     }
     const edge = edges.get(key);
     if (filterId !== undefined && !edge.filterIds.includes(filterId)) edge.filterIds.push(filterId);
@@ -74,7 +80,7 @@ export function buildGraph({ boxes, aliases, filters, domains, aliasDomains = []
     for (const member of members) addEdge(address, member, 'team');
     // teamEntry already expanded this copy destination into its members.
     if (item.memberAlias) members.add(item.memberAlias);
-    teamTargets.set(address, new Set([...members].map(resolve)));
+    teamTargets.set(address, members);
   }
   const orderedFilters = filterRows.filter(row => active(row) && ['prefilter', 'postfilter'].includes(row.filter_type))
     .sort((a, b) => compareId(a.id, b.id));
@@ -92,7 +98,7 @@ export function buildGraph({ boxes, aliases, filters, domains, aliasDomains = []
       continue;
     }
     for (const { target, copy } of redirects) {
-      if (copy && teamTargets.get(address)?.has(resolve(target))) continue;
+      if (copy && teamTargets.get(address)?.has(target)) continue;
       addEdge(address, target, 'filter', copy, filterId);
       if (!copy) {
         if (!moveTargets.has(address)) moveTargets.set(address, new Set());

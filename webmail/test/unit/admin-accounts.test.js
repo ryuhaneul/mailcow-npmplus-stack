@@ -635,34 +635,55 @@ test('accounts flow HTTP: same guard as refs and a read-only response', async t 
   assert.equal(missing.json().error.code, 'NOT_FOUND');
 });
 
-test('accounts: active alias domains resolve mailboxes and aliases while flow keeps the entered address', async t => {
+test('accounts: alias domains resolve receiving mailboxes and leave disabled, missing and alias-only targets unknown', async t => {
   const f = await fixture(t);
   f.options.aliasDomains = [
     { alias_domain: 'Alternate.Example.com', target_domain: 'Example.com', active: '1' },
     { alias_domain: 'inactive.example.com', target_domain: 'example.com', active: '0' },
   ];
   f.aliases.push(
-    { address: 'orders@example.com', goto: 'team@alternate.example.com, team@example.com', active: 1 },
-    { address: 'orders-chain@example.com', goto: 'orders@alternate.example.com', active: 1 },
-    { address: 'orders-off@example.com', goto: 'team@inactive.example.com', active: 1 },
+    { address: 'orders@example.com', goto: 'team@alternate.example.com', active: 1 },
+    { address: 'orders-left@example.com', goto: 'left@alternate.example.com', active: 1 },
+    { address: 'orders-off@example.com', goto: 'off@alternate.example.com', active: 1 },
+    { address: 'orders-alias@example.com', goto: 'forward@alternate.example.com', active: 1 },
+    { address: 'orders-missing@example.com', goto: 'missing@alternate.example.com', active: 1 },
+    { address: 'orders-inactive-domain@example.com', goto: 'team@inactive.example.com', active: 1 },
+    { address: 'forward@example.com', goto: user, active: 1 },
   );
   assert.deepEqual((await f.service.list({}, { q: 'orders' })).items.map(row => [row.address, row.matchedAliases]), [
-    [team, ['orders-chain@example.com', 'orders@example.com']],
+    ['left@example.com', ['orders-left@example.com']], [team, ['orders@example.com']],
   ]);
-  const received = await f.service.flow({}, team);
-  assert.equal(received.counts.incoming, 2);
-  assert.equal(received.incoming.children[0].kind, 'alias');
-  assert.equal(received.incoming.children[0].children[0].address, 'orders-chain@example.com');
+  const receivingOnly = await f.service.flow({}, 'left@example.com');
+  assert.deepEqual(receivingOnly.incoming.children.map(node => node.address), ['orders-left@example.com']);
+  assert.equal((await f.service.flow({}, 'off@example.com')).counts.incoming, 0);
+  const forward = (await f.service.flow({}, user)).incoming.children.find(node => node.address === 'forward@example.com');
+  assert.deepEqual(forward?.children, []);
+
   f.filters.push({ id: 2, username: user, active: 1, filter_type: 'postfilter',
-    script_data: 'redirect "orders-chain@example.com"; redirect :copy "missing@alternate.example.com";' });
+    script_data: 'redirect "orders-off@example.com"; redirect "orders-alias@example.com"; redirect "orders-missing@example.com";' });
   const sent = await f.service.flow({}, user);
-  assert.equal(sent.outgoing.children[0].type, 'unknown');
-  const alias = sent.outgoing.children[1].children[0];
-  assert.equal(alias.address, 'orders@alternate.example.com');
-  assert.equal(alias.type, 'alias');
-  const destination = alias.children[0];
-  assert.equal(destination.address, 'team@alternate.example.com');
-  assert.equal(destination.type, 'mailbox');
-  assert.equal(destination.kind, 'alias');
-  assert.equal(destination.children[0].cycle, true);
+  assert.deepEqual(sent.outgoing.children.map(node => node.children.map(child => [child.address, child.type, child.children.length])), [
+    [['forward@alternate.example.com', 'unknown', 0]],
+    [['missing@alternate.example.com', 'unknown', 0]],
+    [['off@alternate.example.com', 'unknown', 0]],
+  ]);
+});
+
+test('accounts: equivalent configured addresses remain visible and count as one receiving mailbox', async t => {
+  const f = await fixture(t);
+  const address = 'left@example.com', alternate = 'left@alternate.example.com', alias = 'orders@example.com';
+  f.options.aliasDomains = [{ alias_domain: 'alternate.example.com', target_domain: 'example.com', active: 1 }];
+  f.aliases.push({ address: alias, goto: `${address}, ${alternate}`, active: 1 });
+  f.filters.push({ id: 2, username: user, active: 1, filter_type: 'postfilter', script_data: `redirect "${alias}";` });
+  const sent = await f.service.flow({}, user);
+  assert.equal(sent.counts.endMailboxes, 1);
+  assert.deepEqual(sent.outgoing.children[0].children.map(node => [node.address, node.type, node.kind, node.active]), [
+    [alternate, 'mailbox', 'alias', 2],
+    [address, 'mailbox', 'alias', 2],
+  ]);
+  const received = await f.service.flow({}, address);
+  assert.deepEqual(received.incoming.children.map(node => node.address), [alias]);
+  assert.deepEqual((await f.service.list({}, { q: 'orders' })).items.map(row => [row.address, row.matchedAliases]), [
+    [address, [alias]],
+  ]);
 });

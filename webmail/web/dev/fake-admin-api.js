@@ -355,7 +355,7 @@ export function createFakeAdminApi() {
       const row = state.accounts.items.find(item => item.address === address);
       if (!row) return fail({ status: 404, code: 'NOT_FOUND', message: '메일함을 찾을 수 없어요.' });
       const root = { address, type: 'mailbox', active: row.active, team: row.kind === 'team', kind: null, copy: null,
-        cycle: false, warning: null, children: [], group: null };
+        cycle: false, warnings: [], children: [], group: null };
       return response.end(JSON.stringify({ address, keepsMail: true, moveTargets: [], incoming: root, outgoing: root,
         counts: { incoming: 0, endMailboxes: 0 }, warnings: [] }));
     }

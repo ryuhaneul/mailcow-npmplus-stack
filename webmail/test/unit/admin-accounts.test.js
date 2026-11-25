@@ -36,7 +36,7 @@ async function fixture(t) {
     if (path === '/api/v1/get/mailbox/all') return structuredClone(boxes);
     if (path.startsWith('/api/v1/get/mailbox/')) return structuredClone(boxes.find(row => row.username === decodeURIComponent(path.split('/').at(-1))) ?? {});
     if (path === '/api/v1/get/filters/all') return structuredClone(filters.length ? filters : {});
-    if (path === '/api/v1/get/alias-domain/all') return [];
+    if (path === '/api/v1/get/alias-domain/all') return structuredClone(options.aliasDomains ?? []);
     if (path === '/api/v1/get/domain/all') return structuredClone(domains);
     if (path === '/api/v1/get/alias/all') return structuredClone(aliases);
     if (path === '/api/v1/get/syncjobs/all/no_log') return structuredClone(jobs);
@@ -589,11 +589,11 @@ test('accounts flow: reads each dataset once and reports delivery for inactive a
   const value = await f.service.flow({}, ' USER@EXAMPLE.COM ');
   assert.deepEqual(value, {
     address: user, keepsMail: false, moveTargets: [outside],
-    incoming: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warning: null, group: null, children: [
-      { address: team, type: 'mailbox', active: 1, team: true, kind: 'team', copy: null, cycle: false, warning: null, group: null, children: [] },
+    incoming: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warnings: [], group: null, children: [
+      { address: team, type: 'mailbox', active: 1, team: true, kind: 'team', copy: null, cycle: false, warnings: [], group: null, children: [] },
     ] },
-    outgoing: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warning: null, group: null, children: [
-      { address: outside, type: 'external', active: null, team: false, kind: 'filter', copy: false, cycle: false, warning: null, group: null, children: [] },
+    outgoing: { address: user, type: 'mailbox', active: 1, team: false, kind: null, copy: null, cycle: false, warnings: [], group: null, children: [
+      { address: outside, type: 'external', active: null, team: false, kind: 'filter', copy: false, cycle: false, warnings: [], group: null, children: [] },
     ] },
     counts: { incoming: 1, endMailboxes: 1 }, warnings: [],
   });
@@ -633,4 +633,36 @@ test('accounts flow HTTP: same guard as refs and a read-only response', async t 
   const missing = await app.inject({ url: '/api/admin/mailboxes/missing%40example.com/flow', headers });
   assert.equal(missing.statusCode, 404, missing.body);
   assert.equal(missing.json().error.code, 'NOT_FOUND');
+});
+
+test('accounts: active alias domains resolve mailboxes and aliases while flow keeps the entered address', async t => {
+  const f = await fixture(t);
+  f.options.aliasDomains = [
+    { alias_domain: 'Alternate.Example.com', target_domain: 'Example.com', active: '1' },
+    { alias_domain: 'inactive.example.com', target_domain: 'example.com', active: '0' },
+  ];
+  f.aliases.push(
+    { address: 'orders@example.com', goto: 'team@alternate.example.com, team@example.com', active: 1 },
+    { address: 'orders-chain@example.com', goto: 'orders@alternate.example.com', active: 1 },
+    { address: 'orders-off@example.com', goto: 'team@inactive.example.com', active: 1 },
+  );
+  assert.deepEqual((await f.service.list({}, { q: 'orders' })).items.map(row => [row.address, row.matchedAliases]), [
+    [team, ['orders-chain@example.com', 'orders@example.com']],
+  ]);
+  const received = await f.service.flow({}, team);
+  assert.equal(received.counts.incoming, 2);
+  assert.equal(received.incoming.children[0].kind, 'alias');
+  assert.equal(received.incoming.children[0].children[0].address, 'orders-chain@example.com');
+  f.filters.push({ id: 2, username: user, active: 1, filter_type: 'postfilter',
+    script_data: 'redirect "orders-chain@example.com"; redirect :copy "missing@alternate.example.com";' });
+  const sent = await f.service.flow({}, user);
+  assert.equal(sent.outgoing.children[0].type, 'unknown');
+  const alias = sent.outgoing.children[1].children[0];
+  assert.equal(alias.address, 'orders@alternate.example.com');
+  assert.equal(alias.type, 'alias');
+  const destination = alias.children[0];
+  assert.equal(destination.address, 'team@alternate.example.com');
+  assert.equal(destination.type, 'mailbox');
+  assert.equal(destination.kind, 'alias');
+  assert.equal(destination.children[0].cycle, true);
 });

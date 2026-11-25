@@ -153,6 +153,7 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
   --flow-filter-bg:#fbf0dc;--flow-filter-ink:#774800;
   --flow-external-bg:#fbe9ed;--flow-external-ink:#98203f;
   --flow-cycle-bg:#fef6ee;--flow-cycle-ink:#974015;--flow-cycle-line:#f3c79b;
+  --flow-discard-bg:#eeeef0;--flow-discard-ink:#44444a;
   --flow-cycle-card:#fffbf5;--flow-wire:#797981;--flow-end:#9c9ca3;
 }
 :root[data-mode=dark] :is(.mail-flow,.account-item){
@@ -163,6 +164,7 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
   --flow-filter-bg:#3f311d;--flow-filter-ink:#f2cd88;
   --flow-external-bg:#432934;--flow-external-ink:#f6bace;
   --flow-cycle-bg:#442d22;--flow-cycle-ink:#ffbe92;--flow-cycle-line:#8f563d;
+  --flow-discard-bg:#34343a;--flow-discard-ink:#e6e6ea;
   --flow-cycle-card:#33251f;--flow-wire:#a8a8b2;--flow-end:#858591;
 }
 .account-alias-match{
@@ -180,6 +182,7 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 .mail-flow-chip.is-alias{background:var(--flow-alias-bg);color:var(--flow-alias-ink)}
 .mail-flow-chip.is-team{background:var(--flow-team-bg);color:var(--flow-team-ink)}
 .mail-flow-chip.is-filter{background:var(--flow-filter-bg);color:var(--flow-filter-ink)}
+.mail-flow-chip.is-discard{background:var(--flow-discard-bg);color:var(--flow-discard-ink)}
 .mail-flow-chip.is-external{background:var(--flow-external-bg);color:var(--flow-external-ink)}
 .mail-flow-chip.is-cycle{background:var(--flow-cycle-bg);color:var(--flow-cycle-ink);box-shadow:inset 0 0 0 1px var(--flow-cycle-line)}
 .mail-flow-container{
@@ -187,7 +190,9 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
   --flow-gutter:24px;
   --flow-center-width:150px;
   --flow-total-steps:calc(var(--flow-in) + var(--flow-out));
-  font-size:calc(var(--flow-center-width) + 54px + var(--flow-total-steps) * 104px + (var(--flow-total-steps) - 2) * var(--flow-gutter));
+  --flow-gaps:calc((var(--flow-total-steps) - 2) * var(--flow-gutter));
+  --flow-side-padding:26px;
+  font-size:calc(var(--flow-center-width) + 2 * var(--flow-side-padding) + 2px + var(--flow-total-steps) * 220px + var(--flow-gaps));
 }
 .mail-flow-chart{border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:var(--fs-body)}
 .mail-flow-side{min-width:0;padding:14px}
@@ -216,6 +221,10 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 .mail-flow-card-meta{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;margin-top:4px;color:var(--ink-3);font-size:11px}
 .mail-flow-card-meta>*{min-width:0}
 .mail-flow-members{display:block;margin-top:4px;font-size:11.5px;font-weight:700}
+.mail-flow-member{display:inline-block;vertical-align:top;max-width:100%}
+.mail-flow-member>.chip{margin-left:4px}
+.mail-flow-email{word-break:normal;overflow-wrap:normal}
+.mail-flow-email>span{display:inline-block;max-width:100%;overflow-wrap:anywhere}
 .mail-flow-warning{display:block;margin-top:4px;color:var(--flow-cycle-ink);font-size:11.5px}
 .mail-flow-center{
   display:flex;align-items:center;gap:8px;padding:12px 14px;
@@ -256,7 +265,10 @@ td{padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 .mail-flow-side.is-in .mail-flow-branch:only-child::after{height:28px}
 
 @container account-flow (min-width:1em){
-  .mail-flow-chart{display:grid;grid-template-columns:minmax(0,calc((100% - var(--flow-center-width)) * var(--flow-in) / var(--flow-total-steps))) var(--flow-center-width) minmax(0,1fr)}
+  .mail-flow-chart{
+    --flow-stage-width:calc((100% - var(--flow-center-width) - 2 * var(--flow-side-padding) - var(--flow-gaps)) / var(--flow-total-steps));
+    display:grid;grid-template-columns:calc(var(--flow-side-padding) + var(--flow-stage-width) * var(--flow-in) + (var(--flow-in) - 1) * var(--flow-gutter)) var(--flow-center-width) minmax(0,1fr);
+  }
   .mail-flow-side.is-in{padding-right:12px}
   .mail-flow-side.is-out{padding-left:12px}
   .mail-flow-center{flex-direction:column;justify-content:center;padding:16px 10px;border:0;border-inline:1px solid var(--line);text-align:center}

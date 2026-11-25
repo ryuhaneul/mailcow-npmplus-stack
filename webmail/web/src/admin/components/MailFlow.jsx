@@ -1,36 +1,52 @@
+import { Fragment } from 'preact';
 import { useId, useState } from 'preact/hooks';
 import Loading from './Loading.jsx';
 import LoadError from './LoadError.jsx';
 
-const kinds = { alias: '별칭', team: '팀 분배', filter: '관리자 필터', external: '외부', cycle: '순환' };
+const kinds = { alias: '별칭', team: '팀 분배', filter: '관리자 필터', external: '외부', discard: '폐기', cycle: '순환' };
 
 function FlowChip({ kind, children }) {
   return <span class={`chip mail-flow-chip is-${kind}`}>{children ?? kinds[kind]}</span>;
 }
 
-function Address({ address, domain }) {
-  const separator = address.lastIndexOf('@');
-  return <span title={address}>{separator > 0 && address.slice(separator + 1) === domain ? address.slice(0, separator + 1) : address}</span>;
+function AddressPart({ text }) {
+  const pieces = text.split(/(?<=[-._])/);
+  return <span>{pieces.map((piece, index) => <Fragment key={index}>{index > 0 && <wbr/>}{piece}</Fragment>)}</span>;
 }
 
-function FlowWarning({ warning }) {
-  return warning?.code === 'FILTER_UNINSPECTABLE' && <span class="mail-flow-warning">필터 #{warning.filterId} 를 해석하지 못해 이 필터의 전달은 빠졌어요.</span>;
+function Address({ address, domain }) {
+  const separator = address.lastIndexOf('@');
+  const local = address.slice(0, separator + 1), host = address.slice(separator + 1);
+  return <span title={address} class="mail-flow-email">
+    <AddressPart text={local}/>{(separator <= 0 || host !== domain) && <><wbr/><AddressPart text={host}/></>}
+  </span>;
+}
+
+function FlowWarnings({ warnings }) {
+  return warnings.map(({ filterId }) => <span key={filterId} class="mail-flow-warning">필터 #{filterId} 를 해석하지 못해 이 필터의 전달은 빠졌어요.</span>);
 }
 
 function FlowCard({ node, parent, domain, direction, nested }) {
-  const end = direction === 'out' && !node.children.length && !node.cycle && node.type !== 'alias';
+  const end = direction === 'out' && !node.children.length && !node.cycle && !['alias', 'discard'].includes(node.type);
   return <div class={`mail-flow-card${end ? ' is-end' : ''}${node.type === 'external' ? ' is-external' : ''}${node.cycle ? ' is-cycle' : ''}${node.group ? ' is-group' : ''}`}>
     <strong class="mail-flow-address">{node.group ? `구성원 ${node.group.members.length}명` : <Address address={node.address} domain={domain}/>}</strong>
     <div class="mail-flow-card-meta">
       <FlowChip kind={node.kind}/>
       {node.kind === 'filter' && <span>{node.copy ? '사본' : '원본 이동'}</span>}
-      {node.type === 'external' && <FlowChip kind="external"/>}
+      {['external', 'discard'].includes(node.type) && <FlowChip kind={node.type}/>}
       {node.active === 0 && !node.group && <span class="chip">꺼짐</span>}
       {node.cycle && <FlowChip kind="cycle">순환 · 여기서 멈춤</FlowChip>}
       {nested && <span class="mail-flow-relative"><span aria-hidden="true">{direction === 'in' ? '→' : '←'} </span><Address address={parent} domain={domain}/></span>}
     </div>
-    {node.group && <span class="mail-flow-members">{node.group.members.map((member, index) => <span key={member}>{index > 0 && ' · '}<Address address={member} domain={domain}/></span>)}</span>}
-    <FlowWarning warning={node.warning}/>
+    {node.group && <span class="mail-flow-members">
+      {node.group.members.map((member, index) => <span key={member.address} class="mail-flow-member">
+        <Address address={member.address} domain={domain}/>
+        {member.active === 0 && <span class="chip">꺼짐</span>}
+        {index < node.group.members.length - 1 && ' · '}
+        <FlowWarnings warnings={member.warnings}/>
+      </span>)}
+    </span>}
+    <FlowWarnings warnings={node.warnings}/>
   </div>;
 }
 
@@ -82,7 +98,7 @@ function FlowChart({ data, name }) {
         <FlowSide root={data.incoming} direction="in" count={data.counts.incoming} steps={incomingSteps} domain={domain}/>
         <div class="mail-flow-center">
           <span class="pic" aria-hidden="true">{(name || data.address).slice(0, 1)}</span>
-          <div><strong><Address address={data.address} domain={domain}/></strong><small>이 계정 · {data.outgoing.team ? '팀 메일함' : '메일함'}</small><FlowWarning warning={data.outgoing.warning}/></div>
+          <div><strong><Address address={data.address} domain={domain}/></strong><small>이 계정 · {data.outgoing.team ? '팀 메일함' : '메일함'}</small><FlowWarnings warnings={data.outgoing.warnings}/></div>
         </div>
         <FlowSide root={data.outgoing} direction="out" count={data.counts.endMailboxes} steps={outgoingSteps} domain={domain}/>
       </div>

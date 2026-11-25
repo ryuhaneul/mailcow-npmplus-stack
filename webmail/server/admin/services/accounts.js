@@ -179,11 +179,12 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
   async function list(session, { q = '', kind = 'all', page = '1' } = {}) {
     if (typeof q !== 'string' || !['all', 'personal', 'team', 'admin', 'off'].includes(kind) || !/^[1-9]\d*$/.test(String(page)) || !Number.isSafeInteger(Number(page))) throw invalid();
     const search = q.trim().toLowerCase();
-    const [boxes, filters, aliases] = await Promise.all([
+    const [boxes, filters, aliases, primaryDomains, aliasDomains] = await Promise.all([
       rows(session, 'mailbox/all'), rows(session, 'filters/all'), search ? rows(session, 'alias/all') : [],
+      search ? rows(session, 'domain/all') : [], search ? rows(session, 'alias-domain/all') : [],
     ]);
     const groups = groupMailboxAddresses(filters);
-    const matches = search ? aliasMatches(buildGraph({ boxes, aliases, filters: [], domains: [] }), search) : new Map();
+    const matches = search ? aliasMatches(buildGraph({ boxes, aliases, filters: [], domains: internalDomainSet(primaryDomains, []), aliasDomains }), search) : new Map();
     const found = boxes.filter(row => typeof row.username === 'string' &&
       (`${row.username} ${row.name ?? ''}`.toLowerCase().includes(search) || matches.has(normalize(row.username))) &&
       (kind === 'all' || (kind === 'off' ? String(row.active) !== '1' : kindOf(row, groups) === kind))).sort((a, b) => a.username.localeCompare(b.username));
@@ -267,7 +268,7 @@ export function createAccountsService({ mailcow, dockerapi, audit, lock, history
     const [aliases, filters, primaryDomains, aliasDomains] = await Promise.all([
       rows(session, 'alias/all'), rows(session, 'filters/all'), rows(session, 'domain/all'), rows(session, 'alias-domain/all'),
     ]);
-    const graph = buildGraph({ boxes, aliases, filters, domains: internalDomainSet(primaryDomains, aliasDomains) });
+    const graph = buildGraph({ boxes, aliases, filters, domains: internalDomainSet(primaryDomains, []), aliasDomains });
     const incoming = incomingTree(graph, addr), outgoing = outgoingTree(graph, addr);
     const moveTargets = [...graph.moveTargets.get(addr) ?? []];
     return { address: addr, keepsMail: !moveTargets.length, moveTargets, incoming: incoming.root, outgoing: outgoing.root,

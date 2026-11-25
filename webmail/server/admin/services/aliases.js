@@ -9,6 +9,11 @@ const unique = value => [...new Set(value)].sort();
 const invalid = () => new AppError(422, 'INVALID_INPUT', '별칭 주소와 대상을 확인해 주세요.');
 const verifyFailed = () => new AppError(502, 'WRITE_VERIFY_FAILED', '저장한 별칭이 예상과 달라요. 현재 값을 다시 확인해 주세요.');
 const loopError = () => new AppError(409, 'ALIAS_LOOP', '별칭이 서로 돌아가도록 연결돼요. 대상을 다시 확인해 주세요.');
+export const isDiscardTarget = target => target === 'null@localhost';
+export function activeAliasDomainMap(rows, primary) {
+  return new Map(rows.filter(row => row && String(row.active) === '1' && primary.has(normalize(row.target_domain)))
+    .map(row => [normalize(row.alias_domain), normalize(row.target_domain)]));
+}
 export const aliasBackup = row => ({ address: normalize(row.address), goto: String(row.goto ?? ''), active: String(row.active ?? '1'),
   sogo_visible: String(row.sogo_visible ?? '0'), sender_allowed: String(row.sender_allowed ?? '0'),
   public_comment: String(row.public_comment ?? ''), private_comment: String(row.private_comment ?? '') });
@@ -89,7 +94,7 @@ export function createAliasesService({ mailcow, audit, lock, history, retirement
   async function domains(session) {
     const [primary, aliases, boxes] = await Promise.all([rows(session, 'domain/all'), rows(session, 'alias-domain/all'), rows(session, 'mailbox/all')]);
     const active = new Set(primary.filter(row => String(row.active) === '1' && typeof (row.domain_name ?? row.domain) === 'string').map(row => normalize(row.domain_name ?? row.domain)));
-    const map = new Map(aliases.filter(row => String(row.active) === '1' && active.has(normalize(row.target_domain))).map(row => [normalize(row.alias_domain), normalize(row.target_domain)]));
+    const map = activeAliasDomainMap(aliases, active);
     return { active: new Set([...active, ...map.keys()]), map, mailboxes: new Set(boxes.filter(row => ['1', '2'].includes(String(row.active))).map(row => normalize(row.username))) };
   }
   const senderAcl = row => unique(split(row.sender_acl));
@@ -113,7 +118,7 @@ export function createAliasesService({ mailcow, audit, lock, history, retirement
     const [aliases, boxes] = await Promise.all([rows(session, 'alias/all'), rows(session, 'mailbox/all')]);
     return state(addr, aliases, boxes, participants);
   }
-  const dto = (addr, value) => ({ address: addr, targets: split(value.alias.goto), discard: value.alias.goto === 'null@localhost',
+  const dto = (addr, value) => ({ address: addr, targets: split(value.alias.goto), discard: isDiscardTarget(value.alias.goto),
     team: value.alias.private_comment === 'mailadmin:team-members', sendAllowed: value.alias.sender_allowed === '1', active: value.alias.active === '1', etag: etag({ ...value, senders: value.senders.filter(row => row.senderAcl?.includes(addr)) }),
     metadata: { sogoVisible: value.alias.sogo_visible === '1', internal: value.alias.internal === '1', publicComment: value.alias.public_comment, privateComment: value.alias.private_comment } });
   async function list(session, { q = '', target = '', page = '1' } = {}) {

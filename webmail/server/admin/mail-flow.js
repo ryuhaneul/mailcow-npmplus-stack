@@ -1,4 +1,5 @@
 import { inspectRedirects } from '../sieve/redirect-targets.js';
+import { activeAliasDomainMap, isDiscardTarget } from './services/aliases.js';
 import { groupMailboxAddresses } from './services/shares.js';
 import { activePrefilterGroups, isMemberAlias, teamEntry } from './services/teams.js';
 
@@ -7,23 +8,33 @@ export const targets = value => (Array.isArray(value) ? value : String(value ?? 
 const active = row => String(row.active) === '1';
 const compareId = (a, b) => Number(a) - Number(b);
 
-export function buildGraph({ boxes, aliases, filters, domains }) {
+export function buildGraph({ boxes, aliases, filters, domains, aliasDomains = [] }) {
   const nodes = new Map(), outgoing = new Map(), incoming = new Map(), aliasAddresses = new Set();
   const moveTargets = new Map(), warnings = new Map();
   const internal = new Set(domains);
+  const domainMap = activeAliasDomainMap(aliasDomains, internal);
+  for (const aliasDomain of domainMap.keys()) internal.add(aliasDomain);
   function node(address) {
     if (!nodes.has(address)) nodes.set(address, {
-      address, type: internal.has(address.split('@').at(-1)) ? 'unknown' : 'external', active: null, team: false,
+      address, type: isDiscardTarget(address) ? 'discard' : internal.has(address.split('@').at(-1)) ? 'unknown' : 'external', active: null, team: false,
     });
     return nodes.get(address);
   }
+  function resolve(target) {
+    if (['alias', 'mailbox'].includes(nodes.get(target)?.type)) return target;
+    const [local, domain] = target.split('@'), primary = domainMap.get(domain);
+    if (!primary || !local) return target;
+    const canonical = `${local}@${primary}`;
+    return ['alias', 'mailbox'].includes(nodes.get(canonical)?.type) ? canonical : target;
+  }
   const edges = new Map();
-  function addEdge(from, to, kind, copy = null, filterId) {
+  function addEdge(from, displayTo, kind, copy = null, filterId) {
+    const to = resolve(displayTo);
     node(from);
     node(to);
     const key = JSON.stringify([from, to, kind, copy]);
     if (!edges.has(key)) {
-      const edge = { from, to, kind, copy, filterIds: [] };
+      const edge = { from, to, displayTo, kind, copy, filterIds: [] };
       edges.set(key, edge);
       if (!outgoing.has(from)) outgoing.set(from, []);
       if (!incoming.has(to)) incoming.set(to, []);
@@ -41,12 +52,15 @@ export function buildGraph({ boxes, aliases, filters, domains }) {
     if (active(box)) names.set(address, typeof box.name === 'string' ? box.name : '');
   }
   const aliasRows = aliases.filter(row => row && typeof row === 'object');
-  for (const alias of aliasRows) {
+  const activeAliases = aliasRows.filter(alias => normalize(alias.address) && active(alias) && !isMemberAlias(alias));
+  for (const alias of activeAliases) {
     const address = normalize(alias.address);
-    if (!address || !active(alias) || isMemberAlias(alias)) continue;
     aliasAddresses.add(address);
     const source = node(address);
     if (source.type !== 'mailbox') source.type = 'alias';
+  }
+  for (const alias of activeAliases) {
+    const address = normalize(alias.address);
     for (const target of targets(alias.goto)) addEdge(address, target, 'alias');
   }
   const filterRows = filters.filter(row => row && typeof row === 'object');
@@ -57,10 +71,10 @@ export function buildGraph({ boxes, aliases, filters, domains }) {
     if (!item) continue;
     node(address).team = true;
     const members = new Set(item.members.map(member => normalize(member.address)));
-    teamTargets.set(address, members);
     for (const member of members) addEdge(address, member, 'team');
     // teamEntry already expanded this copy destination into its members.
     if (item.memberAlias) members.add(item.memberAlias);
+    teamTargets.set(address, new Set([...members].map(resolve)));
   }
   const orderedFilters = filterRows.filter(row => active(row) && ['prefilter', 'postfilter'].includes(row.filter_type))
     .sort((a, b) => compareId(a.id, b.id));
@@ -73,11 +87,12 @@ export function buildGraph({ boxes, aliases, filters, domains }) {
     catch (error) {
       if (error.code !== 'FILTER_UNINSPECTABLE') throw error;
       node(address);
-      if (!warnings.has(address)) warnings.set(address, { code: error.code, filterId });
+      if (!warnings.has(address)) warnings.set(address, []);
+      warnings.get(address).push({ code: error.code, filterId });
       continue;
     }
     for (const { target, copy } of redirects) {
-      if (copy && teamTargets.get(address)?.has(target)) continue;
+      if (copy && teamTargets.get(address)?.has(resolve(target))) continue;
       addEdge(address, target, 'filter', copy, filterId);
       if (!copy) {
         if (!moveTargets.has(address)) moveTargets.set(address, new Set());
@@ -85,7 +100,7 @@ export function buildGraph({ boxes, aliases, filters, domains }) {
       }
     }
   }
-  for (const edges of outgoing.values()) edges.sort((a, b) => a.to.localeCompare(b.to));
+  for (const edges of outgoing.values()) edges.sort((a, b) => a.displayTo.localeCompare(b.displayTo));
   for (const edges of incoming.values()) edges.sort((a, b) => a.from.localeCompare(b.from));
   return { nodes, outgoing, incoming, aliasAddresses, moveTargets, warnings };
 }
@@ -94,36 +109,38 @@ function tree(graph, address, reverse) {
   const adjacency = reverse ? graph.incoming : graph.outgoing;
   const path = new Set(), counted = new Set();
   const makeNode = (addr, edge = null) => ({
-    ...graph.nodes.get(addr), kind: edge?.kind ?? null, copy: edge?.copy ?? null, cycle: path.has(addr),
-    warning: graph.warnings.get(addr) ?? null, children: [], group: null,
+    ...graph.nodes.get(addr), address: reverse ? addr : edge?.displayTo ?? addr,
+    kind: edge?.kind ?? null, copy: edge?.copy ?? null, cycle: path.has(addr),
+    warnings: graph.warnings.get(addr) ?? [], children: [], group: null,
   });
   const root = makeNode(address);
-  function visit(node) {
+  function visit(node, addr) {
     if (node.cycle) return;
-    const edges = adjacency.get(node.address) ?? [];
-    path.add(node.address);
+    const edges = adjacency.get(addr) ?? [];
+    path.add(addr);
     const members = [];
     for (const edge of edges) {
       const next = reverse ? edge.from : edge.to;
-      const leaf = !adjacency.get(next)?.length && graph.nodes.get(next).type !== 'alias';
+      const leaf = !adjacency.get(next)?.length && !['alias', 'discard'].includes(graph.nodes.get(next).type);
       if (next !== address && (reverse || leaf)) counted.add(next);
+      const child = makeNode(next, edge);
       if (!reverse && edge.kind === 'team' && leaf) {
-        members.push(next);
+        members.push(child);
         continue;
       }
-      const child = makeNode(next, edge);
       node.children.push(child);
-      visit(child);
+      visit(child, next);
     }
     if (members.length) {
-      const group = makeNode(members[0], { kind: 'team' });
-      group.group = { members };
+      const group = { ...members[0], warnings: [], group: {
+        members: members.map(({ address, active, warnings }) => ({ address, active, warnings })),
+      } };
       node.children.push(group);
       node.children.sort((a, b) => a.address.localeCompare(b.address));
     }
-    path.delete(node.address);
+    path.delete(addr);
   }
-  visit(root);
+  visit(root, address);
   return { root, count: counted.size };
 }
 

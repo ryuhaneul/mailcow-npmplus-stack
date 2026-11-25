@@ -14,7 +14,7 @@ const outside = 'out@outside.example.com';
 function fixture() {
   return buildGraph({
     boxes: [...['tax3', 'tax', 'tax-member', 'sales', 'ywlee', 'rose', 'mix', 'x'].map(local => mailbox(local)),
-      ...members.map((username, index) => ({ username, active: index === 0 ? '2' : '1' }))],
+      ...members.map((username, index) => ({ username, active: index === 0 ? '2' : index === 1 ? '0' : '1' }))],
     aliases: [
       alias('global', `SALES@EXAMPLE.COM, ${addr('ywlee')}`),
       alias('global-chain', [addr('global-loop')]),
@@ -30,6 +30,8 @@ function fixture() {
       filter(5, 'sales', redirect(addr('rose'), true)),
       filter(6, 'rose', redirect(addr('sales'), true)),
       prefilter(7, 'mix', redirect(addr('x'), true) + redirect(addr('x'))),
+      filter(13, 'mix', 'redirect "${another}";'),
+      filter(14, 'member02', 'redirect "${member}";'),
       filter(8, 'mix', 'redirect :copy "${dynamic}";'),
       filter(9, 'mix', redirect(addr('missing'), true), { active: 0 }),
       filter(10, 'mix', redirect(addr('missing'), true), { filter_type: 'personal' }),
@@ -46,10 +48,15 @@ test('mail flow: tax routes reach fourteen distinct destinations with ordered mo
   const { root, count } = outgoingTree(graph, 'TAX3@EXAMPLE.COM');
   assert.equal(count, 14);
   assert.deepEqual([...graph.moveTargets.get(addr('tax3'))], [addr('tax'), addr('global')]);
-  assert.deepEqual(child(child(root, 'tax'), 'tax-member').group, { members: [addr('tax-member')] });
+  assert.deepEqual(child(child(root, 'tax'), 'tax-member').group, { members: [{ address: addr('tax-member'), active: 1, warnings: [] }] });
   const sales = child(child(root, 'global'), 'sales');
-  assert.deepEqual(sales.children.find(row => row.group).group.members, members);
-  assert.equal(sales.children.find(row => row.group).active, 2);
+  const group = sales.children.find(row => row.group);
+  assert.deepEqual(group.group.members.map(member => member.address), members);
+  assert.deepEqual(group.group.members.slice(0, 2), [
+    { address: members[0], active: 2, warnings: [] },
+    { address: members[1], active: 0, warnings: [{ code: 'FILTER_UNINSPECTABLE', filterId: '14' }] },
+  ]);
+  assert.deepEqual(group.warnings, []);
   assert.equal(child(child(root, 'global'), 'ywlee').type, 'mailbox');
   assert.equal(root.children.find(row => row.address === outside).type, 'external');
   assert.deepEqual(graph.outgoing.get(addr('tax3')).find(edge => edge.to === addr('tax')).filterIds, ['2', '12']);
@@ -74,7 +81,10 @@ test('mail flow: cycles stop only the current branch in both directions', () => 
 test('mail flow: team copies are deduplicated and moves, warnings and unrelated routes survive', () => {
   const graph = fixture();
   const { root, count } = outgoingTree(graph, addr('mix'));
-  assert.deepEqual(root.warning, { code: 'FILTER_UNINSPECTABLE', filterId: '8' });
+  assert.deepEqual(root.warnings, [
+    { code: 'FILTER_UNINSPECTABLE', filterId: '8' },
+    { code: 'FILTER_UNINSPECTABLE', filterId: '13' },
+  ]);
   assert.deepEqual([...graph.moveTargets.get(addr('mix'))], [addr('x')]);
   assert.deepEqual(root.children.map(({ kind, copy }) => [kind, copy]), [['filter', false], ['team', null]]);
   assert.equal(count, 1);
@@ -111,4 +121,17 @@ test('mail flow: alias search follows only aliases through cycles and stops at t
   assert.deepEqual(matches.get(addr('ywlee')), expected);
   assert.equal(aliasMatches(graph, 'sales-members').size, 0);
   assert.equal(aliasMatches(graph, '').size, 0);
+});
+
+test('mail flow: discard destinations are visible and excluded from terminal mailbox counts', () => {
+  const graph = buildGraph({
+    boxes: [mailbox('start')], aliases: [alias('discard-orders', 'null@localhost')],
+    filters: [filter(1, 'start', redirect(addr('discard-orders')))],
+    domains: ['example.com'],
+  });
+  const { root, count } = outgoingTree(graph, addr('start'));
+  assert.equal(count, 0);
+  assert.deepEqual(child(root, 'discard-orders').children.map(({ address, type, kind }) => [address, type, kind]), [
+    ['null@localhost', 'discard', 'alias'],
+  ]);
 });
